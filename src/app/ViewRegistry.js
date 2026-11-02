@@ -19,9 +19,9 @@ export function allViews() {
   return [...views.values()];
 }
 
-/** 切换视图；返回被停用的视图 id 或 null */
+/** 切换视图；返回新激活的视图对象（供 App 绑定快照推送） */
 export function activateView(id, ctx) {
-  if (active && active.id === id) return null;
+  if (active && active.id === id) return active;
   if (active) {
     try {
       active.unmount();
@@ -29,11 +29,10 @@ export function activateView(id, ctx) {
       console.error(`视图 ${active.id} 卸载异常`, e);
     }
   }
-  const prev = active ? active.id : null;
   active = views.get(id) || null;
   if (!active) throw new Error(`视图未注册: ${id}`);
   active.mount(ctx);
-  return prev;
+  return active;
 }
 
 export function activeView() {

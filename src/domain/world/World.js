@@ -83,11 +83,12 @@ export function createWorld(config) {
       history: [],     // 战报（有界）
     },
 
-    // 叙事：事件标记、故事线、全局 flag
+    // 叙事：事件标记、故事线、全局 flag、待决抉择
     narrative: {
-      fired: {},       // eventId → tick（一次性去重）
-      arcs: {},        // arcId → { stage, vars }
-      flags: {},       // 全局布尔/数值标记
+      fired: {},            // eventId → tick（一次性去重）
+      arcs: {},             // arcId → { stage, vars }
+      flags: {},            // 全局布尔/数值标记
+      pendingChoices: [],   // 待玩家抉择的事件卡（有界）
     },
 
     // 文明 AI 状态：factionId → { personality, goals, cooldowns, lastEvalTick }

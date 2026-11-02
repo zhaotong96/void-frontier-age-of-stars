@@ -30,7 +30,15 @@ export function registerYearly(name, fn) {
 }
 
 export function runHourly(world) {
-  for (const p of hourlyPhases) p.fn(world);
+  for (const p of hourlyPhases) {
+    try {
+      p.fn(world);
+    } catch (e) {
+      // 阶段定位（诊断与错误边界）；原样上抛由调用方决定回滚
+      e.phaseName = p.name;
+      throw e;
+    }
+  }
 }
 
 export function runDaily(world) {

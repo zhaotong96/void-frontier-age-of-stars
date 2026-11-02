@@ -54,6 +54,8 @@ export class App {
     this.audio = new AudioManager();
     this.performance = { fps: 0, tickMs: 0, lastSnapshotAt: 0 };
     this._frame = this._frame.bind(this);
+    // 诊断/测试句柄（只读探测与自动化验证用；生产无副作用）
+    window.__VF_APP = this;
   }
 
   async boot() {
@@ -74,6 +76,10 @@ export class App {
     this._onRoute(parseHash());
     mark('route:done');
     mark('boot:end');
+    // rAF 看门狗：后台/失焦标签页 rAF 被冻结时以低频维持模拟（降频不冻结）
+    this._watchdog = setInterval(() => {
+      if (performance.now() - this.lastFrame > 600) this._frame(performance.now());
+    }, 500);
     } catch (e) { mark('boot:error:' + (e && e.message) + ' @ ' + String(e && e.stack || '').split(String.fromCharCode(10)).slice(1, 3).join(' <- ')); throw e; }
     this.lastFrame = performance.now();
     requestAnimationFrame(this._frame);
@@ -184,36 +190,42 @@ export class App {
   }
 
   _frame(now) {
-    const dtReal = Math.min(0.25, (now - this.lastFrame) / 1000);
-    this.lastFrame = now;
-    this.performance.fps = Math.round(1 / Math.max(dtReal, 1e-4));
+    try {
+      const dtReal = Math.min(0.25, (now - this.lastFrame) / 1000);
+      this.lastFrame = now;
+      this.performance.fps = Math.round(1 / Math.max(dtReal, 1e-4));
 
-    if (this.world && this.running) {
-      const t0 = performance.now();
-      const tps = SPEEDS[this.speedIdx].ticksPerSecond;
-      if (tps > 0) {
-        this.accumulator += dtReal * tps;
-        let steps = 0;
-        const maxSteps = 40; // 防螺旋积压
-        while (this.accumulator >= 1 && steps < maxSteps) {
-          this._advanceTick();
-          this.accumulator -= 1;
-          steps++;
+      if (this.world && this.running) {
+        const t0 = performance.now();
+        const tps = SPEEDS[this.speedIdx].ticksPerSecond;
+        if (tps > 0) {
+          this.accumulator += dtReal * tps;
+          let steps = 0;
+          const maxSteps = 40; // 防螺旋积压
+          while (this.accumulator >= 1 && steps < maxSteps) {
+            this._advanceTick();
+            this.accumulator -= 1;
+            steps++;
+          }
+          if (this.accumulator > maxSteps) this.accumulator = 0; // 积压丢弃（低帧率设备降级）
         }
-        if (this.accumulator > maxSteps) this.accumulator = 0; // 积压丢弃（低帧率设备降级）
-      }
-      this.performance.tickMs = performance.now() - t0;
+        this.performance.tickMs = performance.now() - t0;
 
-      // 快照节流刷新（4Hz）+ 命令后立即刷新
-      if (now - this.performance.lastSnapshotAt > 250) {
-        this.refreshSnapshot();
+        // 快照节流刷新（4Hz）+ 命令后立即刷新
+        if (now - this.performance.lastSnapshotAt > 250) {
+          this.refreshSnapshot();
+        }
+        // 自动保存检查
+        this._autosaveCheck();
       }
-      // 自动保存检查
-      this._autosaveCheck();
+
+      this.topBar.refresh();
+      this.bottomBar.refresh();
+    } catch (e) {
+      // 帧循环错误隔离（RISK-09）：记录并继续调度，不让单帧异常杀死主循环
+      (window.__frameErrs ||= []).push(String(e && e.message) + ' @ ' + String(e && e.stack || '').split(String.fromCharCode(10))[1]);
+      if ((window.__frameErrs || []).length < 4) this.reportFatal(e);
     }
-
-    this.topBar.refresh();
-    this.bottomBar.refresh();
     requestAnimationFrame(this._frame);
   }
 
@@ -222,7 +234,10 @@ export class App {
     worldSim().then((mod) => {
       mod.advanceOneTick(this.world);
       this._checkPendingEvent();
-    }).catch((e) => this.reportFatal(e));
+    }).catch((e) => {
+      (window.__simErrs ||= []).push(String(e && e.message || e) + ' @ phase=' + (e && e.phaseName || '?') + ' @ ' + String(e && e.stack || '').split(String.fromCharCode(10)).slice(1, 3).join(' <- '));
+      this.reportFatal(e);
+    });
   }
 
   _checkPendingEvent() {

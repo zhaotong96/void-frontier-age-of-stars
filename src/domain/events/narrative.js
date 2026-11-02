@@ -17,6 +17,7 @@ import { DIFFICULTY } from '../../content/constants.js';
 
 /** 每日检查（DailySystems 注册）：条件 + 权重抽取 */
 export function dailyEventCheck(world) {
+  world.narrative.pendingChoices ||= []; // 兼容旧存档
   if (world.victory.ended && !world.narrative.flags.sandbox_continue) return;
   const mult = (DIFFICULTY[world.difficulty] || DIFFICULTY.standard).eventFrequencyMult || 1;
   for (const def of EVENT_DEFS) {
@@ -54,6 +55,17 @@ export function fireEvent(world, def) {
   emit(world, 'EventFired', { eventId: def.id, category: def.category }, def.category || 'politics');
 
   if (def.choices && def.choices.length > 0) {
+    // 待决上限：满 3 张时最旧的一张按默认选项自动结算
+    //（代表政府按既定方针处理被搁置的议题，防堆积也符合世界观）
+    if (world.narrative.pendingChoices.length >= 3) {
+      const oldest = world.narrative.pendingChoices.shift();
+      const oldDef = EVENT_DEFS.find((e) => e.id === oldest.eventId);
+      const defaultChoice = oldDef?.choices?.find((c) => c.isDefault) || oldDef?.choices?.[0];
+      if (defaultChoice) {
+        resolveChoice(world, oldest.eventId, defaultChoice.id);
+        emit(world, 'EventAutoResolved', { eventId: oldest.eventId }, 'politics');
+      }
+    }
     world.narrative.pendingChoices.push({
       eventId: def.id,
       titleZh: def.titleZh,
@@ -153,9 +165,11 @@ export function resolveChoice(world, eventId, choiceId) {
 
 /** 过期待决到期处理（默认选项 / 撤下） */
 export function expirePendingChoices(world) {
+  const AGE_LIMIT = 30 * 24; // 30 游戏日未决 → 自动默认
   const keep = [];
   for (const p of world.narrative.pendingChoices) {
-    if (p.expiresTick && world.tick > p.expiresTick) {
+    const aged = world.tick - p.firedTick > AGE_LIMIT;
+    if ((p.expiresTick && world.tick > p.expiresTick) || aged) {
       const def = EVENT_DEFS.find((e) => e.id === p.eventId);
       const defaultChoice = def?.choices?.find((c) => c.isDefault) || def?.choices?.[0];
       if (defaultChoice) {
