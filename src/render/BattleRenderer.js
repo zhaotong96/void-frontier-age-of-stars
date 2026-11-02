@@ -20,6 +20,8 @@
  *   本渲染器不写任何世界/快照状态；顶层不触碰 document/window。
  */
 
+import { Battle3D, logicalToWorld } from './gl/Battle3D.js';
+
 /** 与 styles.css 同步的字面量色板 */
 const C = {
   BG: '#070b12',
@@ -101,6 +103,20 @@ export class BattleRenderer {
 
   /** 绑定画布管理器（复用 CanvasManager 的尺寸/dpr/上下文） */
   init(canvasManager) {
+    this._C = C;
+    // GL 通道：WebGL2 可用时构建三维战场资源；否则整体退化为既有 2D 路径
+    if (canvasManager.hasGL && canvasManager.glc) {
+      try {
+        this._battle3d = new Battle3D(canvasManager.glc, canvasManager.tier || 1);
+        this._cm = canvasManager;
+        canvasManager.onGLStateChange((degraded) => {
+          if (degraded) this._battle3d = null; // 上下文丢失 → 平滑退化 2D
+        });
+      } catch (e) {
+        console.warn('[BattleRenderer] GL 初始化失败，退化 Canvas 2D:', e && e.message);
+        this._battle3d = null;
+      }
+    }
     this.cm = canvasManager;
     return this;
   }
@@ -120,6 +136,19 @@ export class BattleRenderer {
    * @returns {string|null} shipId 或 null
    */
   pick(sx, sy) {
+    if (this._battle3d && this._pickList) {
+      let best = null;
+      let bestD = 14;
+      for (const p of this._pickList) {
+        const d = Math.hypot(p.sx - sx, p.sy - sy);
+        if (d < bestD) { bestD = d; best = p.shipId; }
+      }
+      return best;
+    }
+    return this._pick2D(sx, sy);
+  }
+
+  _pick2D(sx, sy) {
     const v = this._view;
     if (!v || v.scale <= 0) return null;
     const px = fin(sx, NaN);
@@ -149,6 +178,91 @@ export class BattleRenderer {
    *                        retreatCharges: { [shipId]: { charge, total } } }
    */
   render(ctx, w, h, data, opts = {}) {
+    if (this._battle3d && this._cm && this._cm.hasGL && (this._cm.tier || 1) < 3 && data) {
+      this._battle3d.tier = this._cm.tier || 1; // LOD 同步
+      this._render3D(ctx, w, h, data, opts);
+      this._renderHUD(ctx, w, h, data, opts);
+      return;
+    }
+    this._render2DFull(ctx, w, h, data, opts);
+  }
+
+  /** 三维战场：环绕运镜 + GL 绘制（坐标映射见 gl/Battle3D.js） */
+  _render3D(ctx, w, h, data, opts) {
+    const time = opts.time || 0;
+    const ang = time * 0.05;
+    const camPos = [Math.sin(ang) * 4.5, 6.2, 10.5 - Math.cos(ang) * 2.0];
+    const camTarget = [0, 0, 0];
+    const target = this._cm.post ? this._cm.beginGLFrame() : null;
+    if (target) {
+      const gl = this._cm.gl;
+      gl.clearColor(0.008, 0.012, 0.024, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      this._battle3d.draw(gl, target.width, target.height, data, { time, camPos, camTarget, tier: this._cm.tier });
+      this._cm.endGLFrame({ bloom: 1.1, exposure: 1.05, time });
+      this._pickList = this._battle3d.buildPickList(gl, w, h, data, { camPos, camTarget });
+    }
+  }
+
+  /** HUD 层（2D）：选中环 / 悬停名 / 顶部态势条（高锐度中文） */
+  _renderHUD(ctx, w, h, data, opts) {
+    ctx.clearRect(0, 0, w, h);
+    const C = this._C;
+    // 顶部态势条
+    ctx.fillStyle = 'rgba(14, 21, 32, 0.82)';
+    ctx.fillRect(0, 0, w, 22);
+    ctx.font = `11px ${FONT}`;
+    ctx.textBaseline = 'middle';
+    const aliveA = (data.units || []).filter((u) => u.side === 'a' && !u.destroyed).length;
+    const aliveB = (data.units || []).filter((u) => u.side === 'b' && !u.destroyed).length;
+    ctx.fillStyle = C.ACCENT;
+    ctx.fillText(`我方 ${aliveA}  损失 ${data.losses?.a ?? 0}`, 10, 11);
+    ctx.fillStyle = C.DANGER;
+    ctx.fillText(`敌方 ${aliveB}  损失 ${data.losses?.b ?? 0}`, w / 2 - 40, 11);
+    ctx.fillStyle = C.INK_DIM;
+    ctx.textAlign = 'right';
+    ctx.fillText(`T+${Math.round(data.time || 0)}s`, w - 10, 11);
+    ctx.textAlign = 'left';
+
+    // 单位铭牌（投影坐标）
+    const list = this._pickList || [];
+    for (const p of list) {
+      const u = (data.units || []).find((x) => x.shipId === p.shipId);
+      if (!u) continue;
+      const selected = opts.selectedId === u.shipId;
+      if (selected) {
+        ctx.strokeStyle = C.ACCENT;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(p.sx, p.sy, 16, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.lineWidth = 1;
+      }
+      ctx.fillStyle = u.side === 'a' ? C.ACCENT : C.DANGER;
+      ctx.font = `10px ${FONT}`;
+      ctx.textAlign = 'center';
+      ctx.fillText(u.name || '', p.sx, p.sy - 24);
+      // 微型血条
+      const frac = u.structure / Math.max(1, u.structureMax);
+      ctx.fillStyle = 'rgba(7, 11, 18, 0.8)';
+      ctx.fillRect(p.sx - 14, p.sy - 16, 28, 3);
+      ctx.fillStyle = frac > 0.5 ? C.INK_DIM : frac > 0.25 ? C.WARN : C.DANGER;
+      ctx.fillRect(p.sx - 14, p.sy - 16, 28 * frac, 3);
+      ctx.textAlign = 'left';
+    }
+    if (opts.hoverId) {
+      const hp = list.find((x) => x.shipId === opts.hoverId);
+      if (hp) {
+        ctx.strokeStyle = 'rgba(201, 214, 227, 0.5)';
+        ctx.beginPath();
+        ctx.arc(hp.sx, hp.sy, 13, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+  }
+
+  /** 2D 全量绘制（退化路径，逻辑与旧版一致） */
+  _render2DFull(ctx, w, h, data, opts = {}) {
     if (!ctx) return;
     const vw = fin(w, 0);
     const vh = fin(h, 0);

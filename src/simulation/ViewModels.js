@@ -402,6 +402,7 @@ export function battleView(world, battleId) {
   if (!b) return null;
   return {
     id: b.id,
+    systemId: b.systemId || null,
     systemName: world.entities.systems[b.systemId]?.name,
     time: Math.round(b.time),
     status: b.status,
@@ -411,6 +412,8 @@ export function battleView(world, battleId) {
       return {
         shipId: u.shipId, side: u.side, x: Math.round(u.x), y: Math.round(u.y),
         heading: Math.round((u.heading || 0) * 100) / 100,
+        hullId: s?.hullId || null,
+        retreatCharge: Math.round((u.retreatCharge || 0) * 10) / 10,
         name: s?.name, hullName: s ? hullDef(s.hullId)?.nameZh : '?',
         shield: s ? Math.round(s.hp.shield) : 0,
         shieldMax: s?.hp.shieldMax || 1,
