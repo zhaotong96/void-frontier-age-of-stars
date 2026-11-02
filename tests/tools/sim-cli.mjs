@@ -8,6 +8,7 @@
  */
 
 import { createStarterCampaign } from '../../src/devtools/scenarioFactory.js';
+import '../../src/app/commands.js'; // 命令注册（与真实游戏一致，否则 AI 全部 UNKNOWN）
 import { advanceTicks } from '../../src/simulation/WorldSimulation.js';
 import { checkWorldInvariants } from '../../src/core/invariant.js';
 import { worldHash } from '../../src/core/serialization.js';
