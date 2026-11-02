@@ -1,0 +1,105 @@
+/**
+ * domain/diplomacy/war.js — 战争状态机、条约计时与关系维护（任务书 5.1 / 5.4）
+ *
+ * 当前版本：条约到期处理、战争疲劳累积、关系维度自然回归。
+ * 宣战/和谈/占领逻辑随阶段09扩展（均通过命令总线）。
+ */
+
+import { emit } from '../../core/eventBus.js';
+import { relationKey } from '../../core/ids.js';
+
+/** 每小时计时器：条约到期、战争状态推进 */
+export function runDiplomacyTimers(world) {
+  const E = world.entities;
+
+  // 条约到期
+  for (const tid of Object.keys(E.treaties).sort()) {
+    const treaty = E.treaties[tid];
+    if (treaty.status === 'active' && treaty.expiryTick && world.tick >= treaty.expiryTick) {
+      treaty.status = 'expired';
+      emit(world, 'TreatyExpired', { treatyId: tid, type: treaty.type, parties: treaty.parties }, 'diplomacy');
+      onTreatyEnd(world, treaty, 'expired');
+    }
+  }
+
+  // 战争疲劳（每小时微量累积，战斗损失在战斗结算中额外累加）
+  for (const wid of Object.keys(E.wars).sort()) {
+    const war = E.wars[wid];
+    if (war.status !== 'active') continue;
+    for (const fid of [...war.attackers, ...war.defenders]) {
+      war.exhaustion[fid] = Math.min(100, (war.exhaustion[fid] || 0) + 0.005);
+    }
+  }
+}
+
+/** 条约结束时的关系反馈（DIP-02 违约/到期差异） */
+export function onTreatyEnd(world, treaty, reason) {
+  const [a, b] = treaty.parties;
+  const rel = getRelation(world, a, b);
+  if (reason === 'breached') {
+    rel.trust = Math.max(0, rel.trust - 18);
+    rel.opinion = Math.max(-100, rel.opinion - 15);
+    rel.grievances += 1;
+  } else if (reason === 'expired') {
+    rel.trust = Math.max(0, rel.trust - 2);
+  }
+}
+
+/** 取得（或惰性创建）两阵营多维关系记录 */
+export function getRelation(world, a, b) {
+  if (a === b) throw new Error('关系不能指向自身');
+  const key = relationKey(a, b);
+  let rel = world.relations.diplomacy[key];
+  if (!rel) {
+    rel = {
+      key,
+      parties: [a, b].sort(),
+      contactState: 'none', // none|signal|analyzing|contacted
+      firstContactTick: null,
+      opinion: 0,
+      trust: 10,
+      threat: 0,
+      borderTension: 0,
+      tradeInterdependence: 0,
+      grievances: 0,
+      warWeariness: 0,
+      intelConfidence: 0.2,
+      treaties: [],
+    };
+    world.relations.diplomacy[key] = rel;
+  }
+  return rel;
+}
+
+/** 宣战（由 DeclareWar 命令调用；校验在命令层） */
+export function declareWar(world, attackerId, defenderId, wargoals) {
+  const key = relationKey(attackerId, defenderId);
+  const rel = getRelation(world, attackerId, defenderId);
+  rel.borderTension = Math.min(100, rel.borderTension + 40);
+  rel.opinion = Math.max(-100, rel.opinion - 30);
+
+  // 解除双方条约
+  for (const tid of rel.treaties.slice()) {
+    const t = world.entities.treaties[tid];
+    if (t && t.status === 'active') {
+      t.status = 'breached';
+      emit(world, 'TreatyBreached', { treatyId: tid, reason: 'war' }, 'diplomacy');
+    }
+  }
+  rel.treaties = [];
+
+  const war = {
+    id: null, // 由调用方分配
+    attackers: [attackerId],
+    defenders: [defenderId],
+    startTick: world.tick,
+    wargoals: wargoals || [],
+    occupiedSystems: {},
+    exhaustion: {},
+    battles: 0,
+    status: 'active',
+    peaceOffers: [],
+  };
+  rel.atWarWith = rel.parties.find((p) => p !== attackerId);
+  return war;
+}
