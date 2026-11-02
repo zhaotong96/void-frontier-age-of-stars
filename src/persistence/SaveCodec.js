@@ -51,6 +51,9 @@ export function validateSaveRecord(rec, { requireChecksum = true } = {}) {
   if (p.seed === undefined || p.tick === undefined || !p.entities) {
     return { ok: false, reason: 'payload 缺少必要字段（seed/tick/entities）' };
   }
+  if (!Number.isInteger(p.seed) || !Number.isInteger(p.tick) || typeof p.entities !== 'object') {
+    return { ok: false, reason: 'payload 字段类型非法（seed/tick 须为整数，entities 须为对象）' };
+  }
   if (requireChecksum) {
     const expect = hash32(stableStringify(p)).toString(16).padStart(8, '0');
     if (rec.checksum !== expect) {

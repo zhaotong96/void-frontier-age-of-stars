@@ -104,7 +104,7 @@ export function generateGalaxy(world, config = {}) {
   const prune = avgNNDist * BAL.galaxy.lanePruneFactor;
   const laneSets = new Map(); // idx -> Set(idx)
   for (const p of points) {
-    p.knn = kNearest(points, p.x, p.y, 5);
+    p.knn = kNearest(points, p.x, p.y, 6).filter((e) => e.point.idx !== p.idx); // 排除自身
     laneSets.set(p.idx, new Set());
   }
   for (const p of points) {
@@ -125,6 +125,7 @@ export function generateGalaxy(world, config = {}) {
     if (set.size < BAL.galaxy.lanesPerNodeMin) {
       for (const { point: q } of p.knn) {
         if (set.size >= BAL.galaxy.lanesPerNodeMin) break;
+        if (q.idx === p.idx) continue;
         set.add(q.idx);
         laneSets.get(q.idx).add(p.idx);
       }

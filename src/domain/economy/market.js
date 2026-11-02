@@ -18,7 +18,7 @@ export function ensureMarket(world, systemId) {
     const demand = {};
     const price = {};
     for (const rid of tradeableResourceIds()) {
-      stock[rid] = Math.round(resourceDef(rid).basePrice * BAL.economy.marketBaseStockDays / 4);
+      stock[rid] = Math.max(40, Math.round(resourceDef(rid).basePrice * BAL.economy.marketBaseStockDays / 4));
       demand[rid] = 0;
       price[rid] = resourceDef(rid).basePrice;
     }

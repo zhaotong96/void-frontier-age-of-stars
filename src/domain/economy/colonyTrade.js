@@ -39,6 +39,28 @@ export function dailyColonyCommerce(world) {
     const market = ensureMarket(world, systemId);
     let grossIncome = 0;
 
+    // 殖民补给线：食物/水低于生存线时用殖民地信用点自动从本星系市场购买
+    for (const vitalId of ['food', 'water']) {
+      const have = colony.stockpile[vitalId] ?? 0;
+      const floor = vitalId === 'food' ? 40 : 30;
+      if (have < floor && (colony.stockpile.credits ?? 0) > 120) {
+        const want = Math.min(60, floor - have);
+        const m = market;
+        const stock = Math.floor(m.stock[vitalId] || 0);
+        if (stock > 0) {
+          const unit = marketUnitPrice(m, vitalId, want, 'buy') * 1.5; // 远征溢价
+          const cost = Math.ceil(unit * want);
+          if (cost <= (colony.stockpile.credits ?? 0)) {
+            m.stock[vitalId] -= want;
+            colony.stockpile.credits -= cost;
+            colony.stockpile[vitalId] = have + want;
+            colony.imports ||= {};
+            colony.imports[vitalId] = (colony.imports[vitalId] || 0) + want;
+          }
+        }
+      }
+    }
+
     for (const rid of tradeableResourceIds()) {
       const have = colony.stockpile[rid] ?? 0;
       const reserve = RESERVE[rid] ?? DEFAULT_RESERVE;

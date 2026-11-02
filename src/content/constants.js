@@ -28,7 +28,7 @@ export const BAL = {
     priceMaxFactor: 3.2,        // 价格上限 = base × 3.2
     priceSmooth: 0.35,          // 价格向目标值平滑系数（每日）
     marketBaseStockDays: 40,    // 市场基准库存（按基准需求的“天”数）
-    taxRateColony: 0.22,        // 殖民地税基比例
+    taxRateColony: 0.4,         // 殖民地税基比例（阵营舰队/外交/科研的财政来源）
   },
 
   // —— 人口 ——

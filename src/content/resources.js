@@ -28,11 +28,11 @@ export const RESOURCES = [
   { id: 'reagents', nameKey: 'res.reagents', category: 'volatile', unit: 't', basePrice: 12, mass: 0.5, volume: 0.6, storageClass: 'crate', rarity: 2, isTradeable: true, isStrategic: false, decayRule: { perDayPct: 0.2 }, sourceTypes: ['factory'], sinkTypes: ['refine', 'medicine'] },
 
   // —— 生态资源 ——
-  { id: 'food', nameKey: 'res.food', category: 'bio', unit: 't', basePrice: 3, mass: 1.0, volume: 0.9, storageClass: 'bulk', rarity: 1, isTradeable: true, isStrategic: false, decayRule: { perDayPct: 1.5 }, sourceTypes: ['farm'], sinkTypes: ['population'] },
+  { id: 'food', nameKey: 'res.food', category: 'bio', unit: 't', basePrice: 3, mass: 1.0, volume: 0.9, storageClass: 'bulk', rarity: 1, isTradeable: true, isStrategic: false, decayRule: { perDayPct: 0.3 }, sourceTypes: ['farm'], sinkTypes: ['population'] },
   { id: 'water', nameKey: 'res.water', category: 'bio', unit: 't', basePrice: 1, mass: 1.0, volume: 0.9, storageClass: 'tank', rarity: 1, isTradeable: true, isStrategic: false, decayRule: null, sourceTypes: ['mine', 'recycler'], sinkTypes: ['population', 'farm', 'terraform'] },
   { id: 'oxygen', nameKey: 'res.oxygen', category: 'bio', unit: 't', basePrice: 2, mass: 0.1, volume: 1.3, storageClass: 'tank', rarity: 1, isTradeable: true, isStrategic: false, decayRule: null, sourceTypes: ['farm'], sinkTypes: ['population'] },
-  { id: 'biomass', nameKey: 'res.biomass', category: 'bio', unit: 't', basePrice: 6, mass: 0.9, volume: 0.8, storageClass: 'bulk', rarity: 2, isTradeable: true, isStrategic: false, decayRule: { perDayPct: 0.8 }, sourceTypes: ['farm'], sinkTypes: ['medicine', 'terraform'] },
-  { id: 'medicine', nameKey: 'res.medicine', category: 'bio', unit: '箱', basePrice: 24, mass: 0.3, volume: 0.3, storageClass: 'crate', rarity: 2, isTradeable: true, isStrategic: false, decayRule: { perDayPct: 0.4 }, sourceTypes: ['factory'], sinkTypes: ['population', 'groundMission'] },
+  { id: 'biomass', nameKey: 'res.biomass', category: 'bio', unit: 't', basePrice: 6, mass: 0.9, volume: 0.8, storageClass: 'bulk', rarity: 2, isTradeable: true, isStrategic: false, decayRule: { perDayPct: 0.3 }, sourceTypes: ['farm'], sinkTypes: ['medicine', 'terraform'] },
+  { id: 'medicine', nameKey: 'res.medicine', category: 'bio', unit: '箱', basePrice: 24, mass: 0.3, volume: 0.3, storageClass: 'crate', rarity: 2, isTradeable: true, isStrategic: false, decayRule: { perDayPct: 0.2 }, sourceTypes: ['factory'], sinkTypes: ['population', 'groundMission'] },
 
   // —— 能源 ——
   { id: 'powerCell', nameKey: 'res.powerCell', category: 'energy', unit: '组', basePrice: 28, mass: 0.5, volume: 0.25, storageClass: 'crate', rarity: 2, isTradeable: true, isStrategic: false, decayRule: null, sourceTypes: ['factory'], sinkTypes: ['building', 'ship', 'groundMission'] },

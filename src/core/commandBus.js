@@ -43,7 +43,18 @@ export function executeCommand(world, cmd) {
     return { ok: false, code: 'MALFORMED', reason: '命令格式非法' };
   }
   const def = registry.get(cmd.type);
-  if (!def) return { ok: false, code: 'UNKNOWN_COMMAND', reason: `未知命令 ${cmd.type}` };
+  if (!def) {
+    // 未知命令同样入审计（防止缺注册环境下 AI 空转被掩盖）
+    const rec0 = {
+      id: nextId(world, 'command'), tick: world.tick, type: cmd.type,
+      actorId: cmd.actorId ?? null, targetId: cmd.targetId ?? null,
+      params: cmd.params ?? {}, ok: false, code: 'UNKNOWN_COMMAND', reason: '未知命令',
+    };
+    world.commandLog.push(rec0);
+    if (world.commandLog.length > 600) world.commandLog.splice(0, world.commandLog.length - 600);
+    (world.stats.commandsFailed ||= {}).UNKNOWN_COMMAND = (world.stats.commandsFailed.UNKNOWN_COMMAND || 0) + 1;
+    return { ok: false, code: 'UNKNOWN_COMMAND', reason: `未知命令 ${cmd.type}` };
+  }
 
   const record = {
     id: nextId(world, 'command'),

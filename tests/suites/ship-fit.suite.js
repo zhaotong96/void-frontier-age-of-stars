@@ -72,7 +72,7 @@ export const suite = {
         }
       }
       assert(stats.structure >= 1, '结构下限保护 ≥ 1');
-      assertEq(stats.powerNet, 91, '功率净值 = (70+45) − (16+8)');
+      assertEq(stats.powerNet, 99, '功率净值 = (70+45) − 16（未知模块不参与功率结算）');
 
       // 5b) 合规组合的 stats.cpu ≤ 船体 cpu（任务书 SHIP-01 口径）
       const validStats = computeShipStats('hull_frigate', VALID_FRIGATE);

@@ -117,10 +117,10 @@ export const suite = {
           ship.hp[layer] -= absorbed;
           dmg -= absorbed;
         }
-        // 动能 50：护盾(0.45) 吸 22.5，剩余 27.5 → 装甲(0.65) 吸 17.875，剩余 9.625 → 结构(0.95) 吸 9.14
-        assertNear(ship.hp.shield, 40 - 22.5, 1e-9, '级联中护盾最先吸收');
-        assertNear(ship.hp.armor, 30 - 17.875, 1e-9, '级联中装甲第二吸收');
-        assertNear(ship.hp.structure, 260 - 9.144999999999996, 1e-6, '级联中结构最后吸收');
+        // 动能 50：护盾(0.45) 吸 22.5，剩余 27.5 → 装甲(0.65) 吸 17.875，剩余 9.625 → 结构(0.95) 吸 9.14375
+        assertNear(ship.hp.shield, 17.5, 1e-6, '级联中护盾最先吸收');
+        assertNear(ship.hp.armor, 12.125, 1e-6, '级联中装甲第二吸收');
+        assertNear(ship.hp.structure, 250.85625, 1e-6, '级联中结构最后吸收');
       }
 
       // 4) COMBAT-06：结构归零 → destroyed + 从舰队成员表移除

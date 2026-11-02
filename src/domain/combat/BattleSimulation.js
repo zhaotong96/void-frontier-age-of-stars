@@ -90,6 +90,14 @@ export function finishBattle(world, battle, winnerSide) {
   const cap = 24;
   if (world.battles.history.length > cap) world.battles.history.splice(0, world.battles.history.length - cap);
 
+  // 舰队脱离交战状态（battle.fleetIds 双侧复位）
+  if (battle.fleetIds) {
+    for (const flid of [battle.fleetIds.a, battle.fleetIds.b]) {
+      const f = world.entities.fleets[flid];
+      if (f && f.status === 'engaged') f.status = 'idle';
+    }
+  }
+
   emit(world, 'BattleEnded', {
     battleId: battle.id,
     systemId: battle.systemId,

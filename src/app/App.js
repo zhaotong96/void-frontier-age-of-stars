@@ -13,7 +13,7 @@ import { SPEEDS, dateStr } from '../core/clock.js';
 import { buildSnapshot } from '../simulation/SnapshotBuilder.js';
 import { SaveManager } from '../persistence/SaveManager.js';
 import { toast, showModal } from '../ui/components/index.js';
-import { L } from '../core/i18n.js';
+import { L, setLanguage } from '../core/i18n.js';
 import { AudioManager } from '../render/AudioManager.js';
 import { recentLog } from '../core/eventBus.js';
 
@@ -34,6 +34,8 @@ import { ChronicleView } from '../ui/screens/ChronicleView.js';
 import { SettingsView } from '../ui/screens/SettingsView.js';
 import { DiagnosticsView } from '../ui/screens/DiagnosticsView.js';
 
+import { TabGuard } from '../persistence/TabGuard.js';
+import { loadLocalSettings, saveLocalSettings } from '../ui/screens/SettingsView.js';
 import { TopBar } from '../ui/shell/TopBar.js';
 import { SideNav } from '../ui/shell/SideNav.js';
 import { Inspector } from '../ui/shell/Inspector.js';
@@ -51,6 +53,7 @@ export class App {
     this.selection = null; // { kind, id }
     this.pendingEvent = null; // 叙事事件弹卡
     this.saveManager = new SaveManager();
+    this.tabGuard = new TabGuard();
     this.audio = new AudioManager();
     this.performance = { fps: 0, tickMs: 0, lastSnapshotAt: 0 };
     this._frame = this._frame.bind(this);
@@ -62,6 +65,18 @@ export class App {
     window.__bootSteps = window.__bootSteps || [];
     const mark = (s) => window.__bootSteps.push(s);
     try {
+    // 多标签页会话仲裁：后来者只读（任务书 8.4）
+    this.tabGuard.acquire((state) => {
+      if (state === 'observer') {
+        this.setSpeed(0);
+        toast('已在另一标签页进行本战役，当前页面为只读镜像', { kind: 'warn' });
+      }
+    });
+    // 恢复本地轻量设置（语言/音量，不进世界状态）
+    const local = loadLocalSettings();
+    if (local.language) setLanguage(local.language);
+    if (typeof local.masterVolume === 'number') this.audio.setVolume('master', local.masterVolume);
+    if (typeof local.sfxVolume === 'number') this.audio.setVolume('sfx', local.sfxVolume);
     // 注册全部视图
     for (const v of [MenuView, GalaxyView, SystemView, ColonyView, FleetView, DesignerView,
       CombatView, ResearchView, MarketView, DiplomacyView, GovernmentView, GroundView,
@@ -150,6 +165,7 @@ export class App {
   }
 
   exitToMenu() {
+    this.tabGuard?.release();
     this.world = null;
     this.running = false;
     this.snapshot = null;

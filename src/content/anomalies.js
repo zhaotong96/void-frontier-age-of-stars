@@ -1,6 +1,7 @@
 /**
- * content/anomalies.js — 异常模板（任务书 3.5 / 13.3：首发 ≥20，当前为
- * 首批可测试子集，随叙事系统扩充到目标数量）
+ * content/anomalies.js — 异常模板（任务书 3.5 / 13.3：当前 20 个，覆盖
+ * 古代遗存 / 残骸 / 生命 / 空间构造 / 信号 / 自治体 / 资源富集 / 异常气象 /
+ * 引力构造 / 未知构造体）
  *
  * rewards: [{resId, amount}]；risks: 描述性风险标签（调查失败惩罚由叙事层定义）。
  */
@@ -89,5 +90,92 @@ export const ANOMALY_TEMPLATES = [
     category: 'signal', difficultyMod: 3,
     rewards: [{ resId: 'researchData', amount: 22 }],
     risks: ['辐射灼伤'],
+  },
+
+  // ———— 内容批次 2 ————
+  {
+    id: 'ano_ancient_gallery',
+    nameZh: '无名画廊', nameEn: 'Nameless Gallery',
+    descZh: '小行星内壁凿出的长廊，两壁浮雕记录着某个文明完整的哀悼仪式，末端是一扇从内侧封死的门。',
+    category: 'ancient', difficultyMod: 3,
+    rewards: [{ resId: 'ancientData', amount: 7 }, { resId: 'researchData', amount: 14 }],
+    risks: ['心理残留'],
+    storyTag: 'signal_frontier',
+  },
+  {
+    id: 'ano_derelict_shipyard',
+    nameZh: '无人船坞', nameEn: 'Silent Shipyard',
+    descZh: '一座仍在缓慢自转的干船坞，龙骨上停着半艘从未下水的战舰，工单系统还在按周生成无人执行的检修任务。',
+    category: 'derelict', difficultyMod: 3,
+    rewards: [{ resId: 'alloy', amount: 45 }, { resId: 'composite', amount: 18 }, { resId: 'conductor', amount: 10 }],
+    risks: ['防御系统待机'],
+  },
+  {
+    id: 'ano_void_reef',
+    nameZh: '虚礁', nameEn: 'Void Reef',
+    descZh: '由代谢矿物的集群生物在航路交汇处堆出的礁体，航图上它随季节生长，正缓慢挤占过往舰船的跃迁走廊。',
+    category: 'life', difficultyMod: 2,
+    rewards: [{ resId: 'biomass', amount: 35 }, { resId: 'rareEarth', amount: 15 }],
+    risks: ['生物附着'],
+  },
+  {
+    id: 'ano_tidal_rift',
+    nameZh: '潮汐裂隙', nameEn: 'Tidal Rift',
+    descZh: '两颗中子星遗骸之间的引力鞍点，空间在那里被持续拉伸，探测器传回的影像都带着不可逆的时间戳偏移。',
+    category: 'spatial', difficultyMod: 4,
+    rewards: [{ resId: 'exoticMatter', amount: 1 }, { resId: 'researchData', amount: 24 }],
+    risks: ['潮汐撕裂', '时间戳漂移'],
+    storyTag: 'crisis_rift',
+  },
+  {
+    id: 'ano_lament_band',
+    nameZh: '挽歌频段', nameEn: 'Lament Band',
+    descZh: '一段叠加在脉冲星辐射上的宽带信号，破译后是同一段航行警告的反复重放，落款日期比当前纪元早四万年。',
+    category: 'signal', difficultyMod: 2,
+    rewards: [{ resId: 'researchData', amount: 16 }, { resId: 'ancientData', amount: 4 }],
+    risks: ['信息污染'],
+    storyTag: 'signal_frontier',
+  },
+  {
+    id: 'ano_swarm_hatchery',
+    nameZh: '蜂群孵巢', nameEn: 'Swarm Hatchery',
+    descZh: '小行星内核被掏空成蜂窝状的铸造巢，自治单元仍在按一份损坏的生产序列制造新的同类，没有停工的迹象。',
+    category: 'automata', difficultyMod: 4,
+    rewards: [{ resId: 'conductor', amount: 14 }, { resId: 'alloy', amount: 35 }, { resId: 'researchData', amount: 14 }],
+    risks: ['敌对重启', '蜂群扩散'],
+    storyTag: 'crisis_automata',
+  },
+  {
+    id: 'ano_rich_vein',
+    nameZh: '富集矿脉', nameEn: 'Dense Lode',
+    descZh: '一次远古超新星抛射把重元素压进了这颗小行星，勘探光谱上的读数高得让人怀疑仪器出了故障。',
+    category: 'resource', difficultyMod: 1,
+    rewards: [{ resId: 'rareEarth', amount: 30 }, { resId: 'ferro', amount: 120 }, { resId: 'heavyMetal', amount: 40 }],
+    risks: ['粉尘爆燃'],
+  },
+  {
+    id: 'ano_ion_eye',
+    nameZh: '离子风暴眼', nameEn: 'Ion Storm Eye',
+    descZh: '一场持续了至少两个世纪的气态巨星风暴，风眼内的电磁环境却异常平静，是天然的深空通讯屏蔽区。',
+    category: 'weather', difficultyMod: 3,
+    rewards: [{ resId: 'hydrogen', amount: 90 }, { resId: 'inertGas', amount: 40 }, { resId: 'researchData', amount: 12 }],
+    risks: ['辐射潮汐'],
+  },
+  {
+    id: 'ano_dual_knot',
+    nameZh: '双结引力点', nameEn: 'Twin Knot',
+    descZh: '两个史瓦西半径以厘米计的微型引力结互相绕转，任何进入其连线中点的物体都会被拉成一份完美的弦。',
+    category: 'gravity', difficultyMod: 4,
+    rewards: [{ resId: 'darkMatter', amount: 1 }, { resId: 'researchData', amount: 22 }],
+    risks: ['引力剪切'],
+  },
+  {
+    id: 'ano_pale_monolith',
+    nameZh: '苍白独石', nameEn: 'Pale Monolith',
+    descZh: '一块边长完全相等的黑色独石，悬浮在没有任何恒星的空域中央，所有射向它的探测波都不再返回。',
+    category: 'unknown', difficultyMod: 3,
+    rewards: [{ resId: 'ancientData', amount: 5 }, { resId: 'exoticMatter', amount: 1 }, { resId: 'researchData', amount: 18 }],
+    risks: ['读数湮灭'],
+    storyTag: 'crisis_rift',
   },
 ];

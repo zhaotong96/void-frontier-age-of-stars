@@ -18,6 +18,7 @@ import { validateFit, hullDef, computeShipStats } from '../domain/ships/ship.js'
 import { getMod } from '../domain/factions/modifiers.js';
 import { declareWar, createTreaty, treatyAcceptanceScore, getRelation } from '../domain/diplomacy/war.js';
 import { RNG } from '../core/rng.js';
+import { emit } from '../core/eventBus.js';
 
 function ownFleet(world, cmd) {
   const fleet = getEntity(world, 'fleets', cmd.params.fleetId || cmd.targetId);
@@ -205,6 +206,7 @@ registerCommand('UpgradeColony', {
     pay(ctx.world, colony.factionId, { alloy: 30, credits: 220 }, 'upgradeColony', colony.id);
     colony.isOutpost = false;
     colony.housing += 10;
+    colony.stockpile.food = (colony.stockpile.food || 0) + 40; // 殖民物资补给
   },
 });
 

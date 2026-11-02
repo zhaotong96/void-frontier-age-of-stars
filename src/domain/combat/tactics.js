@@ -67,8 +67,17 @@ unitBehaviors.push(function movementBehavior(world, battle, dt) {
         desiredY = target.y + Math.sin(ang) * bestRange;
       }
     } else {
-      desiredX = u.side === 'a' ? 300 : ARENA.w - 300;
-      desiredY = clamp(u.y, 60, ARENA.h - 60);
+      // 无目标：向最近的存活敌人方向移动（防双方站桩死锁）
+      const foe = battle.units
+        .filter((o) => !o.destroyed && o.side !== u.side)
+        .sort((a, b) => dist(u.x, u.y, a.x, a.y) - dist(u.x, u.y, b.x, b.y))[0];
+      if (foe) {
+        desiredX = foe.x;
+        desiredY = foe.y;
+      } else {
+        desiredX = u.side === 'a' ? 300 : ARENA.w - 300;
+        desiredY = clamp(u.y, 60, ARENA.h - 60);
+      }
     }
 
     // 期望方向 → 推进
@@ -114,19 +123,18 @@ unitBehaviors.push(function targetingBehavior(world, battle, dt) {
     u._targetEval = 0;
 
     const range = bestEngagementRange(ship);
-    const enemies = battle.units.filter(
-      (o) => !o.destroyed && o.side !== u.side && o.order !== 'retreat' || (o.destroyed ? false : o.side !== u.side)
-    );
+    const enemies = battle.units.filter((o) => !o.destroyed && o.side !== u.side);
     let best = null;
     let bestScore = -Infinity;
     for (const e of enemies) {
       if (e.destroyed) continue;
       const d = dist(u.x, u.y, e.x, e.y);
-      if (d > range * 1.3) continue;
+      // 目标捕获放宽：射程外也按距离衰减计入（否则开局间距 > 捕获半径 → 永久无目标死锁）
+      const reach = d > range * 1.3 ? -d * 0.02 : 20;
       const eship = world.entities.ships[e.shipId];
       if (!eship) continue;
       const threat = (eship.stats.weapons?.length || 0) * 10 + (eship.hullId === 'hull_supply' ? -20 : 0);
-      const score = threat - d * 0.05 + (e.isBig ? 8 : 0) + (eship.hp.structure < eship.stats.structure * 0.4 ? 12 : 0);
+      const score = threat - d * 0.05 + (e.isBig ? 8 : 0) + (eship.hp.structure < eship.stats.structure * 0.4 ? 12 : 0) + reach;
       if (score > bestScore) {
         bestScore = score;
         best = e;

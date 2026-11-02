@@ -58,7 +58,7 @@ export function foundColony(world, planetId, factionId, initialPop = 6, isOutpos
     population: { total: initialPop, strata: { worker: initialPop } },
     housing: isOutpost ? 8 : 12,
     buildings: isOutpost ? [{ defId: 'bld_admin_post', level: 1, state: 'active', progress: 0 }] : [],
-    stockpile: { food: 60, water: 60, ferro: 0, silicate: 0, powerCell: 4, medicine: 4 },
+    stockpile: { food: 90, water: 70, ferro: 0, silicate: 0, powerCell: 4, medicine: 4 },
     stability: 60,
     powerBalance: 0,
     jobsFilled: {},
@@ -204,9 +204,16 @@ export function dailyPopulation(world, colony) {
   const pop = colony.population;
   const before = pop.total;
 
-  // 消耗
-  const foodNeed = Math.max(1, Math.round(pop.total * BAL.population.foodPerPop * 100) / 100);
-  const foodOK = debitColony(world, colony, 'food', Math.ceil(foodNeed), 'dailyFood', colony.id);
+  // 消耗：小人口按「食物债务」累积取整（6 人口 ≈ 8 天耗 1 食物，防整数化过量消耗）
+  const foodNeedFrac = pop.total * BAL.population.foodPerPop;
+  colony.foodDebt = (colony.foodDebt || 0) + foodNeedFrac;
+  let foodOK = true;
+  if (colony.foodDebt >= 1) {
+    const take = Math.floor(colony.foodDebt);
+    foodOK = debitColony(world, colony, 'food', take, 'dailyFood', colony.id);
+    if (foodOK) colony.foodDebt -= take;
+    else colony.foodDebt = 0;
+  }
   const goodsOK = debitColony(world, colony, 'powerCell', 0, 'noop', colony.id); // 消费品模型简化：暂扣 0
   const housingRatio = pop.total / Math.max(1, colony.housing);
 
@@ -220,10 +227,10 @@ export function dailyPopulation(world, colony) {
       colony.growthBuffer -= delta;
     }
   } else if (!foodOK) {
-    // 饥荒：按规则死亡（无瞬时无因变化）
-    const deaths = Math.max(1, Math.round(pop.total * 0.01));
+    // 饥荒：按比例死亡（小人口缓慢流失，不瞬时清零）
+    const deaths = Math.round(pop.total * 0.01);
     delta = -deaths;
-    emit(world, 'ColonyFamine', { colonyId: colony.id, deaths }, 'colony');
+    if (deaths > 0) emit(world, 'ColonyFamine', { colonyId: colony.id, deaths }, 'colony');
   }
   if (housingRatio > 1.15 && delta > 0) delta = 0; // 住房不足停止增长
 

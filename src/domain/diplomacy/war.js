@@ -15,7 +15,7 @@ export function runDiplomacyTimers(world) {
   // 条约到期
   for (const tid of Object.keys(E.treaties).sort()) {
     const treaty = E.treaties[tid];
-    if (treaty.status === 'active' && treaty.expiryTick && world.tick >= treaty.expiryTick) {
+    if (treaty.status === 'active' && typeof treaty.expiryTick === 'number' && world.tick >= treaty.expiryTick) {
       treaty.status = 'expired';
       emit(world, 'TreatyExpired', { treatyId: tid, type: treaty.type, parties: treaty.parties }, 'diplomacy');
       onTreatyEnd(world, treaty, 'expired');

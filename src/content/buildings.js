@@ -270,7 +270,7 @@ export const BUILDINGS = [
     jobs: 4,
     powerUse: -8,
     upkeep: { credits: 3 },
-    recipe: { hours: 24, inputs: { water: 8 }, outputs: { food: 14 } },
+    recipe: { hours: 24, inputs: { water: 5 }, outputs: { food: 14 } },
     colonyOnly: true,
   },
   {
@@ -286,7 +286,7 @@ export const BUILDINGS = [
     jobs: 3,
     powerUse: -6,
     upkeep: { credits: 4 },
-    recipe: { hours: 24, inputs: { water: 10 }, outputs: { biomass: 8, oxygen: 10 } },
+    recipe: { hours: 24, inputs: { water: 6 }, outputs: { biomass: 6, oxygen: 10 } },
     colonyOnly: true,
   },
   {
@@ -302,7 +302,7 @@ export const BUILDINGS = [
     jobs: 2,
     powerUse: -10,
     upkeep: { credits: 5 },
-    recipe: { hours: 24, inputs: { biomass: 3 }, outputs: { water: 12, oxygen: 4 } },
+    recipe: { hours: 24, inputs: { biomass: 2 }, outputs: { water: 14, oxygen: 4 } },
     colonyOnly: true,
   },
 

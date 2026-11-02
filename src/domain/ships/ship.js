@@ -188,6 +188,11 @@ export function createShip(world, opts) {
     systemId: opts.systemId || null,
     buildTick: world.tick,
   });
+  // 舰船↔舰队双向一致性（invariant 约定）
+  if (ship.fleetId) {
+    const fleet = world.entities.fleets[ship.fleetId];
+    if (fleet && !fleet.shipIds.includes(ship.id)) fleet.shipIds.push(ship.id);
+  }
   emit(world, 'ShipCompleted', { shipId: ship.id, factionId: ship.factionId, hullId: ship.hullId }, 'fleet');
   return ship;
 }
