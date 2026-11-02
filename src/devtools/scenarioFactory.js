@@ -93,6 +93,15 @@ export function createStarterCampaign(config = {}) {
     createFleet(world, {
       factionId: fid,
       systemId: homeSystemId,
+      name: isPlayer ? '拓荒-1 殖民支队' : `${fac.name} 殖民支队`,
+      role: 'colony',
+      ships: [
+        { hullId: 'hull_supply', moduleIds: ['mod_cargo_std', 'mod_reactor_fission', 'mod_ion_thruster'], name: '新家园号' },
+      ],
+    });
+    createFleet(world, {
+      factionId: fid,
+      systemId: homeSystemId,
       name: isPlayer ? '边防-1 巡逻队' : `${fac.name} 巡逻队`,
       role: 'combat',
       stance: 'patrol',

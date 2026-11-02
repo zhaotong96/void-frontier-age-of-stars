@@ -28,7 +28,7 @@ export class SaveManager {
     if (problems.length > 0) {
       return { ok: false, reason: `世界状态异常，拒绝保存: ${problems[0]}` };
     }
-    await Database.putSave(rec);
+    await Database.putSave({ ...rec, slotId }); // keyPath 'slotId'（Database.js）
     await Database.setMeta('lastSlot', slotId);
     return { ok: true, record: rec };
   }

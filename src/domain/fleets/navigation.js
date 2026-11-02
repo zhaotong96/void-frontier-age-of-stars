@@ -101,12 +101,77 @@ export function advanceFleets(world) {
       }
     }
   }
-  // 抵达后触发接触检查
+  // 抵达后触发接触检查与燃料补加
   for (const fid of Object.keys(fleets).sort()) {
     const fleet = fleets[fid];
     if (fleet.systemId && S[fleet.systemId]) {
       checkSystemPresence(world, fleet);
+      refuelFleet(world, fleet, S[fleet.systemId]);
     }
+  }
+}
+
+const REFUEL_PER_HOUR = 20;
+
+/**
+ * 友方补给（任务书 3.3/4.9：舰队不能无限期无成本作战）：
+ *  1) 本文明殖民地 → 直接从殖民地氢仓储加注（舱对舱）
+ *  2) 星系市场 → 以 1.5× 市价用阵营信用点购买
+ * 搁浅舰队在可补给处恢复为 idle。
+ */
+export function refuelFleet(world, fleet, sys) {
+  if (!sys) return;
+  const needTotal = () => fleet.shipIds.reduce((s, sid) => {
+    const ship = world.entities.ships[sid];
+    return s + (ship && ship.status === 'active' ? Math.max(0, (ship.stats?.fuelCap ?? 0) - (ship.fuel ?? 0)) : 0);
+  }, 0);
+
+  // 1. 殖民地仓储直补
+  const colony = sys.planetIds.map((pid) => world.entities.planets[pid]).find((p) => p.colonyId);
+  const col = colony ? world.entities.colonies[colony.colonyId] : null;
+  let gave = 0;
+  if (col && col.factionId === fleet.factionId && (col.stockpile?.hydrogen ?? 0) > 0) {
+    for (const sid of fleet.shipIds) {
+      const ship = world.entities.ships[sid];
+      if (!ship || ship.status !== 'active') continue;
+      const cap = ship.stats?.fuelCap ?? 0;
+      const want = Math.min(cap - (ship.fuel ?? 0), REFUEL_PER_HOUR - gave, col.stockpile.hydrogen);
+      if (want <= 0) continue;
+      col.stockpile.hydrogen -= want;
+      ship.fuel = Math.round(((ship.fuel ?? 0) + want) * 100) / 100;
+      gave += want;
+      if (gave >= REFUEL_PER_HOUR) break;
+    }
+  }
+
+  // 2. 市场购买（1.5× 市价）
+  if (gave < REFUEL_PER_HOUR && needTotal() > 0) {
+    const market = world.economy.markets[sys.id];
+    if (market && !market.embargo[fleet.factionId]) {
+      const led = world.economy.ledgers[fleet.factionId];
+      const price = (market.price.hydrogen ?? 2) * 1.5;
+      let budget = Math.floor((led?.balances?.credits ?? 0) / Math.max(0.1, price));
+      budget = Math.min(budget, REFUEL_PER_HOUR - gave, Math.floor(market.stock.hydrogen || 0));
+      if (budget > 0) {
+        for (const sid of fleet.shipIds) {
+          const ship = world.entities.ships[sid];
+          if (!ship || ship.status !== 'active' || budget <= 0) continue;
+          const cap = ship.stats?.fuelCap ?? 0;
+          const take = Math.min(cap - (ship.fuel ?? 0), budget);
+          if (take <= 0) continue;
+          ship.fuel = Math.round(((ship.fuel ?? 0) + take) * 100) / 100;
+          budget -= take;
+          market.stock.hydrogen = Math.max(0, (market.stock.hydrogen || 0) - take);
+          if (led) led.balances.credits = Math.max(0, led.balances.credits - Math.round(take * price));
+        }
+      }
+    }
+  }
+
+  // 3. 搁浅恢复：有燃料且在星系内；清除残留的失效移动订单（防空转死锁）
+  if (fleet.status === 'stranded' && fleetFuelTotal(world, fleet) > 1) {
+    fleet.status = 'idle';
+    if (fleet.orders?.kind === 'move' && !fleet.transit) fleet.orders = null;
   }
 }
 
@@ -124,12 +189,12 @@ function fleetFuelMult(fleet, world) {
 
 /** 从舰队随行补给船/货舱扣燃料；返回是否还有燃料 */
 function drainFleetFuel(world, fleet, amount) {
-  // 先从旗舰货舱，再从补给舰货舱
+  // 从舰队各船油箱（ship.fuel，上限 fuelCap）扣燃料
   for (const sid of fleet.shipIds) {
     const ship = world.entities.ships[sid];
-    if (!ship || (ship.cargo?.hydrogen ?? 0) <= 0) continue;
-    const take = Math.min(ship.cargo.hydrogen, amount);
-    ship.cargo.hydrogen -= take;
+    if (!ship || ship.status !== 'active' || (ship.fuel ?? 0) <= 0) continue;
+    const take = Math.min(ship.fuel, amount);
+    ship.fuel = Math.round((ship.fuel - take) * 100) / 100;
     amount -= take;
     if (amount <= 1e-9) return true;
   }

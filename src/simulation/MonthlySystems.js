@@ -7,6 +7,9 @@ import { registerMonthly } from './TickPipeline.js';
 import { restockMarkets } from '../domain/economy/colonyTrade.js';
 import { getRelation } from '../domain/diplomacy/war.js';
 import { chronicle } from '../core/eventBus.js';
+import { registerCrisis } from '../domain/events/crisis.js';
+
+registerCrisis();
 
 registerMonthly('stats-guard', (world) => {
   world.stats.monthlyCloses = (world.stats.monthlyCloses || 0) + 1;

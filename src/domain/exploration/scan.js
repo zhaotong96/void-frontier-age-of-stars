@@ -66,7 +66,8 @@ export function tickScanning(world, fleet) {
     return;
   }
   const noise = 1 + (sys.star?.scanNoise ?? 0.2) + sys.dangerRating * 0.06;
-  const power = scanPower(world, fleet, facId) / noise;
+  // /10：内容侧传感器数值为装备强度口径，扫描点按 1/10 折算控制节奏
+  const power = scanPower(world, fleet, facId) / 10 / noise;
   if (power <= 0) {
     order.stage = 'blocked';
     return;

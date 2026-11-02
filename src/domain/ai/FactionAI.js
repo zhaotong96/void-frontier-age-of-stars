@@ -150,6 +150,10 @@ function aiEconomy(world, fid, st, w, criticalOnly = false) {
     return false;
   }
 
+  // 资金预留门槛：留足前哨（合金 20+）与建军（合金 130+）的弹性，
+  // 避免工业阶梯把流动性吸干导致扩张/军事永远无法执行
+  if ((balance(world, fid, 'alloy') || 0) < 150) return false;
+
   // 5. 挥发物（化学/聚合物链的源头）
   if (!hasBuilding(world, home, 'bld_volatile_well')) ladder.push('bld_volatile_well');
   // 6. 精炼链
@@ -230,9 +234,10 @@ const RESEARCH_PREF = {
 function aiResearch(world, fid, st, w) {
   const rs = world.research[fid];
   if (!rs || rs.active.length >= 1) return false;
-  if (rs.queue.length >= 8) return false; // 队列满：不再制造失败命令（防空转）
   const prefs = RESEARCH_PREF[st.personality] || RESEARCH_PREF.balanced;
-  for (const techId of prefs) {
+  // 只把「能立即开始」的项目视为一次行动；仅排队不吞掉本次评估（否则探索被饿死）
+  const candidates = prefs.concat(TECHNOLOGY_ORDER);
+  for (const techId of candidates) {
     if (rs.completed.includes(techId)) continue;
     if (rs.queue.includes(techId)) continue;
     if (rs.active.some((a) => a.techId === techId)) continue;
@@ -241,19 +246,10 @@ function aiResearch(world, fid, st, w) {
       recordOrder(st, 'research', `start:${techId}`);
       return true;
     }
-    // 前置不满足 → 排队后结束本次评估
-    executeCommand(world, { type: 'QueueResearch', actorId: fid, params: { techId } });
-    return true;
-  }
-  // 偏好清单耗尽：按表序补 tail（保持确定性）
-  const all = TECHNOLOGY_ORDER;
-  for (const techId of all) {
-    if (rs.completed.includes(techId) || rs.queue.includes(techId)) continue;
-    if (rs.active.some((a) => a.techId === techId)) continue;
-    const r = executeCommand(world, { type: 'StartResearch', actorId: fid, params: { techId } });
-    if (r.ok) return true;
-    executeCommand(world, { type: 'QueueResearch', actorId: fid, params: { techId } });
-    return true;
+    // 前置不满足 → 排队一次（QueueResearch 去重），继续找可启动项
+    if (rs.queue.length < 8) {
+      executeCommand(world, { type: 'QueueResearch', actorId: fid, params: { techId } });
+    }
   }
   return false;
 }
@@ -263,10 +259,11 @@ function aiResearch(world, fid, st, w) {
 function aiExplore(world, fid, st) {
   const sciFleet = Object.keys(world.entities.fleets).sort()
     .map((id) => world.entities.fleets[id])
-    .find((f) => f.factionId === fid && f.role === 'science' && f.systemId && (!f.orders || f.orders.stage === 'done'));
+    .find((f) => f.factionId === fid && f.role === 'science' && f.systemId && !f.transit &&
+                  (!f.orders || f.orders.kind === 'scan' || f.orders.kind === 'move'));
   if (!sciFleet) return false;
   const here = world.entities.systems[sciFleet.systemId];
-  // 找一个未完成调查的相邻星系
+  // 1) 当前星系的未调查邻接
   for (const nid of here.lanes.slice().sort()) {
     const ns = world.entities.systems[nid];
     const lvl = ns.surveyedBy[fid] ?? 0;
@@ -280,6 +277,32 @@ function aiExplore(world, fid, st) {
         return true;
       }
     }
+  }
+  // 2) 邻接全部完成 → 移动到勘探前沿（已调查且有未调查邻接的最近星系）
+  const frontier = [];
+  for (const sid of Object.keys(world.entities.systems)) {
+    const s = world.entities.systems[sid];
+    if ((s.surveyedBy[fid] ?? 0) < 4) continue;
+    for (const nid of s.lanes) {
+      if ((world.entities.systems[nid].surveyedBy[fid] ?? 0) < 4) {
+        frontier.push(s);
+        break;
+      }
+    }
+  }
+  if (frontier.length === 0) return false;
+  frontier.sort((a, b) => {
+    const da = Math.hypot(a.x - here.x, a.y - here.y);
+    const db = Math.hypot(b.x - here.x, b.y - here.y);
+    return da - db || (a.id < b.id ? -1 : 1);
+  });
+  const r = executeCommand(world, {
+    type: 'OrderFleetMove', actorId: fid,
+    params: { fleetId: sciFleet.id, targetSystemId: frontier[0].id },
+  });
+  if (r.ok) {
+    recordOrder(st, 'scan', `move:${frontier[0].id}`);
+    return true;
   }
   return false;
 }
@@ -318,7 +341,7 @@ function aiExpand(world, fid, st) {
   // 己方舰队已在目标星系 → 直接建前哨
   const fleetHere = Object.keys(world.entities.fleets).sort()
     .map((id) => world.entities.fleets[id])
-    .find((f) => f.factionId === fid && f.systemId === sys.id && f.shipIds.length > 0);
+    .find((f) => f.factionId === fid && f.role === 'colony' && f.systemId === sys.id && f.shipIds.length > 0);
   if (fleetHere) {
     const r = executeCommand(world, {
       type: 'FoundOutpost', actorId: fid,
@@ -332,10 +355,11 @@ function aiExpand(world, fid, st) {
     return false;
   }
 
-  // 否则派最近的空闲舰队前往（科学舰队优先，兼顾勘探）
+  // 殖民舰队专职扩张（与科学舰队分工，杜绝拉锯）
   const idle = Object.keys(world.entities.fleets).sort()
     .map((id) => world.entities.fleets[id])
-    .filter((f) => f.factionId === fid && f.systemId && !f.transit && (!f.orders || f.orders.kind === 'scan'))
+    .filter((f) => f.factionId === fid && f.role === 'colony' && f.systemId && !f.transit &&
+                   (!f.orders || f.orders.kind === 'move'))
     .sort((a, b) => {
       const sa = world.entities.systems[a.systemId];
       const sb = world.entities.systems[b.systemId];
@@ -350,6 +374,8 @@ function aiExpand(world, fid, st) {
   });
   if (r.ok) {
     recordOrder(st, 'expand', `move:${sys.id}`);
+    // 冷却覆盖航程 + 缓冲：抵达前不再改派，给「到达即建前哨」留窗口
+    setCooldown(st, 'expand', world, (r.eta || 24) + 24);
     return true;
   }
   setCooldown(st, 'expand', world, 72);
@@ -484,7 +510,7 @@ function aiDiplomacy(world, fid, st, w) {
     if ((rel.treaties || []).length > 0) continue;
     const threat = rel.threat || 0;
     const trust = rel.trust || 0;
-    if (threat > 55 && trust > 25) {
+    if (threat > 30 && trust > 12) {
       const r = executeCommand(world, {
         type: 'OfferTreaty', actorId: fid,
         params: { targetFactionId: otherId, type: 'nonaggression' },
@@ -494,7 +520,7 @@ function aiDiplomacy(world, fid, st, w) {
         return true;
       }
     }
-    if (trust > 45 && w.diplomacy > 1.1) {
+    if (trust > 25 && w.diplomacy >= 1.0) {
       const r = executeCommand(world, {
         type: 'OfferTreaty', actorId: fid,
         params: { targetFactionId: otherId, type: 'trade' },

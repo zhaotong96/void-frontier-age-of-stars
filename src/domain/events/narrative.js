@@ -1,0 +1,178 @@
+/**
+ * domain/events/narrative.js — 事件系统引擎（任务书 5.9 / EVENT-01/02）
+ *
+ * 事件为数据驱动内容（content/events.js）+ 世界状态条件 + 效果算子。
+ * 触发结合世界状态（每日检查），禁止纯随机弹窗；一次性事件以
+ * world.narrative.fired 去重（幂等）；重要抉择进入 pendingChoices
+ * 由玩家通过 ResolveEventChoice 命令结算。
+ */
+
+import { RNG } from '../../core/rng.js';
+import { registerScheduled } from '../../core/scheduler.js';
+import { emit, chronicle } from '../../core/eventBus.js';
+import { credit, debit, balance } from '../economy/ledger.js';
+import { getRelation } from '../diplomacy/war.js';
+import { EVENT_DEFS } from '../../content/events.js';
+import { DIFFICULTY } from '../../content/constants.js';
+
+/** 每日检查（DailySystems 注册）：条件 + 权重抽取 */
+export function dailyEventCheck(world) {
+  if (world.victory.ended && !world.narrative.flags.sandbox_continue) return;
+  const mult = (DIFFICULTY[world.difficulty] || DIFFICULTY.standard).eventFrequencyMult || 1;
+  for (const def of EVENT_DEFS) {
+    // 一次性
+    if (def.once && world.narrative.fired[def.id]) continue;
+    // 冷却
+    const last = world.narrative.fired[def.id];
+    if (last && world.tick - last < (def.cooldownTicks || 360)) continue;
+    // 互斥组：同组已有待决事件则跳过
+    if (def.mutexGroup) {
+      const clash = world.narrative.pendingChoices.some((p) => p.mutexGroup === def.mutexGroup);
+      if (clash) continue;
+    }
+    // 条件（结合世界状态，不纯随机）
+    let ok = false;
+    try {
+      ok = def.conditions(world);
+    } catch (e) {
+      emit(world, 'EventConditionError', { eventId: def.id, message: String(e && e.message) }, 'system');
+      continue;
+    }
+    if (!ok) continue;
+    // 概率抽取
+    const p = (def.weight ?? 0.3) * mult * 0.42;
+    if (!RNG.chance(world, Math.min(0.9, p))) continue;
+
+    fireEvent(world, def);
+    if (world.narrative.pendingChoices.length >= 3) break; // 待决上限
+  }
+}
+
+/** 触发事件：效果型立即结算；抉择型进入待决队列 */
+export function fireEvent(world, def) {
+  world.narrative.fired[def.id] = world.tick;
+  emit(world, 'EventFired', { eventId: def.id, category: def.category }, def.category || 'politics');
+
+  if (def.choices && def.choices.length > 0) {
+    world.narrative.pendingChoices.push({
+      eventId: def.id,
+      titleZh: def.titleZh,
+      bodyZh: typeof def.bodyZh === 'function' ? def.bodyZh(world) : def.bodyZh,
+      mutexGroup: def.mutexGroup || null,
+      expiresTick: def.expiresTicks ? world.tick + def.expiresTicks : null,
+      choices: def.choices.map((c) => ({
+        id: c.id,
+        labelZh: c.labelZh,
+        hintZh: typeof c.hintZh === 'function' ? c.hintZh(world) : c.hintZh || null,
+        cost: c.cost || null,
+      })),
+      firedTick: world.tick,
+    });
+    chronicle(world, 'event', `抉择：${def.titleZh}`, { eventId: def.id });
+  } else {
+    applyEffects(world, def.effects || [], { eventId: def.id });
+    chronicle(world, 'event', def.titleZh, { eventId: def.id });
+  }
+}
+
+/**
+ * 效果算子（数据驱动，可序列化）。
+ * 支持：resource / relation / flag / arc / event / chronicle
+ */
+export function applyEffects(world, effects, ctx = {}) {
+  const pid = world.playerFactionId;
+  for (const fx of effects) {
+    switch (fx.op) {
+      case 'resource': {
+        const fid = fx.target === 'player' ? pid : fx.target;
+        if (fx.amount >= 0) credit(world, fid, fx.resId, fx.amount, `event:${ctx.eventId}`, null);
+        else debit(world, fid, fx.resId, -fx.amount, `event:${ctx.eventId}`, null);
+        break;
+      }
+      case 'relation': {
+        const rel = getRelation(world, fx.a || pid, fx.b);
+        rel[fx.key] = Math.max(-100, Math.min(100, (rel[fx.key] || 0) + fx.delta));
+        break;
+      }
+      case 'flag':
+        world.narrative.flags[fx.key] = fx.value ?? world.tick;
+        break;
+      case 'arc': {
+        const arc = world.narrative.arcs[fx.arcId] || { stage: 0, vars: {} };
+        arc.stage = Math.max(arc.stage, fx.stage);
+        if (fx.vars) Object.assign(arc.vars, fx.vars);
+        world.narrative.arcs[fx.arcId] = arc;
+        chronicle(world, 'arc', `剧情推进：${fx.arcId} → 阶段 ${arc.stage}`, { arcId: fx.arcId });
+        break;
+      }
+      case 'event': {
+        // 延迟后续事件（调度器承载，可序列化）
+        import('../../core/scheduler.js').then(({ schedule }) => {
+          schedule(world, world.tick + (fx.delayTicks || 0), 'narrativeEvent', { eventId: fx.eventId });
+        });
+        break;
+      }
+      case 'chronicle':
+        chronicle(world, fx.type || 'world', fx.text, ctx);
+        break;
+      default:
+        emit(world, 'UnknownEffectOp', { op: fx.op, eventId: ctx.eventId }, 'system');
+    }
+  }
+}
+
+/** 玩家抉择结算（ResolveEventChoice 命令执行体） */
+export function resolveChoice(world, eventId, choiceId) {
+  const idx = world.narrative.pendingChoices.findIndex((p) => p.eventId === eventId);
+  if (idx < 0) return { ok: false, reason: '事件不存在或已结算' };
+  const pending = world.narrative.pendingChoices[idx];
+  const def = EVENT_DEFS.find((e) => e.id === eventId);
+  if (!def) return { ok: false, reason: '未知事件定义' };
+  const choice = def.choices?.find((c) => c.id === choiceId);
+  if (!choice) return { ok: false, reason: '未知选项' };
+
+  // 成本检查（事务性：命令总线保证失败回滚）
+  if (choice.cost) {
+    for (const resId of Object.keys(choice.cost)) {
+      if (balance(world, world.playerFactionId, resId) < choice.cost[resId]) {
+        return { ok: false, reason: `资源不足：${resId}` };
+      }
+    }
+    for (const resId of Object.keys(choice.cost)) {
+      debit(world, world.playerFactionId, resId, choice.cost[resId], `choice:${eventId}:${choiceId}`, null);
+    }
+  }
+
+  applyEffects(world, choice.effects || [], { eventId, choiceId });
+  world.narrative.pendingChoices.splice(idx, 1);
+  world.narrative.flags[`choice:${eventId}`] = choiceId;
+  chronicle(world, 'event', `抉择结果：${def.titleZh} → ${choice.labelZh}`, { eventId, choiceId });
+  emit(world, 'EventResolved', { eventId, choiceId }, 'politics');
+  return { ok: true };
+}
+
+/** 过期待决到期处理（默认选项 / 撤下） */
+export function expirePendingChoices(world) {
+  const keep = [];
+  for (const p of world.narrative.pendingChoices) {
+    if (p.expiresTick && world.tick > p.expiresTick) {
+      const def = EVENT_DEFS.find((e) => e.id === p.eventId);
+      const defaultChoice = def?.choices?.find((c) => c.isDefault) || def?.choices?.[0];
+      if (defaultChoice) {
+        resolveChoice(world, p.eventId, defaultChoice.id);
+        emit(world, 'EventExpired', { eventId: p.eventId, defaultChoice: defaultChoice.id }, 'politics');
+      } else {
+        world.narrative.pendingChoices = world.narrative.pendingChoices.filter((x) => x.eventId !== p.eventId);
+      }
+    } else {
+      keep.push(p);
+    }
+  }
+  world.narrative.pendingChoices = keep;
+}
+
+// 延迟事件调度注册（'event' 效果算子的载体）
+registerScheduled('narrativeEvent', (world, payload) => {
+  const def = EVENT_DEFS.find((e) => e.id === payload.eventId);
+  if (def) fireEvent(world, def);
+});

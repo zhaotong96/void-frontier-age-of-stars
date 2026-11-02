@@ -75,6 +75,26 @@ registerHourly('diplomacy', (world) => {
   runDiplomacyTimers(world);
 });
 
+// 地面行动：1 战略 tick = 30 任务秒（与战斗同口径）
+registerHourly('ground', (world) => {
+  const dt = 1 / 30;
+  let seconds = BAL.combat.tickBattleSeconds;
+  const missions = Object.values(world.entities.groundMissions).filter((m) => m.state === 'active');
+  while (seconds > 0) {
+    const step = Math.min(1 / 30, seconds);
+    for (const m of missions) {
+      if (m.state !== 'active') continue;
+      try {
+        stepMission(world, m, dt);
+      } catch (e) {
+        m.state = 'failed';
+        m.results = { outcome: 'failed', error: String(e && e.message) };
+      }
+    }
+    seconds -= step;
+  }
+});
+
 // 文明 AI 最后执行（依赖前序阶段的状态产物）
 registerAI();
 

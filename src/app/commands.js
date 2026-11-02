@@ -370,6 +370,103 @@ registerCommand('ImproveRelations', {
   },
 });
 
+// —— 叙事 ————————————————————————————————————————
+
+import { resolveChoice } from '../domain/events/narrative.js';
+
+registerCommand('ResolveEventChoice', {
+  desc: '结算事件抉择',
+  validate(ctx, cmd) {
+    const pending = ctx.world.narrative.pendingChoices.some((p) => p.eventId === cmd.params.eventId);
+    if (!pending) return { ok: false, code: 'NO_EVENT', reason: '事件不存在或已结算' };
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const r = resolveChoice(ctx.world, cmd.params.eventId, cmd.params.choiceId);
+    if (!r.ok) throw new Error(r.reason);
+  },
+});
+
+import { playerContribute } from '../domain/events/crisis.js';
+
+registerCommand('ContributeToCrisis', {
+  desc: '向危机应对投入科研数据（每次 ≥20）',
+  validate(ctx, cmd) {
+    const amount = cmd.params.amount || 20;
+    if (amount < 20) return { ok: false, code: 'TOO_SMALL', reason: '每次至少投入 20 科研数据' };
+    if ((ctx.world.economy.ledgers[cmd.actorId]?.balances?.researchData ?? 0) < amount) {
+      return { ok: false, code: 'NO_FUNDS', reason: '科研数据不足' };
+    }
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const r = playerContribute(ctx.world, cmd.params.crisisId, cmd.params.amount || 20);
+    if (!r.ok) throw new Error(r.reason);
+  },
+});
+
+// —— 地面行动 ————————————————————————————————————————
+
+import { createGroundMission, stepMission, finishMission } from '../domain/ground/GroundMission.js';
+import { MISSION_TEMPLATES, findMissionTemplate } from '../content/missions.js';
+
+registerCommand('BeginGroundMission', {
+  desc: '在行星发起地面行动任务',
+  validate(ctx, cmd) {
+    const tpl = findMissionTemplate(cmd.params.templateId);
+    if (!tpl) return { ok: false, code: 'NO_TEMPLATE', reason: '未知任务模板' };
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    if ((ctx.world.entities.groundMissions[cmd.params.planetId] || null) && false) return { ok: true };
+    const active = Object.values(ctx.world.entities.groundMissions)
+      .some((m) => m.state === 'active' && m.planetId === planet.id);
+    if (active) return { ok: false, code: 'ACTIVE', reason: '该行星已有进行中的行动' };
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    createGroundMission(ctx.world, {
+      templateId: cmd.params.templateId,
+      planetId: cmd.params.planetId || cmd.targetId,
+      squadCharacterIds: cmd.params.squadCharacterIds || [],
+    });
+  },
+});
+
+registerCommand('SetGroundInput', {
+  desc: '写入地面行动玩家输入帧（UI 每帧）',
+  validate(ctx, cmd) {
+    const m = ctx.world.entities.groundMissions[cmd.params.missionId];
+    if (!m || m.state !== 'active') return { ok: false, code: 'NO_MISSION', reason: '无进行中的任务' };
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const m = ctx.world.entities.groundMissions[cmd.params.missionId];
+    const i = cmd.params.input || {};
+    m.input = {
+      moveDir: i.moveDir || { x: 0, y: 0 },
+      sprint: !!i.sprint,
+      attack: i.attack || null,
+      dodgeDir: i.dodgeDir || null,
+      block: !!i.block,
+      interactTarget: i.interactTarget || null,
+      switchUnit: Number.isInteger(i.switchUnit) ? i.switchUnit : null,
+    };
+  },
+});
+
+registerCommand('AbortGroundMission', {
+  desc: '中止地面行动（无奖励）',
+  validate(ctx, cmd) {
+    const m = ctx.world.entities.groundMissions[cmd.params.missionId];
+    if (!m || m.state !== 'active') return { ok: false, code: 'NO_MISSION', reason: '无进行中的任务' };
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const m = ctx.world.entities.groundMissions[cmd.params.missionId];
+    finishMission(ctx.world, m, 'aborted');
+  },
+});
+
 // —— 舰船与蓝图 ————————————————————————————————————————
 
 function shipCost(hull, costMult) {

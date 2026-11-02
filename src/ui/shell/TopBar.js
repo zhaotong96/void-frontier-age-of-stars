@@ -25,18 +25,18 @@ export class TopBar {
   render() {
     const app = this.app;
     const w = app.world;
-    const el = this.el;
-    el.innerHTML = '';
+    const bar = this.el;
+    bar.innerHTML = '';
 
-    el.appendChild(elBrand());
+    bar.appendChild(elBrand());
 
     if (!w) {
-      el.appendChild(el('div', { class: 'spacer' }));
+      bar.appendChild(el('div', { class: 'spacer' }));
       return;
     }
     const snap = app.snapshot;
     this.dateEl = el('div', { class: 'vf-date', text: snap ? snap.date : '—' });
-    el.appendChild(this.dateEl);
+    bar.appendChild(this.dateEl);
 
     // 速度控制
     const speedWrap = el('div', { class: 'vf-speed-controls', role: 'group', 'aria-label': L('ui.speed') });
@@ -51,18 +51,18 @@ export class TopBar {
       this.speedBtns.push(b);
       speedWrap.appendChild(b);
     });
-    el.appendChild(speedWrap);
+    bar.appendChild(speedWrap);
 
-    el.appendChild(el('div', { class: 'spacer' }));
+    bar.appendChild(el('div', { class: 'spacer' }));
 
     // 玩家资源
     if (snap && snap.player) {
       const led = snap.resources?.balances || {};
-      el.appendChild(resourceChip({ icon: '◈', label: L('ui.credits'), value: led.credits ?? 0 }));
-      el.appendChild(resourceChip({ icon: '✦', label: L('ui.influence'), value: led.influence ?? 0 }));
-      el.appendChild(resourceChip({ icon: '⌬', label: L('ui.researchRate'), value: researchRate(app) }));
+      bar.appendChild(resourceChip({ icon: '◈', label: L('ui.credits'), value: led.credits ?? 0 }));
+      bar.appendChild(resourceChip({ icon: '✦', label: L('ui.influence'), value: led.influence ?? 0 }));
+      bar.appendChild(resourceChip({ icon: '⌬', label: L('ui.researchRate'), value: researchRate(app) }));
       const threat = threatLevel(w);
-      el.appendChild(el('span', {
+      bar.appendChild(el('span', {
         class: `vf-chip tone-${threat.tone}`,
         text: `${L('ui.threat')} ${threat.label}`,
       }));
@@ -70,7 +70,7 @@ export class TopBar {
 
     // 通知入口
     const alerts = snap ? snap.alerts.length : 0;
-    el.appendChild(el('button', {
+    bar.appendChild(el('button', {
       class: 'vf-btn small',
       text: `⚑ ${L('ui.notifications')}${alerts ? ` (${alerts})` : ''}`,
       title: '跳转到事件与通知',

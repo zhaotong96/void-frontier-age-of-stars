@@ -4,6 +4,7 @@
  */
 
 import { registerDaily } from './TickPipeline.js';
+import { dailyEventCheck, expirePendingChoices } from '../domain/events/narrative.js';
 import { dailyPopulation } from '../domain/planets/colony.js';
 import { closeDailyLedgers, applyDecay } from '../domain/economy/ledger.js';
 import { updateMarketPrices } from '../domain/economy/market.js';
@@ -47,6 +48,11 @@ registerDaily('ledger', (world) => {
   world.stats.lastDailyFlows = closed;
 });
 
+registerDaily('narrative', (world) => {
+  dailyEventCheck(world);
+  expirePendingChoices(world);
+});
+
 registerDaily('market', (world) => {
   // 殖民地商业闭环：盈余出售 + 税收上缴 + 需求注入
   dailyColonyCommerce(world);
@@ -60,6 +66,7 @@ registerDaily('diplomacy-drift', (world) => {
     if (rel.contactState !== 'contacted') continue;
     const [a, b] = rel.parties;
     rel.opinion = Math.round(rel.opinion * 0.995);
+    rel.trust = Math.min(100, rel.trust + 0.02); // 接触时间的信任累积
     // 边境接壤 → 紧张度自然累积；贸易依赖缓解
     const adjacent = borderAdjacent(world, a, b);
     if (adjacent) {

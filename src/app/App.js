@@ -18,6 +18,19 @@ import { AudioManager } from '../render/AudioManager.js';
 import { recentLog } from '../core/eventBus.js';
 
 import { MenuView } from '../ui/screens/MenuView.js';
+import { GalaxyView } from '../ui/screens/GalaxyView.js';
+import { SystemView } from '../ui/screens/SystemView.js';
+import { ColonyView } from '../ui/screens/ColonyView.js';
+import { FleetView } from '../ui/screens/FleetView.js';
+import { DesignerView } from '../ui/screens/DesignerView.js';
+import { CombatView } from '../ui/screens/CombatView.js';
+import { ResearchView } from '../ui/screens/ResearchView.js';
+import { MarketView } from '../ui/screens/MarketView.js';
+import { DiplomacyView } from '../ui/screens/DiplomacyView.js';
+import { GovernmentView } from '../ui/screens/GovernmentView.js';
+import { GroundView } from '../ui/screens/GroundView.js';
+import { EventsView } from '../ui/screens/EventsView.js';
+import { ChronicleView } from '../ui/screens/ChronicleView.js';
 import { SettingsView } from '../ui/screens/SettingsView.js';
 import { DiagnosticsView } from '../ui/screens/DiagnosticsView.js';
 
@@ -44,14 +57,24 @@ export class App {
   }
 
   async boot() {
+    window.__bootSteps = window.__bootSteps || [];
+    const mark = (s) => window.__bootSteps.push(s);
+    try {
     // 注册全部视图
-    for (const v of [MenuView, SettingsView, DiagnosticsView]) {
+    for (const v of [MenuView, GalaxyView, SystemView, ColonyView, FleetView, DesignerView,
+      CombatView, ResearchView, MarketView, DiplomacyView, GovernmentView, GroundView,
+      EventsView, ChronicleView, SettingsView, DiagnosticsView]) {
       registerView(v);
     }
     this.buildShell();
+    mark('router:init');
     initRouter();
     onRouteChange((route) => this._onRoute(route));
+    mark('route:call');
     this._onRoute(parseHash());
+    mark('route:done');
+    mark('boot:end');
+    } catch (e) { mark('boot:error:' + (e && e.message) + ' @ ' + String(e && e.stack || '').split(String.fromCharCode(10)).slice(1, 3).join(' <- ')); throw e; }
     this.lastFrame = performance.now();
     requestAnimationFrame(this._frame);
   }
@@ -85,17 +108,17 @@ export class App {
 
   /** 开启新战役（由 MenuView 调用） */
   async startNewGame(config) {
-    const [{ scenarioFactory }, {}] = await Promise.all([
+    const [factory] = await Promise.all([
       import('../devtools/scenarioFactory.js'),
       import('./commands.js'), // 命令注册（含内容依赖，动态加载）
     ]);
-    const world = scenarioFactory.createStarterCampaign(config);
+    const world = factory.createStarterCampaign(config);
     this.world = world;
     this.selection = null;
     this.pendingEvent = null;
     this.accumulator = 0;
     this.speedIdx = 1;
-    await this.saveManager.captureCheckpoint(world); // 开局检查点
+    await this.saveManager.save(world, 'auto', `开局检查点 · ${world.campaignName || ''}`);
     this.enterGame();
     navigate('galaxy');
   }
@@ -195,11 +218,11 @@ export class App {
   }
 
   _advanceTick() {
-    // 模拟推进（WorldSimulation 内部含 TickPipeline 与战斗步进）
-    const { advanceOneTick } = worldSim();
-    advanceOneTick(this.world);
-    // 叙事事件检查 → 弹卡
-    this._checkPendingEvent();
+    // 模拟推进（WorldSimulation 内部含 TickPipeline 与战斗步进）；模块懒加载缓存
+    worldSim().then((mod) => {
+      mod.advanceOneTick(this.world);
+      this._checkPendingEvent();
+    }).catch((e) => this.reportFatal(e));
   }
 
   _checkPendingEvent() {

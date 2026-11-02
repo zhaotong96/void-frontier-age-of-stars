@@ -81,6 +81,7 @@ export const DiplomacyView = {
     this.app = app;
     this._mounted = true;
     this._lastRefresh = 0;
+    this._lastSig = null;
     this._expanded = new Set(); // 展开中的文明 factionId 集合
 
     root.innerHTML = '';
@@ -96,14 +97,32 @@ export const DiplomacyView = {
     this._rebuild();
   },
 
-  /** 快照推送：250ms 节流重建（无输入件，安全整体重建） */
+  /** 快照推送：250ms 节流 + 数据签名守卫（签名未变化跳过重建，避免吞掉面板折叠/点击） */
   onSnapshot() {
     if (!this._mounted) return;
     const now = performance.now();
     if (now - this._lastRefresh < 250) return;
     this._lastRefresh = now;
+    const d = this._diplo();
+    const sig = this._signature(d);
+    if (sig === this._lastSig) return; // 外交数据无变化：不重建（保留展开/折叠状态）
+    this._lastSig = sig;
     // 已不存在的战争/文明引用在重建时自然消失；展开集合保持
     this._rebuild();
+  },
+
+  /** 外交数据紧凑签名（关系五维取整 + 条约状态 + 战争摘要） */
+  _signature(d) {
+    const facs = (d.factions || []).map((f) => [
+      f.factionId, f.known ? 1 : 0, f.contactState, f.atWar ? 1 : 0,
+      f.opinion, f.trust, f.threat, f.borderTension, f.tradeInterdependence, f.grievances,
+      (f.treaties || []).map((t) => `${t.id}:${t.status}`).join(','),
+    ].join('|')).join(';');
+    const wars = (d.wars || []).map((w) => [
+      w.id, w.status, (w.occupiedSystems || []).length, w.battles || 0,
+      Object.keys(w.exhaustion || {}).sort().map((k) => Math.round(w.exhaustion[k])).join('+'),
+    ].join('|')).join(';');
+    return `${facs}##${wars}`;
   },
 
   /** 卸载：清引用（本视图无监听 / 无 rAF / 无画布） */
@@ -112,6 +131,7 @@ export const DiplomacyView = {
     this.app = null;
     this._body = null;
     this._expanded = new Set();
+    this._lastSig = null;
   },
 
   // —— 内部实现 ——————————————————————————————————

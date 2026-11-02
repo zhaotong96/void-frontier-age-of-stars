@@ -7,6 +7,7 @@ import { App } from './app/App.js';
 import { registerAll as registerLocalization } from './content/localization/index.js';
 
 function fail(msg) {
+  (window.__bootErrors ||= []).push(msg);
   const status = document.getElementById('boot-status');
   if (status) status.textContent = msg;
   // eslint-disable-next-line no-console

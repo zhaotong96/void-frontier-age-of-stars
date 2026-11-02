@@ -4,6 +4,9 @@
  */
 
 import { registerYearly } from './TickPipeline.js';
+import { registerVictory } from '../domain/victory/victory.js';
+
+registerVictory();
 
 registerYearly('stats-guard', (world) => {
   world.stats.yearlyCloses = (world.stats.yearlyCloses || 0) + 1;
