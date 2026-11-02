@@ -32,6 +32,7 @@ export const GovernmentView = {
   title: '政府',
 
   mount(ctx) {
+    this._app = ctx.app;
     const { root, app } = ctx;
     this.app = app;
     this._mounted = true;
@@ -90,6 +91,7 @@ export const GovernmentView = {
     body.appendChild(this._overviewPanel(g));
     body.appendChild(this._explainPanel(g));
     body.appendChild(this._policyPanel(g));
+    body.appendChild(this._crewPanel());
   },
 
   /** 概览面板：稳定度 gauge + 行政容量 statBar + 基础 kvList */
@@ -202,4 +204,32 @@ export const GovernmentView = {
     p.appendChild(locked);
     return p;
   },
+
+  /** 人物与船员面板（只读视图；任命经 AssignCharacter 命令） */
+  _crewPanel() {
+    const { crewView } = crewApi();
+    const app = this._app;
+    const crew = crewView(app.world, app.world.playerFactionId);
+    const p = el('div', { class: 'vf-panel' });
+    p.appendChild(el('div', { class: 'vf-panel-head', text: '人物与船员' }));
+    const body = el('div', { class: 'vf-panel-body' });
+    if (crew.length === 0) {
+      body.appendChild(el('div', { class: 'vf-faint vf-small', text: '暂无人物记录。' }));
+    }
+    for (const c of crew.slice(0, 12)) {
+      const row = el('div', { class: 'vf-row', style: { padding: '3px 0', borderBottom: '1px solid rgba(29,42,58,0.4)' } });
+      row.appendChild(el('span', { class: 'vf-grow vf-small', text: `${c.name} · ${c.role} Lv${c.level}` }));
+      row.appendChild(el('span', { class: `vf-tag ${c.health === 'healthy' ? 'ok' : c.health === 'dead' ? 'danger' : 'warn'}`, text: c.healthName }));
+      if (c.fleetName) row.appendChild(el('span', { class: 'vf-faint vf-small', text: c.fleetName }));
+      row.title = `忠诚 ${c.loyalty} · 压力 ${c.stress} · 特质 ${c.traits.join('、')}`;
+      body.appendChild(row);
+    }
+    p.appendChild(body);
+    return p;
+  },
 };
+
+import { crewView as crewViewFn } from '../../domain/characters/crew.js';
+function crewApi() {
+  return { crewView: crewViewFn };
+}

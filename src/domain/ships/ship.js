@@ -213,9 +213,20 @@ export function applyDamage(world, ship, amount, layer = 'structure') {
 }
 
 /** 舰船销毁：从舰队移除、保留历史（任务书 2.3 引用清理） */
+let _fateHook = null;
+/** 注入人物命运钩子（crew.onShipDestroyed；避免循环导入） */
+export function setFateHook(fn) {
+  _fateHook = fn;
+}
+
 export function destroyShip(world, ship, cause) {
   if (ship.status === 'destroyed') return;
   ship.status = 'destroyed';
+  if (_fateHook) {
+    try {
+      _fateHook(world, ship);
+    } catch { /* 人物结算失败不阻断战斗 */ }
+  }
   ship.destroyedTick = world.tick;
   ship.destroyCause = cause;
   if (ship.fleetId) {

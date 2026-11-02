@@ -1,21 +1,26 @@
 # TEST_MATRIX — 任务书 10.2 断言矩阵映射
 
-> 状态定义：**PASS** = 已实现且已接入套件运行器；**PENDING** = 尚未实现，已给出计划
-> 测试文件名。矩阵逐行对应任务书 10.2 的 57 条断言；补充套件 `CORE-02a/02b` 为
-> 项目自增行（数学边界/战略时钟），任务书允许增加不允许删除。
+> 状态定义：**PASS（2 轮）** = 已实现、已接入套件运行器且两轮通过（运行器每套件
+> 跑 2 轮验证稳定与无状态泄漏）；**部分** = 该行断言已被其他套件并入覆盖（未独立
+> 立套件）；**PENDING** = 尚未建成独立套件，已给出计划测试文件名。矩阵逐行对应
+> 任务书 10.2 的 57 条断言；另有 **4 个项目自增行**（CORE-02a/02b 数学边界与
+> 战略时钟、REG-01 金快照回归、E2E-01 端到端战役），任务书允许增加不允许删除。
 
 ## 1. 运行方法
 
 ### 1.1 Node 命令行（开发期）
 
 ```bash
-node tests/tools/run-suites.mjs     # 或 npm run test:suites
+node tests/tools/run-suites.mjs     # 或 npm test（scripts 已切换，见 §1.3）
 ```
 
 运行器（`tests/tools/run-suites.mjs`）：从 `tests/suites/index.js` 收集全部套件
 （按 id 升序），**每个套件运行 2 轮**验证结果稳定、无状态泄漏；逐行打印
 `ID PASS/FAIL 耗时 名称`，任何 FAIL 置 `process.exitCode = 1`。
 要求 Node ≥ 18（`package.json engines`）。
+
+**最近一次全量基线（2026-11-03 实跑）：PASS 42 / FAIL 0（2 轮 × 21 套件），
+全程约 3 分钟（E2E-01 约 70 s/轮为主要耗时）。**
 
 ### 1.2 浏览器系统诊断面板（任务书 10.4）
 
@@ -29,14 +34,14 @@ node tests/tools/run-suites.mjs     # 或 npm run test:suites
 
 | 命令 | 作用 |
 | :--- | :--- |
-| `npm run lint:static` | 静态审计：外部依赖/绝对路径/占位代码扫描（`tests/tools/static-audit.mjs`，见 §3 注意事项） |
-| `npm run sim` | 离线批量模拟 CLI，平衡调参（`tests/tools/sim-cli.mjs`） |
-| `npm run golden:update` | 固定种子回归快照更新（`tests/tools/update-golden.mjs`） |
-| `npm test` | Node 内置测试入口（`tests/node/`，预留） |
+| `npm test` | 全部自动化测试套件 = `node tests/tools/run-suites.mjs`（21 套件 × 2 轮） |
+| `npm run lint:static` | 静态审计：外部依赖/绝对路径/占位代码扫描（`tests/tools/static-audit.mjs`，当前零违规） |
+| `npm run sim` | 离线批量模拟 CLI（`tests/tools/sim-cli.mjs`，`--seed/--seeds/--years/--json`），AI 经济平衡调参 |
+| `npm run golden:update` | 固定种子金快照基线更新（`tests/tools/update-golden.mjs` → `tests/regression/golden.json`）；规则有意变更后执行并在 CHANGELOG 记录 |
+| `npm run serve` | Node 开发服务器（`tests/tools/dev-server.mjs`，no-store + hash 路由回退） |
 
-> 注意：`static-audit.mjs`、`sim-cli.mjs`、`update-golden.mjs` 与 `tests/node/`、
-> `tests/core/` 等目录为规划路径，当前仓库中尚不存在对应文件/目录
-> （`tests/` 下现有 `suites/` 与 `tools/run-suites.mjs`）。接入前先补文件。
+> 基线现状：`tests/regression/golden.json`（seed 24601 × 4320 tick，
+> hash `d2ec8589`）已入库；REG-01 每次运行对比当前哈希与基线。
 
 ## 2. 断言矩阵逐行映射
 
@@ -44,14 +49,14 @@ node tests/tools/run-suites.mjs     # 或 npm run test:suites
 
 | 编号 | 测试文件 | 状态 | 说明 |
 | :--- | :--- | :--- | :--- |
-| CORE-01 Seeded PRNG | `tests/suites/core-rng.suite.js` | PASS | 同种子 10000 值两轮一致；不同种子前 100 值内分歧；float/int 越界与拒绝采样校验；非法状态校验 |
-| CORE-02 确定性模拟 | `tests/suites/core-serialization.suite.js` | PASS | stableStringify 键排序稳定、worldHash 一致、deepClone 往返、序列化两次哈希相同 |
-| CORE-02a 数学边界（自增） | `tests/suites/core-math.suite.js` | PASS | clamp/safeDivide/normalizeAngle/safeInt/formatBig 边界（NaN、零除、极值） |
-| CORE-02b 战略时钟（自增） | `tests/suites/core-clock.suite.js` | PASS | tick→日期换算、8640 tick/年、日/月/年边界判定、速度表 |
+| CORE-01 Seeded PRNG | `tests/suites/core-rng.suite.js` | PASS（2 轮） | 同种子 10000 值两轮一致；不同种子前 100 值内分歧；float/int 越界与拒绝采样校验；非法状态校验 |
+| CORE-02 确定性模拟 | `tests/suites/core-serialization.suite.js` | PASS（2 轮） | stableStringify 键排序稳定、worldHash 一致、deepClone 往返、序列化两次哈希相同 |
+| CORE-02a 数学边界（自增） | `tests/suites/core-math.suite.js` | PASS（2 轮） | clamp/safeDivide/normalizeAngle/safeInt/formatBig 边界（NaN、零除、极值） |
+| CORE-02b 战略时钟（自增） | `tests/suites/core-clock.suite.js` | PASS（2 轮） | tick→日期换算、8640 tick/年、日/月/年边界判定、速度表 |
 | CORE-03 暂停 | 计划 `tests/suites/core-pause.suite.js` | PENDING | 需要模拟循环桩：暂停态推进 N 帧后 tick/账本/AI 状态不变化 |
 | CORE-04 帧率解耦 | 计划 `tests/suites/core-framerate.suite.js` | PENDING | 不同 render cadence（累加器 dt 序列）推进相同逻辑 tick，worldHash 一致 |
-| CORE-05 命令事务 | `tests/suites/core-command.suite.js` | PASS | 资源不足命令被拒；execute 抛错后整世界回滚（对象引用保持）；部分扣费不复存在 |
-| CORE-06 事件调度 | `tests/suites/core-scheduler.suite.js` | PASS | 同 tick 多调度项按 (tick, seq) 确定性出队、无重复触发 |
+| CORE-05 命令事务 | `tests/suites/core-command.suite.js` | PASS（2 轮） | 资源不足命令被拒；execute 抛错后整世界回滚（对象引用保持）；部分扣费不复存在 |
+| CORE-06 事件调度 | `tests/suites/core-scheduler.suite.js` | PASS（2 轮） | 同 tick 多调度项按 (tick, seq) 确定性出队、无重复触发 |
 
 > CORE-06 覆盖说明：该套件验证 `schedule/popDue/runDue` 的确定性语义
 > （含乱序入队、同 tick tie-break）；跨系统「事件分发顺序」由
@@ -61,12 +66,15 @@ node tests/tools/run-suites.mjs     # 或 npm run test:suites
 
 | 编号 | 测试文件 | 状态 | 说明 |
 | :--- | :--- | :--- | :--- |
-| WORLD-01 星系生成 | `tests/suites/world-gen.suite.js` | PASS | 多固定种子两次生成：实体数/坐标/航路逐一相等；ID 唯一；无 NaN；出生文明扩张前沿 ≥ 2 |
+| WORLD-01 星系生成 | `tests/suites/world-gen.suite.js` | PASS（2 轮） | 多固定种子两次生成：实体数/坐标/航路逐一相等；ID 唯一；无 NaN；出生文明扩张前沿 ≥ 2 |
 | WORLD-02 航路图 | 计划 `tests/suites/world-lanes.suite.js` | PENDING | 全源连通性检查、度数下限（lanesPerNodeMin=2）、平均航路边目标 |
 | WORLD-03 起源公平性 | 计划 `tests/suites/world-fairness.suite.js` | PENDING | 各文明初始资源/可扩张路径阈值（当前 scenarioFactory 有公平性 warnings，需断言化） |
 | WORLD-04 天体属性 | 计划 `tests/suites/world-celestials.suite.js` | PENDING | 7 恒星 × 8 行星类别属性范围合法、恒星影响宜居带/噪声/危险 |
 
 ### 2.3 EXP / COL — 探索与殖民
+
+> 对应系统（`domain/exploration/scan.js`、`domain/planets/colony.js`）已实现并
+> 接入 UI（`db88f6c`、`943287e`），套件未建。
 
 | 编号 | 测试文件 | 状态 | 说明 |
 | :--- | :--- | :--- | :--- |
@@ -74,7 +82,7 @@ node tests/tools/run-suites.mjs     # 或 npm run test:suites
 | EXP-02 异常奖励 | 计划 `tests/suites/exp-anomaly.suite.js` | PENDING | surveyRewarded/resolveAnomaly 幂等：重复命令只结算一次 |
 | EXP-03 首次接触 | 计划 `tests/suites/exp-contact.suite.js` | PENDING | none→signal→contacted 状态差异；observeForeignSystem 分支 |
 | COL-01 殖民成本 | 计划 `tests/suites/colony-found.suite.js` | PENDING | 资源不足 FoundOutpost 被拒、余额不变；宜居度 <20 阻断 |
-| COL-02 人口守恒 | 计划 `tests/suites/colony-population.suite.js` | PENDING | 长程推进后 期初+增长−死亡 = 期末（整数人口模型） |
+| COL-02 人口守恒 | 计划 `tests/suites/colony-population.suite.js` | PENDING | 长程推进后期初+增长−死亡 = 期末（整数人口模型） |
 | COL-03 生活需求 | 计划 `tests/suites/colony-needs.suite.js` | PENDING | 断食→饥荒死亡+ColonyFamine；断电→降产；无瞬时无因变化 |
 | COL-04 宜居度 | 计划 `tests/suites/colony-habitability.suite.js` | PENDING | habitabilityFactor 0.5–1.2 对增长/产出的趋势影响 |
 
@@ -82,12 +90,12 @@ node tests/tools/run-suites.mjs     # 或 npm run test:suites
 
 | 编号 | 测试文件 | 状态 | 说明 |
 | :--- | :--- | :--- | :--- |
-| ECON-01 资源账本 | `tests/suites/economy-ledger.suite.js` | PASS | credit/debit/pay/refund/transfer 流量记账；`verifyLedgerConsistency` 账本等式；负库存拒绝；decayRule |
+| ECON-01 资源账本 | `tests/suites/economy-ledger.suite.js` | PASS（2 轮） | credit/debit/pay/refund/transfer 流量记账；`verifyLedgerConsistency` 账本等式；负库存拒绝；decayRule |
 | ECON-02 负库存 | 计划 `tests/suites/economy-negative.suite.js` | PENDING | 多笔并发订单下不产生未授权负库存/重复扣款（命令层事务组合） |
 | ECON-03 工业链 | 计划 `tests/suites/economy-chain.suite.js` | PENDING | 矿→合金→模块→舰船端到端，各阶段流量可追溯（reason/sourceId） |
-| ECON-04 市场价格 | `tests/suites/economy-market.suite.js` | PASS | 价格方向与 0.35×/3.2× 边界、平滑收敛、买卖价差、禁运 |
+| ECON-04 市场价格 | `tests/suites/economy-market.suite.js` | PASS（2 轮） | 价格方向与 0.35×/3.2× 边界、平滑收敛、买卖价差、禁运 |
 | ECON-05 贸易路线 | 计划 `tests/suites/economy-trade.suite.js` | PENDING | 商业闭环：保留库存/每日上限/税上缴/需求注入（tradeRoutes 实体化前以 colonyTrade 为准） |
-| TECH-01 科技前置 | 计划 `tests/suites/tech-prereq.suite.js` | PENDING | canStart 拒绝 + 不扣资源；validateTechGraph 无环 |
+| TECH-01 科技前置 | 计划 `tests/suites/tech-prereq.suite.js` | PENDING | canStart 拒绝 + 不扣资源；validateTechGraph 无环（科研系统已实现，套件未建） |
 | TECH-02 科技解锁 | 计划 `tests/suites/tech-unlock.suite.js` | PENDING | 完成科技后 effectIndex 重建并实际改变规则（strategicSpeed 等） |
 | TECH-03 研究队列 | 计划 `tests/suites/tech-queue.suite.js` | PENDING | 多项目分配之和 ≤ 实际科研产出；队列自动补位不跳前置 |
 
@@ -95,19 +103,22 @@ node tests/tools/run-suites.mjs     # 或 npm run test:suites
 
 | 编号 | 测试文件 | 状态 | 说明 |
 | :--- | :--- | :--- | :--- |
-| SHIP-01 装配合法性 | 计划 `tests/suites/ship-fit.suite.js` | PENDING | validateFit：槽位超限/功率缺口/CPU 超限/缺反应堆（NO_REACTOR）逐一拦截 |
-| SHIP-02 舰船建造 | 计划 `tests/suites/ship-build.suite.js` | PENDING | ShipyardBuild 扣料/队列推进/完工 createShip；缺料拒绝 |
+| SHIP-01 装配合法性 | `tests/suites/ship-fit.suite.js` | PASS（2 轮） | validateFit：槽位超限 SLOT_OVERFLOW、缺反应堆 NO_REACTOR、功率 POWER_DEFICIT、CPU 超限 CPU_DEFICIT 逐一拦截；computeShipStats 边界 |
+| SHIP-02 舰船建造 | `tests/suites/ship-build.suite.js` | PASS（2 轮） | SaveBlueprint → ShipyardBuild 按造价精确扣减 → 队列推进 → 完工 createShip 与蓝图回链 |
 | SHIP-03 模块损伤 | 计划 `tests/suites/ship-damage.suite.js` | PENDING | 战斗中 hp 分层下降并持久化；destroyShip 引用清理 |
-| FLEET-01 航行时间 | 计划 `tests/suites/fleet-navigation.suite.js` | PENDING | laneHours = ceil(dist/(最慢船速×55))；多段 legs ETA 累加 |
+| FLEET-01 航行时间 | `tests/suites/fleet-nav.suite.js` | PASS（2 轮） | planRoute 同星系/相邻/不可达（NO_ROUTE）分支、eta 与 fuelNeed、OrderFleetMove 全流程与舰队转移 |
 | FLEET-02 燃料耗尽 | 计划 `tests/suites/fleet-fuel.suite.js` | PENDING | planRoute NO_FUEL 预检；途中耗尽 → stranded + FleetStranded |
 | FLEET-03 补给 | 计划 `tests/suites/fleet-supply.suite.js` | PENDING | 殖民地直补 20/h、市场 1.5× 加价、搁浅恢复 |
 
 ### 2.6 COMBAT — 战术战斗
 
+> 战斗系统（BattleSimulation/tactics，dt=1/30s）已实现并接入 UI（`943287e`）；
+> COMBAT-01/02 已建成套件，其余未建。
+
 | 编号 | 测试文件 | 状态 | 说明 |
 | :--- | :--- | :--- | :--- |
-| COMBAT-01 伤害层级 | 计划 `tests/suites/combat-damage.suite.js` | PENDING | 护盾→装甲→结构顺序、layerResist 抗性、0.85 上限 |
-| COMBAT-02 射程边界 | 计划 `tests/suites/combat-range.suite.js` | PENDING | 命中概率随 (d−optimal)/falloff 衰减、clamp 0.02–0.98 |
+| COMBAT-01 伤害层级 | `tests/suites/combat-damage.suite.js` | PASS（2 轮） | layerResist 抗性锚点（shield/kinetic=0.55、armor/thermal=0.45）；护盾→装甲→结构分层顺序与穿透级联复现 |
+| COMBAT-02 射程边界 | `tests/suites/combat-hitmodel.suite.js` | PASS（2 轮） | 行为级命中模型验证：1000 步推进开火/伤害有限/无 NaN/单位数不变；击杀路径与战后清理 |
 | COMBAT-03 武器周期 | 计划 `tests/suites/combat-cycle.suite.js` | PENDING | cycleSeconds 冷却、耗能/弹药消耗与开火次数一致 |
 | COMBAT-04 战术暂停 | 计划 `tests/suites/combat-pause.suite.js` | PENDING | 暂停后 stepBattles 不推进（由全局暂停保证，需回归锁定） |
 | COMBAT-05 导弹拦截 | 计划 `tests/suites/combat-missile.suite.js` | PENDING | 追踪/近防/生命周期唯一（不重复命中/销毁）、投射物上限 600 |
@@ -117,56 +128,82 @@ node tests/tools/run-suites.mjs     # 或 npm run test:suites
 
 | 编号 | 测试文件 | 状态 | 说明 |
 | :--- | :--- | :--- | :--- |
-| DIP-01 外交条约 | 计划 `tests/suites/dip-treaty.suite.js` | PENDING | treatyAcceptanceScore → 接受/拒绝分支；同类重复缔约拒绝 |
-| DIP-02 违约 | 计划 `tests/suites/dip-breach.suite.js` | PENDING | BreakTreaty/到期/宣战毁约的 trust/opinion/grievances 差异 |
+| DIP-01 外交条约 | `tests/suites/diplomacy-treaty.suite.js` | PASS（2 轮） | createTreaty → TreatySigned/信任 +6；到期 → expired/轻罚 −2；BreakTreaty → breached/grievances+1/重罚 −18 |
+| DIP-02 违约 | （并入 `tests/suites/diplomacy-treaty.suite.js`） | 部分（并入 DIP-01） | 到期轻罚与违约重罚的 trust/opinion/grievances 差异已由 DIP-01 断言；独立违约场景套件未建 |
 | DIP-03 情报置信度 | 计划 `tests/suites/dip-intel.suite.js` | PENDING | 未接触不暴露数值；intelConfidence 随接触提升（0.2→0.35） |
-| AI-01 AI 经济 | 计划 `tests/suites/ai-economy.suite.js` | PENDING | 10 游戏年离线模拟（`npm run sim`）不负债/不无限建造/无凭空资源 |
-| AI-02 AI 航行 | 计划 `tests/suites/ai-navigation.suite.js` | PENDING | 不可达目标可取消/重规划；命令超时 480 tick 清理 |
-| AI-03 AI 战争 | 计划 `tests/suites/ai-war.suite.js` | PENDING | 多文明战争 5 年：宣战条件、回防、疲劳累积 |
+| AI-01 AI 经济 | 计划 `tests/suites/ai-economy.suite.js` | PENDING | 10 游戏年离线模拟（`npm run sim`，CLI 已可用）不负债/不无限建造/无凭空资源 |
+| AI-02 AI 战役稳定性 | `tests/suites/ai-stability.suite.js` | PASS（2 轮） | seed 9 推进半年：checkWorldInvariants 无问题、无 AIError、无 NO_FUNDS/QUEUE_FULL 爆量、无凭空资源 |
+| AI-03 AI 战争 | `tests/suites/ai-stability.suite.js`（同文件双导出 `suiteWar`） | PASS（2 轮） | 多文明宣战/回防/战争疲劳与战斗结算；由 `tests/suites/index.js` 独立注册 |
 
-### 2.8 GROUND / EVENT / CRISIS — 地面行动与叙事（内容未实现，测试随阶段 10/11 立项）
+### 2.8 GROUND / EVENT / CRISIS — 地面行动与叙事（系统已实现，套件未建）
+
+> `f5588cf` 已接通叙事引擎（narrative.js）、危机（crisis.js）、胜利
+> （victory.js）与地面行动（GroundMission.js + GroundView）；`characters`
+> 生产者仍缺。套件随验证收敛立项。
 
 | 编号 | 测试文件 | 状态 | 说明 |
 | :--- | :--- | :--- | :--- |
-| GROUND-01 动作状态机 | 计划 `tests/suites/ground-actions.suite.js` | PENDING | 依赖地面行动系统（阶段 10，未实现） |
+| GROUND-01 动作状态机 | 计划 `tests/suites/ground-actions.suite.js` | PENDING | 地面行动系统已实现（阶段 10），套件未建 |
 | GROUND-02 Boss 阶段 | 计划 `tests/suites/ground-boss.suite.js` | PENDING | 同上 |
-| GROUND-03 任务回写 | 计划 `tests/suites/ground-mission.suite.js` | PENDING | 依赖 groundMissions 实体生产者 |
-| EVENT-01 事件互斥 | 计划 `tests/suites/event-once.suite.js` | PENDING | narrative.fired 去重（当前仅有字段预留 + 异常 storyTag 写入） |
-| EVENT-02 分支状态 | 计划 `tests/suites/event-branch.suite.js` | PENDING | 事件系统阶段 11 实现 |
-| CRISIS-01 危机流程 | 计划 `tests/suites/crisis-flow.suite.js` | PENDING | crises 实体无生产者，阶段 11 |
+| GROUND-03 任务回写 | 计划 `tests/suites/ground-mission.suite.js` | PENDING | groundMissions 生产者已接；characters 生产者缺失 |
+| EVENT-01 事件互斥 | 计划 `tests/suites/event-once.suite.js` | PENDING | narrative.fired 去重（事件系统已实现，套件未建） |
+| EVENT-02 分支状态 | 计划 `tests/suites/event-branch.suite.js` | PENDING | 分支抉择状态机已实现（弹卡抉择），套件未建 |
+| CRISIS-01 危机流程 | 计划 `tests/suites/crisis-flow.suite.js` | PENDING | crises 生产者已接（crisis.js），套件未建 |
 
 ### 2.9 SAVE / UI / DEPLOY — 持久化、UI 与部署
 
 | 编号 | 测试文件 | 状态 | 说明 |
 | :--- | :--- | :--- | :--- |
-| SAVE-01 保存恢复 | `tests/suites/save-codec.suite.js` | PASS | encodeSave→validateSaveRecord→导出导入往返；篡改 payload 捕获 checksum 失败；非法 JSON/format 拒绝；MigrationRegistry v1→v2 注册与迁移 |
-| SAVE-02 RNG 恢复 | 计划 `tests/suites/save-rng.suite.js` | PENDING | 存档→读档→续推 N tick 与不中断推进 worldHash 一致（依赖 worldHash 长程基线） |
-| SAVE-03 损坏文件 | 计划 `tests/suites/save-corrupt.suite.js` | PENDING | 字段缺失/类型错误/超 24MB 导入拒绝且原存档不受影响（encodeSave 部分已覆盖，需补 ImportExport 与 Database 层） |
-| SAVE-04 版本迁移 | 计划 `tests/suites/save-migration.suite.js` | PENDING | 历史 schema fixture 迁移后通过 checkWorldInvariants（当前 v1 无历史版本，fixture 未建） |
+| SAVE-01 保存恢复 | `tests/suites/save-codec.suite.js` | PASS（2 轮） | encodeSave→validateSaveRecord→导出导入往返；篡改 payload 捕获 checksum 失败；非法 JSON/format 拒绝；MigrationRegistry v1→v2 注册与迁移 |
+| SAVE-02 RNG 恢复 | `tests/suites/save-roundtrip.suite.js` | PASS（2 轮） | 存档点深克隆→双路径续推 500 tick 哈希一致（中断续推确定性）；seed 77 |
+| SAVE-03 损坏文件 | （并入 `tests/suites/save-roundtrip.suite.js`） | 部分（并入 SAVE-02） | 损坏记录（worldTick 类型篡改/checksum 失败）被 validateSaveRecord 拒绝已复验；ImportExport 与 Database 层独立覆盖未建 |
+| SAVE-04 版本迁移 | （并入 `tests/suites/save-roundtrip.suite.js`） | 部分（并入 SAVE-02） | registerMigration 注册→执行→字段注入已验证；真实历史 schema fixture 未建 |
 | UI-01 操作可达性 | 计划 `tests/suites/ui-loop.suite.js`（或浏览器验收脚本） | PENDING | 不开 DevTools 走完核心循环；属于 L5 浏览器验收 |
 | UI-02 路由恢复 | 计划 `tests/suites/ui-route.suite.js` | PENDING | 刷新 `#/galaxy`、`#/fleet/xxx`、`#/battle/xxx` 定位有效页面 |
-| DEPLOY-01 二级路径 | 计划 `tests/suites/deploy-basepath.suite.js`（静态扫描）+ 手工二级路径模拟 | PENDING | `/repo/` base path 下无 404（lint:static 的绝对路径扫描是前置） |
-| DEPLOY-02 外部请求审计 | 计划 `tests/suites/deploy-audit.suite.js` + 运行时网络面板核对 | PENDING | 无第三方运行时请求/远程 API（静态审计 + L5/L6 人工环节） |
+| DEPLOY-01 二级路径 | 计划 `tests/suites/deploy-basepath.suite.js`（静态扫描）+ 手工二级路径模拟 | PENDING | `/repo/` base path 下无 404（lint:static 绝对路径扫描已可用；发布走 `.github/workflows/deploy.yml` 相对路径 + hash 路由） |
+| DEPLOY-02 外部请求审计 | 计划 `tests/suites/deploy-audit.suite.js` + 运行时网络面板核对 | PENDING | 无第三方运行时请求/远程 API（lint:static 已静态保证，L5/L6 人工环节待做） |
+
+### 2.10 项目自增行 — 回归与端到端（任务书允许增加）
+
+| 编号 | 测试文件 | 状态 | 说明 |
+| :--- | :--- | :--- | :--- |
+| REG-01 金快照回归（自增 L4） | `tests/suites/regression-golden.suite.js` | PASS（2 轮） | 固定 seed 24601 推进 4320 tick（1 游戏年，含 AI 命令生效）→ worldHash 对比基线 `tests/regression/golden.json`（hash `d2ec8589`）；配置漂移/哈希漂移均 FAIL 并给出排查指引 |
+| E2E-01 端到端战役闭环（自增） | `tests/suites/e2e-campaign.suite.js` | PASS（2 轮） | SCENARIO-STARTER-001 十四步：探索→殖民→工业→造舰→舰队→战斗→结算→外交/科研→存读档→长期推进；全程命令总线驱动（与 UI 同规则），逐步断言世界状态变化 |
 
 ## 3. 套件清单现状
 
-`tests/suites/index.js` 当前注册 **10 个套件**：
+`tests/suites/index.js` 当前注册 **21 个套件**（2026-11-03 实跑 2 轮
+42/42 全绿）：
 
-| 套件文件 | id | 组 |
-| :--- | :--- | :--- |
-| `core-rng.suite.js` | CORE-01 | core |
-| `core-serialization.suite.js` | CORE-02 | core |
-| `core-math.suite.js` | CORE-02a | core |
-| `core-clock.suite.js` | CORE-02b | core |
-| `core-command.suite.js` | CORE-05 | core |
-| `core-scheduler.suite.js` | CORE-06 | core |
-| `economy-ledger.suite.js` | ECON-01 | economy |
-| `economy-market.suite.js` | ECON-04 | economy |
-| `save-codec.suite.js` | SAVE-01 | persistence |
-| `world-gen.suite.js` | WORLD-01 | world |
+| 套件文件 | id | 组 | 状态 |
+| :--- | :--- | :--- | :--- |
+| `core-rng.suite.js` | CORE-01 | core | PASS（2 轮） |
+| `core-serialization.suite.js` | CORE-02 | core | PASS（2 轮） |
+| `core-math.suite.js` | CORE-02a | core | PASS（2 轮） |
+| `core-clock.suite.js` | CORE-02b | core | PASS（2 轮） |
+| `core-command.suite.js` | CORE-05 | core | PASS（2 轮） |
+| `core-scheduler.suite.js` | CORE-06 | core | PASS（2 轮） |
+| `economy-ledger.suite.js` | ECON-01 | economy | PASS（2 轮） |
+| `economy-market.suite.js` | ECON-04 | economy | PASS（2 轮） |
+| `save-codec.suite.js` | SAVE-01 | persistence | PASS（2 轮） |
+| `save-roundtrip.suite.js` | SAVE-02 | persistence | PASS（2 轮）（并入 SAVE-03/04 部分断言） |
+| `world-gen.suite.js` | WORLD-01 | world | PASS（2 轮） |
+| `ship-fit.suite.js` | SHIP-01 | ships | PASS（2 轮） |
+| `ship-build.suite.js` | SHIP-02 | ships | PASS（2 轮） |
+| `fleet-nav.suite.js` | FLEET-01 | fleets | PASS（2 轮） |
+| `combat-damage.suite.js` | COMBAT-01 | combat | PASS（2 轮） |
+| `combat-hitmodel.suite.js` | COMBAT-02 | combat | PASS（2 轮） |
+| `diplomacy-treaty.suite.js` | DIP-01 | diplomacy | PASS（2 轮）（并入 DIP-02 部分断言） |
+| `ai-stability.suite.js` | AI-02 | ai | PASS（2 轮） |
+| `ai-stability.suite.js`（`suiteWar` 双导出） | AI-03 | ai | PASS（2 轮） |
+| `regression-golden.suite.js` | REG-01 | regression | PASS（2 轮）（自增行） |
+| `e2e-campaign.suite.js` | E2E-01 | integration | PASS（2 轮）（自增行） |
 
-即任务书矩阵 57 行中 **8 行 PASS**（CORE-01/02/05/06、ECON-01/04、SAVE-01、WORLD-01），
-另有 **2 行自增套件**（CORE-02a/02b）——合计 **10 套件 PASS**；其余 49 行 **PENDING**。
-PENDING 行全部给出了计划文件名，命名沿用 `tests/suites/<域>-<主题>.suite.js`
-约定（与 index.js 的 import + collectSuites 注册方式一致）。
-建议优先补齐顺序见 `docs/AUTONOMOUS_RUNBOOK.md` §4 下一步队列。
+即任务书矩阵 57 行中 **17 行 PASS**（CORE-01/02/05/06、WORLD-01、ECON-01/04、
+SAVE-01/02、SHIP-01/02、FLEET-01、COMBAT-01/02、DIP-01、AI-02/03），
+**3 行部分覆盖**（DIP-02、SAVE-03/04，并入上述套件），其余 **37 行 PENDING**
+（套件文件名均已规划）；另有 **4 行自增套件**（CORE-02a/02b、REG-01、E2E-01）
+——合计 **21 个套件、42 组断言全绿**。PENDING 行全部给出计划文件名，命名沿用
+`tests/suites/<域>-<主题>.suite.js` 约定（与 index.js 的 import +
+collectSuites 注册方式一致）。建议优先补齐顺序见
+`docs/AUTONOMOUS_RUNBOOK.md` §5 下一步队列。

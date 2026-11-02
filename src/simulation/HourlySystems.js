@@ -43,7 +43,26 @@ registerHourly('navigation', (world) => {
 registerHourly('combat', (world) => {
   checkEngagements(world);
   stepBattles(world);
+  settleCombatCharacterFx(world);
 });
+
+// 舰船损毁 → 人物命运（crew 钩子注入，战斗经验分配）
+import { setFateHook } from '../domain/ships/ship.js';
+import { onShipDestroyed, gainXp } from '../domain/characters/crew.js';
+setFateHook(onShipDestroyed);
+
+function settleCombatCharacterFx(world) {
+  // 战斗结束的指挥官经验（从战报增量结算，幂等标记）
+  for (const bid of Object.keys(world.battles.history).sort()) {
+    const rep = world.battles.history[bid];
+    if (rep._xpSettled) continue;
+    rep._xpSettled = true;
+    for (const fid of [rep.sides.a, rep.sides.b]) {
+      const fleet = Object.values(world.entities.fleets).find((f) => f.factionId === fid);
+      if (fleet?.commanderId) gainXp(world, fleet.commanderId, 20 + (rep.losses[fid === rep.sides.a ? 'a' : 'b'] || 0) * 5, '战斗');
+    }
+  }
+}
 
 registerHourly('exploration', (world) => {
   for (const id of Object.keys(world.entities.fleets).sort()) {

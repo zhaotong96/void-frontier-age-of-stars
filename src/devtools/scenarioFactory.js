@@ -16,6 +16,7 @@ import { createFleet } from '../domain/fleets/fleet.js';
 import { foundColony } from '../domain/planets/colony.js';
 import { createEntity } from '../domain/entities/registry.js';
 import { rebuildEffectIndex } from '../domain/research/research.js';
+import { initCrew } from '../domain/characters/crew.js';
 
 /** 标准战役：CAMPAIGN-01 边疆回声 */
 export function createStarterCampaign(config = {}) {
@@ -115,6 +116,9 @@ export function createStarterCampaign(config = {}) {
     const rs = world.research[fid];
     rs.completed.push('tech_mining_1', 'tech_alloy_1', 'tech_science_1');
     rebuildEffectIndex(world, fid);
+
+    // 初始人物（各舰队舰长 + 储备军官）
+    initCrew(world, fid);
 
     // 初始 AI 状态
     world.ai[fid] = {

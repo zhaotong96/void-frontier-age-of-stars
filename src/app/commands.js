@@ -469,6 +469,24 @@ registerCommand('AbortGroundMission', {
   },
 });
 
+import { assignToFleet } from '../domain/characters/crew.js';
+
+registerCommand('AssignCharacter', {
+  desc: '任命人物为舰队指挥官',
+  validate(ctx, cmd) {
+    const c = getEntity(ctx.world, 'characters', cmd.params.characterId);
+    if (!c || c.health === 'dead') return { ok: false, code: 'NO_CHAR', reason: '人物不可用' };
+    if (cmd.actorId && c.factionId !== cmd.actorId) return { ok: false, code: 'FORBIDDEN', reason: '非本文明人物' };
+    const f = getEntity(ctx.world, 'fleets', cmd.params.fleetId);
+    if (!f || f.factionId !== cmd.actorId) return { ok: false, code: 'NO_FLEET', reason: '舰队不存在' };
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const r = assignToFleet(ctx.world, cmd.params.characterId, cmd.params.fleetId);
+    if (!r.ok) throw new Error(r.reason);
+  },
+});
+
 // —— 舰船与蓝图 ————————————————————————————————————————
 
 function shipCost(hull, costMult) {
