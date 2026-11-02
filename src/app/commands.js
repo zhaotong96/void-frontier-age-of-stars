@@ -136,8 +136,14 @@ registerCommand('OrderFleetAttack', {
 
 // —— 殖民 ————————————————————————————————————————
 
-function outpostCost(mult) {
-  return { alloy: Math.round(20 * mult), credits: Math.round(150 * mult) };
+function outpostCost(mult, world = null, factionId = null) {
+  // 治理规模递增：每 +4 个殖民地，扩张成本 +30%（行政容量约束的扩张代价）
+  let scale = 1;
+  if (world && factionId) {
+    const colonies = Object.values(world.entities.colonies).filter((c) => c.factionId === factionId).length;
+    scale = 1 + Math.floor(colonies / 4) * 0.3;
+  }
+  return { alloy: Math.round(20 * mult * scale), credits: Math.round(150 * mult * scale) };
 }
 
 registerCommand('FoundOutpost', {
@@ -150,8 +156,9 @@ registerCommand('FoundOutpost', {
     if (planet.colonyId) return { ok: false, code: 'TAKEN', reason: '该行星已有殖民地' };
     if (fleet.systemId !== planet.systemId) return { ok: false, code: 'RANGE', reason: '舰队不在目标行星星系' };
     const mult = getMod(ctx.world, cmd.actorId, 'colonizationCost', 'mult') || 1;
-    if (!canAfford(ctx.world, cmd.actorId, outpostCost(mult))) {
-      return { ok: false, code: 'NO_FUNDS', reason: '资源不足：需要 合金×20 信用点×150' };
+    if (!canAfford(ctx.world, cmd.actorId, outpostCost(mult, ctx.world, cmd.actorId))) {
+      const c = outpostCost(mult, ctx.world, cmd.actorId);
+      return { ok: false, code: 'NO_FUNDS', reason: `资源不足：需要 合金×${c.alloy} 信用点×${c.credits}` };
     }
     if (planet.habitability < 20) {
       return { ok: false, code: 'HABITABILITY', reason: `宜居度过低（${planet.habitability}），需要环境改造或穹顶科技` };
@@ -161,7 +168,7 @@ registerCommand('FoundOutpost', {
   execute(ctx, cmd) {
     const planet = getEntity(ctx.world, 'planets', cmd.params.planetId);
     const mult = getMod(ctx.world, cmd.actorId, 'colonizationCost', 'mult') || 1;
-    pay(ctx.world, cmd.actorId, outpostCost(mult), 'foundOutpost', planet.id);
+    pay(ctx.world, cmd.actorId, outpostCost(mult, ctx.world, cmd.actorId), 'foundOutpost', planet.id);
     foundColony(ctx.world, planet.id, cmd.actorId, 6, true);
     ctx.world.stats.coloniesFounded = (ctx.world.stats.coloniesFounded || 0) + 1;
   },
@@ -375,6 +382,35 @@ registerCommand('ImproveRelations', {
 // —— 叙事 ————————————————————————————————————————
 
 import { resolveChoice } from '../domain/events/narrative.js';
+import { canEnact, enactPolicy, revokePolicy } from '../domain/politics/policy.js';
+
+registerCommand('EnactPolicy', {
+  desc: '颁布政策（影响力成本 + 行政容量占用）',
+  validate(ctx, cmd) {
+    const r = canEnact(ctx.world, cmd.actorId, cmd.params.policyId);
+    if (!r.ok) return { ok: false, code: r.code, reason: r.reason };
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const r = enactPolicy(ctx.world, cmd.actorId, cmd.params.policyId);
+    if (!r.ok) throw new Error(r.reason);
+  },
+});
+
+registerCommand('RevokePolicy', {
+  desc: '撤销政策（进入冷却，影响力不退还）',
+  validate(ctx, cmd) {
+    const fac = ctx.world.entities.factions[cmd.actorId];
+    if (!fac?.policies?.[cmd.params.policyId]) {
+      return { ok: false, code: 'NOT_ACTIVE', reason: '政策未生效' };
+    }
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const r = revokePolicy(ctx.world, cmd.actorId, cmd.params.policyId);
+    if (!r.ok) throw new Error(r.reason);
+  },
+});
 
 registerCommand('ResolveEventChoice', {
   desc: '结算事件抉择',

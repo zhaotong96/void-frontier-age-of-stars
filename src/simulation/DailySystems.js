@@ -5,6 +5,7 @@
 
 import { registerDaily } from './TickPipeline.js';
 import { dailyEventCheck, expirePendingChoices } from '../domain/events/narrative.js';
+import { dailyPolicySettlement } from '../domain/politics/policy.js';
 import { dailyPopulation } from '../domain/planets/colony.js';
 import { closeDailyLedgers, applyDecay } from '../domain/economy/ledger.js';
 import { updateMarketPrices } from '../domain/economy/market.js';
@@ -51,6 +52,10 @@ registerDaily('ledger', (world) => {
 registerDaily('narrative', (world) => {
   dailyEventCheck(world);
   expirePendingChoices(world);
+});
+
+registerDaily('policies', (world) => {
+  dailyPolicySettlement(world);
 });
 
 registerDaily('market', (world) => {

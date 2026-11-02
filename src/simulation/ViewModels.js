@@ -279,20 +279,10 @@ export function governmentView(world, factionId) {
   };
 }
 
-export function adminCapacity(world, factionId) {
-  const base = 20;
-  const adminBuildings = countActiveBuildings(world, factionId, 'admin') * 10;
-  return (base + adminBuildings) * (getMod(world, factionId, 'adminCapacity', 'mult') || 1);
-}
-
-export function governanceLoad(world, factionId) {
-  const colonies = sortedKeys(world.entities.colonies)
-    .map((cid) => world.entities.colonies[cid])
-    .filter((c) => c.factionId === factionId).length;
-  const systems = sortedKeys(world.entities.systems)
-    .filter((sid) => world.entities.systems[sid].ownerFactionId === factionId).length;
-  return Math.round(colonies * 6 + systems * 2 * (getMod(world, factionId, 'governanceLoad', 'mult') || 1));
-}
+// adminCapacity / governanceLoad 下沉到 domain/politics/policy.js（领域函数），
+// 此处转发导出以保持既有 UI 引用不变。
+import { adminCapacity, governanceLoad } from '../domain/politics/policy.js';
+export { adminCapacity, governanceLoad };
 
 /** 设计器视图：船体/模块目录 + 蓝图列表 */
 export function designerView(world, factionId) {

@@ -18,6 +18,7 @@ import { suite as saveCodec } from './save-codec.suite.js';
 import { suite as regressionGolden } from './regression-golden.suite.js';
 import { suite as e2eCampaign } from './e2e-campaign.suite.js';
 import { suite as crew } from './crew.suite.js';
+import { suite as policy } from './policy.suite.js';
 import { suite as worldGen } from './world-gen.suite.js';
 import { suite as combatDamage } from './combat-damage.suite.js';
 import { suite as combatHitmodel } from './combat-hitmodel.suite.js';
@@ -42,6 +43,7 @@ export function collectSuites() {
   regressionGolden,
   e2eCampaign,
   crew,
+  policy,
     worldGen,
     combatDamage,
     combatHitmodel,

@@ -91,6 +91,7 @@ export const GovernmentView = {
     body.appendChild(this._overviewPanel(g));
     body.appendChild(this._explainPanel(g));
     body.appendChild(this._policyPanel(g));
+    body.appendChild(this._policiesPanel());
     body.appendChild(this._crewPanel());
   },
 
@@ -205,6 +206,77 @@ export const GovernmentView = {
     return p;
   },
 
+  /** 政策操作面板（任务书 4.1：颁布/撤销、成本/时长/冷却/预期影响可见） */
+  _policiesPanel() {
+    const app = this._app;
+    const { policiesView } = policyApi();
+    const pv = policiesView(app.world, app.world.playerFactionId);
+
+    const p = el('div', { class: 'vf-panel' });
+    p.appendChild(el('div', { class: 'vf-panel-head' }, [
+      el('span', { text: '政策与法令' }),
+      el('span', {
+        class: `vf-small ${pv.usedSlots > pv.capacity ? 'vf-danger' : 'vf-dim'}`,
+        style: { marginLeft: 'auto' },
+        text: `行政占用 ${pv.usedSlots}/${pv.capacity} · 治理负担 ${pv.load}`,
+      }),
+    ]));
+    const body = el('div', { class: 'vf-panel-body' });
+
+    // 超载警告（4.1：行政容量不足产生实际后果）
+    if (pv.load > pv.capacity) {
+      body.appendChild(el('div', {
+        class: 'vf-warn vf-small',
+        text: `⚠ 治理负担超过行政容量：各殖民地稳定度将持续受损。请精简政策或提升行政能力。`,
+      }));
+    }
+
+    for (const pol of pv.list) {
+      const isActive = pol.status === 'active';
+      const row = el('div', { style: { padding: '7px 0', borderBottom: '1px solid rgba(29,42,58,0.5)' } });
+      const head = el('div', { class: 'vf-row' });
+      head.appendChild(el('span', { class: 'vf-grow', text: pol.name }));
+      // 状态标签
+      const tagText = { active: pol.remainingDays != null ? `生效 · 余 ${pol.remainingDays} 日` : '生效中', cooldown: `冷却 · ${pol.remainingDays} 日`, available: '未颁布' }[pol.status] || pol.status;
+      head.appendChild(el('span', { class: `vf-tag ${isActive ? 'ok' : pol.status === 'cooldown' ? 'warn' : ''}`, text: tagText }));
+      head.appendChild(el('span', { class: 'vf-faint vf-small', text: `◈${pol.cost.influence} · 行政 ${pol.adminCost}` }));
+      row.appendChild(head);
+
+      row.appendChild(el('div', { class: 'vf-faint vf-small', text: pol.desc }));
+      row.appendChild(el('div', { class: 'vf-dim vf-small', text: pol.expected }));
+      const meta = [];
+      meta.push(pol.durationDays ? `法令：${pol.durationDays} 日后失效` : '永久政策');
+      meta.push(`冷却 ${pol.cooldownDays} 日`);
+      meta.push(`效果：${pol.effects.map((e2) => `${e2.stat} ${e2.mode === 'mult' ? '×' + e2.value : (e2.value > 0 ? '+' : '') + e2.value}`).join('，')}`);
+      row.appendChild(el('div', { class: 'vf-faint vf-small', text: meta.join(' · ') }));
+
+      const btnRow = el('div', { class: 'vf-row mt-1' });
+      const slotTight = pv.usedSlots + pol.adminCost > pv.capacity && !isActive;
+      if (isActive) {
+        btnRow.appendChild(el('button', {
+          class: 'vf-btn small danger',
+          text: '撤销',
+          title: '撤销后进入冷却，影响力不退还',
+          on: { click: () => app.dispatch('RevokePolicy', { policyId: pol.id }) },
+        }));
+      } else {
+        const b = el('button', {
+          class: 'vf-btn small primary',
+          text: '颁布',
+          disabled: pol.status === 'cooldown' || slotTight,
+          title: pol.status === 'cooldown' ? `冷却中（余 ${pol.remainingDays} 日）` : slotTight ? `行政容量不足（需 ${pol.adminCost} 槽位）` : `花费影响力 ${pol.cost.influence}`,
+          on: { click: () => app.dispatch('EnactPolicy', { policyId: pol.id }) },
+        });
+        btnRow.appendChild(b);
+      }
+      row.appendChild(btnRow);
+      body.appendChild(row);
+    }
+
+    p.appendChild(body);
+    return p;
+  },
+
   /** 人物与船员面板（只读视图；任命经 AssignCharacter 命令） */
   _crewPanel() {
     const { crewView } = crewApi();
@@ -232,4 +304,9 @@ export const GovernmentView = {
 import { crewView as crewViewFn } from '../../domain/characters/crew.js';
 function crewApi() {
   return { crewView: crewViewFn };
+}
+
+import { policiesView } from '../../domain/politics/policy.js';
+function policyApi() {
+  return { policiesView };
 }

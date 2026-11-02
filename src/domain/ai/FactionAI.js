@@ -349,6 +349,8 @@ function aiExpand(world, fid, st) {
     });
     if (r.ok) {
       recordOrder(st, 'expand', `outpost:${best.p.id}`);
+      // 扩张成功后长冷却：给治理消化时间（遏制无脑圈地）
+      setCooldown(st, 'expand', world, 480);
       return true;
     }
     setCooldown(st, 'expand', world, 120);
@@ -481,7 +483,7 @@ function findWeakNeighbor(world, fid) {
     const ratio = myPower / Math.max(1, theirPower);
     const u = ratio * 10 + (rel.borderTension || 0) * 0.2 - (rel.opinion || 0) * 0.1 +
       (otherId === world.playerFactionId ? -6 : 0); // 玩家初始保护倾向
-    if (u > bestU && ratio > 1.5 && (rel.borderTension || 0) > 25) {
+    if (u > bestU && ratio > 1.3 && (rel.borderTension || 0) > 20) {
       bestU = u;
       best = otherId;
     }
