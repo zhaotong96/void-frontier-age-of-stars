@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark" />
+  <title>无垠边疆：星海纪元 — VOID FRONTIER: AGE OF STARS</title>
+  <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <noscript>
+    <div class="boot-error">本游戏需要启用 JavaScript。所有逻辑均在浏览器本地运行，无任何远程依赖。</div>
+  </noscript>
+
+  <div id="app" aria-live="off">
+    <!-- 启动画面（App 初始化后替换） -->
+    <div id="boot" class="boot-screen">
+      <div class="boot-title">VOID FRONTIER</div>
+      <div class="boot-sub">星海纪元 · 初始化指挥系统…</div>
+      <div class="boot-status" id="boot-status">加载核心模块</div>
+    </div>
+  </div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>

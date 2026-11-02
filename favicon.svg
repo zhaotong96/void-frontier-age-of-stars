@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- VOID FRONTIER 原创图标：深空底板 + 双星轨弧线 + 四角导航星（几何原创，非任何现有 logo） -->
+  <defs>
+    <linearGradient id="vf-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1726"/>
+      <stop offset="1" stop-color="#070b12"/>
+    </linearGradient>
+    <linearGradient id="vf-star" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#eafffb"/>
+      <stop offset="1" stop-color="#4fd8c8"/>
+    </linearGradient>
+  </defs>
+  <!-- 深蓝黑底板与描边 -->
+  <rect x="1" y="1" width="62" height="62" rx="14" fill="url(#vf-bg)"/>
+  <rect x="1" y="1" width="62" height="62" rx="14" fill="none" stroke="#1c2b42" stroke-width="1"/>
+  <!-- 外星轨弧线（越过顶部）与航行节点 -->
+  <path d="M 11.3 24.5 A 22 22 0 0 1 52.7 24.5" fill="none" stroke="#4fd8c8" stroke-width="2.4" stroke-linecap="round" opacity="0.9"/>
+  <!-- 内星轨弧线（绕过底部） -->
+  <path d="M 46.1 37.1 A 15 15 0 0 1 20.5 41.6" fill="none" stroke="#4fd8c8" stroke-width="1.6" stroke-linecap="round" opacity="0.5"/>
+  <!-- 航行节点：位于外弧端点，示意巡航中的舰船 -->
+  <circle cx="52.7" cy="24.5" r="2.4" fill="#aef2e8"/>
+  <!-- 四角导航星光晕与星体 -->
+  <circle cx="32" cy="32" r="7" fill="#4fd8c8" opacity="0.15"/>
+  <path d="M32 19 L36 28 L45 32 L36 36 L32 45 L28 36 L19 32 L28 28 Z" fill="url(#vf-star)"/>
+</svg>

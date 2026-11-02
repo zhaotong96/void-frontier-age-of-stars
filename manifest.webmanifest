@@ -1,0 +1,17 @@
+{
+  "name": "VOID FRONTIER: AGE OF STARS",
+  "short_name": "VOID FRONTIER",
+  "description": "单机 4X 星际大战略：统御银河边域的舰队、殖民与外交。",
+  "display": "standalone",
+  "start_url": "./",
+  "scope": "./",
+  "theme_color": "#070b12",
+  "background_color": "#070b12",
+  "icons": [
+    {
+      "src": "./favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
