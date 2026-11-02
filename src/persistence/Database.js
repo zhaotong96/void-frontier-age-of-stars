@@ -49,7 +49,8 @@ function tx(storeName, mode, fn) {
       const t = database.transaction(storeName, mode);
       const store = t.objectStore(storeName);
       const result = fn(store);
-      t.oncomplete = () => resolve(result && result.__value !== undefined ? result.__value : result);
+      // 统一返回 reqValue 的 holder（调用方用 holder.__value 取值，防双重解包）
+      t.oncomplete = () => resolve(result);
       t.onerror = () => reject(t.error);
       t.onabort = () => reject(t.error || new Error('事务中止'));
     });
@@ -67,6 +68,10 @@ function reqValue(request) {
 export const Database = {
   isMemoryMode() {
     return memoryMode;
+  },
+  /** 诊断探针（测试与诊断面板用） */
+  __diag() {
+    return { memoryMode, dbOpen: !!dbPromise };
   },
 
   /** 写入存档槽（整条记录覆盖） */

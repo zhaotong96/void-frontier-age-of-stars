@@ -1,0 +1,47 @@
+# VOID FRONTIER — GitHub Pages 发布（纯静态直传）
+#
+# 启用方法（仅首次需要）：仓库 Settings → Pages → Build and deployment →
+# Source 选择 "GitHub Actions"。此后每次推送 main 自动重新发布；
+# workflow_dispatch 允许在修改 Pages 设置后手动重跑一次。
+#
+# 为什么不需要任何构建步骤与 base-path 配置：
+#   - 仓库即发布目录（index.html / styles.css / src/ 全部为 ES 模块相对路径引用）；
+#   - 路由为 hash 路由（#/galaxy），服务器端永远只返回 index.html；
+#   - 因此部署在 https://<user>.github.io/<repo>/ 二级路径下天然可用，
+#     404.html 提供 hash 路由回退。
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同一时间只保留一次 Pages 部署；进行中的部署不被打断
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 纯静态站点：仓库工作树直接作为 Pages 制品上传，无构建、无依赖安装
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

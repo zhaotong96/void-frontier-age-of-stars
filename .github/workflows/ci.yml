@@ -1,0 +1,33 @@
+# VOID FRONTIER — CI：自动化套件 + 静态审计
+#
+# 说明：
+#   - 仓库零运行时依赖（无 node_modules、无 lockfile）：不需要 npm install；
+#   - package.json engines 要求 Node ≥ 18，这里锁定 22（当前维护线）；
+#   - npm test = node tests/tools/run-suites.mjs（21 套件 × 2 轮，含 E2E-01
+#     端到端推进，整轮约 2–3 分钟）。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # 全部自动化测试套件（每套件跑 2 轮验证确定性，任何 FAIL 置非零退出码）
+      - name: Run test suites
+        run: npm test
+
+      # 静态审计：外部依赖 / 绝对路径 / 占位代码扫描
+      - name: Static audit
+        run: npm run lint:static

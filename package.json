@@ -5,11 +5,10 @@
   "description": "VOID FRONTIER: AGE OF STARS — 单机 4X 星际大战略纯静态 Web 游戏",
   "type": "module",
   "scripts": {
-    "test": "node --test tests/node/",
-    "test:suites": "node tests/tools/run-suites.mjs",
+    "test": "node tests/tools/run-suites.mjs",
     "lint:static": "node tests/tools/static-audit.mjs",
     "golden:update": "node tests/tools/update-golden.mjs",
-    "serve": "python -m http.server 8090",
+    "serve": "node tests/tools/dev-server.mjs",
     "sim": "node tests/tools/sim-cli.mjs"
   },
   "engines": {
