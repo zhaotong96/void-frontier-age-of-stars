@@ -6,8 +6,16 @@
   <meta name="color-scheme" content="dark" />
   <title>无垠边疆：星海纪元 — VOID FRONTIER: AGE OF STARS</title>
   <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
-  <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="stylesheet" href="./styles.css" />
+  <script>
+    // 仅在 HTTP/HTTPS 环境下注入 PWA Manifest，杜绝 file:// 协议下的 CORS 报错
+    if (location.protocol === 'http:' || location.protocol === 'https:') {
+      const link = document.createElement('link');
+      link.rel = 'manifest';
+      link.href = './manifest.webmanifest';
+      document.head.appendChild(link);
+    }
+  </script>
 </head>
 <body>
   <noscript>
@@ -23,6 +31,31 @@
     </div>
   </div>
 
-  <script type="module" src="./src/main.js"></script>
+  <script>
+    // 双模自适应加载器：file:// 直接加载零依赖单文件 Bundle（消除 ES Modules
+    // 与动态 import() 的 CORS 拦截）；HTTP/Pages 优先 ESM 并在加载失败时无缝
+    // 回退到 Bundle（满足 GitHub Pages 二级路径与弱网环境）。
+    (function bootLoader() {
+      function loadBundle() {
+        const s = document.createElement('script');
+        s.src = './dist/void-frontier.bundle.js';
+        s.defer = true;
+        s.onerror = function () {
+          const st = document.getElementById('boot-status');
+          if (st) st.textContent = '静态包加载失败，请确认 ./dist/void-frontier.bundle.js 存在。';
+        };
+        document.body.appendChild(s);
+      }
+      if (location.protocol === 'file:' || location.search.includes('bundle=1')) {
+        loadBundle();
+        return;
+      }
+      const m = document.createElement('script');
+      m.type = 'module';
+      m.src = './src/main.js';
+      m.onerror = loadBundle;
+      document.body.appendChild(m);
+    })();
+  </script>
 </body>
 </html>

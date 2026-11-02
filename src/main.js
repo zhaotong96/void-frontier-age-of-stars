@@ -36,3 +36,11 @@ if (document.readyState === 'loading') {
 } else {
   boot();
 }
+
+// Service Worker：仅在 https:（GitHub Pages）注册；?nosw=1 诊断参数跳过；
+// 相对路径注册适配二级路径；注册失败静默处理（file:// 与受限环境照常运行）
+if (location.protocol === 'https:' && !location.search.includes('nosw=1')) {
+  try {
+    navigator.serviceWorker.register('./sw.js', { scope: './' }).catch(() => { /* 静默 */ });
+  } catch { /* 静默 */ }
+}

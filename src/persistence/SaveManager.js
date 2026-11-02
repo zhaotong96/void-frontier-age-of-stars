@@ -16,6 +16,19 @@ import { dateStr } from '../core/clock.js';
 export const SLOTS = ['manual-1', 'manual-2', 'manual-3', 'auto', 'quick'];
 
 export class SaveManager {
+  /**
+   * 开局检查点（App.startNewGame 调用；等价于 auto 槽保存）。
+   * 持久化失败时静默降级（三级降级在 Database 内完成），绝不外抛。
+   */
+  async captureCheckpoint(world, name = '') {
+    try {
+      return await this.save(world, 'auto', name || '开局检查点');
+    } catch (err) {
+      console.warn('[VOID FRONTIER] 检查点保存降级为会话内存:', err && err.message);
+      return { ok: false, degraded: true, reason: String(err && err.message || err) };
+    }
+  }
+
   /** 保存到指定槽位 */
   async save(world, slotId, name = '') {
     const rec = encodeSave(world, {

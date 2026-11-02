@@ -8,7 +8,7 @@
  */
 
 import { RNG } from '../../core/rng.js';
-import { registerScheduled } from '../../core/scheduler.js';
+import { registerScheduled, schedule } from '../../core/scheduler.js';
 import { emit, chronicle } from '../../core/eventBus.js';
 import { credit, debit, balance } from '../economy/ledger.js';
 import { getRelation } from '../diplomacy/war.js';
@@ -119,9 +119,7 @@ export function applyEffects(world, effects, ctx = {}) {
       }
       case 'event': {
         // 延迟后续事件（调度器承载，可序列化）
-        import('../../core/scheduler.js').then(({ schedule }) => {
-          schedule(world, world.tick + (fx.delayTicks || 0), 'narrativeEvent', { eventId: fx.eventId });
-        });
+        schedule(world, world.tick + (fx.delayTicks || 0), 'narrativeEvent', { eventId: fx.eventId });
         break;
       }
       case 'chronicle':

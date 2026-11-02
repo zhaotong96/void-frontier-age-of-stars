@@ -9,6 +9,9 @@
 import { initRouter, navigate, onRouteChange, parseHash } from './Router.js';
 import { activateView, registerView } from './ViewRegistry.js';
 import { executeCommand, hasCommand } from '../core/commandBus.js';
+import { createStarterCampaign } from '../devtools/scenarioFactory.js';
+import './commands.js'; // 命令注册（核心必需，静态导入消除启动瀑布与 file:// 阻塞）
+import { advanceOneTick } from '../simulation/WorldSimulation.js';
 import { SPEEDS, dateStr } from '../core/clock.js';
 import { buildSnapshot } from '../simulation/SnapshotBuilder.js';
 import { SaveManager } from '../persistence/SaveManager.js';
@@ -65,13 +68,17 @@ export class App {
     window.__bootSteps = window.__bootSteps || [];
     const mark = (s) => window.__bootSteps.push(s);
     try {
-    // 多标签页会话仲裁：后来者只读（任务书 8.4）
+    // 多标签页会话仲裁：后来者只读（任务书 8.4）；受限环境静默降级
+    try {
     this.tabGuard.acquire((state) => {
       if (state === 'observer') {
         this.setSpeed(0);
         toast('已在另一标签页进行本战役，当前页面为只读镜像', { kind: 'warn' });
       }
     });
+    } catch (err) {
+      console.warn('[VOID FRONTIER] BroadcastChannel 受限，跳过多标签页仲裁:', err);
+    }
     // 恢复本地轻量设置（语言/音量，不进世界状态）
     const local = loadLocalSettings();
     if (local.language) setLanguage(local.language);
@@ -129,19 +136,28 @@ export class App {
 
   /** 开启新战役（由 MenuView 调用） */
   async startNewGame(config) {
-    const [factory] = await Promise.all([
-      import('../devtools/scenarioFactory.js'),
-      import('./commands.js'), // 命令注册（含内容依赖，动态加载）
-    ]);
-    const world = factory.createStarterCampaign(config);
+    const world = createStarterCampaign(config);
     this.world = world;
     this.selection = null;
     this.pendingEvent = null;
     this.accumulator = 0;
     this.speedIdx = 1;
-    await this.saveManager.save(world, 'auto', `开局检查点 · ${world.campaignName || ''}`);
+
+    // 先进入游戏并完成视图路由切换，确保存储异常绝不阻断首屏渲染
     this.enterGame();
     navigate('galaxy');
+
+    // 非阻塞式开局检查点保存，兼容 captureCheckpoint 与 save 双接口；
+    // IndexedDB/localStorage 受限时三级降级为会话内存，绝不外抛
+    try {
+      if (typeof this.saveManager.captureCheckpoint === 'function') {
+        await this.saveManager.captureCheckpoint(world, `开局检查点 · ${world.campaignName || ''}`);
+      } else {
+        await this.saveManager.save(world, 'auto', `开局检查点 · ${world.campaignName || ''}`);
+      }
+    } catch (err) {
+      console.warn('[VOID FRONTIER] 本地持久化受限，已降级为会话内存模式:', err);
+    }
   }
 
   /** 读取存档继续 */
@@ -246,14 +262,17 @@ export class App {
   }
 
   _advanceTick() {
-    // 模拟推进（WorldSimulation 内部含 TickPipeline 与战斗步进）；模块懒加载缓存
-    worldSim().then((mod) => {
-      mod.advanceOneTick(this.world);
+    // 模拟推进（WorldSimulation 内部含 TickPipeline 与战斗步进）。
+    // 纯同步确定性调用：同一帧内 while(accumulator>=1) 连跑多步不产生异步竞态。
+    try {
+      advanceOneTick(this.world);
       this._checkPendingEvent();
-    }).catch((e) => {
-      (window.__simErrs ||= []).push(String(e && e.message || e) + ' @ phase=' + (e && e.phaseName || '?') + ' @ ' + String(e && e.stack || '').split(String.fromCharCode(10)).slice(1, 3).join(' <- '));
+    } catch (e) {
+      (window.__simErrs ||= []).push(
+        String((e && e.message) || e) + ' @ phase=' + ((e && e.phaseName) || '?')
+      );
       this.reportFatal(e);
-    });
+    }
   }
 
   _checkPendingEvent() {
@@ -348,9 +367,3 @@ export class App {
   }
 }
 
-/** 延迟加载模拟内核（避免启动期阻塞首屏） */
-let _sim = null;
-function worldSim() {
-  if (!_sim) _sim = import('../simulation/WorldSimulation.js');
-  return _sim;
-}
