@@ -28,7 +28,7 @@ npm run serve
 
 ## 诊断面板
 
-左侧导航「系统诊断」（路由 `#/diagnostics`）在浏览器内直接运行全部 21 个
+左侧导航「系统诊断」（路由 `#/diagnostics`）在浏览器内直接运行全部 22 个
 自动化测试套件，与 Node 命令行共用同一份 `tests/suites/index.js`：按分组
 展示编号、说明、耗时与失败详情，并可导出 JSON 报告。诊断不依赖、也不污染
 玩家当前存档。
@@ -49,7 +49,7 @@ Web Audio（程序化合成）· IndexedDB 存档 · Service Worker 离线缓存
 ## 开发
 
 ```bash
-npm test              # 全部自动化测试套件（node tests/tools/run-suites.mjs；21 套件 × 2 轮）
+npm test              # 全部自动化测试套件（node tests/tools/run-suites.mjs；22 套件 × 2 轮）
 npm run lint:static   # 静态审计：外部依赖/绝对路径/占位代码扫描
 npm run sim           # 离线批量模拟 CLI（--seed/--seeds/--years/--json，平衡调参）
 npm run golden:update # 固定种子金快照基线更新（规则有意变更后执行）

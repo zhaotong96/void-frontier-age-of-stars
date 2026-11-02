@@ -78,6 +78,7 @@ export const GalaxyView = {
     // —— 主体：画布 + 图层面板 ——
     const body = el('div', { class: 'vf-view-body' });
     this._cm = new CanvasManager().attach(body);
+    this._bodyEl = body;
     this._renderer = new GalaxyRenderer();
     this._renderer.init(this._cm);
     if (this._snap) this._renderer.setSnapshot(this._snap);
@@ -109,7 +110,15 @@ export const GalaxyView = {
       this._raf = requestAnimationFrame(loop);
       this._drawFrame();
     };
+    this._mountTutorial();
     this._raf = requestAnimationFrame(loop);
+  },
+
+  /** 新手引导（可关闭，进度存 localStorage） */
+  _mountTutorial() {
+    const { Tutorial } = tutorialApi();
+    this._tutorial = new Tutorial(this.app);
+    this._tutorial.mount(this._bodyEl);
   },
 
   /** 快照推送：更新渲染引用 + 选中态 + 时间提示 + 快捷条 */
@@ -127,6 +136,10 @@ export const GalaxyView = {
 
   /** 卸载：停循环、移除全部监听、释放画布与引用 */
   unmount() {
+    if (this._tutorial) {
+      this._tutorial.dispose();
+      this._tutorial = null;
+    }
     this._mounted = false;
     if (this._raf) {
       cancelAnimationFrame(this._raf);
@@ -347,3 +360,8 @@ export const GalaxyView = {
     return null;
   },
 };
+
+import { Tutorial } from '../shell/Tutorial.js';
+function tutorialApi() {
+  return { Tutorial };
+}

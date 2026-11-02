@@ -3,8 +3,9 @@
 > 状态定义：**PASS（2 轮）** = 已实现、已接入套件运行器且两轮通过（运行器每套件
 > 跑 2 轮验证稳定与无状态泄漏）；**部分** = 该行断言已被其他套件并入覆盖（未独立
 > 立套件）；**PENDING** = 尚未建成独立套件，已给出计划测试文件名。矩阵逐行对应
-> 任务书 10.2 的 57 条断言；另有 **4 个项目自增行**（CORE-02a/02b 数学边界与
-> 战略时钟、REG-01 金快照回归、E2E-01 端到端战役），任务书允许增加不允许删除。
+> 任务书 10.2 的 57 条断言；另有 **5 个项目自增行**（CORE-02a/02b 数学边界与
+> 战略时钟、REG-01 金快照回归、E2E-01 端到端战役、CREW-01 船员人物系统），
+> 任务书允许增加不允许删除。
 
 ## 1. 运行方法
 
@@ -19,8 +20,13 @@ node tests/tools/run-suites.mjs     # 或 npm test（scripts 已切换，见 §1
 `ID PASS/FAIL 耗时 名称`，任何 FAIL 置 `process.exitCode = 1`。
 要求 Node ≥ 18（`package.json engines`）。
 
-**最近一次全量基线（2026-11-03 实跑）：PASS 42 / FAIL 0（2 轮 × 21 套件），
-全程约 3 分钟（E2E-01 约 70 s/轮为主要耗时）。**
+**2026-11-03 实跑记录**：
+1. 人物系统并入前（`0001cda`，21 套件）：**PASS 42 / FAIL 0**（两次实跑确认），
+   全程约 3 分钟。
+2. 人物系统并入后（`a94eae6`，22 套件）：**PASS 42 / FAIL 2**——REG-01 两轮
+   基线漂移（当前 `7ecd48dc` ≠ 基线 `d2ec8589`，系人物特性改变确定性世界演化；
+   新基线已按套件指引重新生成，待提交后恢复全绿）。全程约 6 分钟
+   （CREW-01 约 54 s/轮、E2E-01 约 70 s/轮为主要耗时）。
 
 ### 1.2 浏览器系统诊断面板（任务书 10.4）
 
@@ -34,14 +40,16 @@ node tests/tools/run-suites.mjs     # 或 npm test（scripts 已切换，见 §1
 
 | 命令 | 作用 |
 | :--- | :--- |
-| `npm test` | 全部自动化测试套件 = `node tests/tools/run-suites.mjs`（21 套件 × 2 轮） |
+| `npm test` | 全部自动化测试套件 = `node tests/tools/run-suites.mjs`（22 套件 × 2 轮） |
 | `npm run lint:static` | 静态审计：外部依赖/绝对路径/占位代码扫描（`tests/tools/static-audit.mjs`，当前零违规） |
 | `npm run sim` | 离线批量模拟 CLI（`tests/tools/sim-cli.mjs`，`--seed/--seeds/--years/--json`），AI 经济平衡调参 |
 | `npm run golden:update` | 固定种子金快照基线更新（`tests/tools/update-golden.mjs` → `tests/regression/golden.json`）；规则有意变更后执行并在 CHANGELOG 记录 |
 | `npm run serve` | Node 开发服务器（`tests/tools/dev-server.mjs`，no-store + hash 路由回退） |
 
-> 基线现状：`tests/regression/golden.json`（seed 24601 × 4320 tick，
-> hash `d2ec8589`）已入库；REG-01 每次运行对比当前哈希与基线。
+> 基线现状：`tests/regression/golden.json`（seed 24601 × 4320 tick）已入库；
+> REG-01 每次运行对比当前哈希与基线。基线随规则性特性滚动：
+> `d2ec8589`（人物系统并入前，`0001cda`）→ `7ecd48dc`（人物系统并入后，
+> 工作树待提交）。
 
 ## 2. 断言矩阵逐行映射
 
@@ -163,17 +171,18 @@ node tests/tools/run-suites.mjs     # 或 npm test（scripts 已切换，见 §1
 | DEPLOY-01 二级路径 | 计划 `tests/suites/deploy-basepath.suite.js`（静态扫描）+ 手工二级路径模拟 | PENDING | `/repo/` base path 下无 404（lint:static 绝对路径扫描已可用；发布走 `.github/workflows/deploy.yml` 相对路径 + hash 路由） |
 | DEPLOY-02 外部请求审计 | 计划 `tests/suites/deploy-audit.suite.js` + 运行时网络面板核对 | PENDING | 无第三方运行时请求/远程 API（lint:static 已静态保证，L5/L6 人工环节待做） |
 
-### 2.10 项目自增行 — 回归与端到端（任务书允许增加）
+### 2.10 项目自增行 — 回归、端到端与人物系统（任务书允许增加）
 
 | 编号 | 测试文件 | 状态 | 说明 |
 | :--- | :--- | :--- | :--- |
-| REG-01 金快照回归（自增 L4） | `tests/suites/regression-golden.suite.js` | PASS（2 轮） | 固定 seed 24601 推进 4320 tick（1 游戏年，含 AI 命令生效）→ worldHash 对比基线 `tests/regression/golden.json`（hash `d2ec8589`）；配置漂移/哈希漂移均 FAIL 并给出排查指引 |
+| REG-01 金快照回归（自增 L4） | `tests/suites/regression-golden.suite.js` | FAIL → 待基线提交（此前 `0001cda` 基线下 PASS 2 轮） | 固定 seed 24601 推进 4320 tick（1 游戏年，含 AI 命令生效）→ worldHash 对比基线 `tests/regression/golden.json`；人物系统（`a94eae6`）改变确定性演化 → 哈希漂移 `7ecd48dc` ≠ `d2ec8589`，新基线已生成待提交；配置漂移/哈希漂移均 FAIL 并给出排查指引 |
 | E2E-01 端到端战役闭环（自增） | `tests/suites/e2e-campaign.suite.js` | PASS（2 轮） | SCENARIO-STARTER-001 十四步：探索→殖民→工业→造舰→舰队→战斗→结算→外交/科研→存读档→长期推进；全程命令总线驱动（与 UI 同规则），逐步断言世界状态变化 |
+| CREW-01 船员人物系统（自增，任务书 5.8） | `tests/suites/crew.suite.js` | PASS（2 轮） | 初始人物 ≥ 3；gainXp 升级；AssignCharacter 命令经总线回写 commanderId；fleetCommanderBonus 指挥官加成；onShipDestroyed 命运结算幂等（dead/wounded/missing）；4320 tick 长程推进 invariants 干净；crewView 非空 |
 
 ## 3. 套件清单现状
 
-`tests/suites/index.js` 当前注册 **21 个套件**（2026-11-03 实跑 2 轮
-42/42 全绿）：
+`tests/suites/index.js` 当前注册 **22 个套件**（最新实跑见 §1.1：人物系统
+并入前 42/42 全绿，并入后 REG-01 基线漂移待提交恢复）：
 
 | 套件文件 | id | 组 | 状态 |
 | :--- | :--- | :--- | :--- |
@@ -188,6 +197,7 @@ node tests/tools/run-suites.mjs     # 或 npm test（scripts 已切换，见 §1
 | `save-codec.suite.js` | SAVE-01 | persistence | PASS（2 轮） |
 | `save-roundtrip.suite.js` | SAVE-02 | persistence | PASS（2 轮）（并入 SAVE-03/04 部分断言） |
 | `world-gen.suite.js` | WORLD-01 | world | PASS（2 轮） |
+| `crew.suite.js` | CREW-01 | characters | PASS（2 轮）（自增行，人物系统并入后基线滚动中） |
 | `ship-fit.suite.js` | SHIP-01 | ships | PASS（2 轮） |
 | `ship-build.suite.js` | SHIP-02 | ships | PASS（2 轮） |
 | `fleet-nav.suite.js` | FLEET-01 | fleets | PASS（2 轮） |
@@ -196,14 +206,16 @@ node tests/tools/run-suites.mjs     # 或 npm test（scripts 已切换，见 §1
 | `diplomacy-treaty.suite.js` | DIP-01 | diplomacy | PASS（2 轮）（并入 DIP-02 部分断言） |
 | `ai-stability.suite.js` | AI-02 | ai | PASS（2 轮） |
 | `ai-stability.suite.js`（`suiteWar` 双导出） | AI-03 | ai | PASS（2 轮） |
-| `regression-golden.suite.js` | REG-01 | regression | PASS（2 轮）（自增行） |
+| `regression-golden.suite.js` | REG-01 | regression | FAIL → 待新基线提交（此前 PASS 2 轮）（自增行） |
 | `e2e-campaign.suite.js` | E2E-01 | integration | PASS（2 轮）（自增行） |
 
 即任务书矩阵 57 行中 **17 行 PASS**（CORE-01/02/05/06、WORLD-01、ECON-01/04、
 SAVE-01/02、SHIP-01/02、FLEET-01、COMBAT-01/02、DIP-01、AI-02/03），
 **3 行部分覆盖**（DIP-02、SAVE-03/04，并入上述套件），其余 **37 行 PENDING**
-（套件文件名均已规划）；另有 **4 行自增套件**（CORE-02a/02b、REG-01、E2E-01）
-——合计 **21 个套件、42 组断言全绿**。PENDING 行全部给出计划文件名，命名沿用
+（套件文件名均已规划）；另有 **5 行自增套件**（CORE-02a/02b、REG-01、E2E-01、
+CREW-01）——合计 **22 个套件、44 组断言**（2026-11-03 最新实跑 42/44，
+REG-01 因人物系统并入待基线提交，其余 42 组两轮全绿）。PENDING 行全部给出
+计划文件名，命名沿用
 `tests/suites/<域>-<主题>.suite.js` 约定（与 index.js 的 import +
 collectSuites 注册方式一致）。建议优先补齐顺序见
 `docs/AUTONOMOUS_RUNBOOK.md` §5 下一步队列。

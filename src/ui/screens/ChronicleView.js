@@ -111,6 +111,23 @@ export const ChronicleView = {
       max: 200,
     }));
     body.appendChild(entriesP);
+
+    // 成就（5.12：本地解锁记录）
+    const { achievementsView } = ach();
+    const achievements = achievementsView(this.app.world);
+    const doneCount = achievements.filter((a) => a.unlockedAtTick).length;
+    const achP = el('div', { class: 'vf-panel' });
+    achP.appendChild(el('div', { class: 'vf-panel-head', text: `成就（${doneCount}/${achievements.length}）` }));
+    const achBody = el('div', { class: 'vf-panel-body' });
+    for (const a of achievements) {
+      const row = el('div', { class: 'vf-row', style: { padding: '2px 0' } });
+      row.appendChild(el('span', { class: a.unlockedAtTick ? 'vf-ok' : 'vf-faint', text: a.unlockedAtTick ? '★' : '☆' }));
+      row.appendChild(el('span', { class: 'vf-grow vf-small', text: a.name }));
+      row.appendChild(el('span', { class: 'vf-faint vf-small', text: a.unlockedAtTick ? dateStr(a.unlockedAtTick) : a.desc }));
+      achBody.appendChild(row);
+    }
+    achP.appendChild(achBody);
+    body.appendChild(achP);
   },
 
   /** 导出 JSON：统计 + 全部纪年条目 → Blob 下载（文件名由战役日期确定性生成） */
@@ -136,3 +153,8 @@ export const ChronicleView = {
     setTimeout(() => URL.revokeObjectURL(url), 0);
   },
 };
+
+import { achievementsView } from '../../domain/victory/achievements.js';
+function ach() {
+  return { achievementsView };
+}

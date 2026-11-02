@@ -5,6 +5,7 @@
 
 import { registerYearly } from './TickPipeline.js';
 import { registerVictory } from '../domain/victory/victory.js';
+import '../domain/victory/achievements.js';
 
 registerVictory();
 

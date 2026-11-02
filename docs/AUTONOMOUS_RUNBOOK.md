@@ -1,25 +1,26 @@
 # AUTONOMOUS_RUNBOOK — 长程研发状态记录
 
 > 面向下一名（或下一个会话的）执行工程师：从这里恢复上下文。任务书 12.4 要求本文
-> 持续维护。本文最后核对时间：2026-11-03（基于 git log 至 `0001cda` 与 21 套件
-> × 2 轮实跑 42/42 全绿的当日实测）。阶段定义与验收口径见任务书 9.1 / 9.2；
+> 持续维护。本文最后核对时间：2026-11-03（基于 git log 至 `a94eae6` 与 22 套件
+> × 2 轮实跑的当日实测）。阶段定义与验收口径见任务书 9.1 / 9.2；
 > 测试编号见 `docs/TEST_MATRIX.md`。
 
 ## 1. 当前状态速览
 
 - **当前分支**：`main`（单主线）。
-- **最新提交**：`0001cda test(regression,e2e): 金快照回归 + 端到端战役闭环验收（42/42 全绿）`
-  （30 files, +3871/−2106），落地 REG-01/E2E-01 等最后一批套件并修复
-  `update-golden.mjs` 的 `loadGolden` 读取缺陷。
-- **测试基线（实跑）**：`node tests/tools/run-suites.mjs` → **PASS 42 / FAIL 0**
-  （21 套件 × 2 轮，2026-11-03 两次实跑确认；含 E2E-01 端到端约 70 s/轮，
-  全程约 3 分钟）。`node tests/tools/static-audit.mjs` → 通过、零违规。
-- **工作树**：发布工程会话进行中——新增 `.github/workflows/deploy.yml`、
-  `.github/workflows/ci.yml`、`CHANGELOG.md`，修订 `README.md`、本文与
-  `docs/TEST_MATRIX.md`；`package.json` scripts 切换（`test` →
-  `run-suites.mjs`、`serve` → `dev-server.mjs`）**待提交**。另有并行会话
-  对 `src/persistence/Database.js` 的未提交修改。**以下一轮
-  `git status` 实时输出为准。**
+- **最新提交**：`a94eae6 feat(characters): 船员与人物系统`（10 files,
+  +727/−358；顺带收编发布工程文件与本文/TEST_MATRIX 上一版修订）。
+  前序：`f92f4d4`（Database 事务双重解包修复 + package.json scripts 切换 +
+  发布工程文件）、`0001cda`（REG-01/E2E-01 等套件 + update-golden 读取修复）。
+- **测试基线（实跑）**：2026-11-03 两次全量实跑——
+  1. 人物系统并入前（`0001cda`，21 套件）：**42/42 全绿**（两次确认，约 3 分钟）。
+  2. 人物系统并入后（`a94eae6`，22 套件）：**42/44**——REG-01 两轮基线漂移
+     （人物特性改变确定性演化，新基线 `7ecd48dc` 已按套件指引重新生成、
+     待提交）。CREW-01 两轮 PASS；静态审计零违规。
+- **工作树**：并行会话推进阶段 11 成就系统——`src/domain/victory/achievements.js`
+  （新）、`SeasonalSystems.js`/`ChronicleView.js`/`GalaxyView.js` 修改、
+  `src/ui/shell/Tutorial.js`（新）、`tests/regression/golden.json`（新基线
+  待提交）。**以下一轮 `git status` 实时输出为准。**
 - **最早未收尾阶段**：阶段 03–11 的**领域层与 UI 均已实现**（`implemented`），
   但按 9.2 四步闭环（spec → 领域逻辑 → 界面集成 → 验证收敛）各域专属套件
   尚未补齐（EXP/COL/TECH/SHIP-03/FLEET-02/03/COMBAT-03..06/DIP-02/03/
@@ -39,10 +40,10 @@
 | 07 | ship-fleet | **implemented（SHIP-01/02、FLEET-01 PASS）** | `db88f6c` + `943287e` | 12 船体/37 模块、validateFit、蓝图/船坞建造、planRoute 预检、燃料/受困/加油；DesignerView/FleetView。SHIP-03、FLEET-02/03 PENDING |
 | 08 | space-combat | **implemented（COMBAT-01/02 PASS）** | `943287e` | BattleSimulation（dt=1/30s）+ engagement + tactics（命中/分层伤害/导弹/近防/撤退/结算）；CombatView/BattleRenderer。COMBAT-03..06 PENDING |
 | 09 | diplomacy-ai-war | **implemented（DIP-01、AI-02/03 PASS；和谈/占领缺失）** | `943287e` | FactionAI（6 人格/7 步决策/防空转/工业阶梯）、五维关系、5 类条约、宣战、战争疲劳；DiplomacyView/GovernmentView。DIP-02/03、AI-01 PENDING |
-| 10 | characters-ground | **implemented（地面行动已接；characters 生产者缺失）** | `f5588cf` | `domain/ground/GroundMission.js` + GroundView 全线接通；但 `characters` 集合仍无生产者（GroundMission 引用 `world.entities.characters`）。GROUND-01..03 PENDING |
-| 11 | events-crisis | **implemented（套件未建）** | `f5588cf` | `narrative.js`（三幕弧/弹卡抉择）、`crisis.js`（危机流程）、`victory/victory.js`（年度胜利判定与软失败）全部接通。EVENT-01/02、CRISIS-01 PENDING |
+| 10 | characters-ground | **implemented（地面行动 + 船员/人物已接）** | `f5588cf` + `a94eae6` | GroundMission.js + GroundView（`f5588cf`）；`domain/characters/crew.js`（经验/升级/指派/命运结算）+ GovernmentView 人物面板 + CREW-01 套件 PASS（`a94eae6`）。GROUND-01..03 套件 PENDING |
+| 11 | events-crisis | **implemented（套件未建）** | `f5588cf`（成就系统推进中） | `narrative.js`（三幕弧/弹卡抉择）、`crisis.js`（危机流程）、`victory/victory.js`（年度胜利判定与软失败）全部接通；工作树正推进 `victory/achievements.js`（成就）。EVENT-01/02、CRISIS-01 PENDING |
 | 12 | complete-ui | **部分就绪（深度走查未做）** | `943287e` + `f5588cf` | 16 个视图 + shell 四件套 + 诊断面板（`#/diagnostics`）；信息检视器全覆盖、快捷键、百科未收敛 |
-| 13 | persistence-polish | **implemented（核心；SAVE-01/02 PASS，TabGuard 多标签）** | `df247af`–`0001cda` | IndexedDB/校验/槽位/导入导出/自动+快速存档已实现；多标签页仲裁已实现（TabGuard）；历史版本迁移 fixture 与两段式保存仍缺（SAVE-03/04 由 SAVE-02 套件部分覆盖，见 TEST_MATRIX） |
+| 13 | persistence-polish | **implemented（核心；SAVE-01/02 PASS，TabGuard 多标签）** | `df247af`–`f92f4d4` | IndexedDB/校验/槽位/导入导出/自动+快速存档已实现；多标签页仲裁已实现（TabGuard）；Database 事务双重解包导致存档列表/读取恒空的缺陷已修（`f92f4d4`）；历史版本迁移 fixture 与两段式保存仍缺（SAVE-03/04 由 SAVE-02 套件部分覆盖，见 TEST_MATRIX） |
 | 14 | release-hardening | **in-progress（发布工程进行中）** | — | deploy/ci 工作流、CHANGELOG、README/docs 刷新已就绪（本会话）；Pages 实际首次发布需仓库账号凭据（Settings → Pages → Source: GitHub Actions） |
 
 ## 3. 已实现能力 ↔ 测试编号对照
@@ -60,11 +61,12 @@
 | 伤害分层 / 命中模型与战斗生命周期 | `src/domain/combat/` | COMBAT-01、COMBAT-02 |
 | 条约生命周期与接受效用（含到期/毁约罚分） | `src/domain/diplomacy/war.js` | DIP-01 |
 | AI 战役稳定性 / AI 战争与结算 | `src/domain/ai/FactionAI.js` | AI-02、AI-03 |
-| 固定种子金快照（自增 L4） | `tests/tools/update-golden.mjs` | REG-01 |
+| 船员人物系统 | `src/domain/characters/crew.js` | CREW-01 |
+| 固定种子金快照（自增 L4） | `tests/tools/update-golden.mjs` | REG-01（人物系统并入后基线滚动，见 §4.13） |
 | 端到端战役闭环（自增） | `tests/suites/e2e-campaign.suite.js` | E2E-01 |
 
-运行：`node tests/tools/run-suites.mjs`（21 套件 × 2 轮，42/42 全绿）；
-浏览器内 `#/diagnostics` 运行同一套件集。
+运行：`node tests/tools/run-suites.mjs`（22 套件 × 2 轮；2026-11-03 实跑
+记录见 §1）；浏览器内 `#/diagnostics` 运行同一套件集。
 
 ## 4. 已知问题清单（逐条核实，2026-11-03）
 
@@ -80,7 +82,7 @@
    （`HourlySystems.js:114`、`fleet.js:28`）均未传 `factionMods`，文明特质对
    战斗的加成未接入 `computeShipStats`。
 3. **GroundMission 未实现 — 已解决**：`f5588cf` 落地 `GroundMission.js` +
-   GroundView；但 `characters` 生产者仍缺（见 13）。
+   GroundView；`characters` 生产者已随 `a94eae6`（crew.js）补齐。
 4. **crisis / victory 未实现 — 已解决**：`f5588cf` 接通 `crisis.js`、
    `victory/victory.js`（年度判定 + routes + ended 写入）与 `narrative.js`。
 5. **存档迁移 fixture 未建 — 部分解决**：SAVE-02 套件以临时迁移注册验证机制
@@ -97,39 +99,43 @@
    数据不完整）。
 10. **package.json 部分脚本指向缺失文件 — 已解决**：四个工具文件均已落地；
     scripts 已切换（`test` → `run-suites.mjs`、`serve` → `dev-server.mjs`），
-    该 package.json 修改待提交。
+    随 `f92f4d4` 提交。
 11. **和谈/占领缺失 — 仍开放**：`war.js` 预留 `peaceOffers/occupiedSystems`
     字段，但无 ProposePeace/AcceptPeace 命令；战争终局仍只靠疲劳与战场消耗。
 12. **消费税/维护费简化 — 仍开放**：`colonyTrade.js:115` 维护仍按每活跃建筑
     1 Cr/日内联计算，建筑 `upkeep` 字段未消费。
-13. **update-golden 读取缺陷（新记录）— 已解决**：`loadGolden` 曾因未导入
-    `readFileSync` 恒返回 null，REG-01 误报"缺少基线"；`0001cda` 修复后
-    两轮通过（当前基线 hash `d2ec8589`，seed 24601 × 4320 tick）。
+13. **金快照基线滚动（新记录）— 处置中**：`loadGolden` 曾因未导入
+    `readFileSync` 恒返回 null，REG-01 误报"缺少基线"（`0001cda` 已修）；
+    随后人物系统并入（`a94eae6`）改变确定性世界演化，REG-01 报哈希漂移
+    `7ecd48dc` ≠ 旧基线 `d2ec8589`。新基线已按套件指引重新生成于工作树，
+    **待提交**后 REG-01 恢复预期全绿。
 14. **内容批次本地化键未接入（新记录）— 仍开放**：i18n 内核与 zh-CN/en-US
     词典已装配（`content/localization/`），但事件/异常/建筑/科技等内容文本
     大多仍为硬编码中文，未走查接入词典键位。
+15. **Database 事务双重解包（新记录）— 已解决**：存档列表/读取恒空
+    （`f92f4d4` 修复）。
 
 ## 5. 下一步队列（优先级排序）
 
 > 原则（任务书 12.7）：先恢复稳定与证据链，再扩展功能；P0 缺陷阻塞新功能。
 
-1. **P0 — 提交发布工程工作树**：package.json scripts 切换、
-   `.github/workflows/deploy.yml` + `ci.yml`、`CHANGELOG.md`、README 与 docs
-   修订；随后启用 Pages（Settings → Pages → Source: GitHub Actions）。
+1. **P0 — 提交金快照新基线**：工作树中 `tests/regression/golden.json`
+   （`7ecd48dc`）随人物系统特性一并提交，REG-01 恢复全绿（已知问题 13）。
+2. **P0 — 启用 GitHub Pages 发布**：deploy/ci 工作流已入库（`f92f4d4`）；
+   Settings → Pages → Source: GitHub Actions 后推送 main 即自动发布。
    **实际首次发布需要仓库账号凭据**，本地环境无法代办。
-2. **P1 — 内容批次本地化键走查**：把事件/异常/建筑/科技等硬编码文本接入
+3. **P1 — 内容批次本地化键走查**：把事件/异常/建筑/科技等硬编码文本接入
    `content/localization` 词典，清零 i18n"缺失词条"告警（已知问题 14）。
-3. **P1 — UI 视图深度走查**（阶段 12 收敛）：16 视图信息检视器全覆盖、
+4. **P1 — UI 视图深度走查**（阶段 12 收敛）：16 视图信息检视器全覆盖、
    快捷键、百科。
-4. **P1 — 补齐域专属套件**（约 36 行 PENDING，按风险排序）：COMBAT-03..06、
+5. **P1 — 补齐域专属套件**（约 36 行 PENDING，按风险排序）：COMBAT-03..06、
    TECH-01..03、COL-01..04、EXP-01..03、ECON-02/03/05、FLEET-02/03、
    SAVE-03/04 真实 fixture、GROUND/EVENT/CRISIS。
-5. **P2 — sim 批量校准**：`node tests/tools/sim-cli.mjs --seeds 5 --years 10
+6. **P2 — sim 批量校准**：`node tests/tools/sim-cli.mjs --seeds 5 --years 10
    --json` 跑 AI 经济十年基线，产出经济/战斗调参数据（已知问题 1/2）。
-6. **P2 — 战争终局**：和谈/白和/占领判定接入 `war.js` 预留字段
+7. **P2 — 战争终局**：和谈/白和/占领判定接入 `war.js` 预留字段
    （已知问题 11）。
-7. **P3 — characters 生产者**（阶段 10 收尾）；两段式自动保存与历史版本
-   迁移 fixture（SAVE-04，已知问题 5）。
+8. **P3 — 两段式自动保存与历史版本迁移 fixture**（SAVE-04，已知问题 5）。
 
 ## 6. 设计取舍记录
 
@@ -164,8 +170,9 @@
 
 1. `git log --oneline` + `git status`：确认提交与工作树（本文 §1 的快照是否过期）。
 2. 读 `docs/AUTONOMOUS_RUNBOOK.md`（本文）→ `docs/ARCHITECTURE.md` §5 已知边界。
-3. `node tests/tools/run-suites.mjs` 记录基线（21 套件 × 2 轮 = 42 组，
-   2026-11-03 实跑 42/42 全绿，约 3 分钟；E2E-01 约 70 s/轮为主要耗时）。
+3. `node tests/tools/run-suites.mjs` 记录基线（22 套件 × 2 轮 = 44 组；
+   2026-11-03 实跑记录见 §1；CREW-01 约 54 s/轮、E2E-01 约 70 s/轮，
+   全程约 6 分钟）。
 4. 确认阶段状态表（§2）中最早已 `implemented` 但未 `verified` 的阶段，
    只推进该阶段及其依赖。
 5. 编码前：改动接口/Schema → 同步 `docs/DATA_SCHEMA.md` + 注册迁移 + 补套件；
