@@ -6,8 +6,7 @@ import { createEntity } from '../entities/registry.js';
 import { emit } from '../../core/eventBus.js';
 import { createShip, computeShipStats } from '../ships/ship.js';
 import { hullDef } from '../ships/ship.js';
-import { beginTransit } from './navigation.js';
-import { shortestPath } from '../../core/spatial.js';
+import { beginPlannedTransit, planRoute, fleetFuelTotal } from './navigation.js';
 
 /** 创建舰队（ships: [{hullId, moduleIds, name?}] 或直接给 shipIds） */
 export function createFleet(world, opts) {
@@ -66,48 +65,11 @@ export function removeShipFromFleet(world, fleet, shipId) {
   }
 }
 
-/** 舰队移动命令的路由计算与出发（CommandBus 层校验后调用） */
+/** 舰队移动（planRoute 只读预检 → beginPlannedTransit；失败不触碰状态） */
 export function orderMove(world, fleet, targetSystemId) {
-  const S = world.entities.systems;
-  const from = fleet.systemId;
-  if (!from) return { ok: false, code: 'IN_TRANSIT', reason: '舰队在途中，不能接受新航路' };
-  if (!S[targetSystemId]) return { ok: false, code: 'NO_TARGET', reason: '目标星系不存在' };
-  if (from === targetSystemId) return { ok: false, code: 'SAME_SYSTEM', reason: '已在该星系' };
-
-  // 航路图（考虑封锁：敌方控制的中间节点大幅加权）
-  const nodeIds = Object.keys(S);
-  const edges = new Map();
-  for (const id of nodeIds) edges.set(id, new Set(S[id].lanes));
-  const weightFn = (a, b) => {
-    let w = Math.hypot(S[a].x - S[b].x, S[a].y - S[b].y);
-    const hostile = (sid) => {
-      const owner = S[sid].ownerFactionId;
-      return owner && owner !== fleet.factionId && isHostile(world, fleet.factionId, owner);
-    };
-    if (hostile(b)) w *= 4; // 敌区绕行偏好
-    return w;
-  };
-  const route = shortestPath(nodeIds, edges, from, targetSystemId, weightFn);
-  if (!route) return { ok: false, code: 'NO_ROUTE', reason: '没有可达航路' };
-
-  const fuel = fleetFuelTotal(world, fleet);
-  const res = beginTransit(world, fleet, route, fuel);
-  if (!res.ok) return res;
-  emit(world, 'FleetDeparted', { fleetId: fleet.id, from, to: targetSystemId, eta: res.eta }, 'fleet');
-  return { ok: true, eta: res.eta };
-}
-
-function isHostile(world, a, b) {
-  const rel = world.relations.diplomacy[a < b ? `${a}|${b}` : `${b}|${a}`];
-  return !!(rel && rel.atWarWith);
-}
-
-/** 舰队总燃料（各船货舱 hydrogen 之和） */
-export function fleetFuelTotal(world, fleet) {
-  let sum = 0;
-  for (const sid of fleet.shipIds) {
-    const ship = world.entities.ships[sid];
-    if (ship) sum += ship.cargo?.hydrogen ?? 0;
-  }
-  return sum;
+  const plan = planRoute(world, fleet, targetSystemId);
+  if (!plan.ok) return plan;
+  const res = beginPlannedTransit(world, fleet, plan);
+  emit(world, 'FleetDeparted', { fleetId: fleet.id, from: plan.route.path[0], to: targetSystemId, eta: res.eta }, 'fleet');
+  return res;
 }

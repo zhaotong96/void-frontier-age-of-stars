@@ -182,7 +182,7 @@ export function diplomacySnapshot(world) {
       threat: known ? rel.threat : null,
       borderTension: known ? rel.borderTension : null,
       treaties: known ? rel.treaties.slice() : [],
-      atWar: !!rel.atWarWith,
+      atWar: !!rel.warId,
     });
   }
   return out;

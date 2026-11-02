@@ -13,7 +13,7 @@ import { getRelation } from '../diplomacy/war.js';
 export function areHostile(world, a, b) {
   if (a === b) return false;
   const rel = getRelation(world, a, b);
-  return !!rel.atWarWith;
+  return !!rel.warId;
 }
 
 /** 每小时交战检查（HourlySystems 由 combat 阶段前置调用） */

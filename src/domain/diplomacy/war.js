@@ -73,8 +73,10 @@ export function getRelation(world, a, b) {
 
 /** 宣战（由 DeclareWar 命令调用；校验在命令层） */
 export function declareWar(world, attackerId, defenderId, wargoals) {
-  const key = relationKey(attackerId, defenderId);
   const rel = getRelation(world, attackerId, defenderId);
+  if (rel.warId && world.entities.wars[rel.warId]?.status === 'active') {
+    return null; // 已在战争中
+  }
   rel.borderTension = Math.min(100, rel.borderTension + 40);
   rel.opinion = Math.max(-100, rel.opinion - 30);
 
@@ -83,13 +85,16 @@ export function declareWar(world, attackerId, defenderId, wargoals) {
     const t = world.entities.treaties[tid];
     if (t && t.status === 'active') {
       t.status = 'breached';
+      onTreatyEnd(world, t, 'breached');
       emit(world, 'TreatyBreached', { treatyId: tid, reason: 'war' }, 'diplomacy');
     }
   }
   rel.treaties = [];
 
   const war = {
-    id: null, // 由调用方分配
+    id: `war_${++world.seq}`,
+    type: 'war',
+    createdAtTick: world.tick,
     attackers: [attackerId],
     defenders: [defenderId],
     startTick: world.tick,
@@ -100,6 +105,55 @@ export function declareWar(world, attackerId, defenderId, wargoals) {
     status: 'active',
     peaceOffers: [],
   };
-  rel.atWarWith = rel.parties.find((p) => p !== attackerId);
+  world.entities.wars[war.id] = war;
+  rel.warId = war.id;
+  emit(world, 'WarDeclared', { warId: war.id, attackerId, defenderId, wargoals: war.wargoals }, 'diplomacy');
   return war;
+}
+
+/** 缔结条约（OfferTreaty 被接受后调用） */
+export function createTreaty(world, a, b, type, durationDays = 360) {
+  const rel = getRelation(world, a, b);
+  const treaty = {
+    id: `try_${++world.seq}`,
+    type: 'treaty',
+    createdAtTick: world.tick,
+    kind: type, // nonaggression|trade|research|openBorders|mutualDefense
+    parties: [a, b].sort(),
+    startTick: world.tick,
+    expiryTick: world.tick + durationDays * 24,
+    status: 'active',
+    terms: TREATY_TERMS[type] || {},
+  };
+  world.entities.treaties[treaty.id] = treaty;
+  rel.treaties.push(treaty.id);
+  rel.trust = Math.min(100, rel.trust + 6);
+  emit(world, 'TreatySigned', { treatyId: treaty.id, kind: type, parties: treaty.parties }, 'diplomacy');
+  return treaty;
+}
+
+export const TREATY_TERMS = {
+  nonaggression: { desc: '互不侵犯', tensionDecayMult: 2.0 },
+  trade: { desc: '贸易协定', tradeCapacityMult: 1.15, trustPerMonth: 1 },
+  research: { desc: '科研交流', researchOutputMult: 1.05 },
+  openBorders: { desc: '开放边境', fleetPass: true },
+  mutualDefense: { desc: '共同防御', joinWars: true },
+};
+
+/** 条约接受效用（AI 判定与 UI 预估共用，DIP-01） */
+export function treatyAcceptanceScore(world, proposerId, targetId, type) {
+  const rel = getRelation(world, proposerId, targetId);
+  let score = 0;
+  score += (rel.opinion || 0) * 0.4;
+  score += (rel.trust || 0) * 0.5;
+  score -= (rel.threat || 0) * 0.3;
+  score -= (rel.borderTension || 0) * 0.2;
+  if (type === 'trade') score += (rel.tradeInterdependence || 0) * 0.5 + 15;
+  if (type === 'nonaggression') score += 10;
+  if (type === 'mutualDefense') score -= 10;
+  const fac = world.entities.factions[targetId];
+  if (fac?.personality === 'trader' && type === 'trade') score += 20;
+  if (fac?.personality === 'defensive' && type === 'nonaggression') score += 15;
+  if (fac?.personality === 'expansionist') score -= 8;
+  return Math.round(score);
 }

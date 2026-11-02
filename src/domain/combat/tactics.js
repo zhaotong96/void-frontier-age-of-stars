@@ -6,7 +6,6 @@
  * 每 dt=1/30s 步进一次。所有随机判定经 world.rng（确定性）。
  */
 
-import { unitBehaviors, projectileBehaviors } from './BattleSimulation.js';
 import { RNG } from '../../core/rng.js';
 import { clamp, dist, angleDelta, normalizeAngle } from '../../core/math.js';
 import { BAL } from '../../content/constants.js';
@@ -15,6 +14,15 @@ import { applyDamage, destroyShip } from '../ships/ship.js';
 import { emit } from '../../core/eventBus.js';
 
 const ARENA = { w: 1000, h: 320 };
+
+/** 当前目标单位（按 shipId 查找；销毁/撤离则 null） */
+function targetUnit(battle, u) {
+  if (!u.targetShipId) return null;
+  return battle.units.find((o) => o.shipId === u.targetShipId && !o.destroyed) || null;
+}
+
+/** 安装战术行为（由 BattleSimulation 在模块初始化时调用，避免循环导入） */
+export function installCombatBehaviors(unitBehaviors, projectileBehaviors) {
 
 // ———— 单位行为 ————
 
@@ -173,7 +181,7 @@ unitBehaviors.push(function firingBehavior(world, battle, dt) {
         });
       } else {
         // 直接弹道：命中判定 → 伤害
-        const hit = hitProbability(world, u, target, ship, w, d);
+        const hit = hitProbability(world, battle, u, target, ship, w, d);
         if (RNG.chance(world, hit)) {
           applyHit(world, battle, u, target, w.damage * mult * qualityMult(world, u, target), w.damageType);
         } else {
@@ -299,7 +307,7 @@ function applyHit(world, battle, attacker, target, baseDamage, damageType) {
 }
 
 /** 命中概率（任务书 5.5.2 模型：角速度与距离衰减） */
-function hitProbability(world, u, target, ship, w, d) {
+function hitProbability(world, battle, u, target, ship, w, d) {
   const tShip = world.entities.ships[target.shipId];
   const omega = Math.abs(target._angVel ?? Math.hypot(target.vx, target.vy) / Math.max(10, d));
   const Sr = w.signatureRes ?? 1.0;
@@ -343,4 +351,5 @@ function factionDamageMult(world, factionId) {
   let m = 1;
   if (rs?.effectIndex?.weaponDamage) for (const e of rs.effectIndex.weaponDamage) m *= e.value;
   return m;
+}
 }

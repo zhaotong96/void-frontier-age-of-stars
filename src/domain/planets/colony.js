@@ -11,7 +11,30 @@ import { clamp, safeInt } from '../../core/math.js';
 import { BAL } from '../../content/constants.js';
 import { BUILDINGS } from '../../content/buildings.js';
 import { getMod } from '../factions/modifiers.js';
-import { colonyStock, creditColony, debitColony } from '../economy/ledger.js';
+import { pay } from '../economy/ledger.js';
+import { colonyStock, creditColony, debitColony, credit, debit } from '../economy/ledger.js';
+
+/** 原料类资源存于殖民地仓储；精炼品/战略资源存于阵营账本 */
+const RAW_RESOURCES = new Set([
+  'ferro', 'silicate', 'rareEarth', 'heavyMetal', 'hydrogen', 'helium3',
+  'water', 'biomass', 'oxygen', 'food', 'inertGas', 'reagents', 'deuterium',
+]);
+
+function isRaw(rid) {
+  return RAW_RESOURCES.has(rid);
+}
+
+/** 生产投入：原料取殖民地仓储，精炼品取阵营账本 */
+function takeInput(world, colony, rid, qty) {
+  if (isRaw(rid)) return debitColony(world, colony, rid, qty, 'cycle-input', colony.id);
+  return debit(world, colony.factionId, rid, qty, `cycle-input:${colony.id}`, colony.id);
+}
+
+/** 生产产出：原料入殖民地仓储，精炼品入阵营账本 */
+function giveOutput(world, colony, rid, qty) {
+  if (isRaw(rid)) creditColony(world, colony, rid, qty, 'cycle-output', colony.id);
+  else credit(world, colony.factionId, rid, qty, `cycle-output:${colony.id}`, colony.id);
+}
 
 const bldIndex = new Map(BUILDINGS.map((b) => [b.id, b]));
 export function buildingDef(id) {
@@ -96,7 +119,8 @@ export function tickColonyProduction(world, colony) {
     if (b.progress === 0 && !b.cycleLocked) {
       let ok = true;
       for (const rid of Object.keys(def.recipe.inputs)) {
-        if (colonyStock(world, colony, rid) < def.recipe.inputs[rid]) {
+        const have = isRaw(rid) ? colonyStock(world, colony, rid) : (world.economy.ledgers[colony.factionId]?.balances?.[rid] ?? 0);
+        if (have < def.recipe.inputs[rid]) {
           ok = false;
           break;
         }
@@ -106,7 +130,7 @@ export function tickColonyProduction(world, colony) {
         continue;
       }
       for (const rid of Object.keys(def.recipe.inputs)) {
-        debitColony(world, colony, rid, def.recipe.inputs[rid], `cycle:${b.defId}`, colony.id);
+        takeInput(world, colony, rid, def.recipe.inputs[rid]);
       }
       b.cycleLocked = true;
       b.state = 'active';
@@ -123,7 +147,7 @@ export function tickColonyProduction(world, colony) {
         b.progress = 0;
         b.cycleLocked = false;
         for (const rid of Object.keys(def.recipe.outputs)) {
-          creditColony(world, colony, rid, def.recipe.outputs[rid], `cycle:${b.defId}`, colony.id);
+          giveOutput(world, colony, rid, def.recipe.outputs[rid]);
         }
       }
     }
@@ -146,26 +170,16 @@ export function tickColonyConstruction(world, colony) {
   const q = colony.constructionQueue;
   if (!q || q.length === 0) return;
   const job = q[0];
-  if (job.state === 'waiting') {
-    // 支付成本（原子：不满足则保持 waiting）
+  if (job.state === 'waiting' || job.state === 'missing-material') {
+    // 建造成本从阵营账本支付（原子：不满足保持等待，不阻塞后续入队判定）
     const def = bldIndex.get(job.defId);
     if (!def) {
       q.shift();
       return;
     }
-    let ok = true;
-    if ((colony.stockpile.credits ?? 0) < (def.cost.credits || 0)) ok = false;
-    for (const rid of Object.keys(def.cost)) {
-      if (rid === 'credits') continue;
-      if (colonyStock(world, colony, rid) < def.cost[rid]) ok = false;
-    }
-    if (!ok) {
+    if (!pay(world, colony.factionId, def.cost, `build:${def.id}`, colony.id)) {
       job.state = 'missing-material';
       return;
-    }
-    colony.stockpile.credits = (colony.stockpile.credits ?? 0) - (def.cost.credits || 0);
-    for (const rid of Object.keys(def.cost)) {
-      if (rid !== 'credits') debitColony(world, colony, rid, def.cost[rid], `build:${def.id}`, colony.id);
     }
     job.state = 'building';
     job.progress = 0;

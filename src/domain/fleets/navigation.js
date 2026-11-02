@@ -10,6 +10,8 @@ import { BAL } from '../../content/constants.js';
 import { dist } from '../../core/math.js';
 import { emit } from '../../core/eventBus.js';
 import { getEntity } from '../entities/registry.js';
+import { shortestPath } from '../../core/spatial.js';
+import { observeForeignSystem } from '../exploration/scan.js';
 
 /** 计算一段航路的小时数 */
 export function laneHours(world, fleet, fromSystem, toSystem) {
@@ -134,26 +136,86 @@ function drainFleetFuel(world, fleet, amount) {
   return amount <= 1e-9;
 }
 
-/** 舰队抵达星系时的存在检查（首次接触入口，阶段03 扩展） */
+/** 舰队抵达星系时的存在检查（首次接触入口） */
 function checkSystemPresence(world, fleet) {
   const sys = world.entities.systems[fleet.systemId];
   if (!sys) return;
   if (sys.ownerFactionId && sys.ownerFactionId !== fleet.factionId) {
-    const key = `${fleet.factionId}>${sys.ownerFactionId}`;
-    const R = world.relations;
-    if (!R.contactMade) R.contactMade = {};
-    if (!R.contactMade[key]) {
-      R.contactMade[key] = { tick: world.tick, by: 'fleetTransit' };
-      emit(world, 'FactionContactObserved', {
-        a: fleet.factionId,
-        b: sys.ownerFactionId,
-        systemId: fleet.systemId,
-      }, 'diplomacy');
-    }
+    observeForeignSystem(world, fleet.factionId, sys.ownerFactionId, sys.id);
   }
 }
 
 /** 舰队所在星系（在途返回 null） */
 export function fleetSystem(world, fleet) {
   return fleet.systemId ? getEntity(world, 'systems', fleet.systemId) : null;
+}
+
+/** 舰队总燃料（各船油箱之和） */
+export function fleetFuelTotal(world, fleet) {
+  let sum = 0;
+  for (const sid of fleet.shipIds) {
+    const ship = world.entities.ships[sid];
+    if (ship && ship.status === 'active') sum += ship.fuel ?? 0;
+  }
+  return sum;
+}
+
+/**
+ * 规划航线（只读，供命令 validate 与 AI 预检使用）
+ */
+export function planRoute(world, fleet, targetSystemId) {
+  const S = world.entities.systems;
+  const from = fleet.systemId;
+  if (!from) return { ok: false, code: 'IN_TRANSIT', reason: '舰队在途中，不能接受新航路' };
+  if (!S[targetSystemId]) return { ok: false, code: 'NO_TARGET', reason: '目标星系不存在' };
+  if (from === targetSystemId) return { ok: false, code: 'SAME_SYSTEM', reason: '已在该星系' };
+
+  const nodeIds = Object.keys(S);
+  const edges = new Map();
+  for (const id of nodeIds) edges.set(id, new Set(S[id].lanes));
+  const weightFn = (a, b) => {
+    let w = Math.hypot(S[a].x - S[b].x, S[a].y - S[b].y);
+    const owner = S[b].ownerFactionId;
+    if (owner && owner !== fleet.factionId && isHostile(world, fleet.factionId, owner)) w *= 4;
+    return w;
+  };
+  const route = shortestPath(nodeIds, edges, from, targetSystemId, weightFn);
+  if (!route) return { ok: false, code: 'NO_ROUTE', reason: '没有可达航路' };
+
+  const legs = [];
+  let fuelNeed = 0;
+  let eta = 0;
+  for (let i = 0; i < route.path.length - 1; i++) {
+    const a = S[route.path[i]];
+    const b = S[route.path[i + 1]];
+    const h = laneHours(world, fleet, a, b);
+    legs.push({ to: b.id, eta: h });
+    fuelNeed += h * BAL.navigation.fuelPerLaneHour;
+    eta += h;
+  }
+  const fuelAvailable = fleetFuelTotal(world, fleet);
+  if (fuelNeed > fuelAvailable) {
+    return { ok: false, code: 'NO_FUEL', reason: '燃料不足以完成航线', fuelNeed, fuelAvailable };
+  }
+  return { ok: true, route, legs, fuelNeed, eta };
+}
+
+/** 执行已规划转移（planRoute 通过后调用） */
+export function beginPlannedTransit(world, fleet, plan) {
+  fleet.transit = {
+    path: plan.route.path.slice(),
+    legIndex: 0,
+    legProgress: 0,
+    legEta: plan.legs[0].eta,
+    legs: plan.legs,
+    startedTick: world.tick,
+  };
+  fleet.systemId = null;
+  fleet.orders = { kind: 'move', targetSystemId: plan.route.path[plan.route.path.length - 1], stage: 'underway' };
+  return { ok: true, fuelNeed: plan.fuelNeed, eta: plan.eta };
+}
+
+function isHostile(world, a, b) {
+  const rel = world.relations.diplomacy[a < b ? `${a}|${b}` : `${b}|${a}`];
+  return !!(rel && rel.warId);
 }

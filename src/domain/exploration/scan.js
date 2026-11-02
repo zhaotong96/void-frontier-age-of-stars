@@ -86,6 +86,20 @@ export function revealSurveyLevel(world, sys, factionId, newLevel) {
   sys.surveyedBy[factionId] = newLevel;
   const fleetId = findScanningFleet(world, factionId, sys.id);
 
+  // 扫描揭示他国主权 → 首次接触流程推进（EXP-03）
+  if (sys.ownerFactionId && sys.ownerFactionId !== factionId && newLevel >= 2) {
+    observeForeignSystem(world, factionId, sys);
+  }
+  // 邻近感知：调查星系的邻接星系若为他国领土，侦测到边境信号
+  if (newLevel >= 2) {
+    for (const nid of sys.lanes) {
+      const ns = world.entities.systems[nid];
+      if (ns.ownerFactionId && ns.ownerFactionId !== factionId) {
+        observeForeignSystem(world, factionId, ns.ownerFactionId, sys.id);
+      }
+    }
+  }
+
   if (newLevel === 2) {
     // 分类：揭示恒星/行星类型概要
     emit(world, 'SystemClassified', { systemId: sys.id, factionId, star: sys.star.typeId }, 'exploration');
@@ -198,16 +212,17 @@ export function resolveAnomaly(world, ano, factionId) {
   }
 }
 
-/** 首次接触推进：扫描到归属未知文明的星系时（EXP-03/DIP 流程入口） */
-export function observeForeignSystem(world, factionId, sys) {
-  if (!sys.ownerFactionId || sys.ownerFactionId === factionId) return;
-  const rel = getRelation(world, factionId, sys.ownerFactionId);
+/** 首次接触推进：侦测到未知文明（扫描揭示主权或舰队抵达）（EXP-03） */
+export function observeForeignSystem(world, factionId, otherFactionId, viaSystemId = null) {
+  if (!otherFactionId || otherFactionId === factionId) return;
+  const rel = getRelation(world, factionId, otherFactionId);
   if (rel.contactState === 'none') {
     rel.contactState = 'signal';
     rel.firstContactTick = world.tick;
-    emit(world, 'FirstContactSignal', { a: factionId, b: sys.ownerFactionId, systemId: sys.id }, 'diplomacy');
+    emit(world, 'FirstContactSignal', { a: factionId, b: otherFactionId, systemId: viaSystemId }, 'diplomacy');
   } else if (rel.contactState === 'signal') {
     rel.contactState = 'contacted';
-    emit(world, 'FirstContact', { a: factionId, b: sys.ownerFactionId }, 'diplomacy');
+    rel.intelConfidence = 0.35;
+    emit(world, 'FirstContact', { a: factionId, b: otherFactionId, systemId: viaSystemId }, 'diplomacy');
   }
 }

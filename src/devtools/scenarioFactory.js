@@ -41,33 +41,53 @@ export function createStarterCampaign(config = {}) {
     const led = ensureLedger(world, fid);
     const isPlayer = fid === world.playerFactionId;
     const startMult = isPlayer ? 1 : difficultyMult(world.difficulty);
-    led.balances.credits = Math.round((isPlayer ? 1800 : 1500) * startMult);
+    led.balances.credits = Math.round((isPlayer ? 2400 : 2000) * startMult);
     led.balances.influence = 40;
     led.balances.alloy = Math.round(140 * startMult);
+    led.balances.polymer = Math.round(50 * startMult);
+    led.balances.conductor = 12;
+    led.balances.powerCell = 8;
     led.balances.researchData = 20;
 
     // 母星殖民地
     const homePlanetId = fac.homePlanetId;
     if (homePlanetId) {
       const colony = foundColony(world, homePlanetId, fid, 10, false);
-      colony.stockpile.food = 120;
+      colony.stockpile.food = 100;
+      colony.stockpile.water = 90;
       colony.stockpile.ferro = 40;
+      colony.stockpile.silicate = 30;
       colony.buildingSlots = 12;
       // 初始建筑：水培农场 + 行政中心（保证食物循环与治理）
-      colony.buildings.push({ defId: 'bld_hydroponics', level: 1, state: 'active', progress: 0 });
+      colony.buildings.push({ defId: 'bld_hydro_farm', level: 1, state: 'active', progress: 0 });
       colony.buildings.push({ defId: 'bld_admin_center', level: 1, state: 'active', progress: 0 });
     }
 
     // 初始舰队：科学船 + 2 护卫舰（玩家）；AI 同规格保持公平
     const homeSystemId = fac.homeSystemId;
     ensureMarket(world, homeSystemId);
+    // 母星轨道船坞（舰船生产入口）
+    createEntity(world, 'stations', {
+      kind: 'shipyard',
+      systemId: homeSystemId,
+      factionId: fid,
+      level: 1,
+      buildQueue: [],
+    });
+    // 每文明初始蓝图：护卫舰（AI 建军与玩家造船共用）
+    createEntity(world, 'blueprints', {
+      factionId: fid,
+      name: isPlayer ? '边防型护卫舰' : `${fac.name}标准护卫舰`,
+      hullId: 'hull_frigate',
+      modules: ['mod_railgun', 'mod_reactor_fission', 'mod_ion_thruster', 'mod_armor_composite'].sort(),
+    });
     createFleet(world, {
       factionId: fid,
       systemId: homeSystemId,
       name: isPlayer ? '远航-1 探索分队' : `${fac.name} 探索分队`,
       role: 'science',
       ships: [
-        { hullId: 'hull_science', moduleIds: ['mod_sensor_array', 'mod_reactor_fission', 'mod_engine_ion'], name: '曙光号' },
+        { hullId: 'hull_science', moduleIds: ['mod_sensor_std', 'mod_reactor_fission', 'mod_ion_thruster'], name: '曙光号' },
       ],
     });
     createFleet(world, {
@@ -77,8 +97,8 @@ export function createStarterCampaign(config = {}) {
       role: 'combat',
       stance: 'patrol',
       ships: [
-        { hullId: 'hull_frigate', moduleIds: ['mod_railgun', 'mod_reactor_fission', 'mod_engine_ion', 'mod_armor_composite'], name: '守夜号' },
-        { hullId: 'hull_frigate', moduleIds: ['mod_railgun', 'mod_reactor_fission', 'mod_engine_ion', 'mod_armor_composite'], name: '哨声号' },
+        { hullId: 'hull_frigate', moduleIds: ['mod_railgun', 'mod_reactor_fission', 'mod_ion_thruster', 'mod_armor_composite'], name: '守夜号' },
+        { hullId: 'hull_frigate', moduleIds: ['mod_railgun', 'mod_reactor_fission', 'mod_ion_thruster', 'mod_armor_composite'], name: '哨声号' },
       ],
     });
 
@@ -127,7 +147,7 @@ export function createMinimalWorld(seed = 1234) {
     systemId: factionIds.length ? world.entities.factions[fid].homeSystemId : systemIds[0],
     name: '最小世界探索舰',
     role: 'science',
-    ships: [{ hullId: 'hull_science', moduleIds: ['mod_sensor_array', 'mod_reactor_fission', 'mod_engine_ion'] }],
+    ships: [{ hullId: 'hull_science', moduleIds: ['mod_sensor_std', 'mod_reactor_fission', 'mod_ion_thruster'] }],
   });
   world.ai[fid] = { personality: 'balanced', goals: [], cooldowns: {}, orders: {}, lastEvalTick: 0 };
   return world;

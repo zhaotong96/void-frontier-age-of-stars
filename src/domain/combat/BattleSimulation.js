@@ -103,3 +103,7 @@ export function finishBattle(world, battle, winnerSide) {
 
   delete world.battles.active[battle.id];
 }
+
+// 战术行为注册：安装函数在数组定义之后显式调用（避免循环导入 TDZ）
+import { installCombatBehaviors } from './tactics.js';
+installCombatBehaviors(unitBehaviors, projectileBehaviors);

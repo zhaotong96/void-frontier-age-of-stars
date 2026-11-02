@@ -9,6 +9,7 @@
 import { registerHourly } from './TickPipeline.js';
 import { BAL } from '../content/constants.js';
 import { stepBattles } from '../domain/combat/BattleSimulation.js';
+import { checkEngagements } from '../domain/combat/engagement.js';
 import { advanceFleets } from '../domain/fleets/navigation.js';
 import { runDiplomacyTimers } from '../domain/diplomacy/war.js';
 import { tickScanning, tickAnomalyInvestigation } from '../domain/exploration/scan.js';
@@ -16,6 +17,7 @@ import { tickColonyProduction, tickColonyConstruction, buildingDef } from '../do
 import { tickResearch } from '../domain/research/research.js';
 import { createShip } from '../domain/ships/ship.js';
 import { getMod } from '../domain/factions/modifiers.js';
+import { registerAI } from '../domain/ai/FactionAI.js';
 
 registerHourly('orders', (world) => {
   // AI 命令超时与目标清理（防无限重试 —— RISK-06）
@@ -39,6 +41,7 @@ registerHourly('navigation', (world) => {
 });
 
 registerHourly('combat', (world) => {
+  checkEngagements(world);
   stepBattles(world);
 });
 
@@ -71,6 +74,9 @@ registerHourly('research', (world) => {
 registerHourly('diplomacy', (world) => {
   runDiplomacyTimers(world);
 });
+
+// 文明 AI 最后执行（依赖前序阶段的状态产物）
+registerAI();
 
 // ——
 
