@@ -426,6 +426,8 @@ export const SystemView = {
    * 行星卡：名称/类别/宜居度/重力/大气（+层级≥3 时的矿藏）与操作按钮。
    * 「建立前哨」条件：调查层级≥3、宜居度≥20、无殖民地（FoundOutpost 命令还需
    * 一支在本星系的己方舰队 —— 无舰队时按钮禁用并给出提示）。
+   * 「登陆行星地表」条件：调查层级≥3 且该行星无进行中的地面行动（active 任务）——
+   * 主操作入口直达全 3D 行星地表视图（目标行星经 app._groundTargetPlanet 传给 GroundView）。
    */
   _planetCard(p, lvl) {
     const app = this.app;
@@ -476,6 +478,22 @@ export const SystemView = {
           click: () => {
             // FoundOutpost 校验要求执行舰队；附带本系玩家舰队使命令可直接成立
             app.dispatch('FoundOutpost', fleetId ? { planetId: p.id, fleetId } : { planetId: p.id });
+          },
+        },
+      }));
+    }
+
+    // 卡片底部主操作：登陆行星地表（调查层级≥3 且无进行中的地面行动时提供）
+    if (lvl >= 3 && !this._hasActiveGroundMission(p.id)) {
+      card.appendChild(el('button', {
+        class: 'vf-btn primary mt-1',
+        text: '🚀 登陆行星地表',
+        title: '降落小队 / 视察殖民地 — 进入全 3D 行星地表',
+        on: {
+          click: () => {
+            // 设置 GroundView 的目标行星
+            app._groundTargetPlanet = p.id;
+            app.goto('ground');
           },
         },
       }));
@@ -568,6 +586,15 @@ export const SystemView = {
     if (node && typeof node.scrollIntoView === 'function') {
       node.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
+  },
+
+  /** 该行星是否已有进行中的地面行动（active 状态；有则不重复提供登陆入口） */
+  _hasActiveGroundMission(planetId) {
+    const w = this.app.world;
+    if (!w || !w.entities || !w.entities.groundMissions) return false;
+    return Object.values(w.entities.groundMissions).some(
+      (m) => m && m.status === 'active' && m.planetId === planetId,
+    );
   },
 
   /** 本星系第一支可执行命令的玩家舰队（非在途），无则 null */

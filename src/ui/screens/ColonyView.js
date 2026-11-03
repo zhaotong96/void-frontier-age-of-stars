@@ -1,7 +1,8 @@
 /**
  * ui/screens/ColonyView.js — 殖民地管理视图（任务书 6.2 colonyDetail）
  *
- * 结构：.vf-view > .vf-view-head（标题 + 殖民地下拉 + 名称/标签 + 稳定度仪表 + 升级按钮）
+ * 结构：.vf-view > .vf-view-head（标题 + 殖民地下拉 + 名称/标签 + 稳定度仪表
+ *            + 3D 地表模式切换 + 升级按钮）
  *            + .vf-view-body.pad（三列 grid：人口与环境 / 建筑与建造 / 库存与账本）
  *
  * 数据来源：simulation/ViewModels.colonyDetail（只读）+ 快照 colonies 列表；
@@ -263,7 +264,7 @@ export const ColonyView = {
     this._bodyEl.scrollLeft = savedLeft;
   },
 
-  /** 头部动态区：名称 / 前哨标签 / 稳定度仪表 / 升级按钮 */
+  /** 头部动态区：名称 / 前哨标签 / 稳定度仪表 / 3D 地表切换 / 升级按钮 */
   _renderHead(detail) {
     if (!this._headDyn) return;
     clearEl(this._headDyn);
@@ -279,6 +280,24 @@ export const ColonyView = {
       value: Math.round(detail.stability), max: 100, label: '稳定度', width: 132, height: 76,
     }));
     this._headDyn.appendChild(el('span', { class: 'vf-grow' }));
+
+    // 头部 3D 地表切换：直达全 3D 行星地表视图（体素地形 + 第三人称 RPG）；
+    // 目标行星经 app._groundTargetPlanet 传给 GroundView
+    const app = this.app;
+    const groundPlanetId = detail.planet ? detail.planet.id : null;
+    this._headDyn.appendChild(el('button', {
+      class: 'vf-btn primary',
+      text: '🌍 3D 地表模式',
+      title: '切换到全 3D 行星地表视图（体素地形 + 第三人称 RPG）',
+      disabled: groundPlanetId ? null : true,
+      on: {
+        click: () => {
+          // 设置 GroundView 的目标行星
+          app._groundTargetPlanet = groundPlanetId;
+          app.goto('ground');
+        },
+      },
+    }));
 
     if (detail.isOutpost) {
       // 升级失败（资源不足等）由命令总线 toast 反馈
