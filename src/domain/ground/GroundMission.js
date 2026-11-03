@@ -1098,8 +1098,20 @@ function updateObjectives(mission, dt) {
   }
 
   // —— destroy：交互引导 3s 引爆（打断则缓慢回落） ——
-  const interactId = mission.input.interactTarget;
+  const rawInteract = mission.input.interactTarget;
   const actor = alive.find((u) => u.unitId === activeUnitIdOf(mission));
+  // 'nearest' 自动解析为距当前控制角色最近的可交互目标
+  let interactId = rawInteract;
+  if (rawInteract === 'nearest' && actor) {
+    let nearestT = null;
+    let minD = INTERACT_R;
+    for (const t of mission.targets) {
+      if (t.done) continue;
+      const d = Math.hypot(actor.x - t.x, actor.y - t.y);
+      if (d < minD) { minD = d; nearestT = t; }
+    }
+    interactId = nearestT ? nearestT.targetId : null;
+  }
   for (const t of mission.targets) {
     if (t.done) continue;
     const channeling = interactId && t.targetId === interactId && actor
