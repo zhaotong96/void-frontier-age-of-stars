@@ -20071,6 +20071,238 @@ function availableHullIds() {
 Object.assign(__exports, { buildHullMesh, availableHullIds });
 
 });
+__register("src/render/gl/Mat4.js", function (__exports, __require) {
+/**
+ * render/gl/Mat4.js — 4x4 列主序矩阵工具（WebGL 约定）
+ *
+ * 移植自参考实现 simulation-matrix/common/math/mat4.js，并补全：
+ *  - mat4TRS：欧拉角（yaw=Y, pitch=X, roll=Z，合成顺序 R = Ry·Rx·Rz）模型矩阵；
+ *  - vec3ApplyMat4 / mat4MulVec4：向量变换。
+ *
+ * 零分配约定：所有 out 均由调用方传入 Float32Array(16)（vec3 为 Float32Array(3)），
+ * 渲染循环内不产生任何新数组。存储布局：m[col * 4 + row]（列主序）。
+ */
+
+/** 新建单位矩阵（唯一的分配点：仅限初始化阶段调用） */
+function mat4() {
+  const m = new Float32Array(16);
+  m[0] = 1; m[5] = 1; m[10] = 1; m[15] = 1;
+  return m;
+}
+
+/** out = 单位矩阵 */
+function mat4Identity(out) {
+  out.fill(0);
+  out[0] = 1; out[5] = 1; out[10] = 1; out[15] = 1;
+  return out;
+}
+
+/** out = a * b（列主序；语义为先施加 b 再施加 a） */
+function mat4Multiply(out, a, b) {
+  const a00 = a[0], a01 = a[1], a02 = a[2], a03 = a[3];
+  const a10 = a[4], a11 = a[5], a12 = a[6], a13 = a[7];
+  const a20 = a[8], a21 = a[9], a22 = a[10], a23 = a[11];
+  const a30 = a[12], a31 = a[13], a32 = a[14], a33 = a[15];
+  for (let i = 0; i < 4; i++) {
+    const b0 = b[i * 4], b1 = b[i * 4 + 1], b2 = b[i * 4 + 2], b3 = b[i * 4 + 3];
+    out[i * 4] = b0 * a00 + b1 * a10 + b2 * a20 + b3 * a30;
+    out[i * 4 + 1] = b0 * a01 + b1 * a11 + b2 * a21 + b3 * a31;
+    out[i * 4 + 2] = b0 * a02 + b1 * a12 + b2 * a22 + b3 * a32;
+    out[i * 4 + 3] = b0 * a03 + b1 * a13 + b2 * a23 + b3 * a33;
+  }
+  return out;
+}
+
+/** 透视投影矩阵（fovy 为竖直视场角，弧度） */
+function mat4Perspective(out, fovyRad, aspect, near, far) {
+  const f = 1 / Math.tan(fovyRad / 2);
+  out.fill(0);
+  out[0] = f / aspect;
+  out[5] = f;
+  out[10] = (far + near) / (near - far);
+  out[11] = -1;
+  out[14] = (2 * far * near) / (near - far);
+  return out;
+}
+
+/** 正交投影矩阵 */
+function mat4Ortho(out, left, right, bottom, top, near, far) {
+  out.fill(0);
+  out[0] = 2 / (right - left);
+  out[5] = 2 / (top - bottom);
+  out[10] = -2 / (far - near);
+  out[12] = -(right + left) / (right - left);
+  out[13] = -(top + bottom) / (top - bottom);
+  out[14] = -(far + near) / (far - near);
+  out[15] = 1;
+  return out;
+}
+
+/** 视图矩阵：相机位于 eye，看向 center，up 为世界上方向（右手系） */
+function mat4LookAt(out, eye, center, up) {
+  let zx = eye[0] - center[0];
+  let zy = eye[1] - center[1];
+  let zz = eye[2] - center[2];
+  let len = Math.sqrt(zx * zx + zy * zy + zz * zz);
+  if (len === 0) { zx = 0; zy = 0; zz = 1; len = 1; }
+  zx /= len; zy /= len; zz /= len;
+  let xx = up[1] * zz - up[2] * zy;
+  let xy = up[2] * zx - up[0] * zz;
+  let xz = up[0] * zy - up[1] * zx;
+  len = Math.sqrt(xx * xx + xy * xy + xz * xz);
+  if (len === 0) { xx = 1; xy = 0; xz = 0; } else { xx /= len; xy /= len; xz /= len; }
+  const yx = zy * xz - zz * xy;
+  const yy = zz * xx - zx * xz;
+  const yz = zx * xy - zy * xx;
+  out[0] = xx; out[1] = yx; out[2] = zx; out[3] = 0;
+  out[4] = xy; out[5] = yy; out[6] = zy; out[7] = 0;
+  out[8] = xz; out[9] = yz; out[10] = zz; out[11] = 0;
+  out[12] = -(xx * eye[0] + xy * eye[1] + xz * eye[2]);
+  out[13] = -(yx * eye[0] + yy * eye[1] + yz * eye[2]);
+  out[14] = -(zx * eye[0] + zy * eye[1] + zz * eye[2]);
+  out[15] = 1;
+  return out;
+}
+
+/** 一般 4x4 求逆（伴随展开法）。奇异矩阵返回 null。 */
+function mat4Invert(out, m) {
+  const a00 = m[0], a01 = m[1], a02 = m[2], a03 = m[3];
+  const a10 = m[4], a11 = m[5], a12 = m[6], a13 = m[7];
+  const a20 = m[8], a21 = m[9], a22 = m[10], a23 = m[11];
+  const a30 = m[12], a31 = m[13], a32 = m[14], a33 = m[15];
+
+  const b00 = a00 * a11 - a01 * a10;
+  const b01 = a00 * a12 - a02 * a10;
+  const b02 = a00 * a13 - a03 * a10;
+  const b03 = a01 * a12 - a02 * a11;
+  const b04 = a01 * a13 - a03 * a11;
+  const b05 = a02 * a13 - a03 * a12;
+  const b06 = a20 * a31 - a21 * a30;
+  const b07 = a20 * a32 - a22 * a30;
+  const b08 = a20 * a33 - a23 * a30;
+  const b09 = a21 * a32 - a22 * a31;
+  const b10 = a21 * a33 - a23 * a31;
+  const b11 = a22 * a33 - a23 * a32;
+
+  let det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+  if (!det) return null;
+  det = 1.0 / det;
+
+  out[0] = (a11 * b11 - a12 * b10 + a13 * b09) * det;
+  out[1] = (a02 * b10 - a01 * b11 - a03 * b09) * det;
+  out[2] = (a31 * b05 - a32 * b04 + a33 * b03) * det;
+  out[3] = (a22 * b04 - a21 * b05 - a23 * b03) * det;
+  out[4] = (a12 * b08 - a10 * b11 - a13 * b07) * det;
+  out[5] = (a00 * b11 - a02 * b08 + a03 * b07) * det;
+  out[6] = (a32 * b02 - a30 * b05 - a33 * b01) * det;
+  out[7] = (a20 * b05 - a22 * b02 + a23 * b01) * det;
+  out[8] = (a10 * b10 - a11 * b08 + a13 * b06) * det;
+  out[9] = (a01 * b08 - a00 * b10 - a03 * b06) * det;
+  out[10] = (a30 * b04 - a31 * b02 + a33 * b00) * det;
+  out[11] = (a21 * b02 - a20 * b04 - a23 * b00) * det;
+  out[12] = (a11 * b07 - a10 * b09 - a12 * b06) * det;
+  out[13] = (a00 * b09 - a01 * b07 + a02 * b06) * det;
+  out[14] = (a31 * b01 - a30 * b03 - a32 * b00) * det;
+  out[15] = (a20 * b03 - a21 * b01 + a22 * b00) * det;
+  return out;
+}
+
+/** 平移矩阵（覆盖 out，非右乘叠加） */
+function mat4Translate(out, x, y, z) {
+  mat4Identity(out);
+  out[12] = x; out[13] = y; out[14] = z;
+  return out;
+}
+
+/** 缩放矩阵（覆盖 out） */
+function mat4Scale(out, x, y, z) {
+  mat4Identity(out);
+  out[0] = x; out[5] = y; out[10] = z;
+  return out;
+}
+
+/** 绕 X 轴旋转矩阵（弧度，右手系；覆盖 out） */
+function mat4RotateX(out, rad) {
+  mat4Identity(out);
+  const c = Math.cos(rad), s = Math.sin(rad);
+  out[5] = c; out[6] = s; out[9] = -s; out[10] = c;
+  return out;
+}
+
+/** 绕 Y 轴旋转矩阵（弧度，右手系；覆盖 out） */
+function mat4RotateY(out, rad) {
+  mat4Identity(out);
+  const c = Math.cos(rad), s = Math.sin(rad);
+  out[0] = c; out[2] = -s; out[8] = s; out[10] = c;
+  return out;
+}
+
+/** 绕 Z 轴旋转矩阵（弧度，右手系；覆盖 out） */
+function mat4RotateZ(out, rad) {
+  mat4Identity(out);
+  const c = Math.cos(rad), s = Math.sin(rad);
+  out[0] = c; out[1] = s; out[4] = -s; out[5] = c;
+  return out;
+}
+
+/**
+ * 欧拉合成模型矩阵：out = T(t) · Ry(ry) · Rx(rx) · Rz(rz) · S(s)
+ * 约定：ry = yaw（偏航，绕 Y），rx = pitch（俯仰，绕 X），rz = roll（翻滚，绕 Z），
+ * 旋转合成顺序为 R = Ry·Rx·Rz（先 roll，再 pitch，最后 yaw）。
+ * 解析展开一次写就，避免中间矩阵与临时分配。
+ */
+function mat4TRS(out, tx, ty, tz, rx, ry, rz, s) {
+  const cx = Math.cos(rx), sx = Math.sin(rx);
+  const cy = Math.cos(ry), sy = Math.sin(ry);
+  const cz = Math.cos(rz), sz = Math.sin(rz);
+
+  // R = Ry·Rx·Rz 的三个列向量（展开自 (cy·cz + sy·sx·sz) 等解析式）
+  out[0] = (cy * cz + sy * sx * sz) * s;   // 列 0 行 0：R·e_x.x
+  out[1] = cx * sz * s;                    // 列 0 行 1
+  out[2] = (-sy * cz + cy * sx * sz) * s;  // 列 0 行 2
+  out[3] = 0;
+  out[4] = (-cy * sz + sy * sx * cz) * s;  // 列 1 行 0：R·e_y.x
+  out[5] = cx * cz * s;                    // 列 1 行 1
+  out[6] = (sy * sz + cy * sx * cz) * s;   // 列 1 行 2
+  out[7] = 0;
+  out[8] = sy * cx * s;                    // 列 2 行 0：R·e_z.x
+  out[9] = -sx * s;                        // 列 2 行 1
+  out[10] = cy * cx * s;                   // 列 2 行 2
+  out[11] = 0;
+  out[12] = tx;                            // 列 3：平移
+  out[13] = ty;
+  out[14] = tz;
+  out[15] = 1;
+  return out;
+}
+
+/**
+ * 用 4x4 矩阵变换三维点/向量（隐含 w=1）并做透视除法（w=0 时按 1 处理）。
+ * out 为 Float32Array(3)，允许 out === v。
+ */
+function vec3ApplyMat4(out, m, v) {
+  const x = v[0], y = v[1], z = v[2];
+  const w = m[3] * x + m[7] * y + m[11] * z + m[15];
+  const inv = w !== 0 ? 1 / w : 1;
+  out[0] = (m[0] * x + m[4] * y + m[8] * z + m[12]) * inv;
+  out[1] = (m[1] * x + m[5] * y + m[9] * z + m[13]) * inv;
+  out[2] = (m[2] * x + m[6] * y + m[10] * z + m[14]) * inv;
+  return out;
+}
+
+/** 用 4x4 矩阵变换四维向量（完整分量，含 w 行），允许 out === v。 */
+function mat4MulVec4(out, m, v) {
+  const x = v[0], y = v[1], z = v[2], w = v[3];
+  out[0] = m[0] * x + m[4] * y + m[8] * z + m[12] * w;
+  out[1] = m[1] * x + m[5] * y + m[9] * z + m[13] * w;
+  out[2] = m[2] * x + m[6] * y + m[10] * z + m[14] * w;
+  out[3] = m[3] * x + m[7] * y + m[11] * z + m[15] * w;
+  return out;
+}
+
+Object.assign(__exports, { mat4, mat4Identity, mat4Multiply, mat4Perspective, mat4Ortho, mat4LookAt, mat4Invert, mat4Translate, mat4Scale, mat4RotateX, mat4RotateY, mat4RotateZ, mat4TRS, vec3ApplyMat4, mat4MulVec4 });
+
+});
 __register("src/app/Router.js", function (__exports, __require) {
 /**
  * app/Router.js — hash 路由（任务书 8.6：#/galaxy 形式，兼容 GitHub Pages 二级路径）
@@ -24926,6 +25158,281 @@ void main() {
 Object.assign(__exports, { BLACKHOLE_VERT, BLACKHOLE_FRAG });
 
 });
+__register("src/render/shaders/StarCoronaShader.js", function (__exports, __require) {
+/**
+ * render/shaders/StarCoronaShader.js — 恒星光球 / 日冕 / 脉冲星磁层着色器
+ * （GLSL ES 3.0 字符串，`#version 300 es` 由调用方拼接，模块内不写版本头）
+ *
+ * 导出六段字符串：
+ *  - STAR_VERT + STAR_FRAG：光球层球体着色器（单位球网格）。
+ *      顶点 uniforms = { uMVP: mat4, uNormalMatrix: mat3 }
+ *      顶点输入 = { aPos: vec3（局部单位球）, aNormal: vec3（局部法线） }
+ *      片元 uniforms = { uTime: float, uStarType: int, uSeed: float }
+ *      varying = { vLocalPos, vNormal }
+ *      uStarType: 0 yellowDwarf / 1 redDwarf / 2 blueGiant / 3 whiteDwarf /
+ *                 4 neutronStar / 5 pulsar / 6 blackHole（不适用，渲染近黑圆盘）
+ *      约定：uNormalMatrix 为模型视图法线矩阵（模型仅旋转+均匀缩放），
+ *      视线取远场近似 V ≈ 视空间 (0,0,1)，limbdark = pow(dot(N,V), 0.45)。
+ *      输出 HDR 辐射约 3.0..6.0（供 Bloom 溢出），alpha=1 不透明。
+ *  - CORONA_VERT + CORONA_FRAG：面向相机的日冕公告板。
+ *      顶点 uniforms = { uMVP: mat4, uCoronaRadius: float }
+ *      顶点输入 = { aPos: vec2，单位四边形角点 [-1,1]²（TRIANGLE_STRIP） }
+ *      约定：uMVP 的模型部分须包含"面向相机"的旋转（调用方 billboard），
+ *      或直接传视空间/裁剪空间对齐的四边形顶点。
+ *      片元 uniforms = { uTime: float, uSeed: float, uStarType: int, uCoronaRadius: float }
+ *      varying = { vQuad }
+ *      实现极坐标径向拉伸噪声 fbm(vec2(atan(p.y,p.x)*12, log(r)*3 - uTime*0.6))
+ *      绘制太阳风流线与磁力线拱形日珥；辐射 HDR 约 2..5，边缘 alpha 平滑衰减；
+ *      角向接缝用双纪元交叉混合消除。建议加性混合 gl.blendFunc(gl.ONE, gl.ONE)。
+ *  - PULSAR_VERT + PULSAR_FRAG：绕磁轴的双极同步辐射喷流锥 + 磁层激波环
+ *      （两者合并为同一着色器输出，按网格区域分别着色）。
+ *      顶点与 STAR_VERT 相同（uMVP/uNormalMatrix）。
+ *      片元 uniforms = { uTime: float, uSeed: float }
+ *      网格约定：磁轴 = 局部 +Y。推荐网格为对顶双锥（表面 r=0.35·|y|，y∈[-1,1]，
+ *      表示喷流锥体）与赤道圆环（半径 0.8..1.0，y≈0，表示激波环）；两网格用同一
+ *      程序分别绘制（或合并为一张网格），片元按局部坐标自动区分区域。
+ *      建议关闭面剔除并以加性混合绘制（双面叠加增强体积感）。
+ *
+ * 约束：顶层无副作用、不触碰 DOM；噪声工具来自 ../gl/NoiseGLSL.js。
+ */
+
+const { GLSL_HASH: GLSL_HASH, GLSL_NOISE: GLSL_NOISE, GLSL_SIMPLEX4D: GLSL_SIMPLEX4D, GLSL_FBM: GLSL_FBM } = __require("src/render/gl/NoiseGLSL.js");
+
+/** 片元统一精度头（模块内常量） */
+const PRECISION_HEAD = `
+precision highp float;
+precision highp int;
+`;
+
+/* ========================= 恒星光球层（STAR） ========================= */
+
+/** 光球/脉冲星共用球体网格顶点着色器 */
+const SPHERE_VERT_SRC = `
+// ============ 恒星/脉冲星：单位球网格顶点着色器 ============
+uniform mat4 uMVP;            // 调用方约定命名 uMVP = Projection·View·Model
+uniform mat3 uNormalMatrix;   // 模型视图法线矩阵（模型仅旋转+均匀缩放）
+in vec3 aPos;                 // 局部单位球顶点
+in vec3 aNormal;              // 局部法线
+out vec3 vLocalPos;           // 局部坐标（片元程序化采样用）
+out vec3 vNormal;             // 视空间法线
+
+void main() {
+  vLocalPos = aPos;
+  vNormal = uNormalMatrix * aNormal;
+  gl_Position = uMVP * vec4(aPos, 1.0);
+}
+`;
+
+const STAR_VERT = SPHERE_VERT_SRC;
+
+/** 光球层片元着色器 */
+const STAR_FRAG = PRECISION_HEAD + GLSL_HASH + GLSL_NOISE + GLSL_SIMPLEX4D + `
+// ============ 恒星光球层片元着色器 ============
+uniform float uTime;
+uniform int uStarType;        // 0..6，见模块头注释
+uniform float uSeed;
+
+in vec3 vLocalPos;
+in vec3 vNormal;
+out vec4 fragColor;
+
+// 星型 → 黑体基色（HDR 线性）
+vec3 starTypeBase(int t) {
+  if (t == 0) return vec3(2.60, 1.85, 0.85);   // yellowDwarf 暖金
+  if (t == 1) return vec3(1.90, 0.50, 0.18);   // redDwarf 暗红橙
+  if (t == 2) return vec3(1.05, 1.80, 3.40);   // blueGiant 电光蓝白
+  if (t == 3) return vec3(1.95, 2.15, 2.55);   // whiteDwarf 惨白蓝
+  if (t == 4 || t == 5) return vec3(1.40, 2.55, 3.10);   // neutronStar/pulsar 青白极亮
+  return vec3(0.02, 0.02, 0.03);               // blackHole：不适用，近黑
+}
+
+// 米粒组织采样用复合自转（绕 Y 后绕 X，两层取相反角速度形成差速）
+vec3 starSpin(vec3 p, float ang) {
+  float c = cos(ang);
+  float s = sin(ang);
+  vec3 q = vec3(c * p.x - s * p.z, p.y, s * p.x + c * p.z);
+  float c2 = cos(ang * 0.37);
+  float s2 = sin(ang * 0.37);
+  return vec3(q.x, c2 * q.y - s2 * q.z, s2 * q.y + c2 * q.z);
+}
+
+void main() {
+  vec3 p = normalize(vLocalPos);
+  vec3 N = normalize(vNormal);
+  float NdotV = clamp(N.z, 0.0, 1.0);          // 远场视线 V ≈ 视空间 (0,0,1)
+
+  vec3 base = starTypeBase(uStarType);
+
+  // —— 双层旋转 4D Simplex-Worley 米粒组织（两层不同速度/方向） ——
+  vec3 p1 = starSpin(p, uTime * 0.05 + uSeed);
+  vec3 p2 = starSpin(p, -uTime * 0.13 + uSeed * 2.7);
+  float g1 = simplex4D(vec4(p1 * 3.2, uTime * 0.10 + uSeed));
+  float g2 = simplex4D(vec4(p2 * 6.4, uTime * 0.23 + uSeed * 1.9));
+  float w1 = worley3D(p1 * 4.5);               // Simplex-Worley 混合的胞腔项
+  float grain = (g1 * 0.58 + g2 * 0.42) * 0.78 + (1.0 - w1) * 0.22;
+
+  // —— 太阳黑子暗区（低频噪声阈值） ——
+  float spotN = simplex4D(vec4(starSpin(p, uTime * 0.02) * 1.9, uTime * 0.015 + uSeed * 3.3));
+  float spot = 1.0 - smoothstep(-0.46, -0.26, spotN);   // 低于阈值 → 黑子（严格递增边界）
+
+  // —— 超米粒耀斑亮区（高频脊状阈值） ——
+  float fl = 1.0 - abs(simplex4D(vec4(p * 8.5, uTime * 0.30 + uSeed * 5.1)));
+  float flare = smoothstep(0.80, 0.96, fl);
+
+  // —— 临边昏暗 + 边缘色球反变增亮（边缘 5% 区间色相偏移） ——
+  float limbdark = pow(NdotV, 0.45);
+  float edge = 1.0 - NdotV;
+  float chromo = smoothstep(0.78, 0.97, edge);
+  bool hot = (uStarType == 2 || uStarType == 3 || uStarType == 4 || uStarType == 5);
+  vec3 chromoTint = hot ? vec3(0.45, 1.35, 2.60) : vec3(1.85, 0.42, 0.12);
+
+  vec3 col = base * (0.82 + 0.30 * grain);
+  col *= (1.0 - spot * 0.85);
+  col += base * flare * 1.9;
+  col *= limbdark;
+  col += chromoTint * chromo * (1.1 + 0.9 * flare);
+
+  // 中子星/脉冲星表面高频闪烁
+  if (uStarType == 4 || uStarType == 5) {
+    col *= 0.85 + 0.35 * sin(uTime * 21.0 + uSeed * 41.0) * sin(uTime * 6.3 + uSeed * 17.0);
+  }
+
+  // HDR 辐射 3.0..6.0（供 Bloom 溢出）
+  col *= 2.4;
+  if (uStarType == 6) {
+    col = vec3(0.008, 0.008, 0.012);           // blackHole：不适用，近黑圆盘
+  }
+  fragColor = vec4(col, 1.0);
+}
+`;
+
+/* ========================= 日冕公告板（CORONA） ========================= */
+
+const CORONA_VERT = `
+// ============ 日冕：面向相机的公告板四边形顶点着色器 ============
+uniform mat4 uMVP;              // 模型部分须含面向相机的旋转（调用方 billboard）
+uniform float uCoronaRadius;    // 公告板世界半径
+in vec2 aPos;                   // 单位四边形角点 [-1,1]^2（TRIANGLE_STRIP）
+out vec2 vQuad;                 // 传给片元的公告板坐标
+
+void main() {
+  vQuad = aPos;
+  gl_Position = uMVP * vec4(aPos * uCoronaRadius, 0.0, 1.0);
+}
+`;
+
+const CORONA_FRAG = PRECISION_HEAD + GLSL_HASH + GLSL_NOISE + GLSL_FBM + `
+// ============ 日冕片元着色器 ============
+uniform float uTime;
+uniform float uSeed;
+uniform int uStarType;
+uniform float uCoronaRadius;    // 与顶点侧同名 uniform（同一程序共享）
+
+in vec2 vQuad;
+out vec4 fragColor;
+
+const float CO_TAU = 6.28318530718;
+
+// 星型 → 日冕色（HDR）
+vec3 coronaTint(int t) {
+  if (t == 0) return vec3(2.30, 1.55, 0.70);
+  if (t == 1) return vec3(2.05, 0.70, 0.30);
+  if (t == 2) return vec3(0.75, 1.55, 3.10);
+  if (t == 3) return vec3(1.70, 1.95, 2.40);
+  if (t == 4 || t == 5) return vec3(0.90, 2.20, 2.80);
+  return vec3(0.0);
+}
+
+// 极坐标径向拉伸噪声 fbm(vec2(atan(p.y,p.x)*12, log(r)*3 - uTime*0.6))，
+// 角向用双纪元交叉混合消除 atan ±π 接缝（与吸积盘同思路）
+float coronaFbm(float theta, float r, float t) {
+  float lr = log(max(r, 0.03));
+  float yC = lr * 3.0 - t * 0.6;                  // 径向对数坐标随时间向外流动
+  float u = fract(theta / CO_TAU + 0.5 + uSeed * 0.11);
+  float uB = fract(u + 0.5);
+  float nA = fbm2D(vec2((u - 0.5) * CO_TAU * 12.0, yC));
+  float nB = fbm2D(vec2((uB - 0.5) * CO_TAU * 12.0, yC));
+  return mix(nA, nB, abs(u * 2.0 - 1.0));
+}
+
+void main() {
+  float r = length(vQuad);
+  if (r > 1.0 || uStarType == 6) {               // 圆外 / blackHole 无日冕
+    fragColor = vec4(0.0);
+    return;
+  }
+  float theta = atan(vQuad.y, vQuad.x);
+  vec3 tint = coronaTint(uStarType);
+
+  // 太阳风流线：极坐标径向拉伸噪声阈值化
+  float n = coronaFbm(theta, r, uTime);
+  float stream = smoothstep(0.02, 0.62, n);
+
+  // 磁力线拱形日珥：角向周期拱 + 径向窗口（聚在 limb 一带）
+  float arch = pow(max(sin(theta * 3.0 + n * 2.6 + uSeed * 6.28), 0.0), 5.0);
+  arch *= smoothstep(0.30, 0.55, r) * (1.0 - smoothstep(0.72, 0.95, r));
+
+  // 辉光包络：内圈致密亮核 + 流线延伸 + 日珥
+  float glow = 1.05 * exp(-r * 2.6) + stream * 0.85 * exp(-r * 1.5) + arch * 0.75;
+
+  float fade = 1.0 - smoothstep(0.74, 1.0, r);   // 边缘 alpha 平滑衰减
+  vec3 col = tint * glow * (1.8 + 0.5 * sin(uTime * 0.7 + uSeed * 9.0));
+  float alpha = clamp(glow, 0.0, 1.0) * fade;
+  fragColor = vec4(col * fade, alpha);           // 预乘形式；建议加性混合
+}
+`;
+
+/* ========================= 脉冲星磁层（PULSAR） ========================= */
+
+const PULSAR_VERT = SPHERE_VERT_SRC;
+
+const PULSAR_FRAG = PRECISION_HEAD + `
+// ============ 脉冲星：双极喷流锥 + 磁层激波环片元着色器 ============
+// 网格约定：磁轴 = 局部 +Y。喷流锥 = 对顶双锥（表面 r=0.35·|y|，y∈[-1,1]）；
+// 激波环 = 赤道圆环（半径 0.8..1.0，y≈0）。同一程序可先后绘制两网格。
+uniform float uTime;
+uniform float uSeed;
+
+in vec3 vLocalPos;
+in vec3 vNormal;
+out vec4 fragColor;
+
+void main() {
+  vec3 p = vLocalPos;
+  float ax = abs(p.y);                 // 0 赤道 → 1 极尖
+  float rad = length(p.xz);
+  float ang = atan(p.z, p.x);
+
+  // —— 双极同步辐射喷流锥：锥体内沿轴向渐变 HDR 青白 ——
+  float coneR = 0.35 * ax + 0.03;      // 锥体半径随轴向距离线性展开
+  float ratio = rad / max(coneR, 0.001);
+  float core = 1.0 - smoothstep(0.30, 0.95, ratio);          // 锥体内充实度
+  float sr = rad / (0.14 * ax + 0.03);
+  float spine = exp(-sr * sr);                               // 中轴亮脊
+  float axial = pow(clamp(1.0 - ax, 0.0, 1.0), 0.55);        // 根部亮 → 尖端衰减
+  float helix = 0.68 + 0.32 * sin(ang * 3.0 + ax * 21.0 - uTime * 14.0);   // 高频螺旋
+  float flick = 0.72
+    + 0.38 * pow(0.5 + 0.5 * sin(uTime * 17.0 + uSeed * 43.0), 3.0)          // 快闪烁
+    + 0.18 * sin(uTime * 5.1 + uSeed * 11.0);                                // 慢脉动
+  vec3 jetCol = vec3(0.62, 0.94, 1.35);
+  vec3 jet = jetCol * (core * 0.8 + spine * 1.3) * axial * helix * flick * mix(5.2, 0.9, ax);
+
+  // —— 磁层激波环：绕赤道的亮环，双束方位调制随时间旋转 ——
+  float ry = p.y / 0.055;
+  float ring = exp(-ry * ry)
+    * smoothstep(0.52, 0.80, rad) * (1.0 - smoothstep(0.98, 1.18, rad));
+  float beam = 0.55 + 0.45 * pow(0.5 + 0.5 * sin(ang * 2.0 - uTime * 3.4 + uSeed), 2.0);
+  vec3 ringCol = vec3(0.55, 0.85, 1.20) * ring * beam * 3.1;
+
+  vec3 col = jet + ringCol;
+  float alpha = clamp(dot(col, vec3(0.333)), 0.0, 1.0);
+  fragColor = vec4(col, alpha);        // 建议加性混合 gl.ONE, gl.ONE
+}
+`;
+
+Object.assign(__exports, { STAR_VERT, STAR_FRAG, CORONA_VERT, CORONA_FRAG, PULSAR_VERT, PULSAR_FRAG });
+
+});
 __register("src/ui/screens/GalaxyView.js", function (__exports, __require) {
 /**
  * ui/screens/GalaxyView.js — 银河地图主视图（任务书 6.1 / 6.2）
@@ -26862,236 +27369,863 @@ class GalaxyRenderer {
 Object.assign(__exports, { GalaxyRenderer });
 
 });
-__register("src/render/gl/Mat4.js", function (__exports, __require) {
+__register("src/render/gl/Galaxy3D.js", function (__exports, __require) {
 /**
- * render/gl/Mat4.js — 4x4 列主序矩阵工具（WebGL 约定）
+ * render/gl/Galaxy3D.js — 银河 3D 场景 GL 资源构建（R3 / WebGL2 全 3D 棒旋星系）
  *
- * 移植自参考实现 simulation-matrix/common/math/mat4.js，并补全：
- *  - mat4TRS：欧拉角（yaw=Y, pitch=X, roll=Z，合成顺序 R = Ry·Rx·Rz）模型矩阵；
- *  - vec3ApplyMat4 / mat4MulVec4：向量变换。
+ * 职责：为 GalaxyRenderer 承载全部 WebGL2 资源构建与绘制调用（程序 / VAO / 动态缓冲），
+ * 顶层不触碰 document/window/GL（纯 JS + GLSL 字符串，可在 Node 侧安全 import）；
+ * 所有 GL 调用只发生在方法内部（持有真实上下文时）。
  *
- * 零分配约定：所有 out 均由调用方传入 Float32Array(16)（vec3 为 Float32Array(3)），
- * 渲染循环内不产生任何新数组。存储布局：m[col * 4 + row]（列主序）。
+ * ── 并行模块依赖契约（运行时经非阻塞动态 import 探测，缺席即用本地回退实现） ──
+ * 1) ./GalaxyParticles.js（并行工程师交付中）：
+ *      generateGalaxyParticles({count, seed, worldScale}) →
+ *        { positions: Float32Array(n*3), colors: Float32Array(n*3),
+ *          sizes: Float32Array(n),     seeds:  Float32Array(n) }   // 世界坐标
+ *      generateSupernovaSeeds(systems, worldScale) → Float32Array(systems.length)
+ *    本文件按同签名导出包装函数：外部模块在场且返回形状合法时优先使用，
+ *    否则回退到本地确定性实现（sin-hash，禁用随机数），接口不变。
+ * 2) ../shaders/NebulaShader.js（并行工程师交付中）：
+ *      导出 NEBULA_VERT / NEBULA_FRAG（全屏体积星云）与
+ *      SUPERNOVA_VERT / SUPERNOVA_FRAG（超新星球壳 imposter）。
+ *    约定与 PostProcessor 一致：GLSL ES 3.0 源码、不含 #version 行（GLCore 前置）。
+ *    顶点属性槽位（本文件 VAO 装配基准，真实模块须保持）：
+ *      loc0 aCorner vec2（单位四边形 [-1..1]，TRIANGLE_STRIP 4 顶点）
+ *      loc1 iPos vec3 / loc2 iRadius float / loc3 iColor vec3 / loc4 iSeed float
+ *    uniform：uView、uProj、uProjScale(vec2)、uTime(float)。
+ *    外部源码若带 #version 行会被剥除后再编译。
+ *
+ * ── 程序清单（全部加法混合 ONE/ONE、深度写关闭，绘制顺序不影响结果） ──
+ *   galaxy3d.disk    实例化粒子星系盘（40k billboard，径向高斯软斑，HDR>1）
+ *   galaxy3d.nebula  全屏体积星云 raymarch（3D fBm 5 八度 + 域扭曲 + 尘埃带消光；
+ *                    uSteps 由调用方按 tier 传入 24/14/0，<=0 跳过）
+ *   galaxy3d.line    航路 + 垂直投影标尺线（LINES 动态缓冲）
+ *   galaxy3d.sprite  星系节点核心 / 归属光晕 / 势力环（核心高斯 + 0.75 半径环带）
+ *   galaxy3d.shell   超新星球壳（视图空间射线-球求交 imposter，limb 增亮）
  */
 
-/** 新建单位矩阵（唯一的分配点：仅限初始化阶段调用） */
-function mat4() {
-  const m = new Float32Array(16);
-  m[0] = 1; m[5] = 1; m[10] = 1; m[15] = 1;
-  return m;
+// —— 并行模块探测（非阻塞动态 import） ——
+// 交付模块在场（http 直连模式）即优先采用其导出；缺席/加载失败静默回退本文件内的
+// 本地确定性实现（接口不变）。刻意不用顶层 await：R1 单文件打包器把模块体封装进
+// 同步工厂函数（tests/tools/build-static-bundle.mjs），await 会使 dist 构建失效；
+// 动态 import 不进入其静态依赖图，file:// 单文件模式下探测 404 后同样回退本地。
+let _extParticles = null;
+let _extNebula = null;
+function _probeExternal(spec, assign) {
+  try {
+    import(spec).then(assign, () => { /* 缺席：保持 null → 本地回退 */ });
+  } catch (_) { /* 极老环境无动态 import：仅用本地回退 */ }
+}
+_probeExternal('./GalaxyParticles.js', (m) => { _extParticles = m || null; });
+_probeExternal('../shaders/NebulaShader.js', (m) => { _extNebula = m || null; });
+
+/** 策略坐标 (0..1000) → 世界坐标的缩放系数（±10 世界单位银盘） */
+const WORLD_SCALE = 0.02;
+/** 星系盘粒子生成种子（确定性；世界静态，一次生成） */
+const GALAXY_SEED = 20261103;
+/** 粒子上限（tier 档位在此之内前缀截取绘制） */
+const PARTICLE_MAX = 40000;
+
+// —— 确定性 hash（禁用随机数） ——————————————————————————————
+
+function fract(x) { return x - Math.floor(x); }
+
+/** 带盐/种子的一维 hash（粒子生成用） */
+function hash01s(i, salt, seed) {
+  return fract(Math.sin(i * 127.1 + salt * 311.7 + seed * 0.618034) * 43758.5453);
 }
 
-/** out = 单位矩阵 */
-function mat4Identity(out) {
-  out.fill(0);
-  out[0] = 1; out[5] = 1; out[10] = 1; out[15] = 1;
-  return out;
+/** 字符串 → [0,1) 确定性 hash（FNV-1a 混淆），供星系高度剖面 / 超新星相位使用 */
+function hashString01(str) {
+  const s = String(str == null ? '' : str);
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return (h >>> 0) / 4294967296;
 }
 
-/** out = a * b（列主序；语义为先施加 b 再施加 a） */
-function mat4Multiply(out, a, b) {
-  const a00 = a[0], a01 = a[1], a02 = a[2], a03 = a[3];
-  const a10 = a[4], a11 = a[5], a12 = a[6], a13 = a[7];
-  const a20 = a[8], a21 = a[9], a22 = a[10], a23 = a[11];
-  const a30 = a[12], a31 = a[13], a32 = a[14], a33 = a[15];
-  for (let i = 0; i < 4; i++) {
-    const b0 = b[i * 4], b1 = b[i * 4 + 1], b2 = b[i * 4 + 2], b3 = b[i * 4 + 3];
-    out[i * 4] = b0 * a00 + b1 * a10 + b2 * a20 + b3 * a30;
-    out[i * 4 + 1] = b0 * a01 + b1 * a11 + b2 * a21 + b3 * a31;
-    out[i * 4 + 2] = b0 * a02 + b1 * a12 + b2 * a22 + b3 * a32;
-    out[i * 4 + 3] = b0 * a03 + b1 * a13 + b2 * a23 + b3 * a33;
+/**
+ * 星系三维位置：策略 (x,y) → 世界 (x-500, y-500)*WORLD_SCALE，
+ * 高度 z = hash(systemId)*±核球厚度剖面（银心厚、边缘薄，最大 ±0.56 世界单位）。
+ * @param {{id:string|number, x:number, y:number}} s 快照星系
+ * @param {Float32Array} [out] 复用输出 (3)
+ * @returns {Float32Array} [wx, wy, wz]
+ */
+function systemWorldPos(s, out) {
+  const o = out || new Float32Array(3);
+  if (!s) { o[0] = 0; o[1] = 0; o[2] = 0; return o; }
+  const wx = ((Number(s.x) || 0) - 500) * WORLD_SCALE;
+  const wy = ((Number(s.y) || 0) - 500) * WORLD_SCALE;
+  const rn = Math.sqrt(wx * wx + wy * wy) / (500 * WORLD_SCALE);
+  const thick = 0.055 + 0.5 * Math.exp(-Math.max(0, rn) * 2.4);
+  const h01 = hashString01(s.id != null ? String(s.id) : '');
+  o[0] = wx;
+  o[1] = wy;
+  o[2] = (h01 * 2 - 1) * thick;
+  return o;
+}
+
+// —— 粒子 / 种子生成（外部模块优先，本地确定性回退） ——————————————————
+
+/** 本地棒旋星系粒子生成：双主旋臂 + 中央棒 + 核球（核厚缘薄）+ HII 粉斑 */
+function generateGalaxyParticlesLocal(params) {
+  const count = Math.max(0, Math.round(Number(params && params.count) || 0));
+  const worldScale = Number(params && params.worldScale) > 0 ? Number(params.worldScale) : WORLD_SCALE;
+  const seedN = Math.abs(Math.round(Number(params && params.seed) || 0)) % 100000;
+  const R = 500 * worldScale; // 银盘世界半径（策略 0..1000 映射）
+
+  const positions = new Float32Array(count * 3);
+  const colors = new Float32Array(count * 3);
+  const sizes = new Float32Array(count);
+  const seeds = new Float32Array(count);
+
+  for (let i = 0; i < count; i++) {
+    const rr = Math.pow(hash01s(i, 1, seedN), 0.62); // 半径分布：内密外疏
+    const r = rr * R;
+    let x;
+    let y;
+    if (rr < 0.42 && hash01s(i, 2, seedN) < 0.30) {
+      // 中央棒：沿 x 轴拉长的椭球
+      const bx = (hash01s(i, 3, seedN) * 2 - 1) * R * 0.34;
+      const by = (hash01s(i, 4, seedN) * 2 - 1) * R * 0.10 * (1.15 - Math.abs(bx) / (R * 0.34));
+      x = bx;
+      y = by;
+    } else {
+      // 双主旋臂（自棒端起螺旋）+ 随半径放大的角向散布
+      const arm = (i % 2) * Math.PI;
+      const jitter = (hash01s(i, 3, seedN) * 2 - 1) * (0.10 + 0.55 * rr);
+      const th = arm + Math.max(0, rr - 0.30) * 6.1 + jitter;
+      const rs = r * (0.92 + hash01s(i, 4, seedN) * 0.16);
+      x = Math.cos(th) * rs;
+      y = Math.sin(th) * rs;
+    }
+    // 核球厚、边缘薄的垂直剖面（双 hash 叠加近似高斯）
+    const thick = 0.055 + 0.5 * Math.exp(-rr * 2.6);
+    const z = (hash01s(i, 5, seedN) + hash01s(i, 6, seedN) - 1) * thick;
+
+    positions[i * 3] = x;
+    positions[i * 3 + 1] = y;
+    positions[i * 3 + 2] = z;
+
+    // 色温：核黄 → 臂蓝白，少量 HII 粉斑；HDR 由着色器增益（颜色本身 <=1.1）
+    const t = Math.min(1, Math.max(0, rr * 1.35 + (hash01s(i, 7, seedN) - 0.5) * 0.4));
+    let cr = 1.0 + (0.60 - 1.0) * t;
+    let cg = 0.82 + (0.74 - 0.82) * t;
+    let cb = 0.55 + (1.00 - 0.55) * t;
+    if (hash01s(i, 8, seedN) > 0.968) { cr = 1.05; cg = 0.42; cb = 0.55; }
+    colors[i * 3] = cr;
+    colors[i * 3 + 1] = cg;
+    colors[i * 3 + 2] = cb;
+
+    // 尺寸：世界单位；少数大颗粒 + 核球增亮
+    let sz = 0.018 + Math.pow(hash01s(i, 9, seedN), 3) * 0.15;
+    if (rr < 0.2) sz += 0.02;
+    sizes[i] = sz;
+    seeds[i] = hash01s(i, 10, seedN);
+  }
+  return { positions, colors, sizes, seeds };
+}
+
+/** 本地超新星相位种子（与 systems 顺序对齐） */
+function generateSupernovaSeedsLocal(systems) {
+  const arr = Array.isArray(systems) ? systems : [];
+  const out = new Float32Array(arr.length);
+  for (let i = 0; i < arr.length; i++) {
+    const id = arr[i] && arr[i].id != null ? String(arr[i].id) : String(i);
+    out[i] = hashString01(`${id}:nova`);
   }
   return out;
 }
 
-/** 透视投影矩阵（fovy 为竖直视场角，弧度） */
-function mat4Perspective(out, fovyRad, aspect, near, far) {
-  const f = 1 / Math.tan(fovyRad / 2);
-  out.fill(0);
-  out[0] = f / aspect;
-  out[5] = f;
-  out[10] = (far + near) / (near - far);
-  out[11] = -1;
-  out[14] = (2 * far * near) / (near - far);
-  return out;
-}
-
-/** 正交投影矩阵 */
-function mat4Ortho(out, left, right, bottom, top, near, far) {
-  out.fill(0);
-  out[0] = 2 / (right - left);
-  out[5] = 2 / (top - bottom);
-  out[10] = -2 / (far - near);
-  out[12] = -(right + left) / (right - left);
-  out[13] = -(top + bottom) / (top - bottom);
-  out[14] = -(far + near) / (far - near);
-  out[15] = 1;
-  return out;
-}
-
-/** 视图矩阵：相机位于 eye，看向 center，up 为世界上方向（右手系） */
-function mat4LookAt(out, eye, center, up) {
-  let zx = eye[0] - center[0];
-  let zy = eye[1] - center[1];
-  let zz = eye[2] - center[2];
-  let len = Math.sqrt(zx * zx + zy * zy + zz * zz);
-  if (len === 0) { zx = 0; zy = 0; zz = 1; len = 1; }
-  zx /= len; zy /= len; zz /= len;
-  let xx = up[1] * zz - up[2] * zy;
-  let xy = up[2] * zx - up[0] * zz;
-  let xz = up[0] * zy - up[1] * zx;
-  len = Math.sqrt(xx * xx + xy * xy + xz * xz);
-  if (len === 0) { xx = 1; xy = 0; xz = 0; } else { xx /= len; xy /= len; xz /= len; }
-  const yx = zy * xz - zz * xy;
-  const yy = zz * xx - zx * xz;
-  const yz = zx * xy - zy * xx;
-  out[0] = xx; out[1] = yx; out[2] = zx; out[3] = 0;
-  out[4] = xy; out[5] = yy; out[6] = zy; out[7] = 0;
-  out[8] = xz; out[9] = yz; out[10] = zz; out[11] = 0;
-  out[12] = -(xx * eye[0] + xy * eye[1] + xz * eye[2]);
-  out[13] = -(yx * eye[0] + yy * eye[1] + yz * eye[2]);
-  out[14] = -(zx * eye[0] + zy * eye[1] + zz * eye[2]);
-  out[15] = 1;
-  return out;
-}
-
-/** 一般 4x4 求逆（伴随展开法）。奇异矩阵返回 null。 */
-function mat4Invert(out, m) {
-  const a00 = m[0], a01 = m[1], a02 = m[2], a03 = m[3];
-  const a10 = m[4], a11 = m[5], a12 = m[6], a13 = m[7];
-  const a20 = m[8], a21 = m[9], a22 = m[10], a23 = m[11];
-  const a30 = m[12], a31 = m[13], a32 = m[14], a33 = m[15];
-
-  const b00 = a00 * a11 - a01 * a10;
-  const b01 = a00 * a12 - a02 * a10;
-  const b02 = a00 * a13 - a03 * a10;
-  const b03 = a01 * a12 - a02 * a11;
-  const b04 = a01 * a13 - a03 * a11;
-  const b05 = a02 * a13 - a03 * a12;
-  const b06 = a20 * a31 - a21 * a30;
-  const b07 = a20 * a32 - a22 * a30;
-  const b08 = a20 * a33 - a23 * a30;
-  const b09 = a21 * a32 - a22 * a31;
-  const b10 = a21 * a33 - a23 * a31;
-  const b11 = a22 * a33 - a23 * a32;
-
-  let det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
-  if (!det) return null;
-  det = 1.0 / det;
-
-  out[0] = (a11 * b11 - a12 * b10 + a13 * b09) * det;
-  out[1] = (a02 * b10 - a01 * b11 - a03 * b09) * det;
-  out[2] = (a31 * b05 - a32 * b04 + a33 * b03) * det;
-  out[3] = (a22 * b04 - a21 * b05 - a23 * b03) * det;
-  out[4] = (a12 * b08 - a10 * b11 - a13 * b07) * det;
-  out[5] = (a00 * b11 - a02 * b08 + a03 * b07) * det;
-  out[6] = (a32 * b02 - a30 * b05 - a33 * b01) * det;
-  out[7] = (a20 * b05 - a22 * b02 + a23 * b01) * det;
-  out[8] = (a10 * b10 - a11 * b08 + a13 * b06) * det;
-  out[9] = (a01 * b08 - a00 * b10 - a03 * b06) * det;
-  out[10] = (a30 * b04 - a31 * b02 + a33 * b00) * det;
-  out[11] = (a21 * b02 - a20 * b04 - a23 * b00) * det;
-  out[12] = (a11 * b07 - a10 * b09 - a12 * b06) * det;
-  out[13] = (a00 * b09 - a01 * b07 + a02 * b06) * det;
-  out[14] = (a31 * b01 - a30 * b03 - a32 * b00) * det;
-  out[15] = (a20 * b03 - a21 * b01 + a22 * b00) * det;
-  return out;
-}
-
-/** 平移矩阵（覆盖 out，非右乘叠加） */
-function mat4Translate(out, x, y, z) {
-  mat4Identity(out);
-  out[12] = x; out[13] = y; out[14] = z;
-  return out;
-}
-
-/** 缩放矩阵（覆盖 out） */
-function mat4Scale(out, x, y, z) {
-  mat4Identity(out);
-  out[0] = x; out[5] = y; out[10] = z;
-  return out;
-}
-
-/** 绕 X 轴旋转矩阵（弧度，右手系；覆盖 out） */
-function mat4RotateX(out, rad) {
-  mat4Identity(out);
-  const c = Math.cos(rad), s = Math.sin(rad);
-  out[5] = c; out[6] = s; out[9] = -s; out[10] = c;
-  return out;
-}
-
-/** 绕 Y 轴旋转矩阵（弧度，右手系；覆盖 out） */
-function mat4RotateY(out, rad) {
-  mat4Identity(out);
-  const c = Math.cos(rad), s = Math.sin(rad);
-  out[0] = c; out[2] = -s; out[8] = s; out[10] = c;
-  return out;
-}
-
-/** 绕 Z 轴旋转矩阵（弧度，右手系；覆盖 out） */
-function mat4RotateZ(out, rad) {
-  mat4Identity(out);
-  const c = Math.cos(rad), s = Math.sin(rad);
-  out[0] = c; out[1] = s; out[4] = -s; out[5] = c;
-  return out;
+/**
+ * 星系盘粒子生成（包装）：并行模块在场且返回形状合法时透传，否则本地实现。
+ * @param {{count?:number, seed?:number, worldScale?:number}} [params]
+ * @returns {{positions:Float32Array, colors:Float32Array, sizes:Float32Array, seeds:Float32Array}}
+ */
+function generateGalaxyParticles(params) {
+  const ext = _extParticles;
+  if (ext && typeof ext.generateGalaxyParticles === 'function') {
+    try {
+      const out = ext.generateGalaxyParticles(params || {});
+      if (out && out.positions && out.colors && out.sizes && out.seeds) return out;
+    } catch (_) { /* 外部模块异常：回退本地确定性实现 */ }
+  }
+  return generateGalaxyParticlesLocal(params || {});
 }
 
 /**
- * 欧拉合成模型矩阵：out = T(t) · Ry(ry) · Rx(rx) · Rz(rz) · S(s)
- * 约定：ry = yaw（偏航，绕 Y），rx = pitch（俯仰，绕 X），rz = roll（翻滚，绕 Z），
- * 旋转合成顺序为 R = Ry·Rx·Rz（先 roll，再 pitch，最后 yaw）。
- * 解析展开一次写就，避免中间矩阵与临时分配。
+ * 超新星相位种子生成（包装）。
+ * @param {Array<{id:string|number}>} systems
+ * @param {number} [worldScale]
+ * @returns {Float32Array}
  */
-function mat4TRS(out, tx, ty, tz, rx, ry, rz, s) {
-  const cx = Math.cos(rx), sx = Math.sin(rx);
-  const cy = Math.cos(ry), sy = Math.sin(ry);
-  const cz = Math.cos(rz), sz = Math.sin(rz);
-
-  // R = Ry·Rx·Rz 的三个列向量（展开自 (cy·cz + sy·sx·sz) 等解析式）
-  out[0] = (cy * cz + sy * sx * sz) * s;   // 列 0 行 0：R·e_x.x
-  out[1] = cx * sz * s;                    // 列 0 行 1
-  out[2] = (-sy * cz + cy * sx * sz) * s;  // 列 0 行 2
-  out[3] = 0;
-  out[4] = (-cy * sz + sy * sx * cz) * s;  // 列 1 行 0：R·e_y.x
-  out[5] = cx * cz * s;                    // 列 1 行 1
-  out[6] = (sy * sz + cy * sx * cz) * s;   // 列 1 行 2
-  out[7] = 0;
-  out[8] = sy * cx * s;                    // 列 2 行 0：R·e_z.x
-  out[9] = -sx * s;                        // 列 2 行 1
-  out[10] = cy * cx * s;                   // 列 2 行 2
-  out[11] = 0;
-  out[12] = tx;                            // 列 3：平移
-  out[13] = ty;
-  out[14] = tz;
-  out[15] = 1;
-  return out;
+function generateSupernovaSeeds(systems, worldScale) {
+  void worldScale; // 契约占位参数：本地实现不依赖尺度
+  const ext = _extParticles;
+  const n = Array.isArray(systems) ? systems.length : 0;
+  if (ext && typeof ext.generateSupernovaSeeds === 'function') {
+    try {
+      const out = ext.generateSupernovaSeeds(systems, worldScale);
+      if (out && (out.length ?? -1) === n) return out;
+    } catch (_) { /* 回退本地实现 */ }
+  }
+  return generateSupernovaSeedsLocal(systems);
 }
+
+// —— GLSL（本地契约回退实现；外部 NebulaShader 在场时优先生效） ————————
+
+/** 剥除外部着色器可能自带的 #version 行（GLCore.createProgram 统一前置） */
+function stripVersion(src) {
+  return String(src || '').replace(/^\s*#version[^\n]*\n/, '');
+}
+
+function pickShader(ext, name, local) {
+  const v = ext ? ext[name] : null;
+  return typeof v === 'string' && v.length > 8 ? stripVersion(v) : local;
+}
+
+/** 全屏四边形顶点着色器（星云用，vUv [0..1]） */
+const LOCAL_NEBULA_VERT = `
+precision highp float;
+layout(location = 0) in vec2 aPos;
+out vec2 vUv;
+void main() {
+  vUv = aPos * 0.5 + 0.5;
+  gl_Position = vec4(aPos, 0.0, 1.0);
+}
+`;
 
 /**
- * 用 4x4 矩阵变换三维点/向量（隐含 w=1）并做透视除法（w=0 时按 1 处理）。
- * out 为 Float32Array(3)，允许 out === v。
+ * 体积星云片元：反投影生成视线，在 |z|<=HZ 薄板内 raymarch；
+ * 密度 = 域扭曲(两级低频 fBm) + 5 八度 3D fBm + 对数螺旋臂偏置 + 核厚缘薄包络；
+ * 尘埃带消光以光程累积 exp(-od) 作用于星云自身辐射（加法管线下不衰减既有像素）。
  */
-function vec3ApplyMat4(out, m, v) {
-  const x = v[0], y = v[1], z = v[2];
-  const w = m[3] * x + m[7] * y + m[11] * z + m[15];
-  const inv = w !== 0 ? 1 / w : 1;
-  out[0] = (m[0] * x + m[4] * y + m[8] * z + m[12]) * inv;
-  out[1] = (m[1] * x + m[5] * y + m[9] * z + m[13]) * inv;
-  out[2] = (m[2] * x + m[6] * y + m[10] * z + m[14]) * inv;
-  return out;
+const LOCAL_NEBULA_FRAG = `
+precision highp float;
+in vec2 vUv;
+out vec4 fragColor;
+uniform mat4 uInvViewProj;
+uniform float uTime;
+uniform float uSteps;
+uniform float uGain;
+
+float hash13(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.zyx + 31.32);
+  return fract((p.x + p.y) * p.z);
+}
+float vnoise(vec3 p) {
+  vec3 i = floor(p);
+  vec3 f = fract(p);
+  vec3 u = f * f * (3.0 - 2.0 * f);
+  float a = mix(hash13(i), hash13(i + vec3(1.0, 0.0, 0.0)), u.x);
+  float b = mix(hash13(i + vec3(0.0, 1.0, 0.0)), hash13(i + vec3(1.0, 1.0, 0.0)), u.x);
+  float c = mix(hash13(i + vec3(0.0, 0.0, 1.0)), hash13(i + vec3(1.0, 0.0, 1.0)), u.x);
+  float d = mix(hash13(i + vec3(0.0, 1.0, 1.0)), hash13(i + vec3(1.0, 1.0, 1.0)), u.x);
+  return mix(mix(a, b, u.y), mix(c, d, u.y), u.z);
+}
+float fbm2(vec3 p) {
+  float s = 0.5 * vnoise(p);
+  s += 0.25 * vnoise(p * 2.03 + vec3(11.7, 3.1, 7.9));
+  return s / 0.75;
+}
+float fbm5(vec3 p) {
+  float amp = 0.5;
+  float s = 0.0;
+  float norm = 0.0;
+  for (int i = 0; i < 5; i++) {
+    s += amp * vnoise(p);
+    norm += amp;
+    p = p * 2.02 + vec3(7.3, 1.9, 4.7);
+    amp *= 0.52;
+  }
+  return s / norm;
+}
+void main() {
+  vec2 ndc = vUv * 2.0 - 1.0;
+  vec4 pn = uInvViewProj * vec4(ndc, -1.0, 1.0);
+  vec4 pf = uInvViewProj * vec4(ndc, 1.0, 1.0);
+  vec3 ro = pn.xyz / pn.w;
+  vec3 rd = normalize(pf.xyz / pf.w - ro);
+
+  // 远景星野：视线方向锚定的确定性 hash 点（不随时间漂移）
+  vec3 col = vec3(0.0);
+  vec3 cell = floor(rd * 230.0);
+  float hs = hash13(cell + vec3(7.0));
+  float star = smoothstep(0.9972, 0.9999, hs) * (0.25 + 0.75 * hash13(cell + vec3(19.0)));
+  col += vec3(0.72, 0.8, 0.95) * star;
+
+  // 与银河薄板 |z| <= HZ 求交
+  const float HZ = 2.4;
+  float t0 = 0.0;
+  float t1 = 0.0;
+  bool hit = true;
+  if (abs(rd.z) < 1e-5) {
+    hit = abs(ro.z) < HZ;
+    t1 = hit ? 200.0 : 0.0;
+  } else {
+    float ta = (-HZ - ro.z) / rd.z;
+    float tb = (HZ - ro.z) / rd.z;
+    t0 = max(min(ta, tb), 0.0);
+    t1 = max(ta, tb);
+    hit = t1 > t0;
+  }
+
+  if (hit && uSteps > 0.5) {
+    float dt = (t1 - t0) / uSteps;
+    float t = t0 + dt * hash13(vec3(gl_FragCoord.xy, 1.0));
+    float od = 0.0;
+    vec3 acc = vec3(0.0);
+    for (int i = 0; i < 28; i++) {
+      if (float(i) >= uSteps) break;
+      vec3 p = ro + rd * t;
+      t += dt;
+      float rn = length(p.xy) * 0.1;
+      if (rn > 1.24 || abs(p.z) > HZ) continue;
+      // 域扭曲 + 5 八度 fBm + 对数螺旋臂偏置 + 垂直包络
+      vec3 w = vec3(fbm2(p * 0.4 + vec3(0.0, 0.0, uTime * 0.02)),
+                    fbm2(p * 0.4 + vec3(5.2, 1.3, 9.4)),
+                    fbm2(p * 0.4 + vec3(1.7, 8.1, 3.0)));
+      vec3 q = p * 0.55 + (w - 0.5) * 2.6;
+      float d = fbm5(q);
+      float ang = atan(p.y, p.x);
+      float arm = 0.5 + 0.5 * sin(ang * 2.0 - log(max(rn, 0.06)) * 4.6 + 1.7);
+      d *= 0.6 + 0.6 * arm;
+      float hThick = 0.09 + 0.5 * exp(-rn * 2.4);
+      d *= exp(-abs(p.z) / hThick) * smoothstep(1.24, 0.4, rn) * smoothstep(0.015, 0.14, rn);
+      d = smoothstep(0.3, 0.85, d);
+      if (d <= 0.002) continue;
+      // 尘埃带消光（自遮蔽光程）
+      float du = fbm2(q * 1.9 + vec3(13.1, 3.7, 8.2));
+      float dust = smoothstep(0.5, 0.78, du) * d;
+      // 辐射色：核暖黄 → 外缘蓝白 + HII 粉斑
+      vec3 em = mix(vec3(1.0, 0.62, 0.34), vec3(0.36, 0.55, 1.0), clamp(rn * 1.4 - 0.08, 0.0, 1.0));
+      float hii = fbm2(p * 1.35 + vec3(23.0, 11.0, 5.0));
+      em += vec3(1.0, 0.3, 0.48) * smoothstep(0.6, 0.85, hii) * 0.9;
+      acc += em * d * exp(-od) * dt * uGain;
+      od += dust * dt * 3.2;
+    }
+    col += acc;
+  }
+  fragColor = vec4(col, 1.0);
+}
+`;
+
+/** 超新星球壳顶点：相机朝向 billboard 展开 + 脉冲缩放（视图空间 imposter 基准） */
+const LOCAL_SUPERNOVA_VERT = `
+precision highp float;
+layout(location = 0) in vec2 aCorner;
+layout(location = 1) in vec3 iPos;
+layout(location = 2) in float iRadius;
+layout(location = 3) in vec3 iColor;
+layout(location = 4) in float iSeed;
+uniform mat4 uView;
+uniform mat4 uProj;
+uniform vec2 uProjScale;
+uniform float uTime;
+out vec2 vCorner;
+out vec3 vViewC;
+out float vRadius;
+out vec3 vColor;
+out float vSeed;
+void main() {
+  float pulse = 1.0 + 0.12 * sin(uTime * 2.3 + iSeed * 6.2831853);
+  float r = max(0.0001, iRadius * pulse);
+  vec4 vc = uView * vec4(iPos, 1.0);
+  vec4 cc = uProj * vc;
+  vCorner = aCorner;
+  vViewC = vc.xyz;
+  vRadius = r;
+  vColor = iColor;
+  vSeed = iSeed;
+  if (cc.w <= 0.0001) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    vRadius = 0.0;
+    return;
+  }
+  gl_Position = cc + vec4(aCorner * uProjScale * r * 1.06, 0.0, 0.0);
+}
+`;
+
+/** 超新星球壳片元：视图空间射线-球求交，limb 增亮 + 方位微条纹（additive） */
+const LOCAL_SUPERNOVA_FRAG = `
+precision highp float;
+in vec2 vCorner;
+in vec3 vViewC;
+in float vRadius;
+in vec3 vColor;
+in float vSeed;
+uniform float uTime;
+out vec4 fragColor;
+void main() {
+  if (vRadius <= 0.0) { fragColor = vec4(0.0); return; }
+  vec3 rd = vec3(vCorner * vRadius, vViewC.z);
+  vec3 c = vec3(0.0, 0.0, vViewC.z);
+  float r2 = dot(rd, rd);
+  float b = dot(rd, c);
+  float disc = b * b - r2 * (dot(c, c) - vRadius * vRadius);
+  if (disc <= 0.0) { fragColor = vec4(0.0); return; }
+  float sq = sqrt(disc);
+  float t = (b - sq) / r2;
+  if (t <= 0.0) t = (b + sq) / r2; // 相机入壳内时取后交点
+  if (t <= 0.0) { fragColor = vec4(0.0); return; }
+  vec3 p = rd * t;
+  vec3 n = normalize(p - c);
+  vec3 vdir = normalize(p);
+  float facing = clamp(dot(n, -vdir), 0.0, 1.0);
+  float rim = pow(1.0 - facing, 2.2);
+  float band = 0.78 + 0.22 * sin(atan(n.y, n.x) * 5.0 + uTime * 1.6 + vSeed * 37.0);
+  float inten = (rim * 2.6 + 0.10) * band;
+  fragColor = vec4(vColor * inten, 1.0);
+}
+`;
+
+// —— 星系盘粒子（实例化 billboard） ——————————————————————————————
+
+const VERT_DISK = `
+precision highp float;
+layout(location = 0) in vec2 aCorner;
+layout(location = 1) in vec3 iPos;
+layout(location = 2) in float iSize;
+layout(location = 3) in vec3 iColor;
+layout(location = 4) in float iSeed;
+uniform mat4 uViewProj;
+uniform vec2 uProjScale;
+uniform float uMinSize;
+uniform float uSizeClamp;
+out vec2 vCorner;
+out vec3 vColor;
+out float vSeed;
+void main() {
+  vec4 c = uViewProj * vec4(iPos, 1.0);
+  if (c.w <= 0.0001) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    vCorner = vec2(0.0);
+    vColor = vec3(0.0);
+    vSeed = 0.0;
+    return;
+  }
+  float sz = clamp(iSize, uMinSize, c.w * uSizeClamp);
+  gl_Position = c + vec4(aCorner * uProjScale * sz, 0.0, 0.0);
+  vCorner = aCorner;
+  vColor = iColor;
+  vSeed = iSeed;
+}
+`;
+
+/** 径向高斯软斑 + 亮核 + 种子闪烁（HDR 峰值 ~2.9，供 bloom 提取） */
+const FRAG_DISK = `
+precision highp float;
+in vec2 vCorner;
+in vec3 vColor;
+in float vSeed;
+uniform float uTime;
+out vec4 fragColor;
+void main() {
+  float d2 = dot(vCorner, vCorner);
+  float d = sqrt(d2);
+  float edge = smoothstep(1.0, 0.6, d);
+  float g = exp(-d2 * 5.0);
+  float core = exp(-d2 * 26.0);
+  float tw = 0.82 + 0.34 * sin(uTime * 1.7 + vSeed * 41.0);
+  fragColor = vec4(vColor * ((g * 1.05 + core * 1.9) * tw * edge), 1.0);
+}
+`;
+
+// —— 星系节点 / 归属光晕 / 势力环（实例化 billboard：核心高斯 + 环带） ————
+
+const VERT_SPRITE = `
+precision highp float;
+layout(location = 0) in vec2 aCorner;
+layout(location = 1) in vec3 iPos;
+layout(location = 2) in float iSize;
+layout(location = 3) in vec4 iColA;
+layout(location = 4) in vec4 iColB;
+uniform mat4 uViewProj;
+uniform vec2 uProjScale;
+uniform float uSizeClamp;
+out vec2 vCorner;
+out vec4 vColA;
+out vec4 vColB;
+void main() {
+  vec4 c = uViewProj * vec4(iPos, 1.0);
+  if (c.w <= 0.0001) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    vCorner = vec2(0.0);
+    vColA = vec4(0.0);
+    vColB = vec4(0.0);
+    return;
+  }
+  float sz = min(iSize, c.w * uSizeClamp);
+  gl_Position = c + vec4(aCorner * uProjScale * sz, 0.0, 0.0);
+  vCorner = aCorner;
+  vColA = iColA;
+  vColB = iColB;
+}
+`;
+
+/** 环带中心 d=0.75（调用方按 目标半径/0.75 换算实例尺寸），核心为高斯软斑 */
+const FRAG_SPRITE = `
+precision highp float;
+in vec2 vCorner;
+in vec4 vColA;
+in vec4 vColB;
+out vec4 fragColor;
+void main() {
+  float d = length(vCorner);
+  float edge = smoothstep(1.0, 0.8, d);
+  float core = exp(-d * d * 5.5);
+  float ring = exp(-pow((d - 0.75) * 9.0, 2.0));
+  vec3 col = vColA.rgb * (core * vColA.a) + vColB.rgb * (ring * vColB.a);
+  fragColor = vec4(col * edge, 1.0);
+}
+`;
+
+// —— 航路 / 标尺线 ——————————————————————————————————————————————
+
+const VERT_LINE = `
+precision highp float;
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec4 aColor;
+uniform mat4 uViewProj;
+out vec4 vColor;
+void main() {
+  vColor = aColor;
+  gl_Position = uViewProj * vec4(aPos, 1.0);
+}
+`;
+
+const FRAG_LINE = `
+precision highp float;
+in vec4 vColor;
+out vec4 fragColor;
+void main() {
+  fragColor = vec4(vColor.rgb * vColor.a, 1.0);
+}
+`;
+
+/** 解析实际生效的星云/超新星着色器（外部模块优先，本地契约回退） */
+function resolveNebulaShaders() {
+  return {
+    NEBULA_VERT: pickShader(_extNebula, 'NEBULA_VERT', LOCAL_NEBULA_VERT),
+    NEBULA_FRAG: pickShader(_extNebula, 'NEBULA_FRAG', LOCAL_NEBULA_FRAG),
+    SUPERNOVA_VERT: pickShader(_extNebula, 'SUPERNOVA_VERT', LOCAL_SUPERNOVA_VERT),
+    SUPERNOVA_FRAG: pickShader(_extNebula, 'SUPERNOVA_FRAG', LOCAL_SUPERNOVA_FRAG),
+  };
 }
 
-/** 用 4x4 矩阵变换四维向量（完整分量，含 w 行），允许 out === v。 */
-function mat4MulVec4(out, m, v) {
-  const x = v[0], y = v[1], z = v[2], w = v[3];
-  out[0] = m[0] * x + m[4] * y + m[8] * z + m[12] * w;
-  out[1] = m[1] * x + m[5] * y + m[9] * z + m[13] * w;
-  out[2] = m[2] * x + m[6] * y + m[10] * z + m[14] * w;
-  out[3] = m[3] * x + m[7] * y + m[11] * z + m[15] * w;
-  return out;
+// —— GL 资源容器 ——————————————————————————————————————————————————
+
+/** 星系盘实例步长：pos3 + size1 + color3 + seed1（float） */
+const DISK_STRIDE_F = 8;
+/** 节点 sprite 实例步长：pos3 + size1 + colA4 + colB4（float） */
+const SPRITE_STRIDE_F = 12;
+/** 球壳实例步长：pos3 + radius1 + color3 + seed1（float） */
+const SHELL_STRIDE_F = 8;
+/** 线段顶点步长：pos3 + rgba4（float） */
+const LINE_STRIDE_F = 7;
+
+class Galaxy3D {
+  constructor() {
+    this.glc = null;
+    this.gl = null;
+    /** 实际可绘制粒子实例数（生成结果可能少于请求值） */
+    this.particleCount = 0;
+
+    this._quadBuf = null;
+    this._quadVao = null;
+    this._bufDisk = null;
+    this._vaoDisk = null;
+    this._bufSprite = null;
+    this._vaoSprite = null;
+    this._bufShell = null;
+    this._vaoShell = null;
+    this._bufLine = null;
+    this._vaoLine = null;
+
+    this._progDisk = null;
+    this._progSprite = null;
+    this._progLine = null;
+    this._progNebula = null;
+    this._progShell = null;
+    this._u = {};
+  }
+
+  /**
+   * 构建全部程序 / VAO / 缓冲（上下文丢失恢复后可重复调用：rebuild）。
+   * 任一着色器编译失败即抛错（调用方捕获后整体退回 2D 路径）。
+   * @param {import('./GLCore.js').GLContext} glc
+   */
+  init(glc) {
+    if (!glc || !glc.gl) throw new Error('[Galaxy3D] 需要 GLContext 实例');
+    this.glc = glc;
+    this.gl = glc.gl;
+    const gl = glc.gl;
+
+    this._buildPrograms();
+
+    // 单位四边形（TRIANGLE_STRIP 4 顶点）：billboard 与全屏 pass 共用数据
+    this._quadBuf = glc.createBuffer(new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    this._quadVao = glc.createFullscreenVAO();
+
+    this._buildDiskResources(glc, gl);
+    this._buildSpriteResources(glc, gl);
+    this._buildShellResources(glc, gl);
+    this._buildLineResources(glc, gl);
+    return this;
+  }
+
+  /** 上下文恢复钩子：旧句柄已随上下文失效，整体重建 */
+  rebuild(glc) {
+    this.init(glc);
+  }
+
+  // —— 资源构建 ————————————————————————————————————————————
+
+  _buildPrograms() {
+    const glc = this.glc;
+    const sh = resolveNebulaShaders();
+    const loc = (prog, name) => glc.gl.getUniformLocation(prog, name);
+
+    this._progDisk = glc.createProgram(VERT_DISK, FRAG_DISK, { label: 'galaxy3d.disk' });
+    this._u.disk = {
+      viewProj: loc(this._progDisk, 'uViewProj'),
+      projScale: loc(this._progDisk, 'uProjScale'),
+      minSize: loc(this._progDisk, 'uMinSize'),
+      sizeClamp: loc(this._progDisk, 'uSizeClamp'),
+      time: loc(this._progDisk, 'uTime'),
+    };
+
+    this._progSprite = glc.createProgram(VERT_SPRITE, FRAG_SPRITE, { label: 'galaxy3d.sprite' });
+    this._u.sprite = {
+      viewProj: loc(this._progSprite, 'uViewProj'),
+      projScale: loc(this._progSprite, 'uProjScale'),
+      sizeClamp: loc(this._progSprite, 'uSizeClamp'),
+    };
+
+    this._progLine = glc.createProgram(VERT_LINE, FRAG_LINE, { label: 'galaxy3d.line' });
+    this._u.line = { viewProj: loc(this._progLine, 'uViewProj') };
+
+    this._progNebula = glc.createProgram(sh.NEBULA_VERT, sh.NEBULA_FRAG, { label: 'galaxy3d.nebula' });
+    this._u.nebula = {
+      invViewProj: loc(this._progNebula, 'uInvViewProj'),
+      time: loc(this._progNebula, 'uTime'),
+      steps: loc(this._progNebula, 'uSteps'),
+      gain: loc(this._progNebula, 'uGain'),
+    };
+
+    this._progShell = glc.createProgram(sh.SUPERNOVA_VERT, sh.SUPERNOVA_FRAG, { label: 'galaxy3d.shell' });
+    this._u.shell = {
+      view: loc(this._progShell, 'uView'),
+      proj: loc(this._progShell, 'uProj'),
+      projScale: loc(this._progShell, 'uProjScale'),
+      time: loc(this._progShell, 'uTime'),
+    };
+  }
+
+  /** 星系盘：生成（外部模块优先）→ 交错 → 静态实例缓冲 + VAO */
+  _buildDiskResources(glc, gl) {
+    const gen = generateGalaxyParticles({ count: PARTICLE_MAX, seed: GALAXY_SEED, worldScale: WORLD_SCALE });
+    const pos = gen.positions;
+    const col = gen.colors;
+    const siz = gen.sizes;
+    const sd = gen.seeds;
+    const n = Math.min(Math.floor(pos.length / 3), Math.floor(col.length / 3), siz.length, sd.length);
+    this.particleCount = Math.max(0, n);
+
+    const inst = new Float32Array(this.particleCount * DISK_STRIDE_F);
+    for (let i = 0; i < this.particleCount; i++) {
+      const o = i * DISK_STRIDE_F;
+      inst[o] = pos[i * 3];
+      inst[o + 1] = pos[i * 3 + 1];
+      inst[o + 2] = pos[i * 3 + 2];
+      inst[o + 3] = siz[i];
+      inst[o + 4] = col[i * 3];
+      inst[o + 5] = col[i * 3 + 1];
+      inst[o + 6] = col[i * 3 + 2];
+      inst[o + 7] = sd[i];
+    }
+    this._bufDisk = glc.createBuffer(inst, gl.STATIC_DRAW);
+    const quad = this._quadBuf;
+    this._vaoDisk = glc.createVAO((g) => {
+      g.bindBuffer(g.ARRAY_BUFFER, quad);
+      g.enableVertexAttribArray(0);
+      g.vertexAttribPointer(0, 2, g.FLOAT, false, 0, 0);
+      g.bindBuffer(g.ARRAY_BUFFER, this._bufDisk);
+      g.enableVertexAttribArray(1);
+      g.vertexAttribPointer(1, 3, g.FLOAT, false, DISK_STRIDE_F * 4, 0);
+      g.vertexAttribDivisor(1, 1);
+      g.enableVertexAttribArray(2);
+      g.vertexAttribPointer(2, 1, g.FLOAT, false, DISK_STRIDE_F * 4, 12);
+      g.vertexAttribDivisor(2, 1);
+      g.enableVertexAttribArray(3);
+      g.vertexAttribPointer(3, 3, g.FLOAT, false, DISK_STRIDE_F * 4, 16);
+      g.vertexAttribDivisor(3, 1);
+      g.enableVertexAttribArray(4);
+      g.vertexAttribPointer(4, 1, g.FLOAT, false, DISK_STRIDE_F * 4, 28);
+      g.vertexAttribDivisor(4, 1);
+    });
+  }
+
+  /** 节点 sprite：动态实例缓冲（每帧 bufferSubData 覆盖）+ VAO */
+  _buildSpriteResources(glc, gl) {
+    this._bufSprite = glc.createBuffer(new Float32Array(1024 * SPRITE_STRIDE_F), gl.DYNAMIC_DRAW);
+    const quad = this._quadBuf;
+    this._vaoSprite = glc.createVAO((g) => {
+      g.bindBuffer(g.ARRAY_BUFFER, quad);
+      g.enableVertexAttribArray(0);
+      g.vertexAttribPointer(0, 2, g.FLOAT, false, 0, 0);
+      g.bindBuffer(g.ARRAY_BUFFER, this._bufSprite);
+      g.enableVertexAttribArray(1);
+      g.vertexAttribPointer(1, 3, g.FLOAT, false, SPRITE_STRIDE_F * 4, 0);
+      g.vertexAttribDivisor(1, 1);
+      g.enableVertexAttribArray(2);
+      g.vertexAttribPointer(2, 1, g.FLOAT, false, SPRITE_STRIDE_F * 4, 12);
+      g.vertexAttribDivisor(2, 1);
+      g.enableVertexAttribArray(3);
+      g.vertexAttribPointer(3, 4, g.FLOAT, false, SPRITE_STRIDE_F * 4, 16);
+      g.vertexAttribDivisor(3, 1);
+      g.enableVertexAttribArray(4);
+      g.vertexAttribPointer(4, 4, g.FLOAT, false, SPRITE_STRIDE_F * 4, 32);
+      g.vertexAttribDivisor(4, 1);
+    });
+  }
+
+  /** 超新星球壳：动态实例缓冲 + VAO */
+  _buildShellResources(glc, gl) {
+    this._bufShell = glc.createBuffer(new Float32Array(128 * SHELL_STRIDE_F), gl.DYNAMIC_DRAW);
+    const quad = this._quadBuf;
+    this._vaoShell = glc.createVAO((g) => {
+      g.bindBuffer(g.ARRAY_BUFFER, quad);
+      g.enableVertexAttribArray(0);
+      g.vertexAttribPointer(0, 2, g.FLOAT, false, 0, 0);
+      g.bindBuffer(g.ARRAY_BUFFER, this._bufShell);
+      g.enableVertexAttribArray(1);
+      g.vertexAttribPointer(1, 3, g.FLOAT, false, SHELL_STRIDE_F * 4, 0);
+      g.vertexAttribDivisor(1, 1);
+      g.enableVertexAttribArray(2);
+      g.vertexAttribPointer(2, 1, g.FLOAT, false, SHELL_STRIDE_F * 4, 12);
+      g.vertexAttribDivisor(2, 1);
+      g.enableVertexAttribArray(3);
+      g.vertexAttribPointer(3, 3, g.FLOAT, false, SHELL_STRIDE_F * 4, 16);
+      g.vertexAttribDivisor(3, 1);
+      g.enableVertexAttribArray(4);
+      g.vertexAttribPointer(4, 1, g.FLOAT, false, SHELL_STRIDE_F * 4, 28);
+      g.vertexAttribDivisor(4, 1);
+    });
+  }
+
+  /** 线（航路 + 标尺）：动态顶点缓冲 + VAO */
+  _buildLineResources(glc, gl) {
+    this._bufLine = glc.createBuffer(new Float32Array(6000 * LINE_STRIDE_F), gl.DYNAMIC_DRAW);
+    this._vaoLine = glc.createVAO((g) => {
+      g.bindBuffer(g.ARRAY_BUFFER, this._bufLine);
+      g.enableVertexAttribArray(0);
+      g.vertexAttribPointer(0, 3, g.FLOAT, false, LINE_STRIDE_F * 4, 0);
+      g.enableVertexAttribArray(1);
+      g.vertexAttribPointer(1, 4, g.FLOAT, false, LINE_STRIDE_F * 4, 12);
+    });
+  }
+
+  // —— 绘制调用（每帧；混合/深度状态由调用方统一：additive ONE/ONE、depth 关） ——
+
+  /**
+   * 星系盘粒子：一次 drawArraysInstanced 画 count 个 billboard（count <= particleCount）。
+   * @param {{viewProj:Float32Array, px:number, py:number, minSize:number, count:number, time:number}} o
+   */
+  drawDisk(gl, o) {
+    const u = this._u.disk;
+    const count = Math.min(Math.max(0, Math.round(o.count) || 0), this.particleCount);
+    if (count <= 0) return;
+    gl.useProgram(this._progDisk);
+    gl.uniformMatrix4fv(u.viewProj, false, o.viewProj);
+    gl.uniform2f(u.projScale, o.px, o.py);
+    gl.uniform1f(u.minSize, o.minSize);
+    gl.uniform1f(u.sizeClamp, 0.5);
+    gl.uniform1f(u.time, o.time || 0);
+    gl.bindVertexArray(this._vaoDisk);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
+    gl.bindVertexArray(null);
+  }
+
+  /**
+   * 节点 sprite 批量绘制（data 为预填实例数组，count 为实例数）。
+   * @param {{viewProj:Float32Array, px:number, py:number}} o
+   */
+  drawSprites(gl, data, count, o) {
+    const n = Math.max(0, Math.round(count) || 0);
+    if (n <= 0 || !this._bufSprite) return;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._bufSprite);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, data, 0, n * SPRITE_STRIDE_F);
+    const u = this._u.sprite;
+    gl.useProgram(this._progSprite);
+    gl.uniformMatrix4fv(u.viewProj, false, o.viewProj);
+    gl.uniform2f(u.projScale, o.px, o.py);
+    gl.uniform1f(u.sizeClamp, 0.5);
+    gl.bindVertexArray(this._vaoSprite);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, n);
+    gl.bindVertexArray(null);
+  }
+
+  /**
+   * 超新星球壳批量绘制。
+   * @param {{view:Float32Array, proj:Float32Array, px:number, py:number, time:number}} o
+   */
+  drawShell(gl, data, count, o) {
+    const n = Math.max(0, Math.round(count) || 0);
+    if (n <= 0 || !this._bufShell) return;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._bufShell);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, data, 0, n * SHELL_STRIDE_F);
+    const u = this._u.shell;
+    gl.useProgram(this._progShell);
+    gl.uniformMatrix4fv(u.view, false, o.view);
+    gl.uniformMatrix4fv(u.proj, false, o.proj);
+    gl.uniform2f(u.projScale, o.px, o.py);
+    gl.uniform1f(u.time, o.time || 0);
+    gl.bindVertexArray(this._vaoShell);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, n);
+    gl.bindVertexArray(null);
+  }
+
+  /**
+   * 线段批量绘制（航路 + 垂直标尺；data 已填充 vertCount 个顶点）。
+   * @param {{viewProj:Float32Array}} o
+   */
+  drawLines(gl, data, vertCount, o) {
+    const n = Math.max(0, Math.round(vertCount) || 0);
+    if (n <= 0 || !this._bufLine) return;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._bufLine);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, data, 0, n * LINE_STRIDE_F);
+    const u = this._u.line;
+    gl.useProgram(this._progLine);
+    gl.uniformMatrix4fv(u.viewProj, false, o.viewProj);
+    gl.bindVertexArray(this._vaoLine);
+    gl.drawArrays(gl.LINES, 0, n);
+    gl.bindVertexArray(null);
+  }
+
+  /**
+   * 全屏体积星云 pass（加法；uSteps <= 0 时调用方应整体跳过本 pass）。
+   * @param {{invViewProj:Float32Array, time:number, steps:number, gain:number}} o
+   */
+  drawNebula(gl, o) {
+    const steps = Math.max(0, Math.min(28, Math.round(o.steps) || 0));
+    if (steps <= 0) return;
+    const u = this._u.nebula;
+    gl.useProgram(this._progNebula);
+    gl.uniformMatrix4fv(u.invViewProj, false, o.invViewProj);
+    gl.uniform1f(u.time, o.time || 0);
+    gl.uniform1f(u.steps, steps);
+    gl.uniform1f(u.gain, o.gain);
+    gl.bindVertexArray(this._quadVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.bindVertexArray(null);
+  }
 }
 
-Object.assign(__exports, { mat4, mat4Identity, mat4Multiply, mat4Perspective, mat4Ortho, mat4LookAt, mat4Invert, mat4Translate, mat4Scale, mat4RotateX, mat4RotateY, mat4RotateZ, mat4TRS, vec3ApplyMat4, mat4MulVec4 });
+Object.assign(__exports, { WORLD_SCALE, hashString01, systemWorldPos, generateGalaxyParticles, generateSupernovaSeeds, Galaxy3D });
 
 });
 __register("src/ui/screens/MenuView.js", function (__exports, __require) {

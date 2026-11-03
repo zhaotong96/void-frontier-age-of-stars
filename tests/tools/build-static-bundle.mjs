@@ -46,7 +46,8 @@ function collectModules(entryId) {
     const id = queue.pop();
     if (modules.has(id)) continue;
     const abs = join(ROOT, id);
-    const source = readFileSync(abs, 'utf8');
+    const raw = readFileSync(abs, 'utf8');
+    const source = normalizeMultiLineImports(raw);
     modules.set(id, source);
     for (const spec of scanSpecifiers(source)) {
       const dep = resolveSpecifier(id, spec);
@@ -55,6 +56,43 @@ function collectModules(entryId) {
     }
   }
   return modules;
+}
+
+/**
+ * 归一化多行 import/export 语句：将跨行的 import { ... } from '...'
+ * 压缩为单行，使后续单行正则能正确匹配。
+ */
+function normalizeMultiLineImports(source) {
+  const lines = source.split('\n');
+  const out = [];
+  let joining = false;
+  let joined = '';
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!joining) {
+      // 仅当 import/export 语句开头且不含 from/from 导入路径时才进入连接模式。
+      // export const/let/var/function/class/default 声明不参与连接（防止
+      // 多行对象字面量被误吞 —— 如 localization 词典 export const DICT = {...}）
+      const isImportStart = /^import\s+\{/.test(trimmed) && !/from\s*['"]/.test(trimmed);
+      const isExportFrom = /^export\s+\{/.test(trimmed) && !/from\s*['"]/.test(trimmed) && !/;\s*$/.test(trimmed);
+      const isImportBare = /^import\s+[A-Za-z$*]/.test(trimmed) && !/from\s*['"]/.test(trimmed) && !/['"]\s*;?\s*$/.test(trimmed);
+      if (isImportStart || isExportFrom || isImportBare) {
+        joining = true;
+        joined = line;
+      } else {
+        out.push(line);
+      }
+    } else {
+      joined += ' ' + trimmed;
+      // 连接终止：出现 from '...' 或行尾以引号+分号结束
+      if (/from\s*['"]/.test(trimmed) || /['"]\s*;?\s*$/.test(trimmed)) {
+        joining = false;
+        out.push(joined);
+      }
+    }
+  }
+  if (joining) out.push(joined);
+  return out.join('\n');
 }
 
 /** 扫描静态 import 说明符（含 export...from 重导出；单行锚定，防止跨行吞噬） */
