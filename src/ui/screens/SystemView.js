@@ -113,6 +113,13 @@ export const SystemView = {
 
     // —— 主体：3D 轨道画布占满全视口 ——
     const body = el('div', { class: 'vf-view-body', style: { overflow: 'hidden' } });
+    // —— 悬浮情报舱（原右栏内容：档案 / 行星 / 舰队 / 异常）——
+    this._dossier = el('div', { class: 'vf-float-panel' });
+    body.appendChild(this._dossier);
+
+    const wrap = el('div', { class: 'vf-view vf-view-immersive' }, [head, body]);
+    root.appendChild(wrap); // 先入文档再建画布：保证 GL 上下文/System3D 在挂载态初始化
+
     this._cm = new CanvasManager().attach(body);
     this._renderer = new SystemRenderer();
     this._renderer.init(this._cm); // GL 通道接线（WebGL2 不可用时内部自动退化 2D）
@@ -120,13 +127,6 @@ export const SystemView = {
     this._unsubResize = this._cm.onResize(() => {
       if (this._mounted) this._drawFrame();
     });
-
-    // —— 悬浮情报舱（原右栏内容：档案 / 行星 / 舰队 / 异常）——
-    this._dossier = el('div', { class: 'vf-float-panel' });
-    body.appendChild(this._dossier);
-
-    const wrap = el('div', { class: 'vf-view vf-view-immersive' }, [head, body]);
-    root.appendChild(wrap);
 
     // —— 画布交互：拖拽旋转 / 滚轮缩放 / 单击选择 ——
     this._bindCanvasEvents();
@@ -262,12 +262,15 @@ export const SystemView = {
     ];
   },
 
-  /** 数字变焦：缩放画布容器（GL 与 HUD 2D 同步），拾取坐标已按实际尺寸反解 */
+  /** 数字变焦：缩放两层画布元素本身（GL 与 HUD 2D 同步；不缩放包裹层，
+   *  避免 CanvasManager 测量到放大后的矩形而膨胀绘制缓冲），拾取坐标按实际矩形反解 */
   _setZoom(z) {
     this._zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
-    const canvas = this._cm && this._cm.canvas;
-    const wrap = canvas && canvas.parentNode; // .vf-view-canvas 包裹层
-    if (wrap) wrap.style.transform = `scale(${this._zoom})`;
+    const cm = this._cm;
+    if (!cm) return;
+    for (const c of [cm.glCanvas, cm.hudCanvas]) {
+      if (c) c.style.transform = `scale(${this._zoom})`;
+    }
   },
 
   /** 整体刷新：重建数据包 + 标题 + 悬浮情报舱 */

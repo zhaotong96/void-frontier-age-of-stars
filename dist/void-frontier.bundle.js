@@ -574,6 +574,7 @@ const { SPEEDS: SPEEDS, dateStr: dateStr } = __require("src/core/clock.js");
 const { buildSnapshot: buildSnapshot } = __require("src/simulation/SnapshotBuilder.js");
 const { SaveManager: SaveManager } = __require("src/persistence/SaveManager.js");
 const { toast: toast, showModal: showModal } = __require("src/ui/components/index.js");
+const { el: el } = __require("src/ui/components/dom.js");
 const { L: L, setLanguage: setLanguage } = __require("src/core/i18n.js");
 const { AudioManager: AudioManager } = __require("src/render/AudioManager.js");
 const { recentLog: recentLog } = __require("src/core/eventBus.js");
@@ -601,6 +602,8 @@ const { TopBar: TopBar } = __require("src/ui/shell/TopBar.js");
 const { SideNav: SideNav } = __require("src/ui/shell/SideNav.js");
 const { Inspector: Inspector } = __require("src/ui/shell/Inspector.js");
 const { BottomBar: BottomBar } = __require("src/ui/shell/BottomBar.js");
+
+let app_keysBound = false;
 
 class App {
   constructor(rootEl) {
@@ -656,6 +659,26 @@ class App {
     this._onRoute(parseHash());
     mark('route:done');
     mark('boot:end');
+    // 全局键盘快捷键（任务书 6.6：不依赖设置页是否被打开；R7 追加 N / Esc）
+    if (!app_keysBound) {
+      app_keysBound = true;
+      window.addEventListener('keydown', (e) => {
+        const tag = ((e.target && e.target.tagName) || '').toLowerCase();
+        if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+        // Esc：模态自身监听并关闭弹窗，这里避免重复动作；否则取消选中并收起抽屉
+        if (e.key === 'Escape') {
+          if (document.querySelector('.vf-modal-backdrop')) return;
+          if (this.selection) this.select(null);
+          else this.setInspectorOpen(false);
+          return;
+        }
+        if (!this.inGame) return;
+        if (e.code === 'Space') { e.preventDefault(); this.togglePause(); }
+        else if (e.key >= '1' && e.key <= '4') { this.setSpeed(parseInt(e.key, 10)); }
+        else if (e.key === 'g' || e.key === 'G') { this.goto('galaxy'); }
+        else if (e.key === 'n' || e.key === 'N') { this.openNextEvent(); }
+      });
+    }
     // rAF 看门狗：后台/失焦标签页 rAF 被冻结时以低频维持模拟（降频不冻结）
     this._watchdog = setInterval(() => {
       if (performance.now() - this.lastFrame > 600) this._frame(performance.now());
@@ -665,24 +688,78 @@ class App {
     requestAnimationFrame(this._frame);
   }
 
+  /**
+   * 构建应用外壳（R7 全屏沉浸式）：
+   *   .vf-main 固定铺满 100vw×100vh 承载 3D 视口；顶栏 / 导航栏 / 遥测条 /
+   *   检视器全部改为悬浮毛玻璃 HUD，叠加在视口之上（见 styles.css）。
+   * 初始带 .in-menu（首路由是菜单），由 _onRoute 维护。
+   */
   buildShell() {
     this.root.innerHTML = '';
     const shell = document.createElement('div');
-    shell.className = 'vf-shell';
+    shell.className = 'vf-shell in-menu';
     shell.innerHTML = `
+      <main class="vf-main" id="vf-main"></main>
       <header class="vf-topbar" id="vf-topbar"></header>
       <nav class="vf-sidebar" id="vf-sidebar" aria-label="主导航"></nav>
-      <main class="vf-main" id="vf-main"></main>
-      <aside class="vf-inspector" id="vf-inspector"></aside>
+      <aside class="vf-inspector" id="vf-inspector" aria-label="上下文检视器"></aside>
       <footer class="vf-bottombar" id="vf-bottombar"></footer>
     `;
     this.root.appendChild(shell);
     this.shellEl = shell;
+    this.mainEl = document.getElementById('vf-main');
+    this.inspectorEl = document.getElementById('vf-inspector');
     this.topBar = new TopBar(document.getElementById('vf-topbar'), this);
     this.sideNav = new SideNav(document.getElementById('vf-sidebar'), this);
-    this.inspector = new Inspector(document.getElementById('vf-inspector'), this);
+    this.inspector = new Inspector(this.inspectorEl, this);
     this.bottomBar = new BottomBar(document.getElementById('vf-bottombar'), this);
-    this.mainEl = document.getElementById('vf-main');
+    // 顶栏拆分为三个悬浮 HUD 岛（品牌/星历/倍率 · 资源态势 · 通知）
+    this._hudIslandsInit();
+  }
+
+  /**
+   * 把 TopBar 的单行内容分发到三个 .vf-hud-island（TopBar 本身只负责渲染行，
+   * 每次 render 后重新分发：左岛=品牌/星历/时间倍率，中岛=资源与威胁态势，右岛=通知）。
+   */
+  _hudIslandsInit() {
+    const bar = document.getElementById('vf-topbar');
+    if (!bar) return;
+    const mk = (cls) => {
+      const d = document.createElement('div');
+      d.className = `vf-hud-island ${cls}`;
+      return d;
+    };
+    this._islandL = mk('island-left');
+    this._islandM = mk('island-mid');
+    this._islandR = mk('island-right');
+    bar.appendChild(this._islandL);
+    bar.appendChild(this._islandM);
+    bar.appendChild(this._islandR);
+    const tb = this.topBar;
+    const redistribute = () => {
+      const inner = tb && tb.el;
+      if (!inner || !this._islandL) return;
+      for (const box of [this._islandL, this._islandM, this._islandR]) box.innerHTML = '';
+      for (const node of Array.from(inner.children)) {
+        const cls = node.classList;
+        if (cls.contains('spacer')) continue; // 岛间距由顶栏 flex gap 提供
+        if (cls.contains('brand') || cls.contains('vf-date') || cls.contains('vf-speed-controls')) {
+          this._islandL.appendChild(node);
+        } else if (node.tagName === 'BUTTON') {
+          this._islandR.appendChild(node);
+        } else {
+          this._islandM.appendChild(node);
+        }
+      }
+    };
+    const origRender = tb.render.bind(tb);
+    tb.render = () => { origRender(); redistribute(); };
+    tb.render();
+  }
+
+  /** 悬浮检视器抽屉开合（.vf-inspector.open，见 styles.css） */
+  setInspectorOpen(open) {
+    if (this.inspectorEl) this.inspectorEl.classList.toggle('open', !!open);
   }
 
   /** 是否处于战役内 */
@@ -733,9 +810,31 @@ class App {
   }
 
   enterGame() {
-    this.shellEl.classList.remove('no-inspector');
+    this.setInspectorOpen(false); // 抽屉默认收起，选中实体时再滑出
     this.sideNav.refresh();
     this.running = true;
+  }
+
+  /** 语言切换后原地刷新外壳与当前活动视图（不调 buildShell、不销毁外壳结构） */
+  refreshLocaleUI() {
+    this.topBar.render();
+    this.sideNav.refresh();
+    this.bottomBar.refresh();
+    const view = this._activeViewObj;
+    if (view && typeof view.mount === 'function') {
+      // 先卸载再重挂：保证画布/rAF/监听被视图自身清理，不泄漏
+      if (typeof view.unmount === 'function') {
+        try { view.unmount(); } catch (e) { console.warn('视图卸载异常', e); }
+      }
+      try {
+        view.mount({ root: this.mainEl, app: this, param: this._routeParam || null });
+      } catch (e) {
+        console.error('视图本地化重挂异常', e);
+      }
+      this.refreshSnapshot();
+    } else {
+      this.inspector.render(this.snapshot);
+    }
   }
 
   exitToMenu() {
@@ -743,6 +842,9 @@ class App {
     this.world = null;
     this.running = false;
     this.snapshot = null;
+    this.selection = null;
+    this.pendingEvent = null;
+    this.setInspectorOpen(false);
     this.sideNav.refresh();
     navigate('menu');
   }
@@ -834,13 +936,91 @@ class App {
   }
 
   _checkPendingEvent() {
-    if (this.pendingEvent) return;
     const w = this.world;
-    if (w.narrative && w.narrative.pendingChoices && w.narrative.pendingChoices.length > 0) {
-      this.pendingEvent = w.narrative.pendingChoices[0];
-      this.setSpeed(0);
-      this.goto('events');
+    if (!w || !w.narrative || !Array.isArray(w.narrative.pendingChoices)) return;
+    const next = w.narrative.pendingChoices[0] || null;
+    if (!next) {
+      this.pendingEvent = null;
+      return;
     }
+    // 同一事件已弹出时不重复打断；绝不 goto('events') 卸载当前 3D 视图
+    if (this.pendingEvent && this.pendingEvent.eventId === next.eventId) return;
+    this.pendingEvent = next;
+    this.setSpeed(0);
+    this._openNonIntrusiveEventModal(next);
+  }
+
+  /**
+   * 非侵入式事件模态窗（R7）：以全息模态舱叠加在当前 3D 视口之上，
+   * 不销毁底层视图、不跳转路由。裁决成功后清除 pendingEvent；
+   * 裁决被拒（命令校验失败）时保持打开，由 dispatch 内部 toast 原因。
+   * 关闭弹窗而不裁决（Esc / 遮罩）：事件仍待决，时间维持暂停。
+   */
+  _openNonIntrusiveEventModal(event) {
+    const ev = event || {};
+    const w = this.world;
+    const live = w && w.narrative && Array.isArray(w.narrative.pendingChoices)
+      ? w.narrative.pendingChoices.find((p) => p.eventId === ev.eventId)
+      : null;
+    const def = live || ev;
+    const body = el('div', { class: 'vf-col' });
+    body.appendChild(el('div', {
+      class: 'vf-dim',
+      style: { whiteSpace: 'pre-wrap', lineHeight: '1.7' },
+      text: def.bodyZh || '（无正文）',
+    }));
+    const choices = Array.isArray(def.choices) ? def.choices : [];
+    const actions = choices.map((c) => ({
+      label: c.labelZh || c.id || '选项',
+      kind: 'primary',
+      onClick: () => {
+        const res = this.dispatch('ResolveEventChoice', { eventId: ev.eventId, choiceId: c.id });
+        if (res && res.ok) {
+          this.pendingEvent = null;
+          this.sideNav.refresh();
+          return; // 默认关闭模态
+        }
+        return false; // 裁决失败保持打开
+      },
+    }));
+    if (!choices.length) {
+      actions.push({ label: L('ui.cancel'), kind: 'ghost', onClick: () => {} });
+    }
+    showModal({
+      title: `◈ ${def.titleZh || '叙事事件'}`,
+      body,
+      actions,
+      wide: true,
+      onClose: () => {
+        // 仅当该事件仍在待决队列时保留 pendingEvent（裁决成功后队列已移除）
+        const stillPending = this.world && this.world.narrative
+          && Array.isArray(this.world.narrative.pendingChoices)
+          && this.world.narrative.pendingChoices.some((p) => p.eventId === ev.eventId);
+        if (!stillPending) this.pendingEvent = null;
+      },
+    });
+    // 附加全息模态舱样式（.vf-holo-modal，见 styles.css）
+    const backdrop = document.body.lastElementChild;
+    if (backdrop && backdrop.classList && backdrop.classList.contains('vf-modal-backdrop')) {
+      const dlg = backdrop.querySelector('.vf-modal');
+      if (dlg) dlg.classList.add('vf-holo-modal');
+    }
+  }
+
+  /** N 键：弹出下一个待决事件（无待决事件时给出轻提示） */
+  openNextEvent() {
+    const w = this.world;
+    const queue = w && w.narrative && Array.isArray(w.narrative.pendingChoices)
+      ? w.narrative.pendingChoices : [];
+    if (!queue.length) {
+      toast('当前没有待裁决的事件', { kind: 'info' });
+      return;
+    }
+    const next = this.pendingEvent
+      && queue.some((p) => p.eventId === this.pendingEvent.eventId)
+      ? this.pendingEvent : queue[0];
+    this.setSpeed(0);
+    this._openNonIntrusiveEventModal(next);
   }
 
   /** 重建只读快照并通知当前视图/检视器 */
@@ -873,7 +1053,12 @@ class App {
 
   _onRoute(route) {
     this._route = route.screen;
-    if (!this.inGame && route.screen !== 'menu') {
+    this._routeParam = route.param; // 供 refreshLocaleUI 原地重挂当前视图
+    // 主菜单路由隐藏战略顶栏与遥测条（.vf-shell.in-menu，见 styles.css）
+    if (this.shellEl) this.shellEl.classList.toggle('in-menu', route.screen === 'menu');
+    // 战役外白名单：菜单 / 设置 / 诊断可直达，其余一律弹回菜单
+    const preGameAllowed = route.screen === 'menu' || route.screen === 'settings' || route.screen === 'diagnostics';
+    if (!this.inGame && !preGameAllowed) {
       navigate('menu');
       return;
     }
@@ -893,9 +1078,17 @@ class App {
     navigate(screen, param);
   }
 
-  /** 选中实体（检视器 + 地图联动） */
+  /** 检视器支持的选中类型（planet 等由视图内浮面板自行呈现，不弹抽屉） */
+  static get INSPECTOR_KINDS() {
+    return ['system', 'fleet', 'colony', 'faction'];
+  }
+
+  /** 选中实体（检视器 + 地图联动）：有支持类型的选中即滑出抽屉，清空即收起 */
   select(kind, id) {
     this.selection = kind && id ? { kind, id } : null;
+    const supported = !!this.selection
+      && App.INSPECTOR_KINDS.includes(this.selection.kind);
+    this.setInspectorOpen(supported);
     this.refreshSnapshot();
   }
 
@@ -1114,6 +1307,17 @@ registerCommand('BuildOnColony', {
     if (cmd.actorId && colony.factionId !== cmd.actorId) return { ok: false, code: 'FORBIDDEN', reason: '非己方殖民地' };
     const def = buildingDef(cmd.params.defId);
     if (!def) return { ok: false, code: 'NO_DEF', reason: '未知建筑' };
+    // 采掘类建筑必须与行星矿藏匹配（任务书 0.2：禁止装饰性数据）
+    if (def.category === 'mining' && colony.planetId) {
+      const planet = ctx.world.entities.planets[colony.planetId];
+      if (planet && planet.deposits) {
+        const depMap = { bld_mine_ferro: 'ferro', bld_mine_silicate: 'silicate', bld_mine_rare: 'rareEarth', bld_mine_heavy: 'heavyMetal', bld_volatile_well: 'hydrogen', bld_gas_harvester: 'helium3' };
+        const need = depMap[def.id];
+        if (need && !(planet.deposits[need] > 0)) {
+          return { ok: false, code: 'NO_DEPOSIT', reason: `该行星缺乏${need}矿藏` };
+        }
+      }
+    }
     if (def.techReq && !(ctx.world.research[colony.factionId]?.completed || []).includes(def.techReq)) {
       return { ok: false, code: 'NO_TECH', reason: '科技未解锁' };
     }
@@ -7249,7 +7453,7 @@ function foundColony(world, planetId, factionId, initialPop = 6, isOutpost = fal
     isOutpost,
     population: { total: initialPop, strata: { worker: initialPop } },
     housing: isOutpost ? 8 : 12,
-    buildings: isOutpost ? [{ defId: 'bld_admin_post', level: 1, state: 'active', progress: 0 }] : [],
+    buildings: isOutpost ? [{ defId: 'bld_admin_center', level: 1, state: 'active', progress: 0 }] : [],
     stockpile: { food: 90, water: 70, ferro: 0, silicate: 0, powerCell: 4, medicine: 4 },
     stability: 60,
     powerBalance: 0,
@@ -12173,6 +12377,10 @@ class TopBar {
     const app = this.app;
     const w = app.world;
     const bar = this.el;
+    // 增量更新：仅当数据变化时重建（避免高频 innerHTML 清空吞点击）
+    const sig = JSON.stringify([w?.tick, app.snapshot?.resources?.balances?.credits ?? null, app.speedIdx]);
+    if (this._lastSig === sig) return;
+    this._lastSig = sig;
     bar.innerHTML = '';
 
     bar.appendChild(elBrand());
@@ -12251,21 +12459,29 @@ function researchRate(app) {
   const fid = w.playerFactionId;
   const rs = w.research[fid];
   if (!rs) return 0;
-  let labs = 0;
+  let rate = 1;
   for (const cid of Object.keys(w.entities.colonies)) {
     const c = w.entities.colonies[cid];
     if (c.factionId !== fid) continue;
     for (const b of c.buildings) {
-      if (b.state === 'active' && b.defId === 'bld_lab') labs++;
+      if (b.state !== 'active') continue;
+      if (b.defId === 'bld_lab') rate += 1.5;
+      else if (b.defId === 'bld_deepspace_analytics') rate += 3;
     }
   }
-  return Math.round((1 + labs * 1.5) * 10) / 10;
+  // 科技与政策修正
+  const mult = w.research[fid]?.effectIndex?.researchOutput;
+  if (mult) for (const e of mult) rate *= e.value;
+  return Math.round(rate * 10) / 10;
 }
 
 function threatLevel(world) {
   let wars = 0;
+  const pid = world.playerFactionId;
   for (const wid of Object.keys(world.entities.wars)) {
-    if (world.entities.wars[wid].status === 'active') wars++;
+    const wr = world.entities.wars[wid];
+    if (wr.status !== 'active') continue;
+    if (wr.attackers.includes(pid) || wr.defenders.includes(pid)) wars++;
   }
   if (wars > 0) return { label: '战争', tone: 'danger' };
   let tension = 0;
@@ -12394,10 +12610,11 @@ const SettingsView = {
       setLanguage(langSel.value);
       saveLocalSettings({ language: langSel.value });
       // 重建 shell 文本
-      app.buildShell();
+      app.refreshLocaleUI();
       app.sideNav.refresh();
     });
-    p1.appendChild(langWrap(langSel));
+    // 面板标题已表明用途，语言选择器直接挂载（原 langWrap(langSel) 缺 label 实参必然抛错）
+    p1.appendChild(langSel);
     body.appendChild(p1);
 
     const p2 = panel({ title: '音频', open: true });
@@ -12447,36 +12664,12 @@ const SettingsView = {
     wrap.appendChild(body);
     root.appendChild(wrap);
 
-    // 全局键盘快捷键（App 级，一次绑定）
-    if (!app._keysBound) {
-      app._keysBound = true;
-      window.addEventListener('keydown', (e) => {
-        if (!app.inGame) return;
-        const tag = (e.target.tagName || '').toLowerCase();
-        if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
-        if (e.code === 'Space') {
-          e.preventDefault();
-          app.togglePause();
-        } else if (e.key >= '1' && e.key <= '4') {
-          app.setSpeed(parseInt(e.key, 10));
-        } else if (e.key === 'g' || e.key === 'G') {
-          app.goto('galaxy');
-        }
-      });
-    }
+// 快捷键已移至 App.boot() 全局绑定
   },
 
   unmount() {},
   onSnapshot() {},
 };
-
-function labelWrap(label, control) {
-  const wrap = el('label', { class: 'vf-col' });
-  wrap.appendChild(el('span', { class: 'vf-dim vf-small', text: label }));
-  wrap.appendChild(control);
-  return wrap;
-}
-const langWrap = labelWrap;
 
 function rangeRow(label, value, onChange) {
   const row = el('div', { class: 'vf-row' });
@@ -14862,7 +15055,7 @@ const GroundView = {
     this._raf = null;
 
     // 活动任务查找（param 可为 missionId 或 planetId）
-    const missions = Object.values(w.entities.groundMissions).filter((m) => m.state === 'active');
+    const missions = Object.values(w.entities.groundMissions).filter((m) => m.status === 'active');
     let mission = null;
     if (param) mission = missions.find((m) => m.id === param || m.planetId === param) || null;
     else mission = missions[0] || null;
@@ -14918,13 +15111,13 @@ const GroundView = {
     p1.appendChild(tplBox);
     box.appendChild(p1);
     // 已结束任务结果列表
-    const done = Object.values(this.app.world.entities.groundMissions).filter((m) => m.state !== 'active');
+    const done = Object.values(this.app.world.entities.groundMissions).filter((m) => m.status !== 'active');
     if (done.length > 0) {
       const p2 = panel({ title: '既往行动记录', open: false });
       for (const m of done.slice(-8)) {
         const tpl = findMissionTemplate(m.templateId);
         p2.appendChild(el('div', { class: 'vf-log-line' }, [
-          el('span', { text: `${tpl?.nameZh || m.templateId} — ${({ success: '成功', failed: '失败', aborted: '中止' })[m.state] || m.state}` }),
+          el('span', { text: `${tpl?.nameZh || m.templateId} — ${({ success: '成功', failed: '失败', aborted: '中止' })[m.status] || m.status}` }),
         ]));
       }
       box.appendChild(p2);
@@ -15006,7 +15199,7 @@ const GroundView = {
       if (!this._raf) return;
       const w2 = this.app.world;
       const m = w2.entities.groundMissions[this.missionId];
-      if (!m || m.state !== 'active') {
+      if (!m || m.status !== 'active') {
         this._raf = null;
         // 任务结束：显示结算并返回简报
         this._showResult(m);
@@ -15403,6 +15596,7 @@ class CanvasManager {
   beginFrame() {
     if (!this.ctx) return;
     this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    this.ctx.clearRect(0, 0, this.width, this.height);
   }
 
   /**
@@ -18193,11 +18387,14 @@ Object.assign(__exports, { ResearchView });
 });
 __register("src/ui/screens/CombatView.js", function (__exports, __require) {
 /**
- * ui/screens/CombatView.js — 战术战斗视图（路由 #/combat/<battleId>）
+ * ui/screens/CombatView.js — 战术战斗视图（路由 #/combat/<battleId>，R7 全屏沉浸式重构）
  *
- * 布局：.vf-view > .vf-view-head（返回 + 标题 + 星系名/战斗时间 + 全局时间控制 +
- *       撤退按钮）+ .vf-view-body（左 2/3 战斗画布 BattleRenderer +
- *       右 1/3 信息列：单位检视 / 战斗事件时间线 / 双方损失）。
+ * 布局：.vf-view.vf-view-immersive > .vf-view-head（悬浮玻璃条：返回 + 标题 +
+ *       星系名/战斗时间 + 全局时间控制 + 情报开关 + 撤退按钮）
+ *       + .vf-view-body（战斗画布 BattleRenderer 占满全视口）。
+ *       原右侧固定 HUD 列移除 —— 战斗态势条/铭牌/血条已由 BattleRenderer._renderHUD
+ *       在 2D 层绘制；单位检视 / 损失统计 / 事件时间线收进 .vf-float-panel 悬浮
+ *       毛玻璃情报舱，按 Tab（或头部「情报」按钮）切换显示，选中舰船时自动弹出。
  *
  * 行为：
  *  - param 缺省时取 snapshot.battles[0]?.id；无战斗 → 「当前无战斗」+ 活跃战斗列表；
@@ -18207,12 +18404,12 @@ __register("src/ui/screens/CombatView.js", function (__exports, __require) {
  *  - 撤退：对玩家一侧舰队 dispatch('OrderFleetRetreat', {fleetId})；fleetId 从
  *    world.battles.active[id].fleetIds 按玩家 factionId 所在一侧只读取得
  *    （battleView 未暴露 fleetIds，此处经许可的只读世界查询补齐）；
- *  - 点击画布单位 → 右侧检视（名称/船体/护盾/装甲/结构/航向/命令）；
+ *  - 点击画布单位 → 情报舱检视（名称/船体/护盾/装甲/结构/航向/命令）；
  *    悬停单位 → 画布名字标签（BattleRenderer）。
  *
  * 数据来源纪律：battleView / snapshot 只读消费；装甲与撤退蓄能等 battleView
  * 未暴露的字段经只读 world 查询补齐，绝不写世界状态。
- * onSnapshot 250ms 节流；unmount 停 rAF、移除画布监听并 dispose 画布。
+ * onSnapshot 250ms 节流；unmount 停 rAF、移除画布与 window 监听并 dispose 画布。
  */
 
 const { el: el, clearEl: clearEl } = __require("src/ui/components/dom.js");
@@ -18265,12 +18462,13 @@ const CombatView = {
     this._hoverShipId = null;
     this._data = null;        // battleView() 只读数据缓存（onSnapshot 刷新）
     this._raf = 0;
-    this._handlers = {};
+    this._handlers = [];
     this._unsubResize = null;
+    this._panelOpen = false;  // 悬浮情报舱显隐（Tab / 头部按钮切换）
 
     root.innerHTML = '';
 
-    // —— 头部 ——
+    // —— 头部（悬浮玻璃条）——
     const head = el('div', { class: 'vf-view-head' });
     head.appendChild(el('button', {
       class: 'vf-btn small',
@@ -18297,7 +18495,16 @@ const CombatView = {
       this._speedBtns.push(b);
       head.appendChild(b);
     });
-    head.appendChild(el('span', { class: 'vf-faint vf-small', text: '提示：战斗持续进行，建议暂停逐帧观察' }));
+    head.appendChild(el('span', { class: 'vf-faint vf-small', text: '战斗持续进行，建议暂停逐帧观察 · Tab 切换情报舱' }));
+
+    // —— 情报舱开关 ——
+    this._panelBtn = el('button', {
+      class: 'vf-btn small',
+      text: '情报 ▤',
+      title: '切换战斗情报舱（单位检视 / 损失 / 事件时间线，快捷键 Tab）',
+      on: { click: () => this._togglePanel() },
+    });
+    head.appendChild(this._panelBtn);
 
     // —— 撤退按钮 ——
     this._retreatBtn = el('button', {
@@ -18309,32 +18516,30 @@ const CombatView = {
     });
     head.appendChild(this._retreatBtn);
 
-    // —— 主体：左画布 + 右信息列 ——
-    const body = el('div', { class: 'vf-view-body', style: { display: 'flex', overflow: 'hidden' } });
-    const left = el('div', { style: { flex: '2 1 0', position: 'relative', minWidth: '0' } });
-    this._infoCol = el('div', {
-      style: { flex: '1 1 0', minWidth: '300px', overflowY: 'auto', padding: '10px', borderLeft: '1px solid var(--line)' },
-    });
-    body.appendChild(left);
-    body.appendChild(this._infoCol);
+    // —— 主体：战斗画布占满全视口 ——
+    const body = el('div', { class: 'vf-view-body', style: { overflow: 'hidden' } });
+    // —— 悬浮情报舱（默认隐藏，Tab / 选中舰船时显示）——
+    this._panel = el('div', { class: 'vf-float-panel hidden' });
+    body.appendChild(this._panel);
 
-    this._cm = new CanvasManager().attach(left);
+    const wrap = el('div', { class: 'vf-view vf-view-immersive' }, [head, body]);
+    root.appendChild(wrap); // 先入文档再建画布：保证渲染管线在挂载态初始化
+
+    this._cm = new CanvasManager().attach(body);
     this._renderer = new BattleRenderer().init(this._cm);
     this._unsubResize = this._cm.onResize(() => {
       if (this._mounted) this._drawFrame();
     });
 
-    const wrap = el('div', { class: 'vf-view' }, [head, body]);
-    root.appendChild(wrap);
-
-    // —— 画布交互：点击选中 / 悬停名字 ——
+    // —— 画布交互：点击选中 / 悬停名字 / Tab 开关 ——
     const canvas = this._cm.canvas;
     const onCanvasClick = (e) => {
       const rect = canvas.getBoundingClientRect();
       const hit = this._renderer.pick(e.clientX - rect.left, e.clientY - rect.top);
       this._selectedShipId = hit || null;
       this._renderer.setSelection(hit);
-      this._buildInfoColumn();
+      if (hit && !this._panelOpen) this._togglePanel(true); // 选中舰船自动弹出情报舱
+      this._buildPanel();
     };
     const onCanvasMove = (e) => {
       const rect = canvas.getBoundingClientRect();
@@ -18348,13 +18553,20 @@ const CombatView = {
       this._hoverShipId = null;
       this._renderer.setHover(null);
     };
+    const onKeyTab = (e) => {
+      if (e.key !== 'Tab') return;
+      e.preventDefault(); // 阻止焦点漫游，战斗中 Tab 专用于情报舱
+      this._togglePanel();
+    };
     canvas.addEventListener('click', onCanvasClick);
     canvas.addEventListener('mousemove', onCanvasMove);
     canvas.addEventListener('mouseleave', onCanvasLeave);
+    window.addEventListener('keydown', onKeyTab);
     this._handlers = [
       { target: canvas, type: 'click', fn: onCanvasClick },
       { target: canvas, type: 'mousemove', fn: onCanvasMove },
       { target: canvas, type: 'mouseleave', fn: onCanvasLeave },
+      { target: window, type: 'keydown', fn: onKeyTab },
     ];
 
     this._resolveBattleId();
@@ -18406,11 +18618,21 @@ const CombatView = {
     }
     this._renderer = null;
     this._data = null;
-    this._infoCol = null;
+    this._panel = null;
+    this._panelBtn = null;
     this._speedBtns = [];
   },
 
   // —— 内部实现 ——————————————————————————————————
+
+  /** 情报舱显隐切换（force=true 强制显示） */
+  _togglePanel(force) {
+    this._panelOpen = force === true ? true : !this._panelOpen;
+    if (this._panel) this._panel.classList.toggle('hidden', !this._panelOpen);
+    if (this._panelBtn) {
+      this._panelBtn.classList.toggle('primary', this._panelOpen);
+    }
+  },
 
   /** 确定 battleId：param 缺省时回落到 snapshot.battles[0]?.id */
   _resolveBattleId() {
@@ -18420,14 +18642,14 @@ const CombatView = {
     if (first) this._battleId = first.id;
   },
 
-  /** 整体刷新：重建数据缓存 + 头部状态 + 右侧信息列 */
+  /** 整体刷新：重建数据缓存 + 头部状态 + 情报舱内容 */
   _refreshAll() {
     this._resolveBattleId();
     const w = this.app.world;
     // battleView 对已结束/不存在的战斗返回 null（战斗结束判定依据）
     this._data = this._battleId ? battleView(w, this._battleId) : null;
     this._updateHead();
-    this._buildInfoColumn();
+    this._buildPanel();
   },
 
   /** 头部：标题/星系名/时间档高亮/撤退按钮可用性 */
@@ -18504,7 +18726,7 @@ const CombatView = {
     return map;
   },
 
-  /** 渲染一帧战斗视图（数据来自 onSnapshot 缓存） */
+  /** 渲染一帧战斗视图（数据来自 onSnapshot 缓存；HUD 态势条由渲染器 2D 层绘制） */
   _drawFrame() {
     const cm = this._cm;
     const r = this._renderer;
@@ -18518,30 +18740,30 @@ const CombatView = {
     });
   },
 
-  // —— 右侧信息列 ——————————————————————————————————
+  // —— 悬浮情报舱 ——————————————————————————————————
 
-  _buildInfoColumn() {
-    const col = this._infoCol;
-    if (!col) return;
-    clearEl(col);
+  _buildPanel() {
+    const box = this._panel;
+    if (!box) return;
+    clearEl(box);
     const d = this._data;
     const w = this.app.world;
 
     if (!d) {
       // —— 战斗结束 / 无战斗 ——
-      col.appendChild(panel({
+      box.appendChild(panel({
         title: this._battleId ? '战斗已结束' : '当前无战斗',
         content: el('div', { class: 'vf-faint vf-small', text: this._battleId
           ? '该战斗已脱离活跃列表（全歼 / 全员撤离 / 结算完成）。'
           : '当前星域没有正在进行的战斗。' }),
       }));
-      this._buildHistorySummary(col);
-      this._buildBattleList(col);
+      this._buildHistorySummary(box);
+      this._buildBattleList(box);
       return;
     }
 
     // —— 1) 单位检视 ——
-    col.appendChild(this._unitPanel(d));
+    box.appendChild(this._unitPanel(d));
 
     // —— 2) 双方损失统计 ——
     const colorOf = (fid) => (w.entities.factions[fid] && w.entities.factions[fid].name) || fid;
@@ -18550,7 +18772,7 @@ const CombatView = {
       [`${colorOf(d.sides.a)}（a 方）损失`, d.losses ? d.losses.a : 0],
       [`${colorOf(d.sides.b)}（b 方）损失`, d.losses ? d.losses.b : 0],
     ]));
-    col.appendChild(lossP);
+    box.appendChild(lossP);
 
     // —— 3) 战斗事件时间线（最近 30 条） ——
     const evP = panel({ title: '战斗事件', open: true, dense: true });
@@ -18566,7 +18788,7 @@ const CombatView = {
         el('span', { class: 'vf-faint vf-small vf-grow', style: { textAlign: 'right' }, text: `${fmtTime(e.t)}` }),
       ]));
     }
-    col.appendChild(evP);
+    box.appendChild(evP);
   },
 
   /** 单位检视面板（点击画布选中后展示；装甲经只读 world 补齐） */
@@ -21876,19 +22098,28 @@ Object.assign(__exports, { ColonyView });
 });
 __register("src/ui/screens/SystemView.js", function (__exports, __require) {
 /**
- * ui/screens/SystemView.js — 星系详情视图（路由 #/system/<systemId>）
+ * ui/screens/SystemView.js — 星系详情视图（路由 #/system/<systemId>，R7 全屏沉浸式重构）
  *
- * 布局：.vf-view > .vf-view-head（返回银河 + 标题）+ .vf-view-body
- *       （左 2/3 轨道画布 SystemRenderer + 右 1/3 信息列，可滚动）
+ * 布局：.vf-view.vf-view-immersive > .vf-view-head（悬浮玻璃条：返回银河 + 标题 +
+ *       总览检视）+ .vf-view-body（3D 轨道画布 SystemRenderer 占满全视口）。
+ *       原右侧固定信息列移除，改为 .vf-float-panel 悬浮毛玻璃情报舱：
+ *       星系档案 → 行星卡列表 → 在系舰队 → 异常列表。
  *
- * 信息列（右）：星系档案（kvList）→ 行星卡列表（panel）→ 在系舰队 → 异常列表。
+ * 交互：
+ *  - 鼠标左键拖拽：旋转轨道相机（增量传给 SystemRenderer opts.yaw，渲染器内部
+ *    俯仰固定，仅水平环绕）；
+ *  - 滚轮：数字变焦（画布容器 transform: scale 1.0–2.6，拾取坐标按比例反解）；
+ *  - 单击行星 → app.select('planet', id)（全局选中态联动）+ 情报舱行星卡高亮；
+ *    单击空白 → 清除选中；「定位」按钮反向联动；
+ *  - 头部「总览检视」→ app.select('system', id) 打开右侧全局检视器抽屉。
+ *
  * 信息分层：恒星/行星情报需调查层级≥2，危险度/资源评级/矿藏需≥3（与 scan.js 语义一致）。
  *
  * 数据来源纪律：只读消费 app.snapshot / app.world（绝不写世界字段）+
  * simulation/ViewModels.js 的导出（explorationView，异常只读视图）；
  * 写操作一律经 app.dispatch（FoundOutpost / IssueScanOrder / InvestigateAnomaly）。
  *
- * onSnapshot 以 250ms 节流刷新右侧列表；同视图路由参数变化（ViewRegistry 对相同
+ * onSnapshot 以 250ms 节流刷新情报舱；同视图路由参数变化（ViewRegistry 对相同
  * 视图不重新 mount）时通过 parseHash 感知并整体重建。unmount 释放画布与全部监听。
  */
 
@@ -21912,6 +22143,12 @@ const FLEET_STATUS = {
   idle: '待命', scanning: '扫描中', investigating: '调查中',
   combat: '交战中', docked: '停泊', moving: '机动中', retreat: '撤退中',
 };
+
+/** 拖拽旋转灵敏度（弧度/逻辑像素） */
+const YAW_SPEED = 0.005;
+/** 数字变焦范围（画布容器 transform scale） */
+const ZOOM_MIN = 1;
+const ZOOM_MAX = 2.6;
 
 /**
  * 常用资源中文名（键 = content/resources.js 资源 id）。
@@ -21944,14 +22181,17 @@ const SystemView = {
     this._selectedPlanetId = null;
     this._lastRefresh = 0;
     this._raf = 0;
-    this._handlers = {};
+    this._handlers = [];   // unmount 时统一移除的监听 {target, type, fn}
     this._unsubResize = null;
     this._planetCards = new Map(); // planetId → 行星卡根节点（联动高亮）
-    this._data = null;             // 只读数据包（信息列 + 渲染共享）
+    this._data = null;             // 只读数据包（情报舱 + 渲染共享）
+    this._yaw = 0;                 // 用户拖拽附加偏航（→ SystemRenderer opts.yaw）
+    this._zoom = 1;                // 数字变焦倍率（容器 transform scale）
+    this._drag = { active: false, moved: false, startX: 0, startY: 0, lastX: 0, lastY: 0 };
 
     root.innerHTML = '';
 
-    // —— 头部 ——
+    // —— 头部（悬浮玻璃条）——
     const head = el('div', { class: 'vf-view-head' });
     head.appendChild(el('button', {
       class: 'vf-btn small',
@@ -21962,21 +22202,24 @@ const SystemView = {
     this._titleEl = el('h2', { text: L('ui.system') });
     head.appendChild(this._titleEl);
     head.appendChild(el('span', { class: 'vf-grow' }));
-    head.appendChild(el('span', { class: 'vf-dim vf-small', text: '单击轨道图行星可联动右侧档案卡' }));
+    head.appendChild(el('span', { class: 'vf-dim vf-small', text: '拖拽旋转 · 滚轮缩放 · 单击行星联动档案' }));
+    head.appendChild(el('button', {
+      class: 'vf-btn small',
+      text: '总览检视',
+      title: '在右侧检视器抽屉中打开星系总览档案',
+      on: { click: () => app.select('system', this._systemId) },
+    }));
 
-    // —— 主体：左轨道画布 + 右信息列 ——
-    const body = el('div', { class: 'vf-view-body', style: { display: 'flex', overflow: 'hidden' } });
-    const left = el('div', { style: { flex: '2 1 0', position: 'relative', minWidth: '0' } });
-    this._infoCol = el('div', {
-      style: {
-        flex: '1 1 0', minWidth: '300px', overflowY: 'auto',
-        padding: '10px', borderLeft: '1px solid var(--line)', // var(--line) ≈ #1d2a3a
-      },
-    });
-    body.appendChild(left);
-    body.appendChild(this._infoCol);
+    // —— 主体：3D 轨道画布占满全视口 ——
+    const body = el('div', { class: 'vf-view-body', style: { overflow: 'hidden' } });
+    // —— 悬浮情报舱（原右栏内容：档案 / 行星 / 舰队 / 异常）——
+    this._dossier = el('div', { class: 'vf-float-panel' });
+    body.appendChild(this._dossier);
 
-    this._cm = new CanvasManager().attach(left);
+    const wrap = el('div', { class: 'vf-view vf-view-immersive' }, [head, body]);
+    root.appendChild(wrap); // 先入文档再建画布：保证 GL 上下文/System3D 在挂载态初始化
+
+    this._cm = new CanvasManager().attach(body);
     this._renderer = new SystemRenderer();
     this._renderer.init(this._cm); // GL 通道接线（WebGL2 不可用时内部自动退化 2D）
     // 画布尺寸变化 → 立即补绘一帧（日常逐帧渲染由 rAF 循环承担）
@@ -21984,19 +22227,8 @@ const SystemView = {
       if (this._mounted) this._drawFrame();
     });
 
-    const wrap = el('div', { class: 'vf-view' }, [head, body]);
-    root.appendChild(wrap);
-
-    // 轨道画布单击 → pick 行星 → 高亮行星卡并滚动到可见
-    const canvas = this._cm.canvas;
-    const onCanvasClick = (e) => {
-      const rect = canvas.getBoundingClientRect();
-      const hit = this._renderer.pick(e.clientX - rect.left, e.clientY - rect.top);
-      this._selectedPlanetId = hit || null;
-      this._highlightPlanetCard(hit);
-    };
-    canvas.addEventListener('click', onCanvasClick);
-    this._handlers.canvasClick = { target: canvas, fn: onCanvasClick };
+    // —— 画布交互：拖拽旋转 / 滚轮缩放 / 单击选择 ——
+    this._bindCanvasEvents();
 
     this._refreshAll();
 
@@ -22009,7 +22241,7 @@ const SystemView = {
     this._raf = requestAnimationFrame(loop);
   },
 
-  /** 快照推送：路由参数变化时整体重建；否则 250ms 节流刷新右侧列表 */
+  /** 快照推送：路由参数变化时整体重建；否则 250ms 节流刷新情报舱 */
   onSnapshot(snap) {
     if (!this._mounted) return;
     void snap; // 数据统一经 _buildData 从 app.snapshot / world 只读拉取
@@ -22033,9 +22265,10 @@ const SystemView = {
       cancelAnimationFrame(this._raf);
       this._raf = 0;
     }
-    const H = this._handlers || {};
-    if (H.canvasClick) H.canvasClick.target.removeEventListener('click', H.canvasClick.fn);
-    this._handlers = {};
+    for (const h of this._handlers || []) {
+      h.target.removeEventListener(h.type, h.fn);
+    }
+    this._handlers = [];
     if (this._unsubResize) {
       this._unsubResize();
       this._unsubResize = null;
@@ -22046,19 +22279,105 @@ const SystemView = {
     }
     this._renderer = null;
     this._data = null;
-    this._infoCol = null;
+    this._dossier = null;
     this._titleEl = null;
     this._planetCards = new Map();
   },
 
   // —— 内部实现 ——————————————————————————————————
 
-  /** 整体刷新：重建数据包 + 标题 + 右侧信息列 */
+  /** 绑定画布交互（全部登记到 _handlers 供 unmount 移除） */
+  _bindCanvasEvents() {
+    const canvas = this._cm.canvas;
+    const drag = this._drag;
+
+    /** 事件坐标 → 渲染器逻辑像素坐标（数字变焦时按容器实际尺寸反解） */
+    const toLocal = (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const k = this._cm.width / Math.max(1, rect.width);
+      return { x: (e.clientX - rect.left) * k, y: (e.clientY - rect.top) * k };
+    };
+
+    const mousedown = (e) => {
+      if (e.button !== 0) return; // 仅左键拖拽旋转
+      drag.active = true;
+      drag.moved = false;
+      drag.startX = drag.lastX = e.clientX;
+      drag.startY = drag.lastY = e.clientY;
+      canvas.style.cursor = 'grabbing';
+    };
+    const mousemove = (e) => {
+      if (!drag.active) return;
+      const rect = canvas.getBoundingClientRect();
+      const k = this._cm.width / Math.max(1, rect.width); // 变焦时位移按比例还原
+      const dx = (e.clientX - drag.lastX) * k;
+      const dy = e.clientY - drag.lastY;
+      drag.lastX = e.clientX;
+      drag.lastY = e.clientY;
+      if (!drag.moved && Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) > 4) {
+        drag.moved = true;
+      }
+      if (drag.moved) this._yaw += dx * YAW_SPEED; // 垂直分量忽略：渲染器俯仰固定
+    };
+    const mouseup = () => {
+      drag.active = false;
+      if (canvas.style.cursor === 'grabbing') canvas.style.cursor = 'grab';
+    };
+    const click = (e) => {
+      if (drag.moved) { drag.moved = false; return; } // 拖拽结束不触发选择
+      const p = toLocal(e);
+      const hit = this._renderer.pick(p.x, p.y);
+      this._selectedPlanetId = hit || null;
+      this._highlightPlanetCard(hit);
+      if (hit) {
+        this.app.select('planet', hit); // 全局选中态联动（检视器不弹抽屉）
+      } else {
+        this.app.select(null); // 空白处清除选中
+      }
+    };
+    const wheel = (e) => {
+      e.preventDefault(); // 阻止页面滚动
+      const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+      this._setZoom(this._zoom * factor);
+    };
+    const mouseleave = () => {
+      if (!drag.active && canvas.style.cursor !== 'grab') canvas.style.cursor = 'grab';
+    };
+
+    canvas.style.cursor = 'grab';
+    canvas.addEventListener('mousedown', mousedown);
+    canvas.addEventListener('click', click);
+    canvas.addEventListener('wheel', wheel, { passive: false });
+    canvas.addEventListener('mouseleave', mouseleave);
+    window.addEventListener('mousemove', mousemove);
+    window.addEventListener('mouseup', mouseup);
+    this._handlers = [
+      { target: canvas, type: 'mousedown', fn: mousedown },
+      { target: canvas, type: 'click', fn: click },
+      { target: canvas, type: 'wheel', fn: wheel },
+      { target: canvas, type: 'mouseleave', fn: mouseleave },
+      { target: window, type: 'mousemove', fn: mousemove },
+      { target: window, type: 'mouseup', fn: mouseup },
+    ];
+  },
+
+  /** 数字变焦：缩放两层画布元素本身（GL 与 HUD 2D 同步；不缩放包裹层，
+   *  避免 CanvasManager 测量到放大后的矩形而膨胀绘制缓冲），拾取坐标按实际矩形反解 */
+  _setZoom(z) {
+    this._zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+    const cm = this._cm;
+    if (!cm) return;
+    for (const c of [cm.glCanvas, cm.hudCanvas]) {
+      if (c) c.style.transform = `scale(${this._zoom})`;
+    }
+  },
+
+  /** 整体刷新：重建数据包 + 标题 + 悬浮情报舱 */
   _refreshAll() {
     this._buildData();
     const d = this._data;
     this._titleEl.textContent = d ? `${L('ui.system')} · ${d.system.name}` : L('ui.system');
-    this._buildInfoColumn();
+    this._buildDossier();
   },
 
   /** 从 app.world / app.snapshot / ViewModels 只读构建数据包（绝不写世界） */
@@ -22127,7 +22446,7 @@ const SystemView = {
     };
   },
 
-  /** 渲染一帧轨道视图 */
+  /** 渲染一帧轨道视图（yaw 来自用户拖拽累计） */
   _drawFrame() {
     const cm = this._cm;
     const r = this._renderer;
@@ -22146,17 +22465,19 @@ const SystemView = {
       selectedPlanetId: this._selectedPlanetId,
       reducedEffects: !!(w && w.settings && w.settings.reducedEffects),
       time: performance.now() / 1000, // 仅表现动画，不进模拟
+      yaw: this._yaw, // 用户拖拽旋转增量（渲染器俯仰固定，仅水平环绕）
     });
   },
 
-  /** 构建右侧信息列：档案 → 行星 → 舰队 → 异常 */
-  _buildInfoColumn() {
-    const col = this._infoCol;
-    clearEl(col);
+  /** 构建悬浮情报舱：档案 → 行星 → 舰队 → 异常 */
+  _buildDossier() {
+    const box = this._dossier;
+    if (!box) return;
+    clearEl(box);
     this._planetCards = new Map();
     const d = this._data;
     if (!d) {
-      col.appendChild(el('div', { class: 'vf-faint vf-center mt-3', text: '未找到目标星系 —— 请从银河地图双击进入' }));
+      box.appendChild(el('div', { class: 'vf-faint vf-center mt-3', text: '未找到目标星系 —— 请从银河地图双击进入' }));
       return;
     }
     const w = this.app.world;
@@ -22180,24 +22501,24 @@ const SystemView = {
     if (lvl < 2) {
       file.appendChild(el('div', { class: 'vf-faint vf-small mt-1', text: '情报不足：派遣舰队扫描以提升调查层级。' }));
     }
-    col.appendChild(file);
+    box.appendChild(file);
 
     // 2) 行星列表（分类层级后揭示）
     if (lvl >= 2) {
       const list = panel({ title: `行星（${d.planets.length}）`, open: true });
       for (const p of d.planets) list.appendChild(this._planetCard(p, lvl));
-      col.appendChild(list);
+      box.appendChild(list);
     } else {
       const list = panel({ title: '行星', open: true });
       list.appendChild(el('div', { class: 'vf-faint vf-small', text: '完成「分类」层级后揭示行星情报。' }));
-      col.appendChild(list);
+      box.appendChild(list);
     }
 
     // 3) 在系舰队
-    col.appendChild(this._fleetPanel(d));
+    box.appendChild(this._fleetPanel(d));
 
     // 4) 异常列表
-    col.appendChild(this._anomalyPanel(d));
+    box.appendChild(this._anomalyPanel(d));
   },
 
   /**
@@ -22214,7 +22535,15 @@ const SystemView = {
       title: p.name,
       open: true,
       dense: true,
-      tools: [{ label: '定位', title: '在轨道图中高亮该行星', onClick: () => { this._selectedPlanetId = p.id; } }],
+      tools: [{
+        label: '定位',
+        title: '在轨道图中高亮该行星并设为全局选中',
+        onClick: () => {
+          this._selectedPlanetId = p.id;
+          this._highlightPlanetCard(p.id);
+          app.select('planet', p.id);
+        },
+      }],
     });
 
     const pairs = [
@@ -23737,7 +24066,8 @@ class System3D {
     const isBHCam = typeId === 'blackHole';
     const camPitch = isBHCam ? 0.24 : CAM_PITCH;
     // 黑洞：固定世界距离 7.0 → 11.7 RS，保证吸积盘（1.65..6.2 RS）完整入画
-    const dist = isBHCam ? 4.6 : (camRMax / Math.sin(Math.min(halfY, halfX))) * 1.06;
+    // （修复：camRMax 为未定义标识符，场景半径即上方 rMax —— 原 GL 帧必然抛错退化 2D）
+    const dist = isBHCam ? 4.6 : (rMax / Math.sin(Math.min(halfY, halfX))) * 1.06;
     const yaw = 0.55 + time * (isBHCam ? 0.008 : 0.02) + (Number(opts.yaw) || 0);
     const cp = Math.cos(camPitch);
     const sp = Math.sin(camPitch);
@@ -26853,7 +27183,8 @@ class GalaxyRenderer {
 
   /** GL 模式 HUD：星点 → 势力范围 → 星系标记 → 舰队 → 标签 → 前线 */
   _drawHud(ctx, w, h, snap, L, opts, reduced, t) {
-    this._drawHudStars(ctx, w, h);
+    ctx.clearRect(0, 0, w, h);
+    if (this._mode !== 'gl') this._drawHudStars(ctx, w, h);
     if (!snap || !Array.isArray(snap.systems)) return;
     const facColor = this._facHex;
     const posFn = this._hudPosFn();
@@ -28230,13 +28561,38 @@ Object.assign(__exports, { WORLD_SCALE, hashString01, systemWorldPos, generateGa
 });
 __register("src/ui/screens/MenuView.js", function (__exports, __require) {
 /**
- * ui/screens/MenuView.js — 主菜单：新战役配置 / 继续战役 / 存档管理入口
+ * ui/screens/MenuView.js — 主菜单（R7 全屏沉浸式重构）
+ *
+ * 结构：.boot-screen（全屏 3D 背景叠加层，见 styles.css）
+ *   ├─ CanvasManager 三层画布（glCanvas + hud2D）→ GalaxyRenderer 绘制银河
+ *   ├─ .vf-menu-titleblock 标题块
+ *   ├─ .vf-menu-panel 毛玻璃菜单舱（新战役表单 / 继续战役 / 设置入口）
+ *   └─ .vf-menu-foot 版本脚注
+ *
+ * 银河背景：复用 GalaxyRenderer + CanvasManager（与银河地图同源渲染管线），
+ * 传入合成空快照 {systems:[],factions:[]} —— 仅程序化星盘粒子 + 体积星云 +
+ * 超新星球壳，不依赖任何战役数据；rAF 循环内缓慢递增相机 yaw 实现自动环绕运镜
+ * （约 100 秒/圈，pitch 固定微俯），reducedEffects 时停用旋转与动画。
+ *
+ * 菜单面板为毛玻璃叠加层，无 ERP 式包围框架；交互仍走 app.startNewGame /
+ * app.loadGame / app.goto 既有通道。
  */
 
 const { el: el } = __require("src/ui/components/dom.js");
 const { panel: panel } = __require("src/ui/components/panels.js");
 const { L: L } = __require("src/core/i18n.js");
 const { seedFromString: seedFromString } = __require("src/core/rng.js");
+const { CanvasManager: CanvasManager } = __require("src/render/CanvasManager.js");
+const { GalaxyRenderer: GalaxyRenderer } = __require("src/render/GalaxyRenderer.js");
+const { loadLocalSettings: loadLocalSettings } = __require("src/ui/screens/SettingsView.js");
+
+/** 合成空银河快照：GL 路径只要求 systems 为数组（程序化星盘/星云与快照无关） */
+const EMPTY_GALAXY = { systems: [], factions: [] };
+
+/** 自动环绕运镜角速度（弧度/秒）——缓慢巡游，约 100 秒一整圈 */
+const ORBIT_SPEED = 0.062;
+/** 菜单相机俯仰角（弧度，约 52°，微俯银河盘面） */
+const MENU_PITCH = 0.92;
 
 const MenuView = {
   id: 'menu',
@@ -28245,14 +28601,35 @@ const MenuView = {
   mount(ctx) {
     const { root, app } = ctx;
     this.app = app;
-    root.innerHTML = '';
-    const wrap = el('div', { class: 'vf-view' });
-    const head = el('div', { class: 'vf-view-head' });
-    head.appendChild(el('h2', { text: '无垠边疆：星海纪元' }));
-    wrap.appendChild(head);
+    this._mounted = true;
+    this._raf = 0;
+    this._lastT = 0;
+    this._yaw = 0;
+    this._reduced = !!loadLocalSettings().reducedEffects;
 
-    const body = el('div', { class: 'vf-view-body pad' });
-    const col = el('div', { style: { maxWidth: '560px', margin: '40px auto' } });
+    root.innerHTML = '';
+
+    // —— 全屏叠加层容器（.boot-screen：3D 背景之上的暗角渐变，pointer-events:none）——
+    const wrap = el('div', { class: 'boot-screen' });
+    root.appendChild(wrap);
+    this._wrap = wrap;
+
+    // —— 底层：3D 银河画布（复用银河地图渲染管线）——
+    this._cm = new CanvasManager().attach(wrap);
+    this._renderer = new GalaxyRenderer();
+    this._renderer.init(this._cm);
+    this._renderer.setSnapshot(EMPTY_GALAXY);
+    this._renderer.view.zoom = 0.9; // 略拉远：整盘入画，边缘留出深空
+
+    // —— 上层：标题块 ——
+    const titleblock = el('div', { class: 'vf-menu-titleblock' }, [
+      el('div', { class: 'boot-title', text: 'VOID FRONTIER' }),
+      el('div', { class: 'boot-sub', text: '无垠边疆 · 星海纪元' }),
+    ]);
+    wrap.appendChild(titleblock);
+
+    // —— 上层：毛玻璃菜单舱 ——
+    const panelBox = el('div', { class: 'vf-menu-panel' });
 
     // 新战役
     const p1 = panel({ title: L('ui.newGameTitle'), open: true });
@@ -28298,30 +28675,104 @@ const MenuView = {
     });
     form.appendChild(startBtn);
     p1.appendChild(form);
-    col.appendChild(p1);
+    panelBox.appendChild(p1);
 
     // 继续战役（存在存档时）
     const p2 = panel({ title: L('ui.load'), open: true });
     const contBox = el('div', { class: 'vf-col' });
     p2.appendChild(contBox);
-    col.appendChild(p2);
+    panelBox.appendChild(p2);
     this._refreshSaves(contBox, app);
 
-    body.appendChild(col);
-    wrap.appendChild(body);
-    root.appendChild(wrap);
+    // 设置 / 诊断入口（战役外白名单路由）
+    const actions = el('div', { class: 'vf-menu-actions' });
+    actions.appendChild(el('button', {
+      class: 'vf-btn small',
+      text: `${L('ui.settings')} ⚒`,
+      title: '语言 / 音频 / 体验设置',
+      on: { click: () => app.goto('settings') },
+    }));
+    actions.appendChild(el('button', {
+      class: 'vf-btn small',
+      text: `${L('ui.diagnostics')} ✓`,
+      title: '运行诊断与性能面板',
+      on: { click: () => app.goto('diagnostics') },
+    }));
+    panelBox.appendChild(actions);
+
+    wrap.appendChild(panelBox);
+    wrap.appendChild(el('div', { class: 'vf-menu-foot', text: 'AGE OF STARS · 纯本地单机 · 无远程依赖' }));
+
+    // —— 渲染循环：自动缓慢环绕运镜（仅 mounted 期间运行）——
+    const loop = (now) => {
+      if (!this._mounted) return;
+      this._raf = requestAnimationFrame(loop);
+      const dt = this._lastT ? Math.min(0.1, (now - this._lastT) / 1000) : 0.016;
+      this._lastT = now;
+      if (!this._reduced) {
+        this._yaw += dt * ORBIT_SPEED; // 缓慢环绕：仅表现动画，不进模拟
+        const r = this._renderer;
+        if (r) {
+          r._cam.yaw = this._yaw;
+          r._cam.pitch = MENU_PITCH;
+        }
+      }
+      this._drawFrame();
+    };
+    this._raf = requestAnimationFrame(loop);
   },
 
+  /** 快照推送：主菜单无战役数据，无需刷新 */
+  onSnapshot() {},
+
+  /** 卸载：停循环、释放画布与引用（语言切换重挂前也会先走这里） */
+  unmount() {
+    this._mounted = false;
+    if (this._raf) {
+      cancelAnimationFrame(this._raf);
+      this._raf = 0;
+    }
+    if (this._cm) {
+      this._cm.dispose();
+      this._cm = null;
+    }
+    this._renderer = null;
+    this._wrap = null;
+    this._lastT = 0;
+    this.app = null;
+  },
+
+  // —— 内部实现 ——————————————————————————————————
+
+  /** 渲染一帧银河背景（合成空快照：星盘粒子 / 星云 / 球壳，无节点航路） */
+  _drawFrame() {
+    const cm = this._cm;
+    const r = this._renderer;
+    if (!cm || !r || cm.width < 2 || cm.height < 2) return;
+    cm.beginFrame();
+    r.render(cm.ctx, cm.width, cm.height, EMPTY_GALAXY, {}, {
+      time: performance.now() / 1000, // 仅表现动画，不进模拟
+      reducedEffects: this._reduced,
+    });
+  },
+
+  /** 存档列表（与旧版一致：读取 / 删除，均走 app 既有通道） */
   async _refreshSaves(box, app) {
     box.innerHTML = '';
-    const list = await app.saveManager.list();
+    let list = [];
+    try {
+      list = await app.saveManager.list();
+    } catch (e) {
+      console.warn('[MenuView] 存档列表读取失败:', e);
+    }
+    if (!box) return;
     if (list.length === 0) {
       box.appendChild(el('div', { class: 'vf-faint vf-small', text: '暂无存档' }));
       return;
     }
     for (const rec of list) {
       const row = el('div', { class: 'vf-row' });
-      row.appendChild(el('span', { class: 'vf-grow', text: `${rec.slotId} · ${rec.summary?.name || ''} · T${rec.worldTick}` }));
+      row.appendChild(el('span', { class: 'vf-grow vf-small', text: `${rec.slotId} · ${rec.summary?.name || ''} · T${rec.worldTick}` }));
       row.appendChild(el('button', {
         class: 'vf-btn small primary',
         text: L('ui.load'),
@@ -28335,12 +28786,6 @@ const MenuView = {
       box.appendChild(row);
     }
   },
-
-  unmount() {
-    this.app = null;
-  },
-
-  onSnapshot() {},
 };
 
 function labelWrap(label, control) {
@@ -29517,6 +29962,7 @@ __register("src/simulation/DailySystems.js", function (__exports, __require) {
 const { registerDaily: registerDaily } = __require("src/simulation/TickPipeline.js");
 const { dailyEventCheck: dailyEventCheck, expirePendingChoices: expirePendingChoices } = __require("src/domain/events/narrative.js");
 const { dailyPolicySettlement: dailyPolicySettlement } = __require("src/domain/politics/policy.js");
+const { buildingDef: buildingDef } = __require("src/domain/planets/colony.js");
 const { dailyPopulation: dailyPopulation } = __require("src/domain/planets/colony.js");
 const { closeDailyLedgers: closeDailyLedgers, applyDecay: applyDecay } = __require("src/domain/economy/ledger.js");
 const { updateMarketPrices: updateMarketPrices } = __require("src/domain/economy/market.js");
@@ -29532,6 +29978,29 @@ registerDaily('population', (world) => {
     const r = dailyPopulation(world, colony);
     if (r.after <= 0 && r.before > 0) {
       emit(world, 'ColonyLost', { colonyId: id, planetId: colony.planetId }, 'colony');
+    }
+  }
+});
+
+registerDaily('upkeep', (world) => {
+  // 建筑维护费扣费（任务书 4.6：建筑 upkeep 必须实际结算）
+  for (const cid of Object.keys(world.entities.colonies).sort()) {
+    const col = world.entities.colonies[cid];
+    for (const b of col.buildings || []) {
+      if (b.state !== 'active') continue;
+      const def = buildingDef(b.defId);
+      if (!def || !def.upkeep) continue;
+      for (const [rid, amt] of Object.entries(def.upkeep)) {
+        const need = Math.ceil(amt * (b.level || 1));
+        if (rid === 'credits') {
+          col.stockpile.credits = Math.max(0, (col.stockpile.credits || 0) - need);
+        } else {
+          // 原料从殖民地仓储扣
+          const cur = col.stockpile[rid] || 0;
+          if (cur >= need) { col.stockpile[rid] -= need; }
+          else { b.state = 'starved'; break; }
+        }
+      }
     }
   }
 });

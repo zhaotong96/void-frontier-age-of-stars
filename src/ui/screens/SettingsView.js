@@ -51,7 +51,8 @@ export const SettingsView = {
       app.refreshLocaleUI();
       app.sideNav.refresh();
     });
-    p1.appendChild(langWrap(langSel));
+    // 面板标题已表明用途，语言选择器直接挂载（原 langWrap(langSel) 缺 label 实参必然抛错）
+    p1.appendChild(langSel);
     body.appendChild(p1);
 
     const p2 = panel({ title: '音频', open: true });
@@ -107,14 +108,6 @@ export const SettingsView = {
   unmount() {},
   onSnapshot() {},
 };
-
-function labelWrap(label, control) {
-  const wrap = el('label', { class: 'vf-col' });
-  wrap.appendChild(el('span', { class: 'vf-dim vf-small', text: label }));
-  wrap.appendChild(control);
-  return wrap;
-}
-const langWrap = labelWrap;
 
 function rangeRow(label, value, onChange) {
   const row = el('div', { class: 'vf-row' });
