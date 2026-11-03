@@ -15516,7 +15516,8 @@ const GroundView = {
     const w = app.world;
     this._setHead('简报', []);
 
-    const box = el('div', { class: 'pad vf-col', style: { overflowY: 'auto' } });
+    // 沉浸式全屏 body：内边距避开悬浮侧栏与顶栏（R7 毛玻璃 chrome）
+    const box = el('div', { class: 'pad vf-col', style: { overflowY: 'auto', padding: '64px 200px 24px 72px' } });
     const p1 = panel({ title: '发起地面行动', open: true });
     const planetSel = el('select', { 'aria-label': '目标行星' });
     for (const c of Object.values(w.entities.colonies || {})) {
@@ -15879,7 +15880,9 @@ const GroundView = {
     if (e.button === 0) {
       this._mouse.lDown = true;
       if (this._buildMode) {
-        this._digCd = 0;                // 立即起手采掘
+        // 按下边沿立即采掘一格（按住由 _updateAim 按 DIG_INTERVAL 连挖）
+        this._digCd = DIG_INTERVAL;
+        if (this._aim) this._tryDig(this._aim);
       } else {
         this._oneShot.attack = this._oneShot.attack || 'light';
       }
@@ -15888,7 +15891,11 @@ const GroundView = {
       this._mouse.dragged = false;
       this._mouse.lastX = e.clientX;
       this._mouse.lastY = e.clientY;
-      if (this._buildMode) this._placeCd = 0;
+      if (this._buildMode) {
+        // 按下边沿立即放置一格（按住未拖拽时由 _updateAim 连放）
+        this._placeCd = PLACE_INTERVAL;
+        if (this._aim) this._tryPlace(this._aim);
+      }
     }
   },
 
@@ -16803,22 +16810,22 @@ const GroundView = {
     const au = view.playerUnits.find((u) => u.unitId === view.activeUnitId)
       || view.playerUnits[0];
 
-    // —— 左上：任务名 + 时间（+ 时限） ——
+    // —— 左上：任务名 + 时间（+ 时限；下移避开应用悬浮顶栏） ——
     ctx.fillStyle = 'rgba(8,14,22,0.72)';
-    ctx.fillRect(12, 12, 250, 54);
+    ctx.fillRect(12, 62, 250, 54);
     ctx.strokeStyle = 'rgba(140,170,200,0.3)';
-    ctx.strokeRect(12.5, 12.5, 249, 53);
+    ctx.strokeRect(12.5, 62.5, 249, 53);
     ctx.fillStyle = '#e8f2fb';
     ctx.font = 'bold 13px "Segoe UI", system-ui, sans-serif';
-    ctx.fillText(tpl ? tpl.nameZh : m.templateId, 22, 32);
+    ctx.fillText(tpl ? tpl.nameZh : m.templateId, 22, 82);
     ctx.fillStyle = '#9fb6c9';
     ctx.font = '11px "Segoe UI", system-ui, sans-serif';
     const limit = view.timeLimitSeconds > 0 ? ` / ${fmtClock(view.timeLimitSeconds)}` : '';
-    ctx.fillText(`任务时间 ${fmtClock(view.time)}${limit} · 风险 ${m.riskLevel}/5`, 22, 50);
-    ctx.fillText(`小队指令：${STANCES[this._stanceIdx]}${this._buildMode ? ' · 采掘/建造模式' : ''}`, 22, 62);
+    ctx.fillText(`任务时间 ${fmtClock(view.time)}${limit} · 风险 ${m.riskLevel}/5`, 22, 100);
+    ctx.fillText(`小队指令：${STANCES[this._stanceIdx]}${this._buildMode ? ' · 采掘/建造模式' : ''}`, 22, 112);
 
     // —— 小队成员迷你血条 ——
-    let uy = 84;
+    let uy = 134;
     for (const u of view.playerUnits) {
       const dead = u.state === 'dead';
       ctx.fillStyle = dead ? 'rgba(90,40,40,0.7)' : 'rgba(8,14,22,0.72)';
@@ -16835,17 +16842,18 @@ const GroundView = {
       uy += 20;
     }
 
-    // —— 右上：目标列表 + 行动日志 ——
+    // —— 右上：目标列表 + 行动日志（下移避开顶栏） ——
     const boxW = 268;
+    const boxY = 62;
     ctx.fillStyle = 'rgba(8,14,22,0.72)';
-    ctx.fillRect(W - boxW - 12, 12, boxW, 30 + view.objectives.length * 18);
-    ctx.strokeRect(W - boxW - 11.5, 12.5, boxW - 1, 29 + view.objectives.length * 18);
+    ctx.fillRect(W - boxW - 12, boxY, boxW, 30 + view.objectives.length * 18);
+    ctx.strokeRect(W - boxW - 11.5, boxY + 0.5, boxW - 1, 29 + view.objectives.length * 18);
     ctx.fillStyle = '#e8f2fb';
     ctx.font = 'bold 12px "Segoe UI", system-ui, sans-serif';
-    ctx.fillText('任务目标', W - boxW + 2, 30);
+    ctx.fillText('任务目标', W - boxW + 2, boxY + 18);
     ctx.font = '11px "Segoe UI", system-ui, sans-serif';
     for (const o of view.objectives) {
-      const yLine = 48 + view.objectives.indexOf(o) * 18;
+      const yLine = boxY + 36 + view.objectives.indexOf(o) * 18;
       ctx.fillStyle = o.done ? '#5fe0a0' : '#9fb6c9';
       ctx.fillText(o.done ? '✓' : '○', W - boxW + 2, yLine);
       let extra = '';
@@ -16856,7 +16864,7 @@ const GroundView = {
     }
 
     // —— 行动日志（最近 4 条，右上目标框下方） ——
-    const y = 60 + view.objectives.length * 18;
+    const y = boxY + 48 + view.objectives.length * 18;
     ctx.fillStyle = 'rgba(8,14,22,0.55)';
     ctx.fillRect(W - boxW - 12, y, boxW, 14 + Math.min(4, view.log.length) * 15);
     ctx.font = '10px "Segoe UI", system-ui, sans-serif';
@@ -16867,7 +16875,7 @@ const GroundView = {
       ctx.fillText(`[${fmtClock(line.t)}] ${line.text}`, W - boxW + 2, y + 14 + i * 15);
     }
 
-    // —— 撤离点罗盘（顶部中央箭头 + 距离） ——
+    // —— 撤离点罗盘（顶部中央箭头 + 距离；下移避开顶栏） ——
     const kx = SURFACE_SIZE.X / (m.w * TS);
     const kz = SURFACE_SIZE.Z / (m.h * TS);
     const ex = view.extraction.x * kx;
@@ -16878,7 +16886,7 @@ const GroundView = {
     const rel = normAngle(Math.atan2(ez - c.z, ex - c.x) - camAng);
     const dist = Math.hypot(ex - c.x, ez - c.z);
     ctx.save();
-    ctx.translate(W / 2, 44);
+    ctx.translate(W / 2, 96);
     ctx.rotate(rel);
     ctx.fillStyle = 'rgba(95,224,160,0.9)';
     ctx.beginPath();
@@ -16892,7 +16900,7 @@ const GroundView = {
     ctx.fillStyle = '#8fd8b0';
     ctx.font = '10px "Segoe UI", system-ui, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText(`撤离区 ${Math.round(dist)}m`, W / 2, 68);
+    ctx.fillText(`撤离区 ${Math.round(dist)}m`, W / 2, 120);
     ctx.textAlign = 'left';
 
     // —— 交互引导进度（引爆装药） ——
@@ -16918,28 +16926,28 @@ const GroundView = {
     }
   },
 
-  /** 自由模式 HUD：标题/台账 + 三色条 + 采掘统计 + 返回提示 */
+  /** 自由模式 HUD：标题/台账 + 三色条 + 采掘统计 + 返回提示（下移避开顶栏） */
   _drawHudFree(ctx, W, H) {
     const c = this.char3d;
     ctx.fillStyle = 'rgba(8,14,22,0.72)';
-    ctx.fillRect(12, 12, 250, 54);
+    ctx.fillRect(12, 62, 250, 54);
     ctx.strokeStyle = 'rgba(140,170,200,0.3)';
-    ctx.strokeRect(12.5, 12.5, 249, 53);
+    ctx.strokeRect(12.5, 62.5, 249, 53);
     ctx.fillStyle = '#e8f2fb';
     ctx.font = 'bold 13px "Segoe UI", system-ui, sans-serif';
-    ctx.fillText(`自由探索 · ${this.planet ? this.planet.name : ''}`, 22, 32);
+    ctx.fillText(`自由探索 · ${this.planet ? this.planet.name : ''}`, 22, 82);
     ctx.fillStyle = '#9fb6c9';
     ctx.font = '11px "Segoe UI", system-ui, sans-serif';
-    ctx.fillText(`采掘/建造模式：${this._buildMode ? '开' : '关'} · Esc 升空返回`, 22, 50);
+    ctx.fillText(`采掘/建造模式：${this._buildMode ? '开' : '关'} · Esc 升空返回`, 22, 100);
 
     // 本次采掘台账
     const keys = Object.keys(this._tally).filter((k) => this._tally[k] !== 0);
     if (keys.length) {
       ctx.fillStyle = 'rgba(8,14,22,0.55)';
-      ctx.fillRect(12, 74, 250, 22 + keys.length * 14);
+      ctx.fillRect(12, 124, 250, 22 + keys.length * 14);
       ctx.fillStyle = '#cfe3f5';
-      ctx.fillText('本次作业台账', 22, 90);
-      let ty = 104;
+      ctx.fillText('本次作业台账', 22, 140);
+      let ty = 154;
       for (const k of keys) {
         ctx.fillStyle = this._tally[k] > 0 ? '#9fd8b0' : '#d8a89f';
         ctx.fillText(`${k} × ${this._tally[k]}`, 22, ty);
