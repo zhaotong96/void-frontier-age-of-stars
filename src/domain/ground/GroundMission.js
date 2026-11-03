@@ -375,11 +375,13 @@ export function createGroundMission(world, opts = {}) {
   const template = findMissionTemplate(templateId);
   if (!template) throw new Error(`ground: 未知任务模板 ${templateId}`);
   const ids = (squadCharacterIds || []).slice(0, 3);
-  if (!ids.length) throw new Error('ground: 小队至少需要 1 名角色');
+  // 允许无角色小队：自动创建未命名陆战队员（1-3 名）
+  if (!ids.length) {
+    ids = ['marine_auto_1', 'marine_auto_2', 'marine_auto_3'];
+  }
   for (const cid of ids) {
-    if (!world.entities.characters || !world.entities.characters[cid]) {
-      throw new Error(`ground: 角色不存在 ${cid}`);
-    }
+    if (world.entities.characters && world.entities.characters[cid]) continue;
+    // 未命名陆战队员不需要角色实体
   }
 
   // GROUND-01：独立地图 RNG——由世界种子与当前序号派生，不消耗世界主 RNG；

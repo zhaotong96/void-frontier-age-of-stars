@@ -411,6 +411,7 @@ export const GroundView = {
     this._digCd = 0;
     this._placeCd = 0;
     this._aim = null;                  // 准星 DDA 结果（采掘/建造/信息条共用）
+    this._aimFar = false;              // 瞄准点超出角色触及范围
     this._eye = [0, 0, 0];
     this._fwd = [0, 0, 0];
     this._m = { proj: mat4(), view: mat4(), vp: mat4() };
@@ -449,6 +450,8 @@ export const GroundView = {
   _build(param) {
     if (!this._mounted) return;
     const app = this.app;
+    // 「简报」按钮的一次性覆盖：先取走标记再复位（本帧内强制进简报）
+    const forceBriefing = this._forceBriefing === true;
     this._teardownScene();
     this.body.innerHTML = '';
     this._resultShown = false;
@@ -469,7 +472,7 @@ export const GroundView = {
     if (param) mission = missions.find((m) => m.id === param || m.planetId === param) || null;
     else mission = missions[0] || null;
 
-    if (mission && !this._forceBriefing) {
+    if (mission && !forceBriefing) {
       this._buildMission(mission);
       return;
     }
@@ -506,12 +509,10 @@ export const GroundView = {
     const box = el('div', { class: 'pad vf-col', style: { overflowY: 'auto' } });
     const p1 = panel({ title: '发起地面行动', open: true });
     const planetSel = el('select', { 'aria-label': '目标行星' });
-    const colonyOf = {};
     for (const c of Object.values(w.entities.colonies || {})) {
       if (c.factionId !== w.playerFactionId) continue;
       const planet = w.entities.planets[c.planetId];
       if (!planet) continue;
-      colonyOf[planet.id] = c;
       planetSel.appendChild(el('option', { value: planet.id, text: planet.name || planet.id }));
     }
     if (!planetSel.childElementCount) {
@@ -1270,7 +1271,11 @@ export const GroundView = {
     return this._fwd;
   },
 
-  /** 每帧准星 DDA：采掘/建造目标与 HUD 信息（同时是防穿模同源射线） */
+  /**
+   * 每帧准星两段 DDA：第一段沿相机前向求瞄准点（臂长 + 视距），
+   * 第二段从角色胸口指向瞄准点、以角色为基准的采掘触及范围（AIM_REACH）。
+   * 第三人称下准星与挖掘目标因此始终一致，且触及半径不随臂长缩放。
+   */
   _updateAim(dt) {
     this._digCd = Math.max(0, this._digCd - dt);
     this._placeCd = Math.max(0, this._placeCd - dt);
@@ -1284,7 +1289,25 @@ export const GroundView = {
     this._eye[1] = c.y + 1.55 + sp * d;
     this._eye[2] = c.z + cp * cy * d;
     const fwd = this._camForward();
-    const hit = ddaRaycast(this.sw, this._eye, fwd, AIM_REACH);
+
+    // 第一段：相机 → 瞄准点（命中地形取命中点，否则取视距延伸点）
+    const camRay = ddaRaycast(this.sw, this._eye, fwd, d + AIM_REACH);
+    const camT = camRay.hit ? camRay.t : d + 4;
+    const aimPt = [
+      this._eye[0] + fwd[0] * camT,
+      this._eye[1] + fwd[1] * camT,
+      this._eye[2] + fwd[2] * camT,
+    ];
+    // 第二段：角色胸口 → 瞄准点（触及范围内才有效）
+    const chest = [c.x, c.y + 1.25, c.z];
+    const ddx = aimPt[0] - chest[0];
+    const ddy = aimPt[1] - chest[1];
+    const ddz = aimPt[2] - chest[2];
+    const len = Math.hypot(ddx, ddy, ddz) || 1;
+    this._aimFar = len > AIM_REACH + 0.6;
+    const hit = this._aimFar
+      ? { hit: false }
+      : ddaRaycast(this.sw, chest, [ddx / len, ddy / len, ddz / len], AIM_REACH);
     this._aim = hit.hit ? hit : null;
     if (this._aim) this._aim.dug = false;   // 本帧是否实际挖到（角色采掘姿态用）
 
@@ -1350,18 +1373,21 @@ export const GroundView = {
   // —— 特效 ————————————————
 
   /**
-   * 打击拍检测：任务单元 struck 由 false 翻 true 的那一帧发出刀光/光束。
-   * 远程光束目标取射程内最近存活敌人（视觉近似，判定以 domain 为准）。
+   * 打击拍检测：每个攻击回合（state 进入 attack）内 struck 首次翻 true 的那一帧
+   * 发出刀光/光束。armed 标记防止同一回合重复触发（struck 在回合内保持 true）。
    */
   _detectStrikes(view) {
     for (const u of view.playerUnits) {
       if (u.state === 'dead') continue;
       const key = u.unitId;
-      const prev = this._strikeSeen.get(key);
-      if (u.state === 'attack' && u.struck && prev && !prev.struck) {
+      const prev = this._strikeSeen.get(key) || { state: null, armed: false };
+      let armed = prev.armed;
+      if (u.state === 'attack' && prev.state !== 'attack') armed = false; // 新攻击回合
+      if (u.state === 'attack' && u.struck && !armed) {
+        armed = true;
         this._emitMissionStrike(view, u);
       }
-      this._strikeSeen.set(key, { struck: !!u.struck, state: u.state });
+      this._strikeSeen.set(key, { state: u.state, armed });
     }
     if (this._strikeSeen.size > 8) this._strikeSeen.clear();
   },
@@ -1387,9 +1413,14 @@ export const GroundView = {
         }
       }
       const a = [wx, this.char3d.y + 1.25, wz];
-      const b = tgt
-        ? [tgt.x * kx, this._groundAt(tgt.x * kx, tgt.y * kz) + 0.8, tgt.y * kz]
-        : [wx - Math.cos(u.facing) * 18 * kx, this.char3d.y + 1.25, wz - Math.sin(u.facing) * 18 * kz];
+      let b;
+      if (tgt) {
+        const gy = this._groundAt(tgt.x * kx, tgt.y * kz);
+        b = [tgt.x * kx, (gy === Infinity ? this.char3d.y : gy) + 0.8, tgt.y * kz];
+      } else {
+        // 空放：沿任务朝向（像素系 atan2 → 世界 x/z）打出一道曳光
+        b = [wx + Math.cos(u.facing) * 18 * kx, this.char3d.y + 1.25, wz + Math.sin(u.facing) * 18 * kz];
+      }
       this._fx.beams.push({ a, b, age: 0, life: 0.12 });
     } else {
       this._fx.slashes.push({
@@ -1736,7 +1767,7 @@ export const GroundView = {
       ctx.fillText(
         aim
           ? `${MAT_ZH[aim.matId] || '未知'}（${aim.vx},${aim.vy},${aim.vz}） 左键采掘 · 右键建造`
-          : '超出采掘范围',
+          : (this._aimFar ? '超出采掘范围' : '未瞄准体素'),
         cx, cy + 30,
       );
     } else {
