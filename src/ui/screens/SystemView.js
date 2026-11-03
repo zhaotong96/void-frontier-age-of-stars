@@ -101,6 +101,7 @@ export const SystemView = {
 
     this._cm = new CanvasManager().attach(left);
     this._renderer = new SystemRenderer();
+    this._renderer.init(this._cm); // GL 通道接线（WebGL2 不可用时内部自动退化 2D）
     // 画布尺寸变化 → 立即补绘一帧（日常逐帧渲染由 rAF 循环承担）
     this._unsubResize = this._cm.onResize(() => {
       if (this._mounted) this._drawFrame();

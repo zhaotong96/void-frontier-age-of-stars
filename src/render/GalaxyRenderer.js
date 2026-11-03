@@ -801,10 +801,10 @@ export class GalaxyRenderer {
       systemWorldPos(s, _wp3);
       const lvl = s.surveyedLevel ?? 0;
       const typeId = s.star && s.star.typeId;
-      // 归属势力光晕（软高斯盘）
+      // 归属势力光晕（软高斯薄雾：半径收敛 + 低强度，避免吞没星盘）
       if (L.ownership && s.ownerFactionId) {
         const oc = this._facRgb.get(s.ownerFactionId) || ACCENT_RGB;
-        push(_wp3, 150 * k, oc[0], oc[1], oc[2], 0.05, 0, 0, 0, 0);
+        push(_wp3, 11 * k, oc[0] * 0.45, oc[1] * 0.45, oc[2] * 0.45, 0.010, 0, 0, 0, 0);
       }
       // 节点核心
       if (lvl === 0) {
@@ -916,7 +916,8 @@ export class GalaxyRenderer {
     if (!snap || !Array.isArray(snap.systems)) return;
     const facColor = this._facHex;
     const posFn = this._hudPosFn();
-    if (L.ownership) this._drawOwnership(ctx, snap, facColor, reduced, posFn);
+    // 势力范围雾效已由 GL 通道的归属光晕承担（HUD 层不再叠加 R=90 渐变圆，
+    // 否则 16 星系渐变叠加会形成吞没星盘的巨型色球）
     const sizeK = Math.min(1.5, Math.max(0.8, this.view.zoom));
     for (const s of snap.systems) {
       const p = posFn(s);

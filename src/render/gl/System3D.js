@@ -61,7 +61,7 @@ const ORBIT_INCLINE = 20 * Math.PI / 180;
 const CAM_PITCH = 62 * Math.PI / 180;
 const CAM_FOV = 50 * Math.PI / 180;
 /** 黑洞事件视界（RS=1）对应的世界半径：BH 着色器以 RS 为单位 */
-const BH_RS_WORLD = 0.26;
+const BH_RS_WORLD = 0.6; // 相机 ~6.2 世界单位 → ~10.3 RS（落在 22 RS 积分域内，吸积盘 1.65..6.2 RS 可见）
 /** 日冕半径 = 恒星本体 × 2.6；脉冲星磁层网格缩放 */
 const CORONA_K = 2.6;
 const PULSAR_K = 2.4;
@@ -644,6 +644,9 @@ export class System3D {
     /** @type {{entries:Object[], count:number, ...相机缓存}|null} 最近一帧拾取缓存 */
     this.pickData = null;
 
+    // 舰队动态缓冲数据（pos3 + t1 × 3 顶点）—— 必须先于 _buildResources 分配
+    this._fleetData = new Float32Array(FLEET_MAX * 3 * 4);
+
     this._incCos = Math.cos(ORBIT_INCLINE);
     this._incSin = Math.sin(ORBIT_INCLINE);
     this._coronaRes = this.tier === 2 ? CORONA_RES_LOW : CORONA_RES_FULL;
@@ -676,9 +679,6 @@ export class System3D {
     // —— 拾取条目池 ——
     this._entries = [];
     this._entryCount = 0;
-
-    // —— 舰队动态缓冲数据（pos3 + t1 × 3 顶点） ——
-    this._fleetData = new Float32Array(FLEET_MAX * 3 * 4);
   }
 
   /** 切换 LOD 档位（1|2）；档位变化时重建日冕离屏目标分辨率 */
@@ -732,10 +732,15 @@ export class System3D {
     const aspect = width / Math.max(1, height);
     const halfY = CAM_FOV / 2;
     const halfX = Math.atan(Math.tan(halfY) * aspect);
-    const dist = (rMax / Math.sin(Math.min(halfY, halfX))) * 1.06;
-    const yaw = 0.55 + time * 0.02 + (Number(opts.yaw) || 0);
-    const cp = Math.cos(CAM_PITCH);
-    const sp = Math.sin(CAM_PITCH);
+    // 黑洞星系：专用低角度运镜（吸积盘近景，Interstellar 式构图）；
+    // 盘世界半径 = 6.2 × BH_RS_WORLD，相机略高于盘面并保持完整透镜环入画
+    const isBHCam = typeId === 'blackHole';
+    const camPitch = isBHCam ? 0.24 : CAM_PITCH;
+    // 黑洞：固定世界距离 7.0 → 11.7 RS，保证吸积盘（1.65..6.2 RS）完整入画
+    const dist = isBHCam ? 4.6 : (camRMax / Math.sin(Math.min(halfY, halfX))) * 1.06;
+    const yaw = 0.55 + time * (isBHCam ? 0.008 : 0.02) + (Number(opts.yaw) || 0);
+    const cp = Math.cos(camPitch);
+    const sp = Math.sin(camPitch);
     s.eye[0] = dist * cp * Math.sin(yaw);
     s.eye[1] = dist * sp;
     s.eye[2] = dist * cp * Math.cos(yaw);

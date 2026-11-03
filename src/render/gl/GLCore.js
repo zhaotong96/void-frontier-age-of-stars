@@ -67,6 +67,35 @@ export class GLContext {
     this._tracked = { programs: [], buffers: [], vaos: [], textures: [], fbos: [] };
     this.errorCount = 0;
     void opts; // 预留：后续如需按 opts 差异化初始化在此扩展
+    // 调试模式（window.__GL_THROW_ON_ERROR）：包装全部 gl 方法（原型链完整
+    // 遍历），调用后立即 getError，非 NO_ERROR 即抛出带方法名的错误。
+    if (typeof window !== 'undefined' && window.__GL_THROW_ON_ERROR) {
+      let proto = Object.getPrototypeOf(gl);
+      let count = 0;
+      while (proto && proto !== Object.prototype) {
+        for (const name of Object.getOwnPropertyNames(proto)) {
+          if (name === 'constructor' || typeof gl[name] !== 'function') continue;
+          // getError 自引用会导致无限递归； getContext 不可重入 —— 排除
+          if (name === 'getError' || name === 'getContext') continue;
+          const orig = gl[name].bind(gl);
+          const wrapped = (...a) => {
+            const r = orig(...a);
+            const err = gl.getError();
+            if (err !== gl.NO_ERROR) {
+              const args = a.slice(0, 4).map((v) => (typeof v === 'number' ? v : (v && v.length !== undefined ? 'arr/' + v.length : String(v)))).join(',');
+              throw new Error(`[GL_DEBUG] gl.${name} → 0x${err.toString(16)} (${args})`);
+            }
+            return r;
+          };
+          try {
+            Object.defineProperty(gl, name, { value: wrapped, writable: true, configurable: true });
+            count++;
+          } catch { /* 不可包装的方法跳过 */ }
+        }
+        proto = Object.getPrototypeOf(proto);
+      }
+      this.debugWrapped = count;
+    }
   }
 
   get isLost() {
@@ -301,6 +330,21 @@ export class GLContext {
   resetTracking() {
     this._tracked = { programs: [], buffers: [], vaos: [], textures: [], fbos: [] };
     this.errorCount = 0;
+    // 调试钩子：window.__GL_TRACE 时包装全部 gl 方法，记录最后 N 次调用（含参数摘要）
+    if (typeof window !== 'undefined' && window.__GL_TRACE) {
+      this.traceLog = [];
+      for (const name of Object.getOwnPropertyNames(Object.getPrototypeOf(gl)).concat(Object.keys(gl))) {
+        if (typeof gl[name] !== 'function') continue;
+        const orig = gl[name].bind(gl);
+        gl[name] = (...a) => {
+          try {
+            this.traceLog.push(name + ' ' + a.slice(0, 4).map((v) => typeof v === 'number' ? v : (v && v.length !== undefined ? ('arr:' + (v.length)) : String(v))).join(','));
+            if (this.traceLog.length > 40) this.traceLog.shift();
+          } catch { /* 追踪不影响主流程 */ }
+          return orig(...a);
+        };
+      }
+    }
   }
 
   /** 销毁全部登记资源，并经 WEBGL_lose_context 主动丢弃上下文 */

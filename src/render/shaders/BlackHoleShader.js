@@ -223,6 +223,10 @@ void main() {
   }
 
   col += vec3(dither * 0.004);
+  // Reinhard 输出压缩：吸积盘多普勒束流峰值 HDR 可达 ~190，在 RGBA8 回退
+  // 模式下会被钳制成纯白块；x/(1+x)×2.2 保留环带结构并适配 0..2.2 输出域
+  // （真 RGBA16F 管线下核心仍 >1.0，正常触发 Bloom 溢出）
+  col = col / (1.0 + col) * 2.2;
   fragColor = vec4(max(col, vec3(0.0)), 1.0);
 }
 `;
