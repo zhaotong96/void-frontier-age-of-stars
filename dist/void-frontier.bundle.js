@@ -3864,8 +3864,20 @@ function updateObjectives(mission, dt) {
   }
 
   // —— destroy：交互引导 3s 引爆（打断则缓慢回落） ——
-  const interactId = mission.input.interactTarget;
+  const rawInteract = mission.input.interactTarget;
   const actor = alive.find((u) => u.unitId === activeUnitIdOf(mission));
+  // 'nearest' 自动解析为距当前控制角色最近的可交互目标
+  let interactId = rawInteract;
+  if (rawInteract === 'nearest' && actor) {
+    let nearestT = null;
+    let minD = INTERACT_R;
+    for (const t of mission.targets) {
+      if (t.done) continue;
+      const d = Math.hypot(actor.x - t.x, actor.y - t.y);
+      if (d < minD) { minD = d; nearestT = t; }
+    }
+    interactId = nearestT ? nearestT.targetId : null;
+  }
   for (const t of mission.targets) {
     if (t.done) continue;
     const channeling = interactId && t.targetId === interactId && actor
@@ -14998,28 +15010,383 @@ Object.assign(__exports, { toast, clearToasts });
 });
 __register("src/ui/screens/GroundView.js", function (__exports, __require) {
 /**
- * ui/screens/GroundView.js — 行星行动视图（任务书 5.7 / 6.2）
+ * ui/screens/GroundView.js — 行星地表 3D 视图（返工 Phase R8 门禁闭合）
  *
- * 键鼠控制：WASD/方向键移动、J 轻击、K 重击、L 射击、Shift 格挡、
- * 空格闪避、E 交互、Tab 切换单位。输入作为「输入流」每帧写入
- * mission.input（瞬态控制通道，非世界状态变更，见 ARCHITECTURE.md）。
+ * 全 3D 重写：消费 SurfaceSandbox 体素世界与 PlanetSurface3D GL 渲染器，
+ * 提供第三人称外骨骼地表行动（任务模式）与自由探索沙盒（采掘/建造）。
+ *
+ * 结构：
+ *  - 简报页：行星选择（玩家殖民地）+ 任务模板列表 + 开始行动 + 自由探索模式；
+ *  - 任务模式：createGroundMission 建立任务实体；视图持有固定步长累加器
+ *    （dt = 1/30）驱动 stepMission，输入以「瞬态控制通道」逐帧直写
+ *    mission.input（不经命令总线，见 ARCHITECTURE.md 的输入流约定）；
+ *  - 自由模式：不创建任务，视图侧本地状态机 + 体素 AABB 物理，纯沙盒挖掘/建造；
+ *  - 渲染：CanvasManager 三层画布（GL 场景 + 2D HUD）；每帧
+ *    beginGLFrame → PlanetSurface3D.draw（≤8 draw call）→ 建筑网格批处理
+ *    （buildBuildingMesh(category) 十类别图集 + 选择框，1 draw call）→
+ *    endGLFrame（HDR Bloom 合成）→ 2D HUD。
+ *
+ * 控制器（第三人称弹簧臂）：
+ *  - 右键拖拽旋转 yaw/pitch；滚轮缩放 dist 3..14（防穿模 DDA 收臂由渲染器内完成）；
+ *  - WASD/方向键相机相对移动，Shift 冲刺；空格点按跳跃（初速 √(2g·1.2)）并同时
+ *    触发任务 FSM 的闪避（dodgeDir），空格长按喷气悬停（耗喷气燃料）；
+ *  - 体素 AABB 碰撞（脚底/头顶体素检测，轴分离滑行）；重力 g = planet.gravity × 9.8。
+ *
+ * 技能栏（数字键 1..6，与 GroundMission 的动作参数对齐）：
+ *  1 等离子快斩（light，伤害 22，前摇 0.28s） 2 震地重劈（heavy，×2，前摇 0.5s）
+ *  3 磁轨射击（ranged，需射程 + 视线） 4 偏导护盾格挡（block 0.25s 判定窗，耗耐 15）
+ *  5 纳米采掘/建造（左键挖 / 右键建，矿体入账殖民地仓储） 6 小队指令（跟随/集火/散开）
+ *
+ * 门禁 5（体素/建筑/传送带）：
+ *  - 采掘：准星 DDA 命中 → digVoxel → ps3d.digChunk 增量重建 → creditColony 入账；
+ *  - 建造：命中面法向相邻格 placeVoxel(BUILDING) → digChunk（殖民地扣 1 合金/格）；
+ *  - 建筑：殖民地建筑与建造队列按 buildBuildingMesh(category) 的 3D 网格渲染
+ *    （十类别实例图集；R8 渲染器交付契约中的单位盒管线让渡给传送带货箱）；
+ *  - 传送带：采掘建筑 → 最近精炼建筑自动生成 conveyor.paths，
+ *    PlanetSurface3D 沿路径匀速滑动实例化货箱。
+ *
+ * 约束：确定性（全程无 Math.random，视觉相位由索引常数派生）；
+ * 不修改 domain/simulation 任何文件；unmount 释放全部监听/GL/DOM 资源。
  */
 
 const { el: el } = __require("src/ui/components/dom.js");
-const { panel: panel, kvList: kvList } = __require("src/ui/components/panels.js");
-const { progressBar: progressBar } = __require("src/ui/components/progress.js");
-const { showModal: showModal } = __require("src/ui/components/index.js");
-const { CanvasManager: CanvasManager } = __require("src/render/CanvasManager.js");
-const { GroundRenderer: GroundRenderer } = __require("src/render/GroundRenderer.js");
-const { MISSION_TEMPLATES: MISSION_TEMPLATES, findMissionTemplate: findMissionTemplate } = __require("src/content/missions.js");
+const { panel: panel } = __require("src/ui/components/panels.js");
+const { showModal: showModal, toast: toast } = __require("src/ui/components/index.js");
 const { L: L } = __require("src/core/i18n.js");
+const { CanvasManager: CanvasManager } = __require("src/render/CanvasManager.js");
+const { PlanetSurface3D: PlanetSurface3D } = __require("src/render/gl/PlanetSurface3D.js");
+const { mat4: mat4, mat4Perspective: mat4Perspective, mat4LookAt: mat4LookAt, mat4Multiply: mat4Multiply } = __require("src/render/gl/Mat4.js");
+const { buildBuildingMesh: buildBuildingMesh, buildUnitBox: buildUnitBox } = __require("src/render/meshes/GroundMeshes.js");
+const { createSurfaceWorld: createSurfaceWorld, digVoxel: digVoxel, placeVoxel: placeVoxel, getVoxel: getVoxel, ddaRaycast: ddaRaycast, getSurfaceHeight: getSurfaceHeight, findSpawnPoint: findSpawnPoint, SURFACE_SIZE: SURFACE_SIZE, SURFACE_MAT: SURFACE_MAT } = __require("src/domain/ground/SurfaceSandbox.js");
+const { createGroundMission: createGroundMission, stepMission: stepMission, getMissionView: getMissionView } = __require("src/domain/ground/GroundMission.js");
+const { creditColony: creditColony, debitColony: debitColony } = __require("src/domain/economy/ledger.js");
+const { MISSION_TEMPLATES: MISSION_TEMPLATES, findMissionTemplate: findMissionTemplate } = __require("src/content/missions.js");
+const { BUILDINGS: BUILDINGS } = __require("src/content/buildings.js");
 
-const KEYMAP = {
-  KeyW: 'up', ArrowUp: 'up',
-  KeyS: 'down', ArrowDown: 'down',
-  KeyA: 'left', ArrowLeft: 'left',
-  KeyD: 'right', ArrowRight: 'right',
+// ———— 常量 ————————————————————————————————————————————————
+
+/** GroundMission 的像素格边长（mission 内部坐标 → 体素世界线性映射用） */
+const TS = 24;
+/** 固定步长（与 GroundMission DT_DEFAULT 一致）与单帧最大步数 */
+const STEP = 1 / 30;
+const MAX_STEPS_PER_FRAME = 5;
+
+/** 角色碰撞体（体素单位） */
+const PLAYER_HALF = 0.32;
+const PLAYER_HEIGHT = 1.7;
+/** 相机臂长范围（渲染器内部另有 2.5..26 的钳制与 DDA 收臂） */
+const CAM_DIST_MIN = 3;
+const CAM_DIST_MAX = 14;
+
+/** 采掘/建造节流（秒）与准星射线距离（体素） */
+const DIG_INTERVAL = 0.2;
+const PLACE_INTERVAL = 0.25;
+const AIM_REACH = 7.0;
+
+/** 喷气背包（本地燃料池；任务模式的耐力由 domain 权威，视图不回写） */
+const JET_DRAIN = 22;
+const JET_REGEN = 12;
+
+/** 近战基础伤害（light；与 GroundMission playerUnits.meleeDmg 对齐，heavy ×2） */
+const MELEE_DAMAGE = 22;
+/** 攻击动作参数（与 GroundMission PLAYER_ATTACKS 对齐，供自由模式本地状态机用） */
+const ATTACK_PARAMS = {
+  light: { windup: 0.28, recover: 0.2 },
+  heavy: { windup: 0.5, recover: 0.25 },
+  ranged: { windup: 0.2, recover: 0.3 },
 };
+
+/** 技能栏（键位 → 名称 → 效果类别） */
+const SKILLS = [
+  { key: '1', name: '等离子快斩', attack: 'light' },
+  { key: '2', name: '震地重劈', attack: 'heavy' },
+  { key: '3', name: '磁轨射击', attack: 'ranged' },
+  { key: '4', name: '偏导护盾', block: true },
+  { key: '5', name: '采掘/建造', mode: true },
+  { key: '6', name: '小队指令', order: true },
+];
+
+/** 小队指令档位（技能 6 循环） */
+const STANCES = ['跟随', '集火', '散开'];
+
+/** 任务目标类型中文（HUD 目标列表） */
+const OBJ_ZH = {
+  reach: '全员撤入撤离区',
+  destroy: '摧毁目标物',
+  rescue: '接应失踪人员',
+  collect: '回收数据核心',
+  escort: '护送工程队抵达撤离区',
+  survive: '坚守阵地',
+  boss: '击杀深渊体',
+};
+
+/** 体素材质中文（准星信息） */
+const MAT_ZH = {
+  1: '表土', 2: '岩层', 3: '铁族矿脉', 4: '硅质矿脉',
+  5: '稀土矿脉', 6: '重金属矿脉', 7: '基岩', 8: '结构体素',
+};
+
+/** 移动键集合（keydown/keyup 共用） */
+const MOVE_CODES = new Set([
+  'KeyW', 'ArrowUp', 'KeyS', 'ArrowDown', 'KeyA', 'ArrowLeft', 'KeyD', 'ArrowRight',
+]);
+
+/**
+ * 建筑网格图集槽位：buildings.js 九大类 + 兜底 + 选择框（buildUnitBox 体素高亮）。
+ * 类别索引即实例 iParam.y（着色器按逐顶点 aMesh 失配退化，单 draw call 多网格）。
+ */
+const BUILD_CATEGORY_IDS = [
+  'mining', 'refining', 'industry', 'agri', 'science',
+  'service', 'military', 'admin', 'energy', 'default', 'selector',
+];
+const MESH_OF_CATEGORY = (cat) => {
+  const i = BUILD_CATEGORY_IDS.indexOf(String(cat || 'default'));
+  return i >= 0 ? i : 9; // 兜底槽 'default'
+};
+
+/** 兜底环境光照（PlanetSurface3D 私有环境字段缺失时使用，取值与其默认一致） */
+const FALLBACK_ENV = {
+  sunDir: [0.42, 0.78, 0.32],
+  sunColor: [1.0, 0.96, 0.84],
+  fogColor: [0.6, 0.62, 0.66],
+  fogRange: [34.0, 120.0],
+};
+
+// ———— 工具 ————————————————————————————————————————————————
+
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
+/** 秒 → m:ss */
+function fmtClock(sec) {
+  const s = Math.max(0, Math.floor(Number(sec) || 0));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+/** 角度归一到 [-π, π] */
+function normAngle(a) {
+  while (a > Math.PI) a -= Math.PI * 2;
+  while (a < -Math.PI) a += Math.PI * 2;
+  return a;
+}
+
+/** HUD 状态条 */
+function hudBar(ctx, x, y, w, h, frac, color, label, valueText) {
+  ctx.fillStyle = 'rgba(8,14,22,0.78)';
+  ctx.fillRect(x, y, w, h);
+  const f = clamp(frac, 0, 1);
+  if (f > 0) {
+    ctx.fillStyle = color;
+    ctx.fillRect(x + 1, y + 1, Math.max(0, (w - 2) * f), h - 2);
+  }
+  ctx.strokeStyle = 'rgba(140,170,200,0.35)';
+  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  ctx.fillStyle = '#cfe3f5';
+  ctx.font = '10px "Segoe UI", system-ui, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText(label, x, y - 3);
+  ctx.textAlign = 'right';
+  ctx.fillText(valueText, x + w, y - 3);
+  ctx.textAlign = 'left';
+}
+
+// ———— 建筑网格批处理（GL） ————————————————————————————————————
+
+/** 建筑实例着色器：单位变换（平移 + rotY + 均匀缩放）+ 网格号失配退化 + LIT 光照 */
+const BM_VS = `
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec3 aColor;
+layout(location = 3) in float aMesh;
+layout(location = 4) in vec4 iPos;
+layout(location = 5) in vec4 iParam;
+uniform mat4 uVP;
+out vec3 vN;
+out vec3 vC;
+out vec3 vW;
+out float vF;
+out float vE;
+void main() {
+  if (abs(aMesh - iParam.y) > 0.5) {
+    vN = vec3(0.0, 1.0, 0.0);
+    vC = vec3(0.0);
+    vW = vec3(0.0);
+    vF = 0.0;
+    vE = 0.0;
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    return;
+  }
+  float c = cos(iPos.w);
+  float s = sin(iPos.w);
+  vec3 p = aPos * iParam.x;
+  vec3 w = iPos.xyz + vec3(p.x * c + p.z * s, p.y, -p.x * s + p.z * c);
+  vW = w;
+  vN = vec3(aNormal.x * c + aNormal.z * s, aNormal.y, -aNormal.x * s + aNormal.z * c);
+  vC = aColor;
+  vF = iParam.w;
+  vE = iParam.z;
+  gl_Position = uVP * vec4(w, 1.0);
+}`;
+
+const BM_FS = `
+precision highp float;
+in vec3 vN;
+in vec3 vC;
+in vec3 vW;
+in float vF;
+in float vE;
+uniform vec3 uSunDir;
+uniform vec3 uSunColor;
+uniform vec3 uCamPos;
+uniform vec3 uFogColor;
+uniform vec2 uFogRange;
+out vec4 fragColor;
+void main() {
+  vec3 N = normalize(vN);
+  float diff = max(dot(N, uSunDir), 0.0);
+  float hemi = 0.46 + 0.16 * (N.y * 0.5 + 0.5);
+  vec3 col = vC * uSunColor * (hemi + diff * 0.66) + vC * vE;
+  col = mix(col, vec3(2.0, 2.0, 2.1), vF);
+  float fog = smoothstep(uFogRange.x, uFogRange.y, distance(vW, uCamPos));
+  fragColor = vec4(mix(col, uFogColor, fog), 1.0);
+}`;
+
+/**
+ * 建筑网格批处理：buildBuildingMesh(category) 十槽实例图集（九大类 + 兜底 + 选择框），
+ * 单 draw call 绘制全部建筑 / 目标物 / 拾取物 / 体素选择框。
+ * 光照 uniform 由调用方从 PlanetSurface3D 已求值的环境读取（保持与地形一致）。
+ */
+class BuildingMeshBatch {
+  constructor(glc) {
+    this.glc = glc;
+    this.gl = glc.gl;
+    this.cap = 160;                       // 实例容量（建筑 + 目标物 + 拾取物 + 选择框）
+    this._count = 0;
+
+    // —— 十槽网格图集（逐顶点 aMesh） ——
+    let total = 0;
+    const meshes = BUILD_CATEGORY_IDS.map((cat) => (
+      cat === 'selector' ? buildUnitBox() : buildBuildingMesh(cat)
+    ));
+    for (const m of meshes) total += m.positions.length;
+    const pos = new Float32Array(total);
+    const nor = new Float32Array(total);
+    const col = new Float32Array(total);
+    const ids = new Float32Array(total / 3);
+    let o = 0;
+    let vi = 0;
+    for (let mi = 0; mi < meshes.length; mi++) {
+      const m = meshes[mi];
+      pos.set(m.positions, o);
+      nor.set(m.normals, o);
+      col.set(m.colors, o);
+      const vc = m.positions.length / 3;
+      ids.fill(mi, vi, vi + vc);
+      vi += vc;
+      o += m.positions.length;
+    }
+    this._meshVertCount = total / 3;
+
+    const gl = this.gl;
+    this._bufP = glc.createBuffer(pos);
+    this._bufN = glc.createBuffer(nor);
+    this._bufC = glc.createBuffer(col);
+    this._bufI = glc.createBuffer(ids);
+    this._inst = glc.createBuffer(new Float32Array(this.cap * 8));
+
+    this.prog = glc.createProgram(BM_VS, BM_FS, {
+      label: 'ground:buildings',
+      attributes: { aPos: 0, aNormal: 1, aColor: 2, aMesh: 3, iPos: 4, iParam: 5 },
+    });
+    const inst = this._inst;
+    this.vao = glc.createVAO((g) => {
+      g.bindBuffer(g.ARRAY_BUFFER, this._bufP);
+      g.enableVertexAttribArray(0);
+      g.vertexAttribPointer(0, 3, g.FLOAT, false, 0, 0);
+      g.bindBuffer(g.ARRAY_BUFFER, this._bufN);
+      g.enableVertexAttribArray(1);
+      g.vertexAttribPointer(1, 3, g.FLOAT, false, 0, 0);
+      g.bindBuffer(g.ARRAY_BUFFER, this._bufC);
+      g.enableVertexAttribArray(2);
+      g.vertexAttribPointer(2, 3, g.FLOAT, false, 0, 0);
+      g.bindBuffer(g.ARRAY_BUFFER, this._bufI);
+      g.enableVertexAttribArray(3);
+      g.vertexAttribPointer(3, 1, g.FLOAT, false, 0, 0);
+      g.bindBuffer(g.ARRAY_BUFFER, inst);
+      for (let k = 0; k < 2; k++) {
+        g.enableVertexAttribArray(4 + k);
+        g.vertexAttribPointer(4 + k, 4, g.FLOAT, false, 32, k * 16);
+        g.vertexAttribDivisor(4 + k, 1);
+      }
+    });
+
+    this._arr = new Float32Array(this.cap * 8);
+    this._u = {
+      uVP: gl.getUniformLocation(this.prog, 'uVP'),
+      uSunDir: gl.getUniformLocation(this.prog, 'uSunDir'),
+      uSunColor: gl.getUniformLocation(this.prog, 'uSunColor'),
+      uCamPos: gl.getUniformLocation(this.prog, 'uCamPos'),
+      uFogColor: gl.getUniformLocation(this.prog, 'uFogColor'),
+      uFogRange: gl.getUniformLocation(this.prog, 'uFogRange'),
+    };
+  }
+
+  /**
+   * 绘制一批建筑实例。
+   * @param {WebGL2RenderingContext} gl
+   * @param {Float32Array} vp 视图投影矩阵（与 PlanetSurface3D 同帧相机）
+   * @param {object} env { sunDir, sunColor, fogColor, fogRange, eye }
+   * @param {Array<{x,y,z,rotY?,scale?,meshId,emit?,flash?}>} list 实例表
+   */
+  draw(gl, vp, env, list) {
+    const arr = this._arr;
+    let n = 0;
+    for (const b of list) {
+      if (!b || n >= this.cap) continue;
+      const o = n * 8;
+      arr[o] = b.x;
+      arr[o + 1] = b.y;
+      arr[o + 2] = b.z;
+      arr[o + 3] = b.rotY || 0;
+      arr[o + 4] = b.scale != null ? b.scale : 1;
+      arr[o + 5] = b.meshId || 0;
+      arr[o + 6] = b.emit || 0;
+      arr[o + 7] = b.flash || 0;
+      n++;
+    }
+    this._count = n;
+    if (n <= 0) return;
+    gl.useProgram(this.prog);
+    gl.uniformMatrix4fv(this._u.uVP, false, vp);
+    gl.uniform3fv(this._u.uSunDir, env.sunDir);
+    gl.uniform3fv(this._u.uSunColor, env.sunColor);
+    gl.uniform3f(this._u.uCamPos, env.eye[0], env.eye[1], env.eye[2]);
+    gl.uniform3fv(this._u.uFogColor, env.fogColor);
+    gl.uniform2f(this._u.uFogRange, env.fogRange[0], env.fogRange[1]);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._inst);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, arr.subarray(0, n * 8));
+    gl.bindVertexArray(this.vao);
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, this._meshVertCount, n);
+    gl.bindVertexArray(null);
+  }
+
+  /** 释放本批处理持有的 GL 资源（glc.destroy() 亦会兜底回收） */
+  destroy() {
+    const gl = this.gl;
+    if (!gl) return;
+    for (const b of [this._bufP, this._bufN, this._bufC, this._bufI, this._inst]) {
+      if (b) gl.deleteBuffer(b);
+    }
+    if (this.vao) gl.deleteVertexArray(this.vao);
+    if (this.prog) gl.deleteProgram(this.prog);
+    this.vao = null;
+    this.prog = null;
+    this._count = 0;
+  }
+}
+
+// ———— 视图 ————————————————————————————————————————————————
 
 const GroundView = {
   id: 'ground',
@@ -15028,393 +15395,4876 @@ const GroundView = {
   mount(ctx) {
     const { root, app, param } = ctx;
     this.app = app;
-    this.keys = new Set();
-    this._handlers = [];
-    root.innerHTML = '';
+    this._mounted = true;
+    this.mode = 'briefing';            // briefing | mission | free
+    this.keys = {};                    // 按住态（键码 → bool）
+    this._oneShot = {};                // 边沿触发意图（attack/dodge/interact/switchUnit…）
+    this._handlers = [];               // DOM 监听登记 { target, type, fn }
+    this._unsubGL = null;              // CanvasManager.onGLStateChange 注销函数
+    this._raf = 0;
+    this._lastFrame = 0;
+    this._clock = 0;                   // 视觉时钟（着色器 time / 动画相位）
+    this._acc = 0;                     // 固定步长累加器
+    this.cam = { yaw: 0, pitch: 0.5, dist: 9 };
+    this.char3d = {                    // 第三人称角色状态（视图侧竖直物理 + 自由模式 XZ）
+      x: 0, y: 0, z: 0, vy: 0, onGround: true,
+      yaw: 0, state: 'idle', animT: 0, attackT: 0, attackKind: null, struckFx: false,
+      hp: 100, hpMax: 100, shield: 30, shieldMax: 30, stamina: 100, staminaMax: 100,
+      fuel: 100, dodgeT: 0, dodgeX: 0, dodgeZ: 0, atkCd: 0, blockT: 0,
+    };
+    this._fx = { slashes: [], beams: [], dig: [] };  // 瞬时视觉特效（每帧消费）
+    this._strikeSeen = new Map();      // 单位打击拍检测（unitId → 上一帧 struck）
+    this._buildMode = false;           // 技能 5：采掘/建造模式
+    this._stanceIdx = 0;               // 技能 6：小队指令档位
+    this._digCd = 0;
+    this._placeCd = 0;
+    this._aim = null;                  // 准星 DDA 结果（采掘/建造/信息条共用）
+    this._eye = [0, 0, 0];
+    this._fwd = [0, 0, 0];
+    this._m = { proj: mat4(), view: mat4(), vp: mat4() };
+    this._tally = {};                  // 本次入账（无殖民地的自由沙盒只记视图侧台账）
+    this._resultShown = false;
+    this._forceBriefing = false;       // 头部「简报」按钮一次性覆盖自动恢复
+    this._lastView = null;
+    this._buildingLayout = [];         // 建筑实例（挂载时按殖民地确定性布局一次）
+    this._buildingColonists = [];      // 建筑旁作业殖民者
+    this._conveyor = [];               // 采掘 → 精炼传送带路径
+    this._mouse = { lDown: false, rDown: false, lastX: 0, lastY: 0, dragged: false };
 
-    const wrap = el('div', { class: 'vf-view' });
+    root.innerHTML = '';
+    const wrap = el('div', { class: 'vf-view vf-view-immersive' });
     const head = el('div', { class: 'vf-view-head' });
     head.appendChild(el('h2', { text: L('ui.ground') }));
-    this.headRight = el('div', { class: 'vf-row vf-grow' });
-    head.appendChild(this.headRight);
+    this.headInfo = el('span', { class: 'vf-dim vf-small', text: '' });
+    head.appendChild(this.headInfo);
+    head.appendChild(el('span', { class: 'vf-grow' }));
+    this.headBtns = el('span');
+    head.appendChild(this.headBtns);
+    this.body = el('div', { class: 'vf-view-body', style: { overflow: 'hidden' } });
     wrap.appendChild(head);
-    const body = el('div', { class: 'vf-view-body' });
-    wrap.appendChild(body);
+    wrap.appendChild(this.body);
     root.appendChild(wrap);
-    this.body = body;
-    this.param = param;
 
     this._build(param);
   },
 
-  _build(param) {
-    const app = this.app;
-    const w = app.world;
-    this.body.innerHTML = '';
-    if (this._raf) cancelAnimationFrame(this._raf);
-    this._raf = null;
+  // —— 页面分派 ————————————————
 
-    // 活动任务查找（param 可为 missionId 或 planetId）
-    const missions = Object.values(w.entities.groundMissions).filter((m) => m.status === 'active');
+  /**
+   * 按 param（missionId | planetId）定位进行中任务；无任务 → 简报页。
+   * @param {string|null} param 路由参数
+   */
+  _build(param) {
+    if (!this._mounted) return;
+    const app = this.app;
+    this._teardownScene();
+    this.body.innerHTML = '';
+    this._resultShown = false;
+    this._forceBriefing = false;
+
+    const w = app.world;
+    if (!w) {
+      this.body.appendChild(el('div', { class: 'pad vf-dim', text: '当前无进行中的战役。' }));
+      this._setHead('简报', []);
+      this.mode = 'briefing';
+      return;
+    }
+
+    // 活动任务查找（id 或 planetId 匹配；缺省取第一个）
+    const missions = Object.values(w.entities.groundMissions || {})
+      .filter((m) => m.status === 'active');
     let mission = null;
     if (param) mission = missions.find((m) => m.id === param || m.planetId === param) || null;
     else mission = missions[0] || null;
 
-    if (!mission) {
-      this._buildBriefing();
+    if (mission && !this._forceBriefing) {
+      this._buildMission(mission);
       return;
     }
-    this._buildMission(mission);
+    this._buildBriefing(mission);
   },
 
-  /** 任务简报：行星 + 模板选择 */
-  _buildBriefing() {
+  /** 头部信息与按钮组 */
+  _setHead(infoText, btnDefs) {
+    if (this.headInfo) this.headInfo.textContent = infoText || '';
+    if (!this.headBtns) return;
+    this.headBtns.innerHTML = '';
+    for (const b of btnDefs) {
+      this.headBtns.appendChild(el('button', {
+        class: `vf-btn small${b.kind ? ' ' + b.kind : ''}`,
+        text: b.text,
+        title: b.title || '',
+        on: { click: b.onClick },
+      }));
+    }
+  },
+
+  // —— 简报页 ————————————————
+
+  /**
+   * 任务简报：行星选择 + 模板列表 + 开始行动 + 自由探索模式 + 既往记录。
+   * @param {object|null} resumeMission 已存在的进行中任务（显示恢复入口）
+   */
+  _buildBriefing(resumeMission) {
+    this.mode = 'briefing';
     const app = this.app;
     const w = app.world;
-    const box = el('div', { class: 'pad vf-col' });
+    this._setHead('简报', []);
+
+    const box = el('div', { class: 'pad vf-col', style: { overflowY: 'auto' } });
     const p1 = panel({ title: '发起地面行动', open: true });
     const planetSel = el('select', { 'aria-label': '目标行星' });
-    for (const c of Object.values(w.entities.colonies)) {
+    const colonyOf = {};
+    for (const c of Object.values(w.entities.colonies || {})) {
       if (c.factionId !== w.playerFactionId) continue;
       const planet = w.entities.planets[c.planetId];
-      const opt = el('option', { value: c.planetId, text: planet ? planet.name : c.id });
-      planetSel.appendChild(opt);
+      if (!planet) continue;
+      colonyOf[planet.id] = c;
+      planetSel.appendChild(el('option', { value: planet.id, text: planet.name || planet.id }));
+    }
+    if (!planetSel.childElementCount) {
+      p1.appendChild(el('div', { class: 'vf-faint vf-small', text: '尚无玩家殖民地——先在星系视图建立前哨站。' }));
     }
     p1.appendChild(el('label', { class: 'vf-col' }, [
       el('span', { class: 'vf-dim vf-small', text: '目标行星' }),
       planetSel,
     ]));
 
+    // —— 任务模板列表 ——
     const tplBox = el('div', { class: 'mt-2' });
     for (const tpl of MISSION_TEMPLATES) {
       const row = el('div', { class: 'vf-row', style: { padding: '5px 0', borderBottom: '1px solid var(--line)' } });
       row.appendChild(el('div', { class: 'vf-grow' }, [
         el('div', { text: tpl.nameZh }),
         el('div', { class: 'vf-faint vf-small', text: tpl.descZh }),
-        el('div', { class: 'vf-faint vf-small', text: `风险 ${tpl.riskLevel}/5 · 目标 ${tpl.objectives.map((o) => o.type).join('/')} · 奖励 ${tpl.rewards.map((r) => `${r.resId}×${r.amount}`).join(' ')}` }),
+        el('div', { class: 'vf-faint vf-small', text: `风险 ${tpl.riskLevel}/5 · 目标 ${tpl.objectives.map((o) => OBJ_ZH[o.type] || o.type).join('/')} · 奖励 ${tpl.rewards.map((r) => `${r.resId}×${r.amount}`).join(' ')}` }),
       ]));
       row.appendChild(el('button', {
         class: 'vf-btn small primary',
         text: '开始行动',
         on: {
-          click: () => {
-            const res = app.dispatch('BeginGroundMission', {
-              planetId: planetSel.value,
-              templateId: tpl.id,
-            });
-            if (res.ok) this._build();
-          },
+          click: () => this._startMission(planetSel.value, tpl.id),
         },
       }));
       tplBox.appendChild(row);
     }
     p1.appendChild(tplBox);
+
+    // —— 自由探索模式（无任务，纯沙盒采掘/建造） ——
+    p1.appendChild(el('div', { class: 'vf-row mt-2' }, [
+      el('span', { class: 'vf-faint vf-small vf-grow', text: '不开任务，直接降落到行星地表进行体素采掘与建造（Esc 或「升空返回轨道」离开）。' }),
+      el('button', {
+        class: 'vf-btn small',
+        text: '自由探索模式',
+        on: { click: () => this._startFree(planetSel.value) },
+      }),
+    ]));
     box.appendChild(p1);
-    // 已结束任务结果列表
-    const done = Object.values(this.app.world.entities.groundMissions).filter((m) => m.status !== 'active');
+
+    // —— 进行中任务恢复入口 ——
+    if (resumeMission) {
+      const tpl = findMissionTemplate(resumeMission.templateId);
+      box.appendChild(el('div', { class: 'vf-row mt-2', style: { padding: '8px', border: '1px solid var(--accent)' } }, [
+        el('span', { class: 'vf-grow vf-small', text: `进行中的行动：${tpl ? tpl.nameZh : resumeMission.templateId}（${fmtClock(resumeMission.time)}）` }),
+        el('button', { class: 'vf-btn small primary', text: '恢复行动', on: { click: () => this._build(resumeMission.id) } }),
+      ]));
+    }
+
+    // —— 既往行动记录 ——
+    const done = Object.values(w.entities.groundMissions || {}).filter((m) => m.status !== 'active');
     if (done.length > 0) {
       const p2 = panel({ title: '既往行动记录', open: false });
       for (const m of done.slice(-8)) {
         const tpl = findMissionTemplate(m.templateId);
-        p2.appendChild(el('div', { class: 'vf-log-line' }, [
-          el('span', { text: `${tpl?.nameZh || m.templateId} — ${({ success: '成功', failed: '失败', aborted: '中止' })[m.status] || m.status}` }),
-        ]));
+        p2.appendChild(el('div', { class: 'vf-log-line', text: `${(tpl && tpl.nameZh) || m.templateId} — ${({ success: '成功', failed: '失败', aborted: '中止' })[m.status] || m.status}` }));
       }
       box.appendChild(p2);
     }
     this.body.appendChild(box);
-    this.headRight.innerHTML = '';
   },
 
-  /** 进行中任务：画布 + 控制 + HUD */
-  _buildMission(mission) {
-    const app = this.app;
-    const tpl = findMissionTemplate(mission.templateId);
-    this.headRight.innerHTML = '';
-    this.headRight.appendChild(el('span', { class: 'vf-accent', text: tpl ? tpl.nameZh : mission.templateId }));
-    this.headRight.appendChild(el('button', {
-      class: 'vf-btn small danger',
-      text: '中止行动',
-      on: {
-        click: () => app.confirm('中止行动', '确认中止当前地面行动？（无奖励）', () => {
-          app.dispatch('AbortGroundMission', { missionId: mission.id });
-          this._build();
-        }),
-      },
-    }));
+  /** 就近解析可出动小队：玩家阵营存活角色按 id 稳定排序取前 3（确定性） */
+  _resolveSquad(w) {
+    return Object.values(w.entities.characters || {})
+      .filter((c) => c.factionId === w.playerFactionId && c.health !== 'dead')
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .slice(0, 3)
+      .map((c) => c.id);
+  },
 
-    // 画布区
-    const canvasWrap = el('div', { class: 'vf-view-canvas', style: { position: 'absolute', inset: '0 260px 0 0' } });
+  /** 开始行动：经命令总线创建任务（小队角色由视图就近解析） */
+  _startMission(planetId, templateId) {
+    const w = this.app.world;
+    if (!planetId) {
+      toast('请先选择目标行星', { kind: 'warn' });
+      return;
+    }
+    const squad = this._resolveSquad(w);
+    if (!squad.length) {
+      toast('需要至少 1 名可用角色出动', { kind: 'warn' });
+      return;
+    }
+    const res = this.app.dispatch('BeginGroundMission', {
+      planetId,
+      templateId,
+      squadCharacterIds: squad,
+    });
+    if (res.ok) this._build(planetId);
+  },
+
+  /** 自由探索模式：不创建任务，纯沙盒 */
+  _startFree(planetId) {
+    const w = this.app.world;
+    const planet = w.entities.planets[planetId];
+    if (!planet) {
+      toast('请先选择目标行星', { kind: 'warn' });
+      return;
+    }
+    this.mode = 'free';
+    this.freePlanetId = planetId;
+    this._teardownScene();
+    this.body.innerHTML = '';
+    this._setupScene(planet, null);
+    this._setHead(`自由探索 · ${planet.name || planet.id}`, [
+      { text: '升空返回轨道', title: '返回行星所属星系（Esc）', onClick: () => this._ascend() },
+    ]);
+  },
+
+  /** 升空返回轨道：跳回行星所属星系（#/system/<systemId>） */
+  _ascend() {
+    const w = this.app.world;
+    const pid = this.mode === 'mission' ? (this.mission && this.mission.planetId) : this.freePlanetId;
+    const planet = w && pid ? w.entities.planets[pid] : null;
+    if (planet && planet.systemId) this.app.goto('system', planet.systemId);
+    else this._build(null);
+  },
+
+  // —— 场景装配（任务 / 自由共用） ————————————————
+
+  /**
+   * 建立体素世界 + 三层画布 + GL 渲染器 + 建筑批处理 + 输入绑定，并启动渲染循环。
+   * @param {object} planet 行星实体
+   * @param {object|null} mission 进行中任务实体（null = 自由模式）
+   */
+  _setupScene(planet, mission) {
+    const w = this.app.world;
+    this.planet = planet;
+    this.sw = createSurfaceWorld(w, planet.id);   // 种子 = world.seed ^ hash32(planetId)：同 seed 同地貌
+    this.colony = Object.values(w.entities.colonies || {})
+      .find((c) => c.planetId === planet.id) || null;
+    this.mission = mission || null;
+    this.missionId = mission ? mission.id : null;
+    this._layoutColony();
+    this._conveyor = this._buildConveyorPaths();
+
+    // —— 初始角色位置：任务取出生小队首位，自由取体素世界出生点 ——
+    const c = this.char3d;
+    const spawn = this.sw.spawn;
+    c.x = spawn.x;
+    c.z = spawn.z;
+    c.y = getSurfaceHeight(this.sw, spawn.x, spawn.z) + 1;
+    c.vy = 0;
+    c.onGround = true;
+    c.state = 'idle';
+    c.fuel = 100;
+    // 相机置于角色背后（面向 -Z 时 yaw=0）
+    this.cam.yaw = 0;
+    this.cam.pitch = 0.5;
+    this.cam.dist = 9;
+
+    // —— 画布与 GL ——
+    const canvasWrap = el('div', { class: 'vf-view-canvas' });
     this.body.appendChild(canvasWrap);
     this.cm = new CanvasManager().attach(canvasWrap);
-    this.renderer = new GroundRenderer();
-    this.renderer.init(this.cm);
+    this._glOK = false;
+    this._initGL();
 
-    // HUD 侧栏
-    const hud = el('div', {
-      style: {
-        position: 'absolute', top: '0', right: '0', bottom: '0', width: '260px',
-        background: 'var(--bg2)', borderLeft: '1px solid var(--line)',
-        padding: '10px', overflowY: 'auto',
-      },
-    });
-    this.body.appendChild(hud);
-    this.hud = hud;
+    // —— 输入 ——
+    this._bindInput();
 
-    // 目标说明
-    hud.appendChild(panel({ title: '任务目标', content: el('div', { class: 'vf-small vf-dim', text: tpl ? tpl.descZh : '' }) }));
-    this.objectivesBox = el('div');
-    hud.appendChild(this.objectivesBox);
-    this.logBox = el('div', { class: 'mt-2' });
-    hud.appendChild(panel({ title: '行动日志', content: this.logBox }));
-    hud.appendChild(el('div', { class: 'vf-faint vf-small mt-2', text: 'WASD 移动 · J 轻击 K 重击 L 射击 · 空格闪避 · Shift 格挡 · E 交互 · Tab 切换单位' }));
+    // —— GL 状态回调（上下文丢失/恢复 → 释放/重建） ——
+    this._unsubGL = this.cm.onGLStateChange((degraded) => this._onGLState(degraded));
 
-    // 键盘
-    const onKey = (e, down) => {
-      if (KEYMAP[e.code]) {
-        this.keys[KEYMAP[e.code]] = down;
-        e.preventDefault();
-      } else if (down) {
-        if (e.code === 'Space') this._oneShot.dodge = true;
-        else if (e.code === 'KeyJ') this._oneShot.attack = 'light';
-        else if (e.code === 'KeyK') this._oneShot.attack = 'heavy';
-        else if (e.code === 'KeyL') this._oneShot.attack = 'ranged';
-        else if (e.code === 'KeyE') this._oneShot.interact = true;
-        else if (e.code === 'Tab') this._oneShot.switchUnit = true;
-        else if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') this.keys.block = true;
-      } else if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
-        this.keys.block = false;
-      }
-    };
-    const kd = (e) => onKey(e, true);
-    const ku = (e) => onKey(e, false);
-    window.addEventListener('keydown', kd);
-    window.addEventListener('keyup', ku);
-    this._handlers.push(['keydown', kd], ['keyup', ku]);
-    this._oneShot = {};
-
-    // 帧循环：读 mission → 渲染 + 写输入流（瞬态控制通道）
-    this.missionId = mission.id;
-    const loop = () => {
-      if (!this._raf) return;
-      const w2 = this.app.world;
-      const m = w2.entities.groundMissions[this.missionId];
-      if (!m || m.status !== 'active') {
-        this._raf = null;
-        // 任务结束：显示结算并返回简报
-        this._showResult(m);
-        return;
-      }
-      // 写输入流（不经过命令总线的瞬态控制数据）
-      const dx = (this.keys.right ? 1 : 0) - (this.keys.left ? 1 : 0);
-      const dy = (this.keys.down ? 1 : 0) - (this.keys.up ? 1 : 0);
-      const len = Math.hypot(dx, dy) || 1;
-      const input = m.input = m.input || {};
-      input.moveDir = { x: dx / len, y: dy / len };
-      input.sprint = !!this.keys.sprint;
-      input.block = !!this.keys.block;
-      if (this._oneShot.dodge) { input.dodgeDir = { x: dx / len, y: dy / len }; this._oneShot.dodge = false; }
-      if (this._oneShot.attack) { input.attack = this._oneShot.attack; this._oneShot.attack = null; }
-      if (this._oneShot.interact) { input.interactTarget = 'nearest'; this._oneShot.interact = false; }
-      if (this._oneShot.switchUnit) { input.switchUnit = 'next'; this._oneShot.switchUnit = false; }
-
-      // 渲染
-      const { getMissionView } = groundViewApi();
-      const view = getMissionView(m);
-      this.cm.beginFrame();
-      this.renderer.render(this.cm.ctx, this.cm.width, this.cm.height, view, {});
-      this._renderHud(view);
+    // —— 渲染循环 ——
+    this._lastFrame = 0;
+    this._acc = 0;
+    const loop = (ts) => {
+      if (!this._mounted) return;
       this._raf = requestAnimationFrame(loop);
+      this._loopStep(ts);
     };
     this._raf = requestAnimationFrame(loop);
   },
 
-  _renderHud(view) {
-    if (!this.objectivesBox) return;
-    this.objectivesBox.innerHTML = '';
-    for (const o of view.objectives || []) {
-      const row = el('div', { class: 'vf-row', style: { padding: '2px 0' } });
-      row.appendChild(el('span', { class: o.done ? 'vf-ok' : 'vf-dim', text: o.done ? '✓' : '○' }));
-      row.appendChild(el('span', { class: 'vf-small vf-grow', text: o.text || o.type }));
-      this.objectivesBox.appendChild(row);
-    }
-    this.logBox.innerHTML = '';
-    for (const line of (view.log || []).slice(-6)) {
-      this.logBox.appendChild(el('div', { class: 'vf-log-line', text: line }));
+  /** 创建/重建 GL 资源（上下文恢复后同样走这里） */
+  _initGL() {
+    this._glOK = false;
+    this.ps3d = null;
+    this.bmesh = null;
+    if (this.cm && this.cm.hasGL && this.cm.glc && this.cm.tier < 3) {
+      try {
+        this.ps3d = new PlanetSurface3D(this.cm.glc, this.cm.tier);
+        this.ps3d.init(this.sw);
+        this.bmesh = new BuildingMeshBatch(this.cm.glc);
+        this._glOK = true;
+      } catch (e) {
+        console.error('[GroundView] GL 初始化失败，保持 2D 兜底:', e);
+        try { if (this.ps3d) this.ps3d.destroy(); } catch (_) { /* 忽略 */ }
+        try { if (this.bmesh) this.bmesh.destroy(); } catch (_) { /* 忽略 */ }
+        this.ps3d = null;
+        this.bmesh = null;
+      }
     }
   },
 
+  /** GL 状态回调：丢失 → 释放；恢复 → 重建 */
+  _onGLState(degraded) {
+    if (!this._mounted) return;
+    if (degraded) {
+      try { if (this.ps3d) this.ps3d.destroy(); } catch (_) { /* 忽略 */ }
+      try { if (this.bmesh) this.bmesh.destroy(); } catch (_) { /* 忽略 */ }
+      this.ps3d = null;
+      this.bmesh = null;
+      this._glOK = false;
+    } else {
+      this._initGL();
+    }
+  },
+
+  /** 释放场景（画布 / GL / 监听 / rAF），保留 DOM 骨架 */
+  _teardownScene() {
+    if (this._raf) {
+      cancelAnimationFrame(this._raf);
+      this._raf = 0;
+    }
+    for (const h of this._handlers) {
+      h.target.removeEventListener(h.type, h.fn);
+    }
+    this._handlers = [];
+    if (this._unsubGL) {
+      this._unsubGL();
+      this._unsubGL = null;
+    }
+    try { if (this.ps3d) this.ps3d.destroy(); } catch (_) { /* 忽略 */ }
+    try { if (this.bmesh) this.bmesh.destroy(); } catch (_) { /* 忽略 */ }
+    this.ps3d = null;
+    this.bmesh = null;
+    if (this.cm) {
+      this.cm.dispose();
+      this.cm = null;
+    }
+    this._glOK = false;
+    this.sw = null;
+    this.mission = null;
+    this.missionId = null;
+    this._lastView = null;
+    this._strikeSeen.clear();
+    this._fx.slashes.length = 0;
+    this._fx.beams.length = 0;
+    this._fx.dig.length = 0;
+  },
+
+  // —— 任务模式装配 ————————————————
+
+  /** 进行中任务：3D 场景 + 头部按钮 */
+  _buildMission(mission) {
+    this.mode = 'mission';
+    const app = this.app;
+    const w = app.world;
+    const planet = w.entities.planets[mission.planetId];
+    const tpl = findMissionTemplate(mission.templateId);
+    this._setupScene(planet || { id: mission.planetId, name: mission.planetId, systemId: null }, mission);
+    this._setHead(`${tpl ? tpl.nameZh : mission.templateId} · ${planet ? planet.name : mission.planetId}`, [
+      { text: '简报', title: '返回任务简报', onClick: () => { this._forceBriefing = true; this._build(null); } },
+      { text: '升空返回轨道', title: '返回行星所属星系', onClick: () => this._ascend() },
+    ]);
+  },
+
+  // —— 输入 ————————————————
+
+  /** 绑定键盘 / 鼠标（登记进 _handlers，unmount 统一移除） */
+  _bindInput() {
+    const onKeyDown = (e) => this._onKeyDown(e);
+    const onKeyUp = (e) => this._onKeyUp(e);
+    const canvas = this.cm.canvas;
+    const onMouseDown = (e) => this._onMouseDown(e);
+    const onMouseMove = (e) => this._onMouseMove(e);
+    const onMouseUp = (e) => this._onMouseUp(e);
+    const onWheel = (e) => this._onWheel(e);
+    const onCtx = (e) => e.preventDefault();
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    canvas.addEventListener('mousedown', onMouseDown);
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    canvas.addEventListener('wheel', onWheel, { passive: false });
+    canvas.addEventListener('contextmenu', onCtx);
+    this._handlers = [
+      { target: window, type: 'keydown', fn: onKeyDown },
+      { target: window, type: 'keyup', fn: onKeyUp },
+      { target: canvas, type: 'mousedown', fn: onMouseDown },
+      { target: window, type: 'mousemove', fn: onMouseMove },
+      { target: window, type: 'mouseup', fn: onMouseUp },
+      { target: canvas, type: 'wheel', fn: onWheel },
+      { target: canvas, type: 'contextmenu', fn: onCtx },
+    ];
+  },
+
+  _onKeyDown(e) {
+    if (!this._mounted || this.mode === 'briefing') return;
+    const code = e.code;
+    if (MOVE_CODES.has(code)) {
+      this.keys[code] = true;
+      e.preventDefault();
+      return;
+    }
+    switch (code) {
+      case 'Space':
+        e.preventDefault();
+        if (!this.keys.Space) {
+          this.keys.Space = true;
+          this._oneShot.dodge = true;   // 点按：闪避（任务 FSM）+ 本地跳跃
+        }
+        break;
+      case 'ShiftLeft':
+      case 'ShiftRight':
+        this.keys[code] = true;
+        break;
+      case 'Digit1':
+        this._oneShot.attack = 'light';
+        break;
+      case 'Digit2':
+        this._oneShot.attack = 'heavy';
+        break;
+      case 'Digit3':
+        this._oneShot.attack = 'ranged';
+        break;
+      case 'Digit4':
+        this.keys.Digit4 = true;        // 持续按住 = 格挡意图
+        break;
+      case 'Digit5':
+        this._buildMode = !this._buildMode;
+        break;
+      case 'Digit6':
+        this._stanceIdx = (this._stanceIdx + 1) % STANCES.length;
+        break;
+      case 'KeyE':
+        this._oneShot.interact = true;
+        break;
+      case 'Tab':
+        e.preventDefault();
+        this._oneShot.switchUnit = true;
+        break;
+      case 'Escape':
+        if (this.mode === 'free') this._ascend();
+        break;
+      default:
+        break;
+    }
+  },
+
+  _onKeyUp(e) {
+    const code = e.code;
+    if (MOVE_CODES.has(code)) this.keys[code] = false;
+    else if (code === 'Space') this.keys.Space = false;
+    else if (code === 'ShiftLeft' || code === 'ShiftRight') this.keys[code] = false;
+    else if (code === 'Digit4') this.keys.Digit4 = false;
+  },
+
+  _onMouseDown(e) {
+    if (this.mode === 'briefing') return;
+    if (e.button === 0) {
+      this._mouse.lDown = true;
+      if (this._buildMode) {
+        this._digCd = 0;                // 立即起手采掘
+      } else {
+        this._oneShot.attack = this._oneShot.attack || 'light';
+      }
+    } else if (e.button === 2) {
+      this._mouse.rDown = true;
+      this._mouse.dragged = false;
+      this._mouse.lastX = e.clientX;
+      this._mouse.lastY = e.clientY;
+      if (this._buildMode) this._placeCd = 0;
+    }
+  },
+
+  _onMouseMove(e) {
+    if (!this._mouse.rDown) return;
+    const dx = e.clientX - this._mouse.lastX;
+    const dy = e.clientY - this._mouse.lastY;
+    this._mouse.lastX = e.clientX;
+    this._mouse.lastY = e.clientY;
+    if (Math.abs(dx) + Math.abs(dy) > 0) {
+      this._mouse.dragged = Math.abs(dx) + Math.abs(dy) > 6 || this._mouse.dragged;
+      this.cam.yaw -= dx * 0.0045;
+      this.cam.pitch = clamp(this.cam.pitch + dy * 0.0035, 0.08, 1.35);
+    }
+  },
+
+  _onMouseUp(e) {
+    if (e.button === 0) this._mouse.lDown = false;
+    if (e.button === 2) this._mouse.rDown = false;
+  },
+
+  _onWheel(e) {
+    if (this.mode === 'briefing') return;
+    e.preventDefault();
+    this.cam.dist = clamp(this.cam.dist + Math.sign(e.deltaY) * 0.8, CAM_DIST_MIN, CAM_DIST_MAX);
+  },
+
+  /** 相机相对移动向量（世界 XZ，已归一化；无输入返回 null） */
+  _moveVec() {
+    const f = (this.keys.KeyW || this.keys.ArrowUp ? 1 : 0) - (this.keys.KeyS || this.keys.ArrowDown ? 1 : 0);
+    const r = (this.keys.KeyD || this.keys.ArrowRight ? 1 : 0) - (this.keys.KeyA || this.keys.ArrowLeft ? 1 : 0);
+    if (!f && !r) return null;
+    const sy = Math.sin(this.cam.yaw);
+    const cy = Math.cos(this.cam.yaw);
+    // 相机水平前向 = (-sin yaw, -cos yaw)；右向 = (cos yaw, -sin yaw)
+    let dx = -sy * f + cy * r;
+    let dz = -cy * f - sy * r;
+    const l = Math.hypot(dx, dz) || 1;
+    return { x: dx / l, z: dz / l };
+  },
+
+  /** 行星重力（planet.gravity 缺省按 1.0g） */
+  _gravity() {
+    const g0 = this.planet && this.planet.gravity != null ? Number(this.planet.gravity) : 1.0;
+    return Math.max(0.2, g0) * 9.8;
+  },
+
+  /** 列顶地面高度（体素上沿 y；空列返回 Infinity 表示无底） */
+  _groundAt(x, z) {
+    const h = getSurfaceHeight(this.sw, x, z);
+    return h >= 0 ? h + 1 : Infinity;
+  },
+
+  // —— 主循环 ————————————————
+
+  /** rAF 回调（时间推进） */
+  _loopStep(ts) {
+    const now = ts / 1000;
+    let dt = Math.min(0.25, now - (this._lastFrame || now));
+    if (!(dt > 0)) dt = STEP;
+    this._lastFrame = now;
+    this._clock += dt;
+
+    if (this.mode === 'mission') this._missionFrame(dt);
+    else if (this.mode === 'free') this._freeFrame(dt);
+  },
+
+  /** 任务模式帧：输入 → 固定步长模拟 → 竖直物理 → 渲染 */
+  _missionFrame(dt) {
+    const w = this.app.world;
+    const m = w.entities.groundMissions[this.missionId];
+    if (!m || m.status !== 'active') {
+      // 任务结束：停循环并结算
+      if (this._raf) {
+        cancelAnimationFrame(this._raf);
+        this._raf = 0;
+      }
+      this._showResult(m);
+      return;
+    }
+    this._writeMissionInput(m);
+    this._acc = Math.min(this._acc + dt, STEP * MAX_STEPS_PER_FRAME);
+    while (this._acc >= STEP && m.status === 'active') {
+      try {
+        stepMission(w, m, STEP);
+      } catch (e) {
+        console.error('[GroundView] stepMission 异常:', e);
+        break;
+      }
+      this._acc -= STEP;
+    }
+    if (m.status !== 'active') {
+      if (this._raf) {
+        cancelAnimationFrame(this._raf);
+        this._raf = 0;
+      }
+      this._showResult(m);
+      return;
+    }
+    const view = getMissionView(m);
+    this._lastView = view;
+    // 先更新准星/采掘（供角色采掘姿态判定），再推进打击特效与竖直物理
+    this._updateAim(dt);
+    this._detectStrikes(view);
+    this._followMissionCharacter(view, dt);
+    this._updateFx(dt);
+    this._renderFrame(view, dt);
+  },
+
+  /** 自由模式帧：本地状态机 + 体素物理 → 渲染 */
+  _freeFrame(dt) {
+    this._updateAim(dt);
+    this._freePhysics(dt);
+    this._updateFx(dt);
+    this._renderFrame(null, dt);
+  },
+
+  /**
+   * 将玩家意图逐帧写入 mission.input（瞬态控制通道，不经命令总线）。
+   * moveDir 为相机相对方向映射到任务坐标（任务 +y ↔ 世界 +z）。
+   */
+  _writeMissionInput(m) {
+    const mv = this._moveVec();
+    const inp = m.input;
+    inp.moveDir = mv ? { x: mv.x, y: mv.z } : { x: 0, y: 0 };
+    inp.sprint = !!(this.keys.ShiftLeft || this.keys.ShiftRight);
+    inp.block = !!this.keys.Digit4;
+    if (this._oneShot.attack) {
+      inp.attack = this._oneShot.attack;
+      this._oneShot.attack = null;
+    }
+    if (this._oneShot.dodge) {
+      // 空格点按：闪避方向 = 当前移动方向（无输入交给 FSM 回退为背向）
+      inp.dodgeDir = mv ? { x: mv.x, y: mv.z } : { x: 0, y: 0 };
+      this._oneShot.dodge = false;
+      this._oneShot.jump = true;      // 3D 层同步起跳
+    }
+    if (this._oneShot.interact) {
+      inp.interactTarget = this._resolveInteract(m);
+      this._oneShot.interact = false;
+    }
+    if (this._oneShot.switchUnit) {
+      inp.switchUnit = true;          // FSM 消费后自动复位（cycleActive）
+      this._oneShot.switchUnit = false;
+    }
+  },
+
+  /** E 键就近解析交互目标：交互半径（60px ≈ 2.5 格）内最近的未完成目标物 id */
+  _resolveInteract(m) {
+    const u = m.playerUnits[m.activeIdx];
+    if (!u || u.state === 'dead') return null;
+    let best = null;
+    let bd = Infinity;
+    for (const t of m.targets) {
+      if (t.done) continue;
+      const d = Math.hypot(t.x - u.x, t.y - u.y);
+      if (d < 60 && d < bd) {
+        bd = d;
+        best = t.targetId;
+      }
+    }
+    return best;
+  },
+
+  /**
+   * 任务模式竖直物理：XZ 由任务模拟权威（像素坐标线性映射到体素世界），
+   * Y 由视图本地物理（重力 / 跳跃 / 喷气 / 爬坡平滑）驱动。
+   */
+  _followMissionCharacter(view, dt) {
+    const m = this.mission;
+    const au = view.playerUnits.find((u) => u.unitId === view.activeUnitId)
+      || view.playerUnits[0];
+    if (!au) return;
+    const kx = SURFACE_SIZE.X / (m.w * TS);
+    const kz = SURFACE_SIZE.Z / (m.h * TS);
+    const c = this.char3d;
+    c.x = au.x * kx;
+    c.z = au.y * kz;
+    c.yaw = -au.facing;               // 任务朝向（像素系 atan2）→ 网格 rotY 约定
+    c.animT += dt;
+
+    const g = this._gravity();
+    if (this._oneShot.jump) {
+      this._oneShot.jump = false;
+      if (c.onGround) {
+        c.vy = Math.sqrt(2 * g * 1.2);  // 跳跃初速 √(2g·1.2)：越障 1.2 体素
+        c.onGround = false;
+      }
+    }
+    const ground = this._groundAt(c.x, c.z);
+    const hovering = !!this.keys.Space && !c.onGround && c.fuel > 0;
+    if (hovering) {
+      c.fuel = Math.max(0, c.fuel - JET_DRAIN * dt);
+      c.vy = Math.max(c.vy - g * dt * 0.12, -0.7);   // 喷气悬停：抵消大部分重力
+    } else {
+      c.vy -= g * dt;
+      c.fuel = Math.min(100, c.fuel + JET_REGEN * dt);
+    }
+    c.y += c.vy * dt;
+    if (ground !== Infinity) {
+      if (c.y < ground) {
+        // 爬坡平滑：以有限速率贴上新地面（陡壁视觉爬升，任务层碰撞仍由 domain 权威）
+        c.y = Math.min(ground, c.y + 9 * dt);
+        if (ground - c.y < 0.02) {
+          c.y = ground;
+          c.vy = 0;
+          c.onGround = true;
+        }
+      } else if (c.y > ground + 0.05) {
+        c.onGround = false;
+      }
+    }
+    if (c.y < -12) {
+      // 跌出悬浮平台：回出生点
+      const sp = this.sw.spawn;
+      c.x = sp.x;
+      c.z = sp.z;
+      c.y = this._groundAt(sp.x, sp.z);
+      c.vy = 0;
+    }
+    // 状态映射：run / attack / hurt / dig（采掘中）/ idle
+    if (this._buildMode && this._mouse.lDown && this._aim && this._aim.dug) {
+      c.state = 'dig';
+    } else if (au.state === 'move') c.state = 'run';
+    else if (au.state === 'attack') c.state = 'attack';
+    else if (au.state === 'hurt') c.state = 'hurt';
+    else c.state = 'idle';
+    c.attackT = au.state === 'attack'
+      ? clamp(au.stateTime / 0.68, 0, 1)
+      : 0;
+    c.flash = m.time - au.lastHitAt < 0.3
+      ? clamp(1 - (m.time - au.lastHitAt) / 0.3, 0, 1)
+      : 0;
+  },
+
+  /**
+   * 自由模式本地物理：相机相对移动 + 体素 AABB 碰撞（轴分离滑行）
+   * + 重力 / 跳跃 / 喷气悬停 + 本地攻击/格挡/闪避状态机。
+   */
+  _freePhysics(dt) {
+    const c = this.char3d;
+    const sw = this.sw;
+    c.animT += dt;
+    const mv = this._moveVec();
+    const sprinting = !!mv && (this.keys.ShiftLeft || this.keys.ShiftRight) && c.stamina > 0;
+    const speed = 4.2 * (sprinting ? 1.5 : 1);
+
+    if (c.state === 'attack') {
+      // 本地攻击状态机（与任务 FSM 同参数）：前摇打击拍 → 后摇收招
+      const a = ATTACK_PARAMS[c.attackKind] || ATTACK_PARAMS.light;
+      c.attackT += dt;
+      if (!c.struckFx && c.attackT >= a.windup) {
+        c.struckFx = true;
+        this._emitAttackFx(c.attackKind);
+      }
+      if (c.attackT >= a.windup + a.recover) {
+        c.state = 'idle';
+        c.attackT = 0;
+        c.attackKind = null;
+      }
+    } else if (c.state === 'block') {
+      c.blockT += dt;
+      if (!this.keys.Digit4 || c.blockT >= 0.25) c.state = 'idle';
+    } else if (this._oneShot.attack && c.atkCd <= 0) {
+      c.attackKind = this._oneShot.attack;
+      c.state = 'attack';
+      c.attackT = 0;
+      c.struckFx = false;
+      c.atkCd = ATTACK_PARAMS[c.attackKind].windup + ATTACK_PARAMS[c.attackKind].recover;
+      const fwd = this._camForward();
+      c.yaw = Math.atan2(-fwd[2], fwd[0]);   // 面向相机前向
+    } else if (this.keys.Digit4 && c.stamina >= 15) {
+      // 技能 4：偏导护盾格挡（0.25s 判定窗，耗耐 15 —— 与任务 FSM 同参）
+      c.stamina -= 15;
+      c.blockT = 0;
+      c.state = 'block';
+    } else if (mv) {
+      const yawWant = Math.atan2(-mv.z, mv.x);
+      c.yaw += normAngle(yawWant - c.yaw) * Math.min(1, dt * 12);
+      c.state = 'run';
+    } else {
+      c.state = 'idle';
+    }
+    this._oneShot.attack = null;
+    c.atkCd = Math.max(0, c.atkCd - dt);
+
+    // —— XZ 位移（闪避爆发 + 常速移动，体素 AABB 轴分离碰撞） ——
+    if (c.dodgeT > 0) {
+      c.dodgeT -= dt;
+      this._moveAABB(c.dodgeX * 8.0 * dt, c.dodgeZ * 8.0 * dt);
+    } else if (mv) {
+      this._moveAABB(mv.x * speed * dt, mv.z * speed * dt);
+    }
+
+    // —— 竖直物理 ——
+    const g = this._gravity();
+    if (this._oneShot.dodge) {
+      this._oneShot.dodge = false;
+      if (c.onGround) {
+        c.vy = Math.sqrt(2 * g * 1.2);
+        c.onGround = false;
+        // 空格点按同时给一次闪避爆发（与任务 FSM 的 dodge 对齐）
+        const dir = mv || { x: Math.cos(c.yaw), z: -Math.sin(c.yaw) };
+        c.dodgeT = 0.18;
+        c.dodgeX = dir.x;
+        c.dodgeZ = dir.z;
+        c.stamina = Math.max(0, c.stamina - 25);
+      }
+    }
+    const hovering = !!this.keys.Space && !c.onGround && c.fuel > 0;
+    if (hovering) {
+      c.fuel = Math.max(0, c.fuel - JET_DRAIN * dt);
+      c.vy = Math.max(c.vy - g * dt * 0.12, -0.7);
+    } else {
+      c.vy -= g * dt;
+      c.fuel = Math.min(100, c.fuel + JET_REGEN * dt);
+    }
+    c.y += c.vy * dt;
+    // 头顶体素检测：上升顶头即截停
+    if (c.vy > 0 && getVoxel(sw, Math.floor(c.x), Math.floor(c.y + PLAYER_HEIGHT), Math.floor(c.z)) !== SURFACE_MAT.AIR) {
+      c.vy = 0;
+    }
+    const ground = this._groundAt(c.x, c.z);
+    if (c.y <= ground) {
+      c.y = ground;
+      c.vy = 0;
+      c.onGround = true;
+    } else {
+      c.onGround = false;
+    }
+    if (c.y < -12) {
+      const sp = findSpawnPoint(sw);
+      c.x = sp.x;
+      c.z = sp.z;
+      c.y = this._groundAt(sp.x, sp.z);
+      c.vy = 0;
+    }
+    // 采掘姿态：建造模式按住左键且本帧实际挖到（覆盖待机/奔跑姿态）
+    if (this._buildMode && this._mouse.lDown && this._aim && this._aim.dug
+      && (c.state === 'idle' || c.state === 'dig' || c.state === 'run')) {
+      c.state = 'dig';
+    }
+    // 耐力：冲刺 10/s、闪避 25/次，其余 12/s 回复（与 GroundMission 对齐）
+    if (sprinting) c.stamina = Math.max(0, c.stamina - 10 * dt);
+    else if (c.state !== 'block' && c.dodgeT <= 0) c.stamina = Math.min(c.staminaMax, c.stamina + 12 * dt);
+    c.flash = Math.max(0, c.flash - dt * 3);
+  },
+
+  /**
+   * 体素 AABB 碰撞移动：先 X 后 Z，撞实体素即轴分离滑行。
+   * 碰撞盒：脚底 c.y .. 头顶 c.y + PLAYER_HEIGHT，半宽 PLAYER_HALF。
+   */
+  _moveAABB(dx, dz) {
+    const c = this.char3d;
+    const solidBox = (px, pz) => {
+      const y0 = Math.floor(c.y + 0.05);
+      const y1 = Math.floor(c.y + PLAYER_HEIGHT - 0.05);
+      const x0 = Math.floor(px - PLAYER_HALF);
+      const x1 = Math.floor(px + PLAYER_HALF);
+      const z0 = Math.floor(pz - PLAYER_HALF);
+      const z1 = Math.floor(pz + PLAYER_HALF);
+      for (let y = y0; y <= y1; y++) {
+        for (let x = x0; x <= x1; x++) {
+          for (let z = z0; z <= z1; z++) {
+            if (getVoxel(this.sw, x, y, z) !== SURFACE_MAT.AIR) return true;
+          }
+        }
+      }
+      return false;
+    };
+    if (dx) {
+      const nx = clamp(c.x + dx, 1, SURFACE_SIZE.X - 1);
+      if (!solidBox(nx, c.z)) c.x = nx;
+    }
+    if (dz) {
+      const nz = clamp(c.z + dz, 1, SURFACE_SIZE.Z - 1);
+      if (!solidBox(c.x, nz)) c.z = nz;
+    }
+  },
+
+  /** 相机前向单位向量（准星射线；eye = 胸口 + 背向臂长） */
+  _camForward() {
+    const cp = Math.cos(this.cam.pitch);
+    const sp = Math.sin(this.cam.pitch);
+    const sy = Math.sin(this.cam.yaw);
+    const cy = Math.cos(this.cam.yaw);
+    this._fwd[0] = -cp * sy;
+    this._fwd[1] = -sp;
+    this._fwd[2] = -cp * cy;
+    return this._fwd;
+  },
+
+  /** 每帧准星 DDA：采掘/建造目标与 HUD 信息（同时是防穿模同源射线） */
+  _updateAim(dt) {
+    this._digCd = Math.max(0, this._digCd - dt);
+    this._placeCd = Math.max(0, this._placeCd - dt);
+    const c = this.char3d;
+    const cp = Math.cos(this.cam.pitch);
+    const sp = Math.sin(this.cam.pitch);
+    const sy = Math.sin(this.cam.yaw);
+    const cy = Math.cos(this.cam.yaw);
+    const d = this.cam.dist;
+    this._eye[0] = c.x + cp * sy * d;
+    this._eye[1] = c.y + 1.55 + sp * d;
+    this._eye[2] = c.z + cp * cy * d;
+    const fwd = this._camForward();
+    const hit = ddaRaycast(this.sw, this._eye, fwd, AIM_REACH);
+    this._aim = hit.hit ? hit : null;
+    if (this._aim) this._aim.dug = false;   // 本帧是否实际挖到（角色采掘姿态用）
+
+    // —— 采掘（建造模式按住左键，节流 DIG_INTERVAL） ——
+    if (this._buildMode && this._mouse.lDown && this._digCd <= 0 && this._aim) {
+      this._digCd = DIG_INTERVAL;
+      this._tryDig(this._aim);
+    }
+    // —— 建造（建造模式按住右键且未拖拽旋转相机，节流 PLACE_INTERVAL） ——
+    if (this._buildMode && this._mouse.rDown && !this._mouse.dragged && this._placeCd <= 0) {
+      this._placeCd = PLACE_INTERVAL;
+      this._tryPlace(this._aim);
+    }
+  },
+
+  /** 采掘：digVoxel → digChunk 增量重建 → 资源入账（creditColony / 视图台账） */
+  _tryDig(hit) {
+    const sw = this.sw;
+    const matId = getVoxel(sw, hit.vx, hit.vy, hit.vz);
+    if (matId === SURFACE_MAT.AIR || matId === SURFACE_MAT.BEDROCK) return;
+    const r = digVoxel(sw, hit.vx, hit.vy, hit.vz);
+    if (!r || r.matId === SURFACE_MAT.AIR) return;   // domain 判定不可挖（含并发保护）
+    if (this._aim) this._aim.dug = true;
+    this._fx.dig.push({ x: hit.vx, y: hit.vy, z: hit.vz, matId: r.matId });
+    if (this.ps3d) {
+      this.ps3d.digChunk(Math.floor(hit.vx / SURFACE_SIZE.CHUNK), Math.floor(hit.vz / SURFACE_SIZE.CHUNK));
+    }
+    if (r.resourceDrop) {
+      const { resId, amount } = r.resourceDrop;
+      if (this.colony) {
+        creditColony(this.app.world, this.colony, resId, amount, 'surfaceMining', this.colony.id);
+      }
+      this._tally[resId] = (this._tally[resId] || 0) + amount;
+    }
+  },
+
+  /** 建造：命中面法向相邻格 placeVoxel(BUILDING) → digChunk（殖民地扣 1 合金/格） */
+  _tryPlace(hit) {
+    if (!hit || (hit.nx === 0 && hit.ny === 0 && hit.nz === 0)) return; // 起点即实体的零法线命中
+    const tx = hit.vx + hit.nx;
+    const ty = hit.vy + hit.ny;
+    const tz = hit.vz + hit.nz;
+    if (ty < 0 || ty >= SURFACE_SIZE.Y) return;
+    // 拒绝与角色碰撞盒重叠的放置（防自埋）
+    const c = this.char3d;
+    if (tx === Math.floor(c.x) && tz === Math.floor(c.z)
+      && ty >= Math.floor(c.y) && ty <= Math.floor(c.y + PLAYER_HEIGHT)) return;
+    if (this.colony && (this.colony.stockpile?.alloy ?? 0) < 1) {
+      this._placeCd = 1.0;            // 合金不足：降频提示
+      toast('结构体素需要合金（殖民地仓储 alloy ≥ 1）', { kind: 'warn' });
+      return;
+    }
+    if (!placeVoxel(this.sw, tx, ty, tz, SURFACE_MAT.BUILDING)) return;
+    if (this.colony) {
+      debitColony(this.app.world, this.colony, 'alloy', 1, 'surfaceBuild', this.colony.id);
+      this._tally.alloy = (this._tally.alloy || 0) - 1;
+    }
+    if (this.ps3d) {
+      this.ps3d.digChunk(Math.floor(tx / SURFACE_SIZE.CHUNK), Math.floor(tz / SURFACE_SIZE.CHUNK));
+    }
+  },
+
+  // —— 特效 ————————————————
+
+  /**
+   * 打击拍检测：任务单元 struck 由 false 翻 true 的那一帧发出刀光/光束。
+   * 远程光束目标取射程内最近存活敌人（视觉近似，判定以 domain 为准）。
+   */
+  _detectStrikes(view) {
+    for (const u of view.playerUnits) {
+      if (u.state === 'dead') continue;
+      const key = u.unitId;
+      const prev = this._strikeSeen.get(key);
+      if (u.state === 'attack' && u.struck && prev && !prev.struck) {
+        this._emitMissionStrike(view, u);
+      }
+      this._strikeSeen.set(key, { struck: !!u.struck, state: u.state });
+    }
+    if (this._strikeSeen.size > 8) this._strikeSeen.clear();
+  },
+
+  /** 任务打击特效：近战刀光（伤害 22/×2 对应弧度一致）或远程光束 */
+  _emitMissionStrike(view, u) {
+    const m = this.mission;
+    const kx = SURFACE_SIZE.X / (m.w * TS);
+    const kz = SURFACE_SIZE.Z / (m.h * TS);
+    const wx = u.x * kx;
+    const wz = u.y * kz;
+    const yaw = -u.facing;
+    if (u.attackKind === 'ranged') {
+      let tgt = null;
+      let bd = Infinity;
+      const rangeW = u.range * kx;
+      for (const e of view.enemies) {
+        if (e.state === 'dead') continue;
+        const d = Math.hypot(e.x * kx - wx, e.y * kz - wz);
+        if (d <= rangeW && d < bd) {
+          bd = d;
+          tgt = e;
+        }
+      }
+      const a = [wx, this.char3d.y + 1.25, wz];
+      const b = tgt
+        ? [tgt.x * kx, this._groundAt(tgt.x * kx, tgt.y * kz) + 0.8, tgt.y * kz]
+        : [wx - Math.cos(u.facing) * 18 * kx, this.char3d.y + 1.25, wz - Math.sin(u.facing) * 18 * kz];
+      this._fx.beams.push({ a, b, age: 0, life: 0.12 });
+    } else {
+      this._fx.slashes.push({
+        x: wx, y: this.char3d.y, z: wz, yaw,
+        arc: Math.PI * 0.9, t: 0, age: 0, life: 0.18,
+      });
+    }
+  },
+
+  /** 自由模式攻击特效（本地状态机打击拍） */
+  _emitAttackFx(kind) {
+    const c = this.char3d;
+    if (kind === 'ranged') {
+      const f = this._camForward();
+      this._fx.beams.push({
+        a: [c.x, c.y + 1.25, c.z],
+        b: [c.x - f[0] * 24, c.y + 1.25 - f[1] * 24, c.z - f[2] * 24],
+        age: 0, life: 0.12,
+      });
+    } else {
+      this._fx.slashes.push({
+        x: c.x, y: c.y, z: c.z, yaw: c.yaw,
+        arc: kind === 'heavy' ? Math.PI * 1.2 : Math.PI * 0.9,
+        t: 0, age: 0, life: 0.18,
+      });
+    }
+  },
+
+  /** 推进瞬时特效寿命（刀光 t 扫掠 0..1；光束到寿即删；采掘粒子事件单次消费） */
+  _updateFx(dt) {
+    const fx = this._fx;
+    for (let i = fx.slashes.length - 1; i >= 0; i--) {
+      const s = fx.slashes[i];
+      s.age += dt;
+      s.t = clamp(s.age / s.life, 0, 1);
+      if (s.age >= s.life) fx.slashes.splice(i, 1);
+    }
+    for (let i = fx.beams.length - 1; i >= 0; i--) {
+      const b = fx.beams[i];
+      b.age += dt;
+      if (b.age >= b.life) fx.beams.splice(i, 1);
+    }
+  },
+
+  // —— 殖民地 3D 布局 / 传送带 ————————————————
+
+  /**
+   * 殖民地建筑确定性布局：黄金角螺旋环绕出生点，逐列吸附地表。
+   * 建造队列条目以 0.55 缩放 + 自发光渲染为脚手架。
+   * 同时生成每个建筑旁的作业殖民者（确定性相位）。
+   */
+  _layoutColony() {
+    this._buildingLayout = [];
+    this._buildingColonists = [];
+    const colony = this.colony;
+    if (!colony) return;
+    const sw = this.sw;
+    const GOLDEN = 2.39996323;
+    const entries = [
+      ...(colony.buildings || []),
+      ...(colony.constructionQueue || []).map((j) => ({ defId: j.defId, state: 'construction' })),
+    ];
+    for (let i = 0; i < entries.length && i < 24; i++) {
+      const b = entries[i];
+      const def = BUILDINGS.find((x) => x.id === b.defId);
+      const cat = def ? def.category : 'default';
+      const building = b.state !== 'construction';
+      const r = 5.5 + 2.4 * Math.sqrt(i);
+      const a = i * GOLDEN;
+      const x = clamp(sw.spawn.x + Math.cos(a) * r, 3, SURFACE_SIZE.X - 3);
+      const z = clamp(sw.spawn.z + Math.sin(a) * r, 3, SURFACE_SIZE.Z - 3);
+      const h = getSurfaceHeight(sw, x, z);
+      if (h < 0) continue;             // 虚空列（悬浮平台边缘）跳过
+      this._buildingLayout.push({
+        x,
+        y: h + 1,
+        z,
+        rotY: (i * 0.618) % 1 * Math.PI * 2,
+        scale: building ? 1 : 0.55,
+        meshId: MESH_OF_CATEGORY(cat),
+        emit: building ? 0 : 0.25,
+      });
+      this._buildingColonists.push({
+        x: x + 1.6,
+        y: h + 1,
+        z: z + 1.2,
+        rotY: (i * 0.37) % 1 * Math.PI * 2,
+        walk: false,
+        phase: (i * 0.29) % 1,
+      });
+    }
+  },
+
+  /**
+   * 传送带路径：每座（已建成）采掘建筑连接最近精炼建筑的地面折线，
+   * 逐 1 体素采样并吸附列顶（PlanetSurface3D 沿路径铺带段 + 滑动货箱）。
+   */
+  _buildConveyorPaths() {
+    const paths = [];
+    const mines = this._buildingLayout.filter((b) => b.scale === 1 && b.meshId === MESH_OF_CATEGORY('mining'));
+    const refs = this._buildingLayout.filter((b) => b.scale === 1 && b.meshId === MESH_OF_CATEGORY('refining'));
+    if (!mines.length || !refs.length) return paths;
+    for (const mn of mines) {
+      if (paths.length >= 6) break;
+      let best = null;
+      let bd = Infinity;
+      for (const rf of refs) {
+        const d = Math.hypot(rf.x - mn.x, rf.z - mn.z);
+        if (d < bd) {
+          bd = d;
+          best = rf;
+        }
+      }
+      if (!best || bd < 2) continue;
+      const n = Math.max(2, Math.ceil(bd));
+      const pts = [];
+      for (let k = 0; k <= n; k++) {
+        const f = k / n;
+        const x = mn.x + (best.x - mn.x) * f;
+        const z = mn.z + (best.z - mn.z) * f;
+        const h = getSurfaceHeight(this.sw, x, z);
+        const y = h >= 0 ? h + 1 : mn.y + (best.y - mn.y) * f;
+        pts.push([x, y, z]);
+      }
+      paths.push({ pts, speed: 1.6, spacing: 1.1 });
+    }
+    return paths;
+  },
+
+  // —— 渲染 ————————————————
+
+  /**
+   * 渲染一帧：GL 场景（地形/天空/角色/敌人/特效）→ 建筑批处理 → HUD 2D。
+   * @param {object|null} view getMissionView 快照（自由模式为 null）
+   */
+  _renderFrame(view, dt) {
+    const cm = this.cm;
+    if (!cm) return;
+    cm.beginFrame();
+
+    const rd = this._assembleRenderData(view);
+    if (this._glOK && this.ps3d) {
+      const target = cm.beginGLFrame();
+      if (target) {
+        const gl = this.cm.gl;
+        const pw = this.cm.glCanvas.width;
+        const ph = this.cm.glCanvas.height;
+        this.ps3d.draw(gl, pw, ph, rd, { time: this._clock, dt });
+        // 建筑网格批处理：与渲染器同帧相机（弹簧平滑后的 eye/target）+ 同源光照
+        const bList = this.bmesh ? this._bmeshList() : null;
+        if (this.bmesh && bList.length) {
+          const mm = this._m;
+          mat4Perspective(mm.proj, 1.05, pw / Math.max(1, ph), 0.1, 220);
+          mat4LookAt(mm.view, this.ps3d.camera.eye, this.ps3d.camera.target, [0, 1, 0]);
+          mat4Multiply(mm.vp, mm.proj, mm.view);
+          this.bmesh.draw(gl, mm.vp, this._envOf(), bList);
+        }
+        cm.endGLFrame({ time: this._clock });
+      }
+    }
+    this._fx.dig.length = 0;          // 采掘粒子事件单次消费（渲染器逐事件喷发）
+    this._drawHud(view);
+  },
+
+  /** 组装 PlanetSurface3D.renderData（全部字段缺省安全） */
+  _assembleRenderData(view) {
+    const c = this.char3d;
+    const rd = {
+      character: {
+        x: c.x, y: c.y, z: c.z, yaw: c.yaw,
+        state: c.state, animT: c.animT, attackT: c.attackT, flash: c.flash,
+      },
+      camera: { yaw: this.cam.yaw, pitch: this.cam.pitch, dist: this.cam.dist },
+      enemies: [],
+      colonists: this._buildingColonists.slice(),   // 拷贝：后续会并入任务 NPC/队友
+      conveyor: { paths: this._conveyor },
+      effects: {
+        slashes: this._fx.slashes,
+        beams: this._fx.beams,
+        aoe: [],
+        digEvents: this._fx.dig,
+      },
+    };
+    if (!view) return rd;
+
+    const m = this.mission;
+    const kx = SURFACE_SIZE.X / (m.w * TS);
+    const kz = SURFACE_SIZE.Z / (m.h * TS);
+    // 敌人（≤40，kind 与任务 type 同名；闪白取 lastHitAt 衰减）
+    const fallY = this.char3d.y || 0;
+    for (const e of view.enemies) {
+      if (e.state === 'dead') continue;
+      const ex = e.x * kx;
+      const ez = e.y * kz;
+      const gy = this._groundAt(ex, ez);
+      const hitAge = m.time - e.lastHitAt;
+      rd.enemies.push({
+        kind: e.type,
+        x: ex,
+        y: gy === Infinity ? fallY : gy,   // 悬浮平台虚空列回退到角色高度
+        z: ez,
+        yaw: -e.facing,
+        phase: e.phase || 0,
+        flash: hitAge < 0.25 ? clamp(1 - hitAge / 0.25, 0, 1) : 0,
+        hp: e.hp,
+        hpMax: e.hpMax,
+        state: e.state,
+      });
+      // 前摇期红色预警贴花（AoE 落点 = 面向前方 2 格）
+      if (e.state === 'windup') {
+        rd.effects.aoe.push({
+          x: ex + Math.cos(e.facing) * 2.0,
+          z: ez + Math.sin(e.facing) * 2.0,
+          r: 1.9,
+          t: clamp(e.stateTime / Math.max(0.01, e.windupS), 0, 1),
+        });
+      }
+    }
+    // 非激活小队成员以殖民者网格随行显示（外骨骼实例管线仅承载激活位）
+    const activeId = view.activeUnitId;
+    for (const u of view.playerUnits) {
+      if (u.state === 'dead' || u.unitId === activeId) continue;
+      const ux = u.x * kx;
+      const uz = u.y * kz;
+      rd.colonists.push({
+        x: ux, y: this._groundAt(ux, uz), z: uz,
+        rotY: -u.facing, walk: u.state === 'move', phase: 0.5,
+      });
+    }
+    // 任务 NPC（救援/工程队）
+    for (const n of view.npcs) {
+      if (n.state === 'safe') continue;
+      const nx = n.x * kx;
+      const nz = n.y * kz;
+      rd.colonists.push({
+        x: nx, y: this._groundAt(nx, nz), z: nz,
+        rotY: 0, walk: n.state === 'follow', phase: 0.5,
+      });
+    }
+    return rd;
+  },
+
+  /** 建筑批处理实例表：殖民地建筑 + 任务目标物 + 数据核心 + 体素选择框 */
+  _bmeshList() {
+    const list = this._buildingLayout.slice();
+    const view = this._lastView;
+    if (view && this.mode === 'mission') {
+      const m = this.mission;
+      const kx = SURFACE_SIZE.X / (m.w * TS);
+      const kz = SURFACE_SIZE.Z / (m.h * TS);
+      for (const t of view.targets) {
+        if (t.done) continue;
+        const tx = t.x * kx;
+        const tz = t.y * kz;
+        const hurt = t.hp < t.hpMax;
+        list.push({
+          x: tx, y: this._groundAt(tx, tz), z: tz,
+          rotY: 0.7, scale: 0.8, meshId: MESH_OF_CATEGORY('military'),
+          emit: hurt ? 0.15 : 0,
+          flash: hurt && (m.time % 0.5) < 0.25 ? 0.3 : 0,
+        });
+      }
+      for (const it of view.items) {
+        if (it.done) continue;
+        const ix = it.x * kx;
+        const iz = it.y * kz;
+        list.push({
+          x: ix, y: this._groundAt(ix, iz) + 0.5, z: iz,
+          rotY: this._clock * 0.8, scale: 0.38, meshId: MESH_OF_CATEGORY('selector'),
+          emit: 0.9,
+        });
+      }
+    }
+    // 体素选择框（采掘：命中格；建造：放置格）
+    const aim = this._aim;
+    if (this._buildMode && aim) {
+      const px = this._buildMode && this._mouse.rDown && aim.nx !== undefined && (aim.nx || aim.ny || aim.nz)
+        ? aim.vx + aim.nx : aim.vx;
+      const py = this._buildMode && this._mouse.rDown && (aim.nx || aim.ny || aim.nz)
+        ? aim.vy + aim.ny : aim.vy;
+      const pz = this._buildMode && this._mouse.rDown && (aim.nx || aim.ny || aim.nz)
+        ? aim.vz + aim.nz : aim.vz;
+      list.push({
+        x: px + 0.5, y: py + 0.5, z: pz + 0.5,
+        rotY: 0, scale: 1.04, meshId: MESH_OF_CATEGORY('selector'),
+        emit: 0.55,
+      });
+    }
+    return list;
+  },
+
+  /** 从 PlanetSurface3D 读取已求值环境（保持地形/建筑/雾一致；缺失回退默认） */
+  _envOf() {
+    const p = this.ps3d;
+    return {
+      sunDir: (p && p._sunDir) || FALLBACK_ENV.sunDir,
+      sunColor: (p && p._sunColor) || FALLBACK_ENV.sunColor,
+      fogColor: (p && p._fogColor) || FALLBACK_ENV.fogColor,
+      fogRange: (p && p._fogRange) || FALLBACK_ENV.fogRange,
+      eye: p ? p.camera.eye : this._eye,
+    };
+  },
+
+  // —— HUD（2D 层） ————————————————
+
+  /** HUD 分派：任务 / 自由 / 降级提示 */
+  _drawHud(view) {
+    const ctx = this.cm.ctx;
+    if (!ctx) return;
+    const W = this.cm.width;
+    const H = this.cm.height;
+    if (!this._glOK) {
+      ctx.fillStyle = 'rgba(8,14,22,0.6)';
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = '#cfe3f5';
+      ctx.font = '14px "Segoe UI", system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('当前环境不支持 WebGL2，3D 地表不可用（模拟与 HUD 继续运行）', W / 2, H / 2);
+      ctx.textAlign = 'left';
+    }
+    // 准星（采掘/建造模式为方框 + 目标信息）
+    this._drawCrosshair(ctx, W, H);
+    if (this.mode === 'mission' && view) this._drawHudMission(ctx, W, H, view);
+    else this._drawHudFree(ctx, W, H);
+    this._drawSkillbar(ctx, W, H);
+  },
+
+  /** 屏幕中央准星：战斗为十字，采掘/建造为方框 + 材质信息 */
+  _drawCrosshair(ctx, W, H) {
+    const cx = Math.round(W / 2);
+    const cy = Math.round(H / 2);
+    ctx.strokeStyle = 'rgba(220,240,255,0.85)';
+    ctx.lineWidth = 1.5;
+    if (this._buildMode) {
+      ctx.strokeRect(cx - 7.5, cy - 7.5, 15, 15);
+      const aim = this._aim;
+      ctx.fillStyle = 'rgba(210,232,250,0.85)';
+      ctx.font = '11px "Segoe UI", system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(
+        aim
+          ? `${MAT_ZH[aim.matId] || '未知'}（${aim.vx},${aim.vy},${aim.vz}） 左键采掘 · 右键建造`
+          : '超出采掘范围',
+        cx, cy + 30,
+      );
+    } else {
+      ctx.beginPath();
+      ctx.moveTo(cx - 10, cy);
+      ctx.lineTo(cx - 3, cy);
+      ctx.moveTo(cx + 3, cy);
+      ctx.lineTo(cx + 10, cy);
+      ctx.moveTo(cx, cy - 10);
+      ctx.lineTo(cx, cy - 3);
+      ctx.moveTo(cx, cy + 3);
+      ctx.lineTo(cx, cy + 10);
+      ctx.stroke();
+    }
+    ctx.lineWidth = 1;
+    ctx.textAlign = 'left';
+  },
+
+  /** 任务 HUD：左上任务名/时间、左下三色条、右上目标列表 + 日志、撤离罗盘 */
+  _drawHudMission(ctx, W, H, view) {
+    const m = this.mission;
+    const tpl = findMissionTemplate(m.templateId);
+    const au = view.playerUnits.find((u) => u.unitId === view.activeUnitId)
+      || view.playerUnits[0];
+
+    // —— 左上：任务名 + 时间（+ 时限） ——
+    ctx.fillStyle = 'rgba(8,14,22,0.72)';
+    ctx.fillRect(12, 12, 250, 54);
+    ctx.strokeStyle = 'rgba(140,170,200,0.3)';
+    ctx.strokeRect(12.5, 12.5, 249, 53);
+    ctx.fillStyle = '#e8f2fb';
+    ctx.font = 'bold 13px "Segoe UI", system-ui, sans-serif';
+    ctx.fillText(tpl ? tpl.nameZh : m.templateId, 22, 32);
+    ctx.fillStyle = '#9fb6c9';
+    ctx.font = '11px "Segoe UI", system-ui, sans-serif';
+    const limit = view.timeLimitSeconds > 0 ? ` / ${fmtClock(view.timeLimitSeconds)}` : '';
+    ctx.fillText(`任务时间 ${fmtClock(view.time)}${limit} · 风险 ${m.riskLevel}/5`, 22, 50);
+    ctx.fillText(`小队指令：${STANCES[this._stanceIdx]}${this._buildMode ? ' · 采掘/建造模式' : ''}`, 22, 62 - 6 + 8 - 6);
+
+    // —— 小队成员迷你血条 ——
+    let uy = 84;
+    for (const u of view.playerUnits) {
+      const dead = u.state === 'dead';
+      ctx.fillStyle = dead ? 'rgba(90,40,40,0.7)' : 'rgba(8,14,22,0.72)';
+      ctx.fillRect(12, uy, 250, 16);
+      ctx.fillStyle = dead ? '#7a4a4a' : (u.unitId === view.activeUnitId ? '#ffd76a' : '#7fa8c9');
+      ctx.font = '10px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText(`${u.characterId}${u.unitId === view.activeUnitId ? '（操纵中）' : ''}`, 18, uy + 11);
+      if (!dead) {
+        ctx.fillStyle = '#4fd8a0';
+        ctx.fillRect(120, uy + 4, 130 * clamp(u.hp / u.hpMax, 0, 1), 8);
+        ctx.strokeStyle = 'rgba(140,170,200,0.3)';
+        ctx.strokeRect(120.5, uy + 4.5, 129, 7);
+      }
+      uy += 20;
+    }
+
+    // —— 右上：目标列表 + 行动日志 ——
+    const boxW = 268;
+    let y = 14;
+    ctx.fillStyle = 'rgba(8,14,22,0.72)';
+    ctx.fillRect(W - boxW - 12, 12, boxW, 30 + view.objectives.length * 18);
+    ctx.strokeRect(W - boxW - 11.5, 12.5, boxW - 1, 29 + view.objectives.length * 18);
+    ctx.fillStyle = '#e8f2fb';
+    ctx.font = 'bold 12px "Segoe UI", system-ui, sans-serif';
+    ctx.fillText('任务目标', W - boxW + 2, 30);
+    ctx.font = '11px "Segoe UI", system-ui, sans-serif';
+    for (const o of view.objectives) {
+      const yLine = 48 + view.objectives.indexOf(o) * 18;
+      ctx.fillStyle = o.done ? '#5fe0a0' : '#9fb6c9';
+      ctx.fillText(o.done ? '✓' : '○', W - boxW + 2, yLine);
+      let extra = '';
+      if (o.count > 0) extra = `（${o.doneCount}/${o.count}）`;
+      else if (o.type === 'survive') extra = `（${fmtClock(o.progress)}/${fmtClock(o.seconds)}）`;
+      ctx.fillStyle = o.done ? '#5fe0a0' : '#cfe3f5';
+      ctx.fillText(`${OBJ_ZH[o.type] || o.type}${extra}`, W - boxW + 18, yLine);
+    }
+
+    // —— 行动日志（最近 4 条，右上目标框下方） ——
+    y = 60 + view.objectives.length * 18;
+    ctx.fillStyle = 'rgba(8,14,22,0.55)';
+    ctx.fillRect(W - boxW - 12, y, boxW, 14 + Math.min(4, view.log.length) * 15);
+    ctx.font = '10px "Segoe UI", system-ui, sans-serif';
+    const logs = view.log.slice(-4);
+    for (let i = 0; i < logs.length; i++) {
+      const line = logs[i];
+      ctx.fillStyle = '#8fa8bd';
+      ctx.fillText(`[${fmtClock(line.t)}] ${line.text}`, W - boxW + 2, y + 14 + i * 15);
+    }
+
+    // —— 撤离点罗盘（顶部中央箭头 + 距离） ——
+    const kx = SURFACE_SIZE.X / (m.w * TS);
+    const kz = SURFACE_SIZE.Z / (m.h * TS);
+    const ex = view.extraction.x * kx;
+    const ez = view.extraction.y * kz;
+    const c = this.char3d;
+    const camFwd = this._camForward();
+    const camAng = Math.atan2(camFwd[2], camFwd[0]);
+    const rel = normAngle(Math.atan2(ez - c.z, ex - c.x) - camAng);
+    const dist = Math.hypot(ex - c.x, ez - c.z);
+    ctx.save();
+    ctx.translate(W / 2, 44);
+    ctx.rotate(rel);
+    ctx.fillStyle = 'rgba(95,224,160,0.9)';
+    ctx.beginPath();
+    ctx.moveTo(0, -12);
+    ctx.lineTo(7, 4);
+    ctx.lineTo(0, 0);
+    ctx.lineTo(-7, 4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+    ctx.fillStyle = '#8fd8b0';
+    ctx.font = '10px "Segoe UI", system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(`撤离区 ${Math.round(dist)}m`, W / 2, 68);
+    ctx.textAlign = 'left';
+
+    // —— 交互引导进度（引爆装药） ——
+    const channel = view.targets.find((t) => !t.done && t.progress > 0);
+    if (channel) {
+      const bw = 180;
+      const bx = W / 2 - bw / 2;
+      const by = H - 110;
+      hudBar(ctx, bx, by, bw, 10, channel.progress / 3, '#ffb35c', '装药引爆', `${Math.round(channel.progress / 3 * 100)}%`);
+    }
+
+    // —— 左下：HP / 护盾 / 耐力 三色条 + 喷气燃料 ——
+    if (au) {
+      const bx = 16;
+      let by = H - 118;
+      hudBar(ctx, bx, by, 210, 12, au.hp / au.hpMax, '#e06a5a', '结构 HP', `${Math.round(au.hp)}/${au.hpMax}`);
+      by += 26;
+      hudBar(ctx, bx, by, 210, 10, au.shield / au.shieldMax, '#5ab8e0', '护盾', `${Math.round(au.shield)}/${au.shieldMax}`);
+      by += 24;
+      hudBar(ctx, bx, by, 210, 10, au.stamina / au.staminaMax, '#e0c85a', '耐力', `${Math.round(au.stamina)}/${au.staminaMax}`);
+      by += 24;
+      hudBar(ctx, bx, by, 210, 8, this.char3d.fuel / 100, '#b08ae0', '喷气燃料', `${Math.round(this.char3d.fuel)}%`);
+    }
+  },
+
+  /** 自由模式 HUD：标题/台账 + 三色条 + 采掘统计 + 返回提示 */
+  _drawHudFree(ctx, W, H) {
+    const c = this.char3d;
+    ctx.fillStyle = 'rgba(8,14,22,0.72)';
+    ctx.fillRect(12, 12, 250, 54);
+    ctx.strokeStyle = 'rgba(140,170,200,0.3)';
+    ctx.strokeRect(12.5, 12.5, 249, 53);
+    ctx.fillStyle = '#e8f2fb';
+    ctx.font = 'bold 13px "Segoe UI", system-ui, sans-serif';
+    ctx.fillText(`自由探索 · ${this.planet ? this.planet.name : ''}`, 22, 32);
+    ctx.fillStyle = '#9fb6c9';
+    ctx.font = '11px "Segoe UI", system-ui, sans-serif';
+    ctx.fillText(`采掘/建造模式：${this._buildMode ? '开' : '关'} · Esc 升空返回`, 22, 50);
+
+    // 本次采掘台账
+    const keys = Object.keys(this._tally).filter((k) => this._tally[k] !== 0);
+    if (keys.length) {
+      ctx.fillStyle = 'rgba(8,14,22,0.55)';
+      ctx.fillRect(12, 74, 250, 22 + keys.length * 14);
+      ctx.fillStyle = '#cfe3f5';
+      ctx.fillText('本次作业台账', 22, 90);
+      let ty = 104;
+      for (const k of keys) {
+        ctx.fillStyle = this._tally[k] > 0 ? '#9fd8b0' : '#d8a89f';
+        ctx.fillText(`${k} × ${this._tally[k]}`, 22, ty);
+        ty += 14;
+      }
+    }
+
+    const bx = 16;
+    let by = H - 118;
+    hudBar(ctx, bx, by, 210, 12, c.hp / c.hpMax, '#e06a5a', '结构 HP', `${Math.round(c.hp)}/${c.hpMax}`);
+    by += 26;
+    hudBar(ctx, bx, by, 210, 10, c.shield / c.shieldMax, '#5ab8e0', '护盾', `${Math.round(c.shield)}/${c.shieldMax}`);
+    by += 24;
+    hudBar(ctx, bx, by, 210, 10, c.stamina / c.staminaMax, '#e0c85a', '耐力', `${Math.round(c.stamina)}/${c.staminaMax}`);
+    by += 24;
+    hudBar(ctx, bx, by, 210, 8, c.fuel / 100, '#b08ae0', '喷气燃料', `${Math.round(c.fuel)}%`);
+  },
+
+  /** 底部中央 6 槽技能栏（可用高亮 + 冷却遮罩 + 数字标注 + 名称） */
+  _drawSkillbar(ctx, W, H) {
+    const S = 46;
+    const GAP = 8;
+    const total = SKILLS.length * S + (SKILLS.length - 1) * GAP;
+    const x0 = Math.round(W / 2 - total / 2);
+    const y0 = H - S - 20;
+    const au = this._lastView && this._lastView.playerUnits
+      ? (this._lastView.playerUnits.find((u) => u.unitId === this._lastView.activeUnitId) || this._lastView.playerUnits[0])
+      : null;
+    const stamOk = au ? au.stamina >= 15 : this.char3d.stamina >= 15;
+    const atkReady = au ? au.cooldowns.attack <= 0 : this.char3d.atkCd <= 0;
+    const atkCdMax = 0.68;
+    for (let i = 0; i < SKILLS.length; i++) {
+      const sk = SKILLS[i];
+      const x = x0 + i * (S + GAP);
+      let ready = true;
+      let cdFrac = 0;
+      if (sk.attack) {
+        ready = atkReady;
+        cdFrac = au
+          ? clamp(au.cooldowns.attack / atkCdMax, 0, 1)
+          : clamp(this.char3d.atkCd / atkCdMax, 0, 1);
+      } else if (sk.block) {
+        ready = stamOk;
+      } else if (sk.mode) {
+        ready = true;
+      }
+      const active = (sk.mode && this._buildMode) || (sk.block && (this.keys.Digit4 || (au && au.state === 'block')));
+      ctx.fillStyle = active ? 'rgba(80,160,220,0.35)' : 'rgba(10,16,26,0.78)';
+      ctx.fillRect(x, y0, S, S);
+      if (cdFrac > 0) {
+        ctx.fillStyle = 'rgba(20,26,34,0.75)';
+        ctx.fillRect(x, y0, S, S * cdFrac);
+      }
+      ctx.strokeStyle = ready
+        ? (active ? '#8fd0ff' : 'rgba(143,208,255,0.75)')
+        : 'rgba(110,130,150,0.4)';
+      ctx.strokeRect(x + 0.5, y0 + 0.5, S - 1, S - 1);
+      ctx.fillStyle = '#e8f2fb';
+      ctx.font = 'bold 12px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText(sk.key, x + 5, y0 + 16);
+      ctx.fillStyle = ready ? '#bfe2ff' : '#6c7f92';
+      ctx.font = '9px "Segoe UI", system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(sk.name, x + S / 2, y0 + S + 11);
+      ctx.textAlign = 'left';
+    }
+  },
+
+  // —— 结算 ————————————————
+
+  /** 任务结算弹窗（幂等：一次结束只弹一次），确认后回简报 */
   _showResult(m) {
-    const results = (m && m.results) || { outcome: 'failed' };
+    if (this._resultShown) return;
+    this._resultShown = true;
+    const results = (m && m.results) || { outcome: 'failed', reason: 'unknown' };
+    const outcomeZh = ({ success: '任务完成', failed: '任务失败', aborted: '行动中止' })[results.outcome] || results.outcome;
+    const rewards = (results.rewardsPaid || [])
+      .map((r) => `${r.resId}×${r.amount}`)
+      .join('　') || '无奖励结算';
     showModal({
       title: '行动结束',
       body: el('div', { class: 'vf-col' }, [
-        el('div', { class: 'vf-accent', text: ({ success: '任务完成', failed: '任务失败', aborted: '行动中止' })[results.outcome] || results.outcome }),
-        el('div', { class: 'vf-small vf-dim mt-1', text: results.rewardsPaid ? `奖励已入账：${JSON.stringify(results.rewardsPaid)}` : '无奖励结算' }),
+        el('div', { class: 'vf-accent', text: outcomeZh }),
+        el('div', { class: 'vf-small vf-dim mt-1', text: `用时 ${fmtClock(results.timeSeconds)} · 阵亡 ${results.casualties || 0} 人` }),
+        el('div', { class: 'vf-small vf-dim', text: `奖励：${rewards}` }),
+        el('div', { class: 'vf-faint vf-small', text: `原因：${results.reason || '—'}` }),
       ]),
-      actions: [{ label: L('ui.confirm'), kind: 'primary', onClick: (close) => { close(); this._build(); } }],
+      actions: [{
+        label: L('ui.confirm'),
+        kind: 'primary',
+        onClick: (close) => {
+          close();
+          this._build(null);
+        },
+      }],
     });
   },
 
-  onSnapshot() {},
+  // —— 生命周期 ————————————————
 
+  /** 快照推送：简报页在任务结束后自动切到简报列表；任务/自由模式由 rAF 自驱 */
+  onSnapshot() {
+    if (!this._mounted) return;
+    if (this.mode === 'briefing' && this.app.world) {
+      const active = Object.values(this.app.world.entities.groundMissions || {})
+        .some((mm) => mm.status === 'active');
+      // 有进行中任务且当前处于简报 → 保持简报（由「恢复行动」进入），不强行切换
+      void active;
+    }
+  },
+
+  /** 卸载：停 rAF、移除监听、释放 GL 与画布 */
   unmount() {
-    if (this._raf) cancelAnimationFrame(this._raf);
-    this._raf = null;
-    for (const [name, fn] of this._handlers) window.removeEventListener(name, fn);
-    this._handlers = [];
-    if (this.cm) this.cm.dispose();
-    this.cm = null;
+    this._mounted = false;
+    this._teardownScene();
+    this.body = null;
+    this.headInfo = null;
+    this.headBtns = null;
     this.app = null;
+    this.cm = null;
+    this.sw = null;
+    this.mission = null;
   },
 };
-
-const { getMissionView: getMissionView } = __require("src/domain/ground/GroundMission.js");
-function groundViewApi() {
-  return { getMissionView };
-}
 
 Object.assign(__exports, { GroundView });
 
 });
-__register("src/render/GroundRenderer.js", function (__exports, __require) {
+__register("src/domain/ground/SurfaceSandbox.js", function (__exports, __require) {
 /**
- * render/GroundRenderer.js — 地面行动渲染器（任务书 5.7）
- * 消费 getMissionView 快照，Canvas 2D 绘制网格/单位/目标点/撤离区。
+ * domain/ground/SurfaceSandbox.js — 行星地表体素沙盒数据层（返工 Phase R8）
+ *
+ * 纯逻辑层（无 DOM / 无 WebGL）：三维体素世界的确定性生成、挖掘/放置、
+ * DDA 射线拾取、贪心共面合并（Mikola Lysenko / 0fps 算法，AO 感知）
+ * 与地表寻路。渲染层 PlanetSurface3D 消费本模块的网格输出。
+ *
+ * 世界规格：
+ *  - 64×24×64（X×Y×Z）单体素世界，分 4×4 个 16×16×24 列区块；
+ *  - 材质 ID：0=air 1=surface 2=rock 3=ore_ferro 4=ore_silicate
+ *    5=ore_rare 6=ore_heavy 7=bedrock 8=building；
+ *  - 地貌：表面层（风化表土）/ 地下矿石层（岩层 + 矿脉）/ 基岩层（不可采）；
+ *  - 按 planet.category（8 大类）差异化高度/山脊/洞穴/矿脉丰度；
+ *  - planet.deposits 资量对数映射为确定性矿脉数量（Ore Voxel Veins）。
+ *
+ * 确定性（GROUND-01 兼容）：
+ *  - 种子 = world.seed ^ hash32(planetId)，全部噪声/矿脉/采样由该种子派生；
+ *  - 全程零 Math.random；同 seed 同输入 → 体素网格与网格化输出逐位一致。
+ *
+ * 本文件输出的顶点颜色已烘焙：材质基色 × 行星地表色调 × 逐角点 AO，
+ * 渲染层只需叠加方向光与雾。
  */
 
-const TILE = 22;
+const { seedFromNumber: seedFromNumber, nextU32: nextU32, int: int } = __require("src/core/rng.js");
 
-class GroundRenderer {
-  init(canvasManager) {
-    this.cm = canvasManager;
+// ———— 常量 ————
+
+/** 世界与分块尺寸（X×Y×Z = 64×24×64，区块 16×16 列 × 24 高） */
+const SURFACE_SIZE = {
+  X: 64, Y: 24, Z: 64,
+  CHUNK: 16,
+  CHUNKS_X: 4, CHUNKS_Z: 4,
+  CHUNK_COUNT: 16,
+};
+
+/** 体素材质 ID 表 */
+const SURFACE_MAT = {
+  AIR: 0,
+  SURFACE: 1,      // 表面层：风化表土/沙壤（按行星类别着色）
+  ROCK: 2,         // 地下岩层
+  ORE_FERRO: 3,    // 铁族矿脉
+  ORE_SILICATE: 4, // 硅质矿脉
+  ORE_RARE: 5,     // 稀土矿脉
+  ORE_HEAVY: 6,    // 重金属矿脉
+  BEDROCK: 7,      // 基岩：不可挖掘
+  BUILDING: 8,     // 建筑结构体素
+};
+
+/** 材质基色（线性 RGB；index 即材质 ID）。surface 的色调由行星类别 tint 乘出 */
+const MATERIAL_COLORS = [
+  [0.00, 0.00, 0.00], // 0 air（不渲染）
+  [0.55, 0.47, 0.36], // 1 surface
+  [0.40, 0.41, 0.45], // 2 rock
+  [0.78, 0.46, 0.28], // 3 ore_ferro
+  [0.52, 0.74, 0.76], // 4 ore_silicate
+  [0.66, 0.42, 0.88], // 5 ore_rare
+  [0.44, 0.72, 0.44], // 6 ore_heavy
+  [0.15, 0.15, 0.18], // 7 bedrock
+  [0.62, 0.64, 0.68], // 8 building
+];
+
+/** 矿脉材质 → 资源 id（挖掘入账映射） */
+const ORE_RESOURCE_BY_MAT = {
+  3: 'ferro', 4: 'silicate', 5: 'rareEarth', 6: 'heavyMetal',
+};
+
+/** 面法线表（+x -x +y -y +z -z），贪心网格化的 normalIndex 引用 */
+const NORMALS = [
+  [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
+];
+
+/**
+ * 8 大行星类别的地貌参数：
+ *  base/amp  基准高度 / 噪声振幅（体素）
+ *  ridge     山脊噪声权重（ice/lava 起伏最大）
+ *  ore       矿脉数量系数
+ *  cave      洞穴雕刻强度（0..0.25，3D 噪声阈值偏移）
+ *  tint      表面材质色调（乘入顶点色）
+ *  isle      true = 悬浮平台（气态巨行星：边缘之外为虚空）
+ */
+const CATEGORY_TERRAIN = {
+  rocky:      { base: 9.0,  amp: 3.8, ridge: 0.50, ore: 1.0, cave: 0.10, tint: [1.00, 0.90, 0.76] },
+  ocean:      { base: 6.5,  amp: 2.6, ridge: 0.15, ore: 0.7, cave: 0.05, tint: [0.58, 0.78, 0.72] },
+  ice:        { base: 10.0, amp: 4.4, ridge: 0.70, ore: 0.9, cave: 0.08, terrace: 2, tint: [0.85, 0.92, 1.00] },
+  desert:     { base: 8.0,  amp: 3.0, ridge: 0.20, ore: 1.1, cave: 0.08, tint: [1.00, 0.86, 0.58] },
+  gasGiant:   { base: 11.0, amp: 2.0, ridge: 0.10, ore: 1.3, cave: 0.04, tint: [0.96, 0.82, 0.62], isle: true },
+  lava:       { base: 9.0,  amp: 4.0, ridge: 0.55, ore: 1.5, cave: 0.10, terrace: 2, tint: [0.66, 0.46, 0.42] },
+  toxic:      { base: 8.5,  amp: 3.8, ridge: 0.40, ore: 1.2, cave: 0.12, tint: [0.64, 0.76, 0.46] },
+  artificial: { base: 9.5,  amp: 1.4, ridge: 0.06, ore: 0.6, cave: 0.04, tint: [0.80, 0.82, 0.88] },
+};
+
+// ———— 基础工具 ————
+
+/** FNV-1a 32 位哈希：接受字符串或数字（planetId 兼容两种形态） */
+function hash32(v) {
+  const s = String(v);
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < s.length; i++) {
+    h = Math.imul(h ^ s.charCodeAt(i), 16777619) >>> 0;
+  }
+  return h >>> 0;
+}
+
+/** 确定性 [0,1) 浮点（仅用于形状扰动，绝不进模拟状态） */
+function rngFloat(s) {
+  return nextU32(s) / 4294967296;
+}
+
+/** [lo, hi] 闭区间整数的确定性取样 */
+function rngIntRange(s, lo, hi) {
+  return lo + int(s, hi - lo + 1);
+}
+
+/** 数值钳制 */
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
+// ———— 确定性 Simplex 噪声（2D/3D，Gustavson 公版实现移植） ————
+
+const F2 = 0.5 * (Math.sqrt(3) - 1);
+const G2 = (3 - Math.sqrt(3)) / 6;
+const F3 = 1 / 3;
+const G3 = 1 / 6;
+
+/** 12 个梯度方向（展开存储，g*3 取行） */
+const GRAD3 = new Float32Array([
+  1, 1, 0, -1, 1, 0, 1, -1, 0, -1, -1, 0,
+  1, 0, 1, -1, 0, 1, 1, 0, -1, -1, 0, -1,
+  0, 1, 1, 0, -1, 1, 0, 1, -1, 0, -1, -1,
+]);
+
+/**
+ * 创建种子派生的 2D/3D Simplex 噪声。
+ * 置换表由 splitmix32 派生的 xoshiro128** 状态做 Fisher-Yates 洗牌 ——
+ * 完全确定性，绝不触碰 Math.random。
+ * @returns {{ noise2D:(x:number,y:number)=>number, noise3D:(x:number,y:number,z:number)=>number }}
+ */
+function createSimplexNoise(seed) {
+  const st = seedFromNumber(seed >>> 0);
+  const perm = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) perm[i] = i;
+  for (let i = 255; i > 0; i--) {
+    const j = nextU32(st) % (i + 1);
+    const t = perm[i];
+    perm[i] = perm[j];
+    perm[j] = t;
+  }
+  const p = new Uint8Array(512);
+  for (let i = 0; i < 512; i++) p[i] = perm[i & 255];
+
+  const gi2 = (ii, jj) => (p[ii + p[jj]] % 12) * 3;
+  const gi3 = (ii, jj, kk) => (p[ii + p[jj + p[kk]]] % 12) * 3;
+
+  /** 2D Simplex，返回约 [-1,1] */
+  function noise2D(xin, yin) {
+    const s = (xin + yin) * F2;
+    const i = Math.floor(xin + s);
+    const j = Math.floor(yin + s);
+    const t = (i + j) * G2;
+    const x0 = xin - (i - t);
+    const y0 = yin - (j - t);
+    let i1; let j1;
+    if (x0 > y0) { i1 = 1; j1 = 0; } else { i1 = 0; j1 = 1; }
+    const x1 = x0 - i1 + G2;
+    const y1 = y0 - j1 + G2;
+    const x2 = x0 - 1 + 2 * G2;
+    const y2 = y0 - 1 + 2 * G2;
+    const ii = i & 255;
+    const jj = j & 255;
+    let n = 0;
+    let t0 = 0.5 - x0 * x0 - y0 * y0;
+    if (t0 > 0) {
+      const g = gi2(ii, jj);
+      t0 *= t0;
+      n += t0 * t0 * (GRAD3[g] * x0 + GRAD3[g + 1] * y0);
+    }
+    let t1 = 0.5 - x1 * x1 - y1 * y1;
+    if (t1 > 0) {
+      const g = gi2(ii + i1, jj + j1);
+      t1 *= t1;
+      n += t1 * t1 * (GRAD3[g] * x1 + GRAD3[g + 1] * y1);
+    }
+    let t2 = 0.5 - x2 * x2 - y2 * y2;
+    if (t2 > 0) {
+      const g = gi2(ii + 1, jj + 1);
+      t2 *= t2;
+      n += t2 * t2 * (GRAD3[g] * x2 + GRAD3[g + 1] * y2);
+    }
+    return 70 * n;
   }
 
-  /** 世界坐标（tile）→ 屏幕 */
-  _t2s(gx, gy) {
-    return { x: gx * TILE, y: gy * TILE };
+  /** 3D Simplex，返回约 [-1,1] */
+  function noise3D(xin, yin, zin) {
+    const s = (xin + yin + zin) * F3;
+    const i = Math.floor(xin + s);
+    const j = Math.floor(yin + s);
+    const k = Math.floor(zin + s);
+    const t = (i + j + k) * G3;
+    const x0 = xin - (i - t);
+    const y0 = yin - (j - t);
+    const z0 = zin - (k - t);
+    // 六面体排序确定两个角点（标准 Gustavson 分支）
+    let i1; let j1; let k1; let i2; let j2; let k2;
+    if (x0 >= y0) {
+      if (y0 >= z0) { i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 1; k2 = 0; }
+      else if (x0 >= z0) { i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 0; k2 = 1; }
+      else { i1 = 0; j1 = 0; k1 = 1; i2 = 1; j2 = 0; k2 = 1; }
+    } else {
+      if (y0 < z0) { i1 = 0; j1 = 0; k1 = 1; i2 = 0; j2 = 1; k2 = 1; }
+      else if (x0 < z0) { i1 = 0; j1 = 1; k1 = 0; i2 = 0; j2 = 1; k2 = 1; }
+      else { i1 = 0; j1 = 1; k1 = 0; i2 = 1; j2 = 1; k2 = 0; }
+    }
+    const x1 = x0 - i1 + G3;
+    const y1 = y0 - j1 + G3;
+    const z1 = z0 - k1 + G3;
+    const x2 = x0 - i2 + 2 * G3;
+    const y2 = y0 - j2 + 2 * G3;
+    const z2 = z0 - k2 + 2 * G3;
+    const x3 = x0 - 1 + 3 * G3;
+    const y3 = y0 - 1 + 3 * G3;
+    const z3 = z0 - 1 + 3 * G3;
+    const ii = i & 255;
+    const jj = j & 255;
+    const kk = k & 255;
+    let n = 0;
+    let t0 = 0.6 - x0 * x0 - y0 * y0 - z0 * z0;
+    if (t0 > 0) {
+      const g = gi3(ii, jj, kk);
+      t0 *= t0;
+      n += t0 * t0 * (GRAD3[g] * x0 + GRAD3[g + 1] * y0 + GRAD3[g + 2] * z0);
+    }
+    let t1 = 0.6 - x1 * x1 - y1 * y1 - z1 * z1;
+    if (t1 > 0) {
+      const g = gi3(ii + i1, jj + j1, kk + k1);
+      t1 *= t1;
+      n += t1 * t1 * (GRAD3[g] * x1 + GRAD3[g + 1] * y1 + GRAD3[g + 2] * z1);
+    }
+    let t2 = 0.6 - x2 * x2 - y2 * y2 - z2 * z2;
+    if (t2 > 0) {
+      const g = gi3(ii + i2, jj + j2, kk + k2);
+      t2 *= t2;
+      n += t2 * t2 * (GRAD3[g] * x2 + GRAD3[g + 1] * y2 + GRAD3[g + 2] * z2);
+    }
+    let t3 = 0.6 - x3 * x3 - y3 * y3 - z3 * z3;
+    if (t3 > 0) {
+      const g = gi3(ii + 1, jj + 1, kk + 1);
+      t3 *= t3;
+      n += t3 * t3 * (GRAD3[g] * x3 + GRAD3[g + 1] * y3 + GRAD3[g + 2] * z3);
+    }
+    return 32 * n;
   }
 
-  render(ctx, w, h, view, opts = {}) {
-    if (!view || !view.grid) return;
-    ctx.fillStyle = '#07090e';
-    ctx.fillRect(0, 0, w, h);
+  return { noise2D, noise3D };
+}
 
-    // 网格
-    const gw = view.w;
-    const gh = view.h;
-    const ox = Math.max(0, (w - gw * TILE) / 2);
-    const oy = Math.max(0, (h - gh * TILE) / 2);
-    for (let y = 0; y < gh; y++) {
-      for (let x = 0; x < gw; x++) {
-        const t = view.grid[y * gw + x];
-        let color = null;
-        if (t === 1) color = '#1d2a3a';
-        else if (t === 2) color = '#2c3e54';
-        else if (t === 5) color = 'rgba(98, 217, 138, 0.25)';
-        else if (t === 6) color = 'rgba(232, 95, 95, 0.15)';
-        if (color) {
-          ctx.fillStyle = color;
-          ctx.fillRect(ox + x * TILE, oy + y * TILE, TILE - 1, TILE - 1);
+/** 分形布朗运动（2D）：octaves 个八度叠加，输出约 [-1,1] */
+function fbm2(noise, x, y, octaves, lac = 2.0, gain = 0.5) {
+  let amp = 1;
+  let freq = 1;
+  let sum = 0;
+  let norm = 0;
+  for (let o = 0; o < octaves; o++) {
+    sum += amp * noise.noise2D(x * freq, y * freq);
+    norm += amp;
+    amp *= gain;
+    freq *= lac;
+  }
+  return sum / norm;
+}
+
+/** 分形布朗运动（3D） */
+function fbm3(noise, x, y, z, octaves, lac = 2.0, gain = 0.5) {
+  let amp = 1;
+  let freq = 1;
+  let sum = 0;
+  let norm = 0;
+  for (let o = 0; o < octaves; o++) {
+    sum += amp * noise.noise3D(x * freq, y * freq, z * freq);
+    norm += amp;
+    amp *= gain;
+    freq *= lac;
+  }
+  return sum / norm;
+}
+
+// ———— 世界创建 ————
+
+/**
+ * 创建行星地表体素世界（纯数据实体，可随存档序列化体素主数组）。
+ * @param {object} world 世界实体（只读取 world.seed 与 entities 中的行星档案）
+ * @param {string|number} planetId 行星实体 id
+ * @param {{category?:string, deposits?:object, atmosphere?:string, starTypeId?:string}} [opts]
+ *        行星档案缺失时的兜底输入（保持函数可独立测试）
+ * @returns {object} surfaceWorld 实体
+ */
+function createSurfaceWorld(world, planetId, opts = {}) {
+  const { X, Y, Z, CHUNKS_X, CHUNKS_Z } = SURFACE_SIZE;
+  const seed = (world.seed >>> 0) ^ hash32(planetId);
+
+  // 行星档案：8 大类 + 矿脉储量 + 大气（缺省回落 rocky）
+  const planet = world.entities && world.entities.planets ? world.entities.planets[planetId] : null;
+  const system = planet && world.entities.systems ? world.entities.systems[planet.systemId] : null;
+  const category = (opts.category || (planet && planet.category) || 'rocky');
+  const deposits = opts.deposits || (planet && planet.deposits) || {};
+  const atmosphere = opts.atmosphere || (planet && planet.atmosphere) || '';
+  const starTypeId = opts.starTypeId || (system && system.star ? system.star.typeId : 'yellowDwarf');
+
+  const sw = {
+    kind: 'surfaceWorld',
+    planetId,
+    category,
+    atmosphere,
+    starTypeId,
+    seed,
+    sx: X, sy: Y, sz: Z,
+    voxels: new Uint8Array(X * Y * Z),
+    heights: new Int8Array(X * Z),           // 每列最高非空体素 y（-1 = 空列）
+    chunks: [],
+    spawn: { x: X / 2 + 0.5, y: Y - 2, z: Z / 2 + 0.5 },
+    stats: { dug: 0, placed: 0, mined: {} },
+  };
+  for (let cz = 0; cz < CHUNKS_Z; cz++) {
+    for (let cx = 0; cx < CHUNKS_X; cx++) {
+      sw.chunks.push({ cx, cz, dirty: true });
+    }
+  }
+
+  _generateTerrain(sw, deposits);
+  sw.spawn = findSpawnPoint(sw);
+  return sw;
+}
+
+/** 体素线性索引（y 主序：与渲染层共享布局） */
+function idx(sw, x, y, z) {
+  return (y * sw.sz + z) * sw.sx + x;
+}
+
+/**
+ * 地形生成：fBm 大陆起伏 + 山脊噪声 + 3D 洞穴 + 分层材质 + 悬浮平台边缘衰减。
+ * 噪声种子与矿脉 RNG 相互独立派生，保证增删矿脉不影响地貌。
+ */
+function _generateTerrain(sw, deposits) {
+  const { X, Y, Z } = SURFACE_SIZE;
+  const prof = CATEGORY_TERRAIN[sw.category] || CATEGORY_TERRAIN.rocky;
+  const noise = createSimplexNoise((sw.seed ^ 0x1a2b3c4d) >>> 0);
+  const v = sw.voxels;
+
+  for (let z = 0; z < Z; z++) {
+    for (let x = 0; x < X; x++) {
+      // —— 高度场：大陆 fBm + 山脊（ridged）噪声（3 八度控制碎面数量） ——
+      const cont = fbm2(noise, x * 0.042, z * 0.042, 3);
+      let ridge = 1 - Math.abs(noise.noise2D(x * 0.021 + 37.2, z * 0.021 - 11.7));
+      ridge = ridge * ridge;
+      let h = prof.base + cont * prof.amp + ridge * prof.ridge * prof.amp;
+
+      // 海洋类：洼地峡谷（低频负值区下切）；人工天体：台地量化；
+      // 冰封/熔岩：阶地量化（梯田式平台显著改善贪心合并，兼具地貌辨识度）
+      if (sw.category === 'ocean' && cont < -0.18) h -= 2.4;
+      if (sw.category === 'artificial') h = Math.round(h / 3) * 3;
+      if (prof.terrace) h = Math.floor(h / prof.terrace) * prof.terrace + 1;
+
+      // 悬浮平台（气态巨行星）：Chebyshev 边缘 + 噪声海岸线之外的列为虚空
+      if (prof.isle) {
+        const d = Math.max(Math.abs(x - (X - 1) / 2), Math.abs(z - (Z - 1) / 2)) / ((X - 1) / 2);
+        const edge = 0.80 + fbm2(noise, x * 0.09 + 91, z * 0.09 - 45, 2) * 0.10;
+        if (d > edge) {
+          sw.heights[z * X + x] = -1;
+          continue;
+        }
+      }
+
+      const top = clamp(Math.round(h), 3, SURFACE_SIZE.Y - 5);
+      for (let y = 0; y <= top; y++) {
+        let mat = SURFACE_MAT.ROCK;
+        if (y === top) mat = SURFACE_MAT.SURFACE;
+        else if (y <= 1) mat = SURFACE_MAT.BEDROCK;          // 基岩层（不可采）
+        // —— 3D 洞穴雕刻（保留 2 层表壳与基岩完整；高阈值控制暴露面数量） ——
+        if (y > 2 && y < top - 2 && prof.cave > 0) {
+          const c = fbm3(noise, x * 0.085, y * 0.125, z * 0.085, 2);
+          if (c > 0.68 - prof.cave) mat = SURFACE_MAT.AIR;
+        }
+        v[idx(sw, x, y, z)] = mat;
+      }
+      sw.heights[z * X + x] = top;
+    }
+  }
+
+  // —— Ore Voxel Veins：planet.deposits 资量 → 确定性随机游走矿脉 ——
+  _embedOreVeins(sw, deposits, prof);
+}
+
+/**
+ * 矿脉嵌入：每种资源按 log2(储量) 生成矿脉条数（受类别 ore 系数与上限约束），
+ * 每条矿脉为 5..16 步随机游走 + 1..2 体素半径团簇，只替换岩层（不动表面/基岩）。
+ */
+function _embedOreVeins(sw, deposits, prof) {
+  const { X, Y, Z } = SURFACE_SIZE;
+  const rng = seedFromNumber((sw.seed ^ 0x51ed270b) >>> 0);
+  const v = sw.voxels;
+  for (const resId of ['ferro', 'silicate', 'rareEarth', 'heavyMetal']) {
+    const amount = deposits[resId];
+    if (!(amount > 0)) continue;
+    const matId = Number(Object.keys(ORE_RESOURCE_BY_MAT).find((k) => ORE_RESOURCE_BY_MAT[k] === resId));
+    const veins = clamp(Math.round(Math.log2(amount + 2) * prof.ore), 2, 26);
+    for (let n = 0; n < veins; n++) {
+      let vx = int(rng, X);
+      let vz = int(rng, Z);
+      let vy = rngIntRange(rng, 3, Y - 6);      // 矿脉埋藏在地下层
+      const steps = rngIntRange(rng, 5, 16);
+      for (let s = 0; s < steps; s++) {
+        const r = rngFloat(rng) < 0.35 ? 1 : 0; // 团簇半径（0=单块，1=3×3×3）
+        for (let dx = -r; dx <= r; dx++) {
+          for (let dy = -r; dy <= r; dy++) {
+            for (let dz = -r; dz <= r; dz++) {
+              const bx = vx + dx;
+              const by = vy + dy;
+              const bz = vz + dz;
+              if (bx < 0 || bx >= X || by < 2 || by >= Y || bz < 0 || bz >= Z) continue;
+              const i = idx(sw, bx, by, bz);
+              if (v[i] === SURFACE_MAT.ROCK) v[i] = matId; // 只侵入岩层
+            }
+          }
+        }
+        vx = clamp(vx + int(rng, 3) - 1, 0, X - 1);
+        vy = clamp(vy + int(rng, 3) - 1, 2, Y - 4);
+        vz = clamp(vz + int(rng, 3) - 1, 0, Z - 1);
+      }
+    }
+  }
+}
+
+// ———— 体素访问 ————
+
+/**
+ * 读取体素材质。越界：y 超层返回 AIR；x/z 越界返回 AIR（世界边缘可视）。
+ * @returns {number} 材质 ID
+ */
+function getVoxel(sw, x, y, z) {
+  const { X, Y, Z } = SURFACE_SIZE;
+  const xi = Math.floor(x);
+  const yi = Math.floor(y);
+  const zi = Math.floor(z);
+  if (yi < 0 || yi >= Y || xi < 0 || xi >= X || zi < 0 || zi >= Z) return SURFACE_MAT.AIR;
+  return sw.voxels[(yi * sw.sz + zi) * sw.sx + xi];
+}
+
+/** 列顶扫描：重算 heights 缓存（在 set/dig 后调用） */
+function _rescanColumn(sw, x, z) {
+  const { X, Y } = SURFACE_SIZE;
+  for (let y = Y - 1; y >= 0; y--) {
+    if (sw.voxels[(y * sw.sz + z) * sw.sx + x] !== SURFACE_MAT.AIR) {
+      sw.heights[z * X + x] = y;
+      return;
+    }
+  }
+  sw.heights[z * X + x] = -1;
+}
+
+/** 标记体素所属区块与（跨界时的）邻接区块为脏 */
+function _markDirty(sw, x, z) {
+  const { CHUNK, CHUNKS_X, CHUNKS_Z } = SURFACE_SIZE;
+  const cx = Math.floor(x / CHUNK);
+  const cz = Math.floor(z / CHUNK);
+  const mark = (a, b) => {
+    if (a < 0 || a >= CHUNKS_X || b < 0 || b >= CHUNKS_Z) return;
+    sw.chunks[b * CHUNKS_X + a].dirty = true;
+  };
+  mark(cx, cz);
+  const lx = x - cx * CHUNK;
+  const lz = z - cz * CHUNK;
+  if (lx === 0) mark(cx - 1, cz);
+  if (lx === CHUNK - 1) mark(cx + 1, cz);
+  if (lz === 0) mark(cx, cz - 1);
+  if (lz === CHUNK - 1) mark(cx, cz + 1);
+}
+
+/**
+ * 原始写体素（含边界检查，供挖掘/放置/直接改造共用）。
+ * @returns {boolean} 是否实际写入
+ */
+function setVoxel(sw, x, y, z, matId) {
+  const { X, Y, Z } = SURFACE_SIZE;
+  const xi = Math.floor(x);
+  const yi = Math.floor(y);
+  const zi = Math.floor(z);
+  if (yi < 0 || yi >= Y || xi < 0 || xi >= X || zi < 0 || zi >= Z) return false;
+  if (!Number.isInteger(matId) || matId < SURFACE_MAT.AIR || matId > SURFACE_MAT.BUILDING) return false;
+  const i = (yi * sw.sz + zi) * sw.sx + xi;
+  if (sw.voxels[i] === matId) return false;
+  sw.voxels[i] = matId;
+  _markDirty(sw, xi, zi);
+  if (yi >= sw.heights[zi * X + xi]) {
+    // 写入/删除当前顶面及以上：置顶或重扫该列
+    if (matId !== SURFACE_MAT.AIR) sw.heights[zi * X + xi] = yi;
+    else _rescanColumn(sw, xi, zi);
+  }
+  return true;
+}
+
+/**
+ * 挖掘体素：基岩不可挖；矿脉按 ORE_RESOURCE_BY_MAT 入账。
+ * @returns {{ matId:number, resourceDrop:{resId:string, amount:number}|null }}
+ */
+function digVoxel(sw, x, y, z) {
+  const matId = getVoxel(sw, x, y, z);
+  if (matId === SURFACE_MAT.AIR || matId === SURFACE_MAT.BEDROCK) {
+    return { matId, resourceDrop: null }; // 空气/基岩：不可挖掘
+  }
+  if (!setVoxel(sw, x, y, z, SURFACE_MAT.AIR)) {
+    return { matId, resourceDrop: null };
+  }
+  sw.stats.dug++;
+  let resourceDrop = null;
+  const resId = ORE_RESOURCE_BY_MAT[matId];
+  if (resId) {
+    resourceDrop = { resId, amount: 1 };
+    sw.stats.mined[resId] = (sw.stats.mined[resId] || 0) + 1;
+  } else if (matId === SURFACE_MAT.BUILDING) {
+    resourceDrop = { resId: 'alloy', amount: 1 }; // 拆除建筑结构回收合金
+  }
+  return { matId, resourceDrop };
+}
+
+/**
+ * 放置体素：仅允许写入空气格（已有体素需先挖掘）。
+ * @returns {boolean}
+ */
+function placeVoxel(sw, x, y, z, matId) {
+  if (getVoxel(sw, x, y, z) !== SURFACE_MAT.AIR) return false;
+  if (!setVoxel(sw, x, y, z, matId)) return false;
+  sw.stats.placed++;
+  return true;
+}
+
+// ———— DDA 射线（Amanatides & Woo） ————
+
+/**
+ * 体素 DDA 射线步进：返回命中的体素坐标、进入面法线与材质。
+ * @param {{x:number,y:number,z:number}} origin 射线起点（世界坐标）
+ * @param {{x:number,y:number,z:number}|number[]} dir 单位方向
+ * @param {number} maxDist 最大步进距离
+ * @returns {{ hit:boolean, vx:number, vy:number, vz:number, nx:number, ny:number, nz:number, matId:number, t:number }}
+ */
+function ddaRaycast(sw, origin, dir, maxDist = 8) {
+  const ox = origin[0] !== undefined ? origin[0] : origin.x;
+  const oy = origin[1] !== undefined ? origin[1] : origin.y;
+  const oz = origin[2] !== undefined ? origin[2] : origin.z;
+  const dx = dir[0] !== undefined ? dir[0] : dir.x;
+  const dy = dir[1] !== undefined ? dir[1] : dir.y;
+  const dz = dir[2] !== undefined ? dir[2] : dir.z;
+  let x = Math.floor(ox);
+  let y = Math.floor(oy);
+  let z = Math.floor(oz);
+  const stepX = dx > 0 ? 1 : -1;
+  const stepY = dy > 0 ? 1 : -1;
+  const stepZ = dz > 0 ? 1 : -1;
+  const tDeltaX = dx !== 0 ? Math.abs(1 / dx) : Infinity;
+  const tDeltaY = dy !== 0 ? Math.abs(1 / dy) : Infinity;
+  const tDeltaZ = dz !== 0 ? Math.abs(1 / dz) : Infinity;
+  let tMaxX = dx !== 0 ? (dx > 0 ? x + 1 - ox : ox - x) * tDeltaX : Infinity;
+  let tMaxY = dy !== 0 ? (dy > 0 ? y + 1 - oy : oy - y) * tDeltaY : Infinity;
+  let tMaxZ = dz !== 0 ? (dz > 0 ? z + 1 - oz : oz - z) * tDeltaZ : Infinity;
+  const miss = { hit: false, vx: 0, vy: 0, vz: 0, nx: 0, ny: 0, nz: 0, matId: 0, t: Infinity };
+  let nx = 0;
+  let ny = 0;
+  let nz = 0;
+  let t = 0;
+  // 起点即实体：零法线命中
+  const m0 = getVoxel(sw, x, y, z);
+  if (m0 !== SURFACE_MAT.AIR) {
+    return { hit: true, vx: x, vy: y, vz: z, nx: 0, ny: 0, nz: 0, matId: m0, t: 0 };
+  }
+  for (let guard = 0; guard < 512; guard++) {
+    if (tMaxX < tMaxY && tMaxX < tMaxZ) {
+      x += stepX; t = tMaxX; tMaxX += tDeltaX;
+      nx = -stepX; ny = 0; nz = 0;
+    } else if (tMaxY < tMaxZ) {
+      y += stepY; t = tMaxY; tMaxY += tDeltaY;
+      nx = 0; ny = -stepY; nz = 0;
+    } else {
+      z += stepZ; t = tMaxZ; tMaxZ += tDeltaZ;
+      nx = 0; ny = 0; nz = -stepZ;
+    }
+    if (t > maxDist) break;
+    const m = getVoxel(sw, x, y, z);
+    if (m !== SURFACE_MAT.AIR) {
+      return { hit: true, vx: x, vy: y, vz: z, nx, ny, nz, matId: m, t };
+    }
+  }
+  return miss;
+}
+
+// ———— 地表查询 ————
+
+/**
+ * 列扫描最高非空体素 y（体素占据 [y, y+1)）。空列返回 -1。
+ * @returns {number}
+ */
+function getSurfaceHeight(sw, x, z) {
+  const { X } = SURFACE_SIZE;
+  const xi = Math.floor(x);
+  const zi = Math.floor(z);
+  if (xi < 0 || xi >= SURFACE_SIZE.X || zi < 0 || zi >= SURFACE_SIZE.Z) return -1;
+  return sw.heights[zi * X + xi];
+}
+
+/** 列是否可站立（存在顶面且顶面下有支撑） */
+function isStandable(sw, x, z) {
+  return getSurfaceHeight(sw, x, z) >= 0;
+}
+
+/**
+ * 出生点：自世界中心螺旋外扫，取第一个顶面平整（3×3 高差 ≤1）的列。
+ * 返回世界坐标（列中心，脚底 = 顶面体素上沿）。
+ * @returns {{x:number, y:number, z:number}}
+ */
+function findSpawnPoint(sw) {
+  const { X, Z } = SURFACE_SIZE;
+  const cx = X >> 1;
+  const cz = Z >> 1;
+  let best = null;
+  for (let r = 0; r <= 26 && !best; r++) {
+    for (let dz = -r; dz <= r && !best; dz++) {
+      for (let dx = -r; dx <= r && !best; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+        const x = cx + dx;
+        const z = cz + dz;
+        if (x < 2 || z < 2 || x >= X - 2 || z >= Z - 2) continue;
+        const h0 = getSurfaceHeight(sw, x, z);
+        if (h0 < 2 || h0 > SURFACE_SIZE.Y - 4) continue;
+        // 3×3 邻域平整性：高差 ≤1，保证出生不卡在陡壁
+        let flat = true;
+        for (let qz = -1; qz <= 1 && flat; qz++) {
+          for (let qx = -1; qx <= 1 && flat; qx++) {
+            const h = getSurfaceHeight(sw, x + qx, z + qz);
+            if (h < 0 || Math.abs(h - h0) > 1) flat = false;
+          }
+        }
+        if (flat) best = { x: x + 0.5, y: h0 + 1, z: z + 0.5 };
+      }
+    }
+  }
+  // 兜底：中心列顶面（heights 全空时回落到 y=2 悬空点，理论不可达）
+  if (!best) {
+    const h = getSurfaceHeight(sw, cx, cz);
+    return { x: cx + 0.5, y: (h >= 0 ? h + 1 : 2), z: cz + 0.5 };
+  }
+  return best;
+}
+
+// ———— 寻路（地表 A*） ————
+
+const SQRT2 = Math.SQRT2;
+const PATH_DIRS = [
+  [1, 0, 1], [-1, 0, 1], [0, 1, 1], [0, -1, 1],
+  [1, 1, SQRT2], [1, -1, SQRT2], [-1, 1, SQRT2], [-1, -1, SQRT2],
+];
+
+/**
+ * 地表 A* 寻路：2D 栅格 8 向，可通行条件为两侧列均可站立且顶面高差 ≤ climb。
+ * 对角移动要求两个正交邻格同样可通行（禁止切角）。
+ * 堆序以 (f, node) 双关键字保证确定性。
+ * @param {number} sx,sz 起点格坐标    @param {number} tx,tz 终点格坐标
+ * @param {{climb?:number, maxIter?:number}} [opts]
+ * @returns {Array<{x:number,y:number,z:number}>|null} 世界坐标路径（含起终点）；不可达为 null
+ */
+function findPath(sw, sx, sz, tx, tz, opts = {}) {
+  const { X, Z } = SURFACE_SIZE;
+  const climb = opts.climb == null ? 1 : opts.climb;
+  const maxIter = opts.maxIter || 6000;
+  const inb = (v) => Number.isInteger(v) && v >= 0 && v < X;
+  if (!inb(sx) || !inb(sz) || !inb(tx) || !inb(tz) || sz >= Z || tz >= Z) return null;
+  if (!isStandable(sw, sx, sz) || !isStandable(sw, tx, tz)) return null;
+
+  const N = X;
+  const start = sz * N + sx;
+  const goal = tz * N + tx;
+  if (start === goal) return [{ x: sx + 0.5, y: getSurfaceHeight(sw, sx, sz) + 1, z: sz + 0.5 }];
+
+  const gScore = new Float32Array(N * Z).fill(Infinity);
+  const from = new Int32Array(N * Z).fill(-1);
+  const closed = new Uint8Array(N * Z);
+  const heapF = [];
+  const heapN = [];
+
+  const hOf = (x, z) => sw.heights[z * N + x];
+  const heur = (x, z) => {
+    const dx = Math.abs(x - tx);
+    const dz = Math.abs(z - tz);
+    return (dx + dz) + (SQRT2 - 2) * Math.min(dx, dz); // 八向一致启发
+  };
+  const heapPush = (f, node) => {
+    heapF.push(f);
+    heapN.push(node);
+    let i = heapF.length - 1;
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (heapF[p] < heapF[i] || (heapF[p] === heapF[i] && heapN[p] <= heapN[i])) break;
+      const tf = heapF[i]; heapF[i] = heapF[p]; heapF[p] = tf;
+      const tn = heapN[i]; heapN[i] = heapN[p]; heapN[p] = tn;
+      i = p;
+    }
+  };
+  const heapPop = () => {
+    const topN = heapN[0];
+    const lastF = heapF.pop();
+    const lastN = heapN.pop();
+    if (heapF.length > 0) {
+      heapF[0] = lastF;
+      heapN[0] = lastN;
+      let i = 0;
+      for (;;) {
+        const l = i * 2 + 1;
+        const r = l + 1;
+        let m = i;
+        if (l < heapF.length && (heapF[l] < heapF[m] || (heapF[l] === heapF[m] && heapN[l] < heapN[m]))) m = l;
+        if (r < heapF.length && (heapF[r] < heapF[m] || (heapF[r] === heapF[m] && heapN[r] < heapN[m]))) m = r;
+        if (m === i) break;
+        const tf = heapF[i]; heapF[i] = heapF[m]; heapF[m] = tf;
+        const tn = heapN[i]; heapN[i] = heapN[m]; heapN[m] = tn;
+        i = m;
+      }
+    }
+    return topN;
+  };
+
+  gScore[start] = 0;
+  heapPush(heur(sx, sz), start);
+  let iter = 0;
+  let found = false;
+  while (heapF.length > 0 && iter++ < maxIter) {
+    const cur = heapPop();
+    if (cur === goal) { found = true; break; }
+    if (closed[cur]) continue;
+    closed[cur] = 1;
+    const cxp = cur % N;
+    const czp = (cur / N) | 0;
+    const hc = hOf(cxp, czp);
+    for (let d = 0; d < 8; d++) {
+      const nxp = cxp + PATH_DIRS[d][0];
+      const nzp = czp + PATH_DIRS[d][1];
+      if (nxp < 0 || nxp >= N || nzp < 0 || nzp >= Z) continue;
+      const ni = nzp * N + nxp;
+      if (closed[ni]) continue;
+      const hn = hOf(nxp, nzp);
+      if (hn < 0 || Math.abs(hn - hc) > climb) continue;
+      // 对角禁切角：两个正交邻格须可站立且高差同样合规
+      if (d >= 4) {
+        const h1 = hOf(cxp + PATH_DIRS[d][0], czp);
+        const h2 = hOf(cxp, czp + PATH_DIRS[d][1]);
+        if (h1 < 0 || Math.abs(h1 - hc) > climb || h2 < 0 || Math.abs(h2 - hc) > climb) continue;
+      }
+      const ng = gScore[cur] + PATH_DIRS[d][2];
+      if (ng < gScore[ni]) {
+        gScore[ni] = ng;
+        from[ni] = cur;
+        heapPush(ng + heur(nxp, nzp), ni);
+      }
+    }
+  }
+  if (!found) return null;
+  // 回溯（终点 → 起点），输出世界坐标
+  const path = [];
+  let node = goal;
+  while (node !== -1) {
+    const px = node % N;
+    const pz = (node / N) | 0;
+    path.push({ x: px + 0.5, y: hOf(px, pz) + 1, z: pz + 0.5 });
+    node = from[node];
+  }
+  path.reverse();
+  return path;
+}
+
+// ———— 贪心网格化（0fps 算法，AO 感知共面合并） ————
+
+/** 经典 0fps 逐角点 AO：s1/s2 为两侧邻接，c 为对角 */
+function vertexAO(s1, s2, c) {
+  if (s1 && s2) return 0;
+  return 3 - (s1 + s2 + c);
+}
+
+/**
+ * 贪心网格化一个 16×16 列区块（y 全高 24）。
+ * 算法（Mikola Lysenko / 0fps）：
+ *  1. 对 3 个轴向 × 每层切片构建二值截面 mask：键 = ±(材质+1)
+ *     （正号 = 法线朝 +轴，负号朝 -轴；相邻体素一对 solid/air 才产生面）；
+ *  2. 每个 mask 单元同时计算 4 角点 AO（面外侧 8 邻域占用）；
+ *  3. 矩形最大化：沿 u 向扩张 width、沿 w 向扩张 height，
+ *     要求键与 4 角 AO 全部一致（AO 不一致处断开合并，避免插值破绽）；
+ *  4. 输出四边形按朝向确定三角形绕序，顶点位置为区块原点偏移的世界坐标。
+ * 顶点颜色 = 材质基色 × 行星地表色调(surface) × AO 亮度(0.55..1.0)。
+ *
+ * @param {object} sw surfaceWorld
+ * @param {number} cx 区块 X 索引 0..3  @param {number} cz 区块 Z 索引 0..3
+ * @returns {{positions:Float32Array, normals:Float32Array, colors:Float32Array,
+ *            quadCount:number, triCount:number}}
+ */
+function greedyMeshChunk(sw, cx, cz) {
+  const { X, Y, Z, CHUNK } = SURFACE_SIZE;
+  const dims = [CHUNK, Y, CHUNK];
+  const ox = cx * CHUNK;
+  const oz = cz * CHUNK;
+  const prof = CATEGORY_TERRAIN[sw.category] || CATEGORY_TERRAIN.rocky;
+  const tint = prof.tint;
+  const voxels = sw.voxels;
+
+  // 填充读取：区块内直查，越界回世界（世界外为空气）
+  const getPadded = (x, y, z) => {
+    if (x >= 0 && x < CHUNK && z >= 0 && z < CHUNK && y >= 0 && y < Y) {
+      return voxels[(y * Z + (oz + z)) * X + (ox + x)];
+    }
+    return getVoxel(sw, ox + x, y, oz + z);
+  };
+  const solid = (m) => m !== SURFACE_MAT.AIR;
+
+  const positions = [];
+  const normals = [];
+  const colors = [];
+  let quadCount = 0;
+
+  const maskW = Math.max(dims[1], dims[2]);
+  const maskH = Math.max(dims[1], dims[2]);
+  const maskKey = new Int32Array(maskW * maskH);
+  const maskAO = new Uint8Array(maskW * maskH * 4);
+
+  for (let axis = 0; axis < 3; axis++) {
+    const u = (axis + 1) % 3;
+    const w = (axis + 2) % 3;
+    const x = [0, 0, 0];
+    const q = [0, 0, 0];
+    q[axis] = 1;
+    const mw = dims[u];
+    const mh = dims[w];
+
+    for (x[axis] = -1; x[axis] < dims[axis];) {
+      // —— 1. 构建截面 mask（键 + 4 角 AO） ——
+      let n = 0;
+      for (x[w] = 0; x[w] < mh; x[w]++) {
+        for (x[u] = 0; x[u] < mw; x[u]++, n++) {
+          const a = getPadded(x[0], x[1], x[2]);
+          const b = getPadded(x[0] + q[0], x[1] + q[1], x[2] + q[2]);
+          const solidA = solid(a);
+          if (solidA === solid(b)) { maskKey[n] = 0; continue; }
+          const type = solidA ? a : b;
+          maskKey[n] = solidA ? (type + 1) : -(type + 1);
+
+          // AO 采样面：法线一侧的邻接层
+          const faceShift = solidA ? 1 : -1;
+          const bx = x[0] + q[0] * faceShift;
+          const by = x[1] + q[1] * faceShift;
+          const bz = x[2] + q[2] * faceShift;
+          const duX = u === 0 ? 1 : 0;
+          const duY = u === 1 ? 1 : 0;
+          const duZ = u === 2 ? 1 : 0;
+          const dwX = w === 0 ? 1 : 0;
+          const dwY = w === 1 ? 1 : 0;
+          const dwZ = w === 2 ? 1 : 0;
+          const occ = (uu, ww) => (solid(getPadded(
+            bx + duX * uu + dwX * ww,
+            by + duY * uu + dwY * ww,
+            bz + duZ * uu + dwZ * ww,
+          )) ? 1 : 0);
+          const s1u = occ(1, 0);
+          const s1d = occ(-1, 0);
+          const s2u = occ(0, 1);
+          const s2d = occ(0, -1);
+          const cuu = occ(1, 1);
+          const cud = occ(1, -1);
+          const cdu = occ(-1, 1);
+          const cdd = occ(-1, -1);
+          // 角序：(0,0) (1,0) (1,1) (0,1) —— (u,w) 单元局部坐标
+          maskAO[n * 4 + 0] = vertexAO(s1d, s2d, cdd);
+          maskAO[n * 4 + 1] = vertexAO(s1u, s2d, cud);
+          maskAO[n * 4 + 2] = vertexAO(s1u, s2u, cuu);
+          maskAO[n * 4 + 3] = vertexAO(s1d, s2u, cdu);
+        }
+      }
+
+      x[axis]++;
+      if (x[axis] < 0) continue;
+
+      // —— 2. 矩形最大化（键 + AO 全等才合并） ——
+      n = 0;
+      for (let j = 0; j < mh; j++) {
+        for (let i = 0; i < mw;) {
+          const key = maskKey[n];
+          if (key === 0) { i++; n++; continue; }
+          const ao0 = maskAO[n * 4];
+          const ao1 = maskAO[n * 4 + 1];
+          const ao2 = maskAO[n * 4 + 2];
+          const ao3 = maskAO[n * 4 + 3];
+          let width = 1;
+          while (i + width < mw) {
+            const k2 = maskKey[n + width];
+            if (k2 !== key) break;
+            const b2 = (n + width) * 4;
+            if (maskAO[b2] !== ao0 || maskAO[b2 + 1] !== ao1
+              || maskAO[b2 + 2] !== ao2 || maskAO[b2 + 3] !== ao3) break;
+            width++;
+          }
+          let height = 1;
+          outer: while (j + height < mh) {
+            for (let kk = 0; kk < width; kk++) {
+              const i2 = n + kk + height * mw;
+              if (maskKey[i2] !== key) break outer;
+              const b2 = i2 * 4;
+              if (maskAO[b2] !== ao0 || maskAO[b2 + 1] !== ao1
+                || maskAO[b2 + 2] !== ao2 || maskAO[b2 + 3] !== ao3) break outer;
+            }
+            height++;
+          }
+
+          // —— 3. 发射四边形（世界坐标顶点 + AO 烘焙颜色） ——
+          const type = Math.abs(key) - 1;
+          const dirPositive = key > 0;
+          const pos = [0, 0, 0];
+          pos[axis] = x[axis];
+          pos[u] = i;
+          pos[w] = j;
+          const normalIndex = axis === 0 ? (dirPositive ? 0 : 1)
+            : axis === 1 ? (dirPositive ? 2 : 3) : (dirPositive ? 4 : 5);
+          const nxv = NORMALS[normalIndex][0];
+          const nyv = NORMALS[normalIndex][1];
+          const nzv = NORMALS[normalIndex][2];
+
+          const base = MATERIAL_COLORS[type];
+          const aoBright = [0.55 + 0.15 * ao0, 0.55 + 0.15 * ao1, 0.55 + 0.15 * ao2, 0.55 + 0.15 * ao3];
+          // 顶点基色（surface 乘行星色调）
+          const tr = type === SURFACE_MAT.SURFACE ? base[0] * tint[0] : base[0];
+          const tg = type === SURFACE_MAT.SURFACE ? base[1] * tint[1] : base[1];
+          const tb = type === SURFACE_MAT.SURFACE ? base[2] * tint[2] : base[2];
+
+          const corner = (du, dv, aoB) => {
+            const p = [pos[0], pos[1], pos[2]];
+            p[u] += du;
+            p[w] += dv;
+            positions.push(ox + p[0], p[1], oz + p[2]);
+            normals.push(nxv, nyv, nzv);
+            colors.push(tr * aoB, tg * aoB, tb * aoB);
+          };
+          const v00 = [0, 0, aoBright[0]];
+          const v10 = [width, 0, aoBright[1]];
+          const v11 = [width, height, aoBright[2]];
+          const v01 = [0, height, aoBright[3]];
+          const emit = (A, B, C) => { corner(A[0], A[1], A[2]); corner(B[0], B[1], B[2]); corner(C[0], C[1], C[2]); };
+          if (dirPositive) {
+            emit(v00, v10, v11);
+            emit(v00, v11, v01);
+          } else {
+            emit(v00, v11, v10);
+            emit(v00, v01, v11);
+          }
+          quadCount++;
+
+          // 消费区域清零
+          for (let dj = 0; dj < height; dj++) {
+            for (let di = 0; di < width; di++) {
+              maskKey[n + di + dj * mw] = 0;
+            }
+          }
+          i += width;
+          n += width;
+        }
+      }
+    }
+  }
+
+  return {
+    positions: new Float32Array(positions),
+    normals: new Float32Array(normals),
+    colors: new Float32Array(colors),
+    quadCount,
+    triCount: quadCount * 2,
+  };
+}
+
+Object.assign(__exports, { SURFACE_SIZE, SURFACE_MAT, MATERIAL_COLORS, ORE_RESOURCE_BY_MAT, CATEGORY_TERRAIN, hash32, createSimplexNoise, createSurfaceWorld, getVoxel, setVoxel, digVoxel, placeVoxel, ddaRaycast, getSurfaceHeight, isStandable, findSpawnPoint, findPath, greedyMeshChunk });
+
+});
+__register("src/render/meshes/GroundMeshes.js", function (__exports, __require) {
+/**
+ * render/meshes/GroundMeshes.js — 地表行动 3D 网格（返工 Phase R8）
+ *
+ * 与 ShipMeshes.js 同源的 MeshBuilder 模式：纯代码生成的低多边形硬表面网格，
+ * 在其基础上扩展 —— 部件分段登记（partNames，逐顶点区间）供动画系统按部件
+ * 驱动旋转/位移，并附带逐顶点颜色（部件配色；实例色在着色器中与之混合）。
+ *
+ * 局部坐标系约定：+X 为正面朝向、+Y 上、+Z 右舷；角色网格脚底位于 y=0。
+ * 尺寸单位 = 1 体素。全部确定性生成（无随机）；顶层禁止访问 document/window。
+ *
+ * partNames 形态：[{ name, start, count }] —— start/count 为顶点区间
+ * （positions/normals/colors 三数组共享同一顶点序），渲染层按区间分部件绘制。
+ */
+
+// —— 几何构建器 ————————————————————————————————————————
+
+/** 部件分段顶点累积器：push 三角形并自动计算面法线与逐顶点颜色 */
+class PartMeshBuilder {
+  constructor() {
+    this.positions = [];
+    this.normals = [];
+    this.colors = [];
+    this.parts = [];
+    this._cur = null;
+  }
+
+  /** 开始一个命名部件（后续三角形归入该部件区间） */
+  beginPart(name) {
+    this._cur = { name, start: this.positions.length / 3, count: 0 };
+    this.parts.push(this._cur);
+    return this;
+  }
+
+  /** 单三角形：顶点 a/b/c 与颜色 col=[r,g,b]，面法线右手系 (b-a)×(c-a) */
+  tri(ax, ay, az, bx, by, bz, cx, cy, cz, col) {
+    const ux = bx - ax;
+    const uy = by - ay;
+    const uz = bz - az;
+    const vx = cx - ax;
+    const vy = cy - ay;
+    const vz = cz - az;
+    let nx = uy * vz - uz * vy;
+    let ny = uz * vx - ux * vz;
+    let nz = ux * vy - uy * vx;
+    const len = Math.hypot(nx, ny, nz) || 1;
+    nx /= len;
+    ny /= len;
+    nz /= len;
+    const r = col[0];
+    const g = col[1];
+    const b = col[2];
+    this.positions.push(ax, ay, az, bx, by, bz, cx, cy, cz);
+    this.normals.push(nx, ny, nz, nx, ny, nz, nx, ny, nz);
+    this.colors.push(r, g, b, r, g, b, r, g, b);
+    if (this._cur) this._cur.count += 3;
+    return this;
+  }
+
+  /** 轴对齐盒子（中心 cx,cy,cz；半尺寸 hx,hy,hz）→ 12 三角形 */
+  box(cx, cy, cz, hx, hy, hz, col) {
+    const x0 = cx - hx;
+    const x1 = cx + hx;
+    const y0 = cy - hy;
+    const y1 = cy + hy;
+    const z0 = cz - hz;
+    const z1 = cz + hz;
+    this.tri(x1, y0, z1, x1, y0, z0, x1, y1, z0, col);
+    this.tri(x1, y0, z1, x1, y1, z0, x1, y1, z1, col);
+    this.tri(x0, y0, z0, x0, y0, z1, x0, y1, z1, col);
+    this.tri(x0, y0, z0, x0, y1, z1, x0, y1, z0, col);
+    this.tri(x0, y1, z1, x1, y1, z1, x1, y1, z0, col);
+    this.tri(x0, y1, z1, x1, y1, z0, x0, y1, z0, col);
+    this.tri(x0, y0, z0, x1, y0, z0, x1, y0, z1, col);
+    this.tri(x0, y0, z0, x1, y0, z1, x0, y0, z1, col);
+    this.tri(x0, y0, z1, x1, y0, z1, x1, y1, z1, col);
+    this.tri(x0, y0, z1, x1, y1, z1, x0, y1, z1, col);
+    this.tri(x1, y0, z0, x0, y0, z0, x0, y1, z0, col);
+    this.tri(x1, y0, z0, x0, y1, z0, x1, y1, z0, col);
+    return this;
+  }
+
+  /** 四棱锥（炮塔/钻头/冠饰），dir=1 尖朝上 / -1 尖朝下 */
+  pyramid(cx, baseY, cz, w, h, col, dir = 1) {
+    const h2 = w / 2;
+    if (dir >= 0) {
+      this.tri(cx - h2, baseY, cz - h2, cx + h2, baseY, cz - h2, cx, baseY + h, cz, col);
+      this.tri(cx + h2, baseY, cz - h2, cx + h2, baseY, cz + h2, cx, baseY + h, cz, col);
+      this.tri(cx + h2, baseY, cz + h2, cx - h2, baseY, cz + h2, cx, baseY + h, cz, col);
+      this.tri(cx - h2, baseY, cz + h2, cx - h2, baseY, cz - h2, cx, baseY + h, cz, col);
+    } else {
+      this.tri(cx + h2, baseY, cz - h2, cx - h2, baseY, cz - h2, cx, baseY - h, cz, col);
+      this.tri(cx + h2, baseY, cz + h2, cx + h2, baseY, cz - h2, cx, baseY - h, cz, col);
+      this.tri(cx - h2, baseY, cz + h2, cx + h2, baseY, cz + h2, cx, baseY - h, cz, col);
+      this.tri(cx - h2, baseY, cz - h2, cx - h2, baseY, cz + h2, cx, baseY - h, cz, col);
+    }
+    return this;
+  }
+
+  /** 直棱柱圆柱（沿 Y 轴，seg 段正多边形近似；绕序保证外向法线） */
+  cylinderY(cx, cy, cz, r, h, seg, col) {
+    const at = (i) => {
+      const a = (i / seg) * Math.PI * 2;
+      return [cx + r * Math.cos(a), cz + r * Math.sin(a)];
+    };
+    const y0 = cy - h / 2;
+    const y1 = cy + h / 2;
+    for (let i = 0; i < seg; i++) {
+      const [ax, az] = at(i);
+      const [bx, bz] = at(i + 1);
+      // 侧面（外向）
+      this.tri(bx, y0, bz, ax, y0, az, ax, y1, az, col);
+      this.tri(bx, y0, bz, ax, y1, az, bx, y1, bz, col);
+      // 顶/底盖
+      this.tri(cx, y1, cz, bx, y1, bz, ax, y1, az, col);
+      this.tri(cx, y0, cz, ax, y0, az, bx, y0, bz, col);
+    }
+    return this;
+  }
+
+  /** 直棱柱圆柱（沿 X 轴 —— 传送带滚轴等横向部件） */
+  cylinderX(cx, cy, cz, r, len, seg, col) {
+    const at = (i) => {
+      const a = (i / seg) * Math.PI * 2;
+      return [cy + r * Math.cos(a), cz + r * Math.sin(a)];
+    };
+    const x0 = cx - len / 2;
+    const x1 = cx + len / 2;
+    for (let i = 0; i < seg; i++) {
+      const [ay, az] = at(i);
+      const [by, bz] = at(i + 1);
+      this.tri(x0, ay, az, x0, by, bz, x1, by, bz, col);
+      this.tri(x0, ay, az, x1, by, bz, x1, ay, az, col);
+      this.tri(x1, cy, cz, x1, ay, az, x1, by, bz, col);
+      this.tri(x0, cy, cz, x0, by, bz, x0, ay, az, col);
+    }
+    return this;
+  }
+
+  /** 低多边形球（经纬各 seg 段） */
+  sphere(cx, cy, cz, r, seg, col) {
+    const at = (i, j) => {
+      const phi = (i / seg) * Math.PI;
+      const theta = (j / seg) * Math.PI * 2;
+      return [
+        cx + r * Math.sin(phi) * Math.cos(theta),
+        cy + r * Math.cos(phi),
+        cz + r * Math.sin(phi) * Math.sin(theta),
+      ];
+    };
+    for (let i = 0; i < seg; i++) {
+      for (let j = 0; j < seg; j++) {
+        const a = at(i, j);
+        const b = at(i + 1, j);
+        const c = at(i + 1, j + 1);
+        const d = at(i, j + 1);
+        this.tri(...a, ...b, ...c, col);
+        this.tri(...a, ...c, ...d, col);
+      }
+    }
+    return this;
+  }
+
+  /** 半球穹顶（温室/舱顶；仅上半球，开口朝下不封底） */
+  dome(cx, cy, cz, r, seg, col) {
+    const at = (i, j) => {
+      const phi = (i / seg) * Math.PI * 0.5; // 0..π/2
+      const theta = (j / seg) * Math.PI * 2;
+      return [
+        cx + r * Math.cos(phi) * Math.cos(theta),
+        cy + r * Math.sin(phi),
+        cz + r * Math.cos(phi) * Math.sin(theta),
+      ];
+    };
+    for (let i = 0; i < seg; i++) {
+      for (let j = 0; j < seg; j++) {
+        const a = at(i, j);
+        const b = at(i + 1, j);
+        const c = at(i + 1, j + 1);
+        const d = at(i, j + 1);
+        this.tri(...a, ...b, ...c, col);
+        this.tri(...a, ...c, ...d, col);
+      }
+    }
+    return this;
+  }
+
+  /** 输出网格：positions/normals/colors 三 Float32Array + partNames 区间表 */
+  build() {
+    const parts = this.parts.map((p) => ({ name: p.name, start: p.start, count: p.count }));
+    // 无显式分段时整体归入单一部件
+    if (!parts.length) {
+      parts.push({ name: 'main', start: 0, count: this.positions.length / 3 });
+    }
+    return {
+      positions: new Float32Array(this.positions),
+      normals: new Float32Array(this.normals),
+      colors: new Float32Array(this.colors),
+      triCount: this.positions.length / 9,
+      partNames: parts,
+    };
+  }
+}
+
+// —— 配色常量（部件/阵营视觉识别） ————————————————
+
+const COL = {
+  armor: [0.30, 0.62, 0.72],    // 外骨骼装甲（青蓝）
+  armorDark: [0.20, 0.30, 0.36],
+  joint: [0.22, 0.26, 0.30],    // 关节/腿（暗灰蓝）
+  visor: [0.62, 0.95, 1.05],    // 观察窗（过亮供辉光）
+  pack: [0.45, 0.48, 0.55],
+  grunt: [0.72, 0.34, 0.26],    // 步兵（锈红）
+  gruntDark: [0.42, 0.20, 0.16],
+  heavy: [0.46, 0.49, 0.55],    // 重装（钢灰）
+  heavyDark: [0.28, 0.30, 0.34],
+  turret: [0.58, 0.60, 0.64],
+  turretDark: [0.34, 0.35, 0.38],
+  boss: [0.48, 0.26, 0.66],     // 深渊体（紫）
+  bossDark: [0.28, 0.14, 0.40],
+  bossGlow: [0.85, 0.45, 1.05],
+  colonist: [0.85, 0.62, 0.32], // 殖民者作业服（橙）
+  colonistDark: [0.50, 0.38, 0.22],
+  metal: [0.52, 0.54, 0.58],
+  metalDark: [0.30, 0.31, 0.34],
+  belt: [0.16, 0.16, 0.18],
+  glass: [0.55, 0.85, 0.85],
+  panel: [0.24, 0.42, 0.72],    // 太阳能板
+};
+
+// —— 角色 / 敌人 / NPC ————————————————————————————————
+
+/** 外骨骼角色（7 部件：head/torso/armL/armR/legL/legR/backpack，约 1.8 高） */
+function buildExosuitMesh() {
+  const m = new PartMeshBuilder();
+  m.beginPart('head');
+  m.box(0.02, 1.50, 0, 0.095, 0.115, 0.105, COL.armor);       // 头盔
+  m.box(0.115, 1.51, 0, 0.015, 0.05, 0.065, COL.visor);       // 观察窗
+  m.beginPart('torso');
+  m.box(0, 1.06, 0, 0.20, 0.27, 0.24, COL.armor);             // 胸甲
+  m.box(0.06, 1.06, 0, 0.145, 0.20, 0.185, COL.armorDark);    // 胸口内衬
+  m.beginPart('armL');
+  m.box(0, 1.04, -0.295, 0.075, 0.185, 0.075, COL.armor);     // 左臂
+  m.box(-0.02, 0.80, -0.295, 0.06, 0.055, 0.065, COL.joint);  // 左手套
+  m.beginPart('armR');
+  m.box(0, 1.04, 0.295, 0.075, 0.185, 0.075, COL.armor);      // 右臂
+  m.box(0.02, 0.80, 0.295, 0.06, 0.055, 0.065, COL.joint);    // 右手套
+  m.beginPart('legL');
+  m.box(0, 0.38, -0.145, 0.085, 0.38, 0.095, COL.joint);      // 左腿
+  m.box(0.03, 0.035, -0.145, 0.10, 0.035, 0.115, COL.armorDark); // 左靴
+  m.beginPart('legR');
+  m.box(0, 0.38, 0.145, 0.085, 0.38, 0.095, COL.joint);       // 右腿
+  m.box(0.03, 0.035, 0.145, 0.10, 0.035, 0.115, COL.armorDark); // 右靴
+  m.beginPart('backpack');
+  m.box(-0.20, 1.10, 0, 0.075, 0.16, 0.17, COL.pack);         // 生命维持背包
+  m.box(-0.285, 1.14, 0, 0.012, 0.05, 0.05, COL.visor);       // 状态灯
+  return m.build();
+}
+
+/** 敌军步兵（四足驮兽形，6 部件，肩高约 0.8） */
+function buildGruntMesh() {
+  const m = new PartMeshBuilder();
+  m.beginPart('body');
+  m.box(0, 0.56, 0, 0.34, 0.15, 0.20, COL.grunt);             // 躯干
+  m.box(-0.30, 0.60, 0, 0.05, 0.11, 0.05, COL.gruntDark);     // 尾椎
+  m.pyramid(-0.36, 0.60, 0, 0.08, 0.10, COL.gruntDark, -1);   // 尾刺
+  m.beginPart('head');
+  m.box(0.42, 0.64, 0, 0.13, 0.11, 0.13, COL.gruntDark);      // 头甲
+  m.box(0.52, 0.62, 0, 0.035, 0.035, 0.05, COL.visor);        // 感官窗
+  m.pyramid(0.60, 0.62, 0.05, 0.05, 0.09, COL.grunt, 1);      // 右颚牙
+  m.pyramid(0.60, 0.62, -0.05, 0.05, 0.09, COL.grunt, 1);     // 左颚牙
+  m.beginPart('legFL');
+  m.box(0.24, 0.29, -0.17, 0.055, 0.29, 0.055, COL.gruntDark);
+  m.beginPart('legFR');
+  m.box(0.24, 0.29, 0.17, 0.055, 0.29, 0.055, COL.gruntDark);
+  m.beginPart('legBL');
+  m.box(-0.22, 0.29, -0.17, 0.055, 0.29, 0.055, COL.gruntDark);
+  m.beginPart('legBR');
+  m.box(-0.22, 0.29, 0.17, 0.055, 0.29, 0.055, COL.gruntDark);
+  m.beginPart('spine');
+  m.box(0, 0.74, 0, 0.20, 0.035, 0.045, COL.gruntDark);       // 背脊板
+  return m.build();
+}
+
+/** 重装机甲（8 部件，肩高约 1.7，双臂速射炮） */
+function buildHeavyMesh() {
+  const m = new PartMeshBuilder();
+  m.beginPart('torso');
+  m.box(0, 1.02, 0, 0.30, 0.30, 0.34, COL.heavy);             // 主装甲箱
+  m.box(0, 0.70, 0, 0.20, 0.10, 0.24, COL.heavyDark);         // 骨盆驱动
+  m.beginPart('cockpit');
+  m.box(0.16, 1.26, 0, 0.14, 0.11, 0.16, COL.heavyDark);      // 座舱
+  m.box(0.31, 1.26, 0, 0.015, 0.06, 0.09, COL.visor);         // 舱窗
+  m.beginPart('legL');
+  m.box(0, 0.42, -0.24, 0.16, 0.42, 0.16, COL.heavyDark);     // 左液压腿
+  m.box(0.04, 0.04, -0.24, 0.20, 0.045, 0.20, COL.heavy);     // 左足
+  m.beginPart('legR');
+  m.box(0, 0.42, 0.24, 0.16, 0.42, 0.16, COL.heavyDark);
+  m.box(0.04, 0.04, 0.24, 0.20, 0.045, 0.20, COL.heavy);
+  m.beginPart('armL');
+  m.box(0.10, 1.06, -0.46, 0.30, 0.10, 0.10, COL.metal);      // 左臂炮
+  m.cylinderX(0.44, 1.06, -0.46, 0.065, 0.14, 6, COL.heavyDark); // 炮口
+  m.beginPart('armR');
+  m.box(0.10, 1.06, 0.46, 0.30, 0.10, 0.10, COL.metal);
+  m.cylinderX(0.44, 1.06, 0.46, 0.065, 0.14, 6, COL.heavyDark);
+  m.beginPart('shoulderL');
+  m.box(0, 1.32, -0.40, 0.16, 0.10, 0.12, COL.heavy);         // 左肩甲
+  m.beginPart('shoulderR');
+  m.box(0, 1.32, 0.40, 0.16, 0.10, 0.12, COL.heavy);
+  m.beginPart('antenna');
+  m.box(-0.20, 1.55, 0.10, 0.015, 0.22, 0.015, COL.metalDark); // 通讯天线
+  return m.build();
+}
+
+/** 自动炮台（3 部件：base/yoke/barrel，塔身高约 0.9） */
+function buildTurretMesh() {
+  const m = new PartMeshBuilder();
+  m.beginPart('base');
+  m.cylinderY(0, 0.16, 0, 0.46, 0.32, 8, COL.turretDark);     // 底座
+  m.box(0, 0.36, 0, 0.30, 0.05, 0.30, COL.turretDark);        // 承台
+  m.beginPart('yoke');
+  m.box(0, 0.55, 0, 0.13, 0.16, 0.24, COL.turret);            // 炮架
+  m.beginPart('barrel');
+  m.box(0.36, 0.58, 0, 0.28, 0.055, 0.055, COL.metal);        // 主炮身
+  m.cylinderX(0.66, 0.58, 0, 0.075, 0.10, 6, COL.turretDark); // 炮口制退器
+  m.box(-0.02, 0.68, 0, 0.06, 0.06, 0.06, COL.visor);         // 瞄具
+  return m.build();
+}
+
+/**
+ * 深渊体 Boss（三阶段形态，6 部件，核心高约 3）：
+ *  阶段 1 = core + armL/armR；阶段 2 展开 shellL/shellR；
+ *  阶段 3 隆起 crest。渲染层可按 partNames 区间选择性绘制部件。
+ */
+function buildBossMesh() {
+  const m = new PartMeshBuilder();
+  m.beginPart('core');
+  m.sphere(0, 1.55, 0, 0.92, 6, COL.boss);                    // 主核心
+  m.sphere(0.55, 1.55, 0, 0.34, 5, COL.bossGlow);             // 前突眼核
+  m.cylinderY(0, 0.42, 0, 0.55, 0.84, 8, COL.bossDark);       // 底座触根
+  m.beginPart('armL');
+  m.box(0.10, 1.30, -1.20, 0.55, 0.14, 0.14, COL.bossDark);   // 左触臂
+  m.pyramid(0.72, 1.30, -1.20, 0.26, 0.34, COL.bossGlow, 1);  // 左臂尖刺
+  m.beginPart('armR');
+  m.box(0.10, 1.30, 1.20, 0.55, 0.14, 0.14, COL.bossDark);
+  m.pyramid(0.72, 1.30, 1.20, 0.26, 0.34, COL.bossGlow, 1);
+  m.beginPart('shellL');
+  m.tri(-0.30, 1.10, -0.70, -0.30, 2.30, -0.90, -0.95, 1.70, -1.30, COL.boss); // 左甲壳
+  m.tri(-0.30, 1.10, -0.70, -0.95, 1.70, -1.30, -0.55, 1.05, -1.05, COL.bossDark);
+  m.beginPart('shellR');
+  m.tri(-0.30, 1.10, 0.70, -0.95, 1.70, 1.30, -0.30, 2.30, 0.90, COL.boss);   // 右甲壳
+  m.tri(-0.30, 1.10, 0.70, -0.55, 1.05, 1.05, -0.95, 1.70, 1.30, COL.bossDark);
+  m.beginPart('crest');
+  m.pyramid(0, 2.42, 0, 0.55, 0.75, COL.bossGlow, 1);         // 顶冠（阶段 3）
+  m.pyramid(0.30, 2.35, 0.26, 0.28, 0.45, COL.boss, 1);
+  m.pyramid(0.30, 2.35, -0.26, 0.28, 0.45, COL.boss, 1);
+  return m.build();
+}
+
+/** 殖民者小人（5 部件，约 1.05 高；无装甲的作业服造型） */
+function buildColonistMesh() {
+  const m = new PartMeshBuilder();
+  m.beginPart('torso');
+  m.box(0, 0.62, 0, 0.145, 0.20, 0.10, COL.colonist);         // 作业服躯干
+  m.beginPart('head');
+  m.sphere(0, 0.94, 0, 0.115, 4, COL.colonistDark);           // 头（含安全帽）
+  m.beginPart('armL');
+  m.box(0, 0.62, -0.175, 0.045, 0.15, 0.045, COL.colonistDark);
+  m.beginPart('armR');
+  m.box(0, 0.62, 0.175, 0.045, 0.15, 0.045, COL.colonistDark);
+  m.beginPart('legs');
+  m.box(0, 0.20, -0.065, 0.055, 0.20, 0.055, COL.colonistDark);
+  m.box(0, 0.20, 0.065, 0.055, 0.20, 0.055, COL.colonistDark);
+  return m.build();
+}
+
+// —— 建筑网格（按 building.category，9 类 + 兜底） ————————————————
+
+/**
+ * 24 种建筑按 9 个 category 差异化造型（mining/refining/industry/agri/
+ * science/service/military/admin/energy）。底面约 4×4 体素，高度 2..6。
+ * 实例化渲染时按类别整体着色（实例色与顶点色混合），部件区间保留给
+ * 需要分件动画的场景（雷达旋转、钻头升降等）。
+ * @param {string} buildingCategory buildings.js 的 category 字段
+ */
+function buildBuildingMesh(buildingCategory) {
+  const m = new PartMeshBuilder();
+  const cat = String(buildingCategory || 'default');
+  switch (cat) {
+    case 'mining': {
+      // 采掘：井架 + 钻锥
+      m.beginPart('foundation');
+      m.box(0, 0.15, 0, 2.0, 0.15, 2.0, COL.metalDark);
+      m.beginPart('derrick');
+      m.box(-1.2, 1.4, -1.2, 0.10, 1.25, 0.10, COL.metal);
+      m.box(-1.2, 1.4, 1.2, 0.10, 1.25, 0.10, COL.metal);
+      m.box(1.2, 1.4, -1.2, 0.10, 1.25, 0.10, COL.metal);
+      m.box(1.2, 1.4, 1.2, 0.10, 1.25, 0.10, COL.metal);
+      m.box(0, 2.75, 0, 1.3, 0.10, 1.3, COL.metalDark);
+      m.beginPart('drill');
+      m.pyramid(0, 2.65, 0, 0.7, 0.9, COL.turret, 1);
+      break;
+    }
+    case 'refining': {
+      // 精炼：双储罐 + 连接管
+      m.beginPart('foundation');
+      m.box(0, 0.12, 0, 2.0, 0.12, 2.0, COL.metalDark);
+      m.beginPart('silo');
+      m.cylinderY(-0.85, 1.42, 0, 0.85, 2.6, 8, COL.metal);
+      m.cylinderY(0.85, 1.42, 0, 0.85, 2.6, 8, COL.metal);
+      m.beginPart('pipe');
+      m.box(0, 2.0, 0, 0.85, 0.14, 0.16, COL.turretDark);
+      m.box(0, 0.5, 0, 0.16, 0.14, 0.85, COL.turretDark);
+      break;
+    }
+    case 'industry': {
+      // 工业：主厂房 + 烟囱
+      m.beginPart('hall');
+      m.box(0, 0.75, 0, 1.9, 0.75, 1.3, COL.metal);
+      m.box(0, 1.55, 0, 1.9, 0.06, 1.3, COL.metalDark);        // 屋沿
+      m.beginPart('chimney');
+      m.cylinderY(1.25, 2.0, 0.7, 0.24, 2.3, 6, COL.turretDark);
+      m.beginPart('vent');
+      m.box(-1.0, 1.70, -0.5, 0.22, 0.12, 0.22, COL.metalDark);
+      break;
+    }
+    case 'agri': {
+      // 农业：水培穹顶 + 种植架
+      m.beginPart('dome');
+      m.dome(0, 0.1, 0, 1.7, 6, COL.glass);
+      m.beginPart('racks');
+      m.box(-0.8, 0.45, 0, 0.5, 0.35, 0.7, COL.metalDark);
+      m.box(0.8, 0.45, 0, 0.5, 0.35, 0.7, COL.metalDark);
+      m.beginPart('pad');
+      m.box(0, 0.08, 0, 1.85, 0.08, 1.85, COL.metalDark);
+      break;
+    }
+    case 'science': {
+      // 科研：实验方舱 + 深空天线
+      m.beginPart('lab');
+      m.box(-0.7, 0.65, 0.4, 0.9, 0.65, 0.8, COL.metal);
+      m.beginPart('mast');
+      m.cylinderY(1.0, 0.9, -0.7, 0.09, 1.8, 6, COL.metalDark);
+      m.pyramid(1.0, 1.8, -0.7, 0.9, 0.5, COL.panel, 1);       // 碟形天线（锥代）
+      m.beginPart('dome');
+      m.dome(-0.7, 1.3, 0.4, 0.5, 5, COL.glass);
+      break;
+    }
+    case 'service': {
+      // 人口服务：居住街区 + 灯带
+      m.beginPart('block');
+      m.box(0, 1.05, 0, 1.5, 1.05, 1.05, COL.metal);
+      m.beginPart('windows');
+      m.box(1.51, 1.05, 0, 0.02, 0.55, 0.75, COL.visor);       // 东面灯带
+      m.box(-1.51, 1.05, 0, 0.02, 0.55, 0.75, COL.visor);      // 西面灯带
+      m.beginPart('roof');
+      m.box(0, 2.16, 0, 0.9, 0.06, 0.7, COL.metalDark);
+      break;
+    }
+    case 'military': {
+      // 军事：掩体碉堡 + 双联炮
+      m.beginPart('bunker');
+      m.box(0, 0.42, 0, 1.6, 0.42, 1.6, COL.turretDark);
+      m.beginPart('turrets');
+      m.cylinderY(-0.55, 1.05, 0, 0.28, 0.42, 6, COL.turret);
+      m.cylinderY(0.55, 1.05, 0, 0.28, 0.42, 6, COL.turret);
+      m.beginPart('barrels');
+      m.box(-0.95, 1.12, 0, 0.42, 0.06, 0.06, COL.metal);
+      m.box(0.95, 1.12, 0, 0.42, 0.06, 0.06, COL.metal);
+      break;
+    }
+    case 'admin': {
+      // 行政贸易：指挥塔 + 尖顶
+      m.beginPart('tower');
+      m.box(0, 1.5, 0, 1.0, 1.5, 1.0, COL.metal);
+      m.box(0, 3.1, 0, 0.65, 0.10, 0.65, COL.metalDark);
+      m.beginPart('spire');
+      m.pyramid(0, 3.2, 0, 0.7, 1.1, COL.turret, 1);
+      m.beginPart('annex');
+      m.box(1.5, 0.55, 0.6, 0.7, 0.55, 0.55, COL.metalDark);
+      break;
+    }
+    case 'energy': {
+      // 能源：变电塔 + 双太阳能板阵
+      m.beginPart('pylon');
+      m.cylinderY(0, 0.9, 0, 0.16, 1.8, 6, COL.metalDark);
+      m.beginPart('panels');
+      m.box(-1.3, 1.0, 0, 0.9, 0.04, 0.7, COL.panel);
+      m.box(1.3, 1.0, 0, 0.9, 0.04, 0.7, COL.panel);
+      m.box(0, 1.85, 0, 0.6, 0.04, 0.6, COL.panel);
+      m.beginPart('base');
+      m.box(0, 0.1, 0, 1.9, 0.1, 1.9, COL.metalDark);
+      break;
+    }
+    default: {
+      // 兜底：通用方舱 + 天线
+      m.beginPart('block');
+      m.box(0, 0.9, 0, 1.4, 0.9, 1.4, COL.metal);
+      m.beginPart('mast');
+      m.box(0.5, 2.2, 0.5, 0.03, 0.4, 0.03, COL.metalDark);
+      break;
+    }
+  }
+  return m.build();
+}
+
+// —— 传送带 / 通用几何 ————————————————————————————————
+
+/**
+ * 传送带段网格：沿 +X 方向 1.0 单位长（frame + belt + rollers）。
+ * 渲染层按路径方向 rotY 摆放；货箱为独立实例沿带面滑动。
+ */
+function buildConveyorBelt() {
+  const m = new PartMeshBuilder();
+  m.beginPart('frame');
+  m.box(0, 0.10, 0, 0.5, 0.05, 0.30, COL.metalDark);          // 机架
+  m.box(-0.32, 0.035, 0, 0.06, 0.035, 0.24, COL.metalDark);   // 支腿
+  m.box(0.32, 0.035, 0, 0.06, 0.035, 0.24, COL.metalDark);
+  m.beginPart('belt');
+  m.box(0, 0.17, 0, 0.47, 0.022, 0.26, COL.belt);             // 带面
+  m.beginPart('rollers');
+  m.cylinderX(-0.42, 0.155, 0, 0.055, 0.5, 6, COL.turret);    // 尾滚轮
+  m.cylinderX(0.42, 0.155, 0, 0.055, 0.5, 6, COL.turret);     // 头滚轮
+  return m.build();
+}
+
+/** 中心对称单位盒（24 顶点带独立面法线）—— 建筑/货箱/传送带实例化的公共底座 */
+function buildUnitBox() {
+  const m = new PartMeshBuilder();
+  m.beginPart('box');
+  m.box(0, 0, 0, 0.5, 0.5, 0.5, [1, 1, 1]);
+  return m.build();
+}
+
+Object.assign(__exports, { buildExosuitMesh, buildGruntMesh, buildHeavyMesh, buildTurretMesh, buildBossMesh, buildColonistMesh, buildBuildingMesh, buildConveyorBelt, buildUnitBox });
+
+});
+__register("src/render/gl/Mat4.js", function (__exports, __require) {
+/**
+ * render/gl/Mat4.js — 4x4 列主序矩阵工具（WebGL 约定）
+ *
+ * 移植自参考实现 simulation-matrix/common/math/mat4.js，并补全：
+ *  - mat4TRS：欧拉角（yaw=Y, pitch=X, roll=Z，合成顺序 R = Ry·Rx·Rz）模型矩阵；
+ *  - vec3ApplyMat4 / mat4MulVec4：向量变换。
+ *
+ * 零分配约定：所有 out 均由调用方传入 Float32Array(16)（vec3 为 Float32Array(3)），
+ * 渲染循环内不产生任何新数组。存储布局：m[col * 4 + row]（列主序）。
+ */
+
+/** 新建单位矩阵（唯一的分配点：仅限初始化阶段调用） */
+function mat4() {
+  const m = new Float32Array(16);
+  m[0] = 1; m[5] = 1; m[10] = 1; m[15] = 1;
+  return m;
+}
+
+/** out = 单位矩阵 */
+function mat4Identity(out) {
+  out.fill(0);
+  out[0] = 1; out[5] = 1; out[10] = 1; out[15] = 1;
+  return out;
+}
+
+/** out = a * b（列主序；语义为先施加 b 再施加 a） */
+function mat4Multiply(out, a, b) {
+  const a00 = a[0], a01 = a[1], a02 = a[2], a03 = a[3];
+  const a10 = a[4], a11 = a[5], a12 = a[6], a13 = a[7];
+  const a20 = a[8], a21 = a[9], a22 = a[10], a23 = a[11];
+  const a30 = a[12], a31 = a[13], a32 = a[14], a33 = a[15];
+  for (let i = 0; i < 4; i++) {
+    const b0 = b[i * 4], b1 = b[i * 4 + 1], b2 = b[i * 4 + 2], b3 = b[i * 4 + 3];
+    out[i * 4] = b0 * a00 + b1 * a10 + b2 * a20 + b3 * a30;
+    out[i * 4 + 1] = b0 * a01 + b1 * a11 + b2 * a21 + b3 * a31;
+    out[i * 4 + 2] = b0 * a02 + b1 * a12 + b2 * a22 + b3 * a32;
+    out[i * 4 + 3] = b0 * a03 + b1 * a13 + b2 * a23 + b3 * a33;
+  }
+  return out;
+}
+
+/** 透视投影矩阵（fovy 为竖直视场角，弧度） */
+function mat4Perspective(out, fovyRad, aspect, near, far) {
+  const f = 1 / Math.tan(fovyRad / 2);
+  out.fill(0);
+  out[0] = f / aspect;
+  out[5] = f;
+  out[10] = (far + near) / (near - far);
+  out[11] = -1;
+  out[14] = (2 * far * near) / (near - far);
+  return out;
+}
+
+/** 正交投影矩阵 */
+function mat4Ortho(out, left, right, bottom, top, near, far) {
+  out.fill(0);
+  out[0] = 2 / (right - left);
+  out[5] = 2 / (top - bottom);
+  out[10] = -2 / (far - near);
+  out[12] = -(right + left) / (right - left);
+  out[13] = -(top + bottom) / (top - bottom);
+  out[14] = -(far + near) / (far - near);
+  out[15] = 1;
+  return out;
+}
+
+/** 视图矩阵：相机位于 eye，看向 center，up 为世界上方向（右手系） */
+function mat4LookAt(out, eye, center, up) {
+  let zx = eye[0] - center[0];
+  let zy = eye[1] - center[1];
+  let zz = eye[2] - center[2];
+  let len = Math.sqrt(zx * zx + zy * zy + zz * zz);
+  if (len === 0) { zx = 0; zy = 0; zz = 1; len = 1; }
+  zx /= len; zy /= len; zz /= len;
+  let xx = up[1] * zz - up[2] * zy;
+  let xy = up[2] * zx - up[0] * zz;
+  let xz = up[0] * zy - up[1] * zx;
+  len = Math.sqrt(xx * xx + xy * xy + xz * xz);
+  if (len === 0) { xx = 1; xy = 0; xz = 0; } else { xx /= len; xy /= len; xz /= len; }
+  const yx = zy * xz - zz * xy;
+  const yy = zz * xx - zx * xz;
+  const yz = zx * xy - zy * xx;
+  out[0] = xx; out[1] = yx; out[2] = zx; out[3] = 0;
+  out[4] = xy; out[5] = yy; out[6] = zy; out[7] = 0;
+  out[8] = xz; out[9] = yz; out[10] = zz; out[11] = 0;
+  out[12] = -(xx * eye[0] + xy * eye[1] + xz * eye[2]);
+  out[13] = -(yx * eye[0] + yy * eye[1] + yz * eye[2]);
+  out[14] = -(zx * eye[0] + zy * eye[1] + zz * eye[2]);
+  out[15] = 1;
+  return out;
+}
+
+/** 一般 4x4 求逆（伴随展开法）。奇异矩阵返回 null。 */
+function mat4Invert(out, m) {
+  const a00 = m[0], a01 = m[1], a02 = m[2], a03 = m[3];
+  const a10 = m[4], a11 = m[5], a12 = m[6], a13 = m[7];
+  const a20 = m[8], a21 = m[9], a22 = m[10], a23 = m[11];
+  const a30 = m[12], a31 = m[13], a32 = m[14], a33 = m[15];
+
+  const b00 = a00 * a11 - a01 * a10;
+  const b01 = a00 * a12 - a02 * a10;
+  const b02 = a00 * a13 - a03 * a10;
+  const b03 = a01 * a12 - a02 * a11;
+  const b04 = a01 * a13 - a03 * a11;
+  const b05 = a02 * a13 - a03 * a12;
+  const b06 = a20 * a31 - a21 * a30;
+  const b07 = a20 * a32 - a22 * a30;
+  const b08 = a20 * a33 - a23 * a30;
+  const b09 = a21 * a32 - a22 * a31;
+  const b10 = a21 * a33 - a23 * a31;
+  const b11 = a22 * a33 - a23 * a32;
+
+  let det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+  if (!det) return null;
+  det = 1.0 / det;
+
+  out[0] = (a11 * b11 - a12 * b10 + a13 * b09) * det;
+  out[1] = (a02 * b10 - a01 * b11 - a03 * b09) * det;
+  out[2] = (a31 * b05 - a32 * b04 + a33 * b03) * det;
+  out[3] = (a22 * b04 - a21 * b05 - a23 * b03) * det;
+  out[4] = (a12 * b08 - a10 * b11 - a13 * b07) * det;
+  out[5] = (a00 * b11 - a02 * b08 + a03 * b07) * det;
+  out[6] = (a32 * b02 - a30 * b05 - a33 * b01) * det;
+  out[7] = (a20 * b05 - a22 * b02 + a23 * b01) * det;
+  out[8] = (a10 * b10 - a11 * b08 + a13 * b06) * det;
+  out[9] = (a01 * b08 - a00 * b10 - a03 * b06) * det;
+  out[10] = (a30 * b04 - a31 * b02 + a33 * b00) * det;
+  out[11] = (a21 * b02 - a20 * b04 - a23 * b00) * det;
+  out[12] = (a11 * b07 - a10 * b09 - a12 * b06) * det;
+  out[13] = (a00 * b09 - a01 * b07 + a02 * b06) * det;
+  out[14] = (a31 * b01 - a30 * b03 - a32 * b00) * det;
+  out[15] = (a20 * b03 - a21 * b01 + a22 * b00) * det;
+  return out;
+}
+
+/** 平移矩阵（覆盖 out，非右乘叠加） */
+function mat4Translate(out, x, y, z) {
+  mat4Identity(out);
+  out[12] = x; out[13] = y; out[14] = z;
+  return out;
+}
+
+/** 缩放矩阵（覆盖 out） */
+function mat4Scale(out, x, y, z) {
+  mat4Identity(out);
+  out[0] = x; out[5] = y; out[10] = z;
+  return out;
+}
+
+/** 绕 X 轴旋转矩阵（弧度，右手系；覆盖 out） */
+function mat4RotateX(out, rad) {
+  mat4Identity(out);
+  const c = Math.cos(rad), s = Math.sin(rad);
+  out[5] = c; out[6] = s; out[9] = -s; out[10] = c;
+  return out;
+}
+
+/** 绕 Y 轴旋转矩阵（弧度，右手系；覆盖 out） */
+function mat4RotateY(out, rad) {
+  mat4Identity(out);
+  const c = Math.cos(rad), s = Math.sin(rad);
+  out[0] = c; out[2] = -s; out[8] = s; out[10] = c;
+  return out;
+}
+
+/** 绕 Z 轴旋转矩阵（弧度，右手系；覆盖 out） */
+function mat4RotateZ(out, rad) {
+  mat4Identity(out);
+  const c = Math.cos(rad), s = Math.sin(rad);
+  out[0] = c; out[1] = s; out[4] = -s; out[5] = c;
+  return out;
+}
+
+/**
+ * 欧拉合成模型矩阵：out = T(t) · Ry(ry) · Rx(rx) · Rz(rz) · S(s)
+ * 约定：ry = yaw（偏航，绕 Y），rx = pitch（俯仰，绕 X），rz = roll（翻滚，绕 Z），
+ * 旋转合成顺序为 R = Ry·Rx·Rz（先 roll，再 pitch，最后 yaw）。
+ * 解析展开一次写就，避免中间矩阵与临时分配。
+ */
+function mat4TRS(out, tx, ty, tz, rx, ry, rz, s) {
+  const cx = Math.cos(rx), sx = Math.sin(rx);
+  const cy = Math.cos(ry), sy = Math.sin(ry);
+  const cz = Math.cos(rz), sz = Math.sin(rz);
+
+  // R = Ry·Rx·Rz 的三个列向量（展开自 (cy·cz + sy·sx·sz) 等解析式）
+  out[0] = (cy * cz + sy * sx * sz) * s;   // 列 0 行 0：R·e_x.x
+  out[1] = cx * sz * s;                    // 列 0 行 1
+  out[2] = (-sy * cz + cy * sx * sz) * s;  // 列 0 行 2
+  out[3] = 0;
+  out[4] = (-cy * sz + sy * sx * cz) * s;  // 列 1 行 0：R·e_y.x
+  out[5] = cx * cz * s;                    // 列 1 行 1
+  out[6] = (sy * sz + cy * sx * cz) * s;   // 列 1 行 2
+  out[7] = 0;
+  out[8] = sy * cx * s;                    // 列 2 行 0：R·e_z.x
+  out[9] = -sx * s;                        // 列 2 行 1
+  out[10] = cy * cx * s;                   // 列 2 行 2
+  out[11] = 0;
+  out[12] = tx;                            // 列 3：平移
+  out[13] = ty;
+  out[14] = tz;
+  out[15] = 1;
+  return out;
+}
+
+/**
+ * 用 4x4 矩阵变换三维点/向量（隐含 w=1）并做透视除法（w=0 时按 1 处理）。
+ * out 为 Float32Array(3)，允许 out === v。
+ */
+function vec3ApplyMat4(out, m, v) {
+  const x = v[0], y = v[1], z = v[2];
+  const w = m[3] * x + m[7] * y + m[11] * z + m[15];
+  const inv = w !== 0 ? 1 / w : 1;
+  out[0] = (m[0] * x + m[4] * y + m[8] * z + m[12]) * inv;
+  out[1] = (m[1] * x + m[5] * y + m[9] * z + m[13]) * inv;
+  out[2] = (m[2] * x + m[6] * y + m[10] * z + m[14]) * inv;
+  return out;
+}
+
+/** 用 4x4 矩阵变换四维向量（完整分量，含 w 行），允许 out === v。 */
+function mat4MulVec4(out, m, v) {
+  const x = v[0], y = v[1], z = v[2], w = v[3];
+  out[0] = m[0] * x + m[4] * y + m[8] * z + m[12] * w;
+  out[1] = m[1] * x + m[5] * y + m[9] * z + m[13] * w;
+  out[2] = m[2] * x + m[6] * y + m[10] * z + m[14] * w;
+  out[3] = m[3] * x + m[7] * y + m[11] * z + m[15] * w;
+  return out;
+}
+
+Object.assign(__exports, { mat4, mat4Identity, mat4Multiply, mat4Perspective, mat4Ortho, mat4LookAt, mat4Invert, mat4Translate, mat4Scale, mat4RotateX, mat4RotateY, mat4RotateZ, mat4TRS, vec3ApplyMat4, mat4MulVec4 });
+
+});
+__register("src/render/gl/PlanetSurface3D.js", function (__exports, __require) {
+/**
+ * render/gl/PlanetSurface3D.js — 行星地表 3D 体素渲染器（返工 Phase R8）
+ *
+ * 消费 SurfaceSandbox 的体素世界与贪心网格输出，绘制第三人称 RPG 地表场景：
+ *  - 地形：16 区块合并为单一顶点缓冲，1 次 draw call（逐顶点 AO + 材质色已由
+ *    数据层烘焙，着色器叠加太阳方向漫反射 + 半球环境光 + 距离雾）；
+ *  - 天空盒：按行星 category 与 atmosphere 的解析渐变（含太阳圆盘与无大气星空）；
+ *  - 直接光照：太阳方向按所属星系 star.typeId 色温着色；
+ *  - 建筑/货箱：单位盒实例化（按 building.category 着色），1 次 draw call；
+ *  - 传送带：带段实例化（六号角色图集位）+ 货箱实例沿预定义路径按弧长移动
+ *    （≤200 箱，确定性相位，无随机数）；
+ *  - 殖民者/敌人：六网格实例图集（grunt/heavy/turret/boss/colonist/conveyor）
+ *    全部 actor 合并 1 次 draw call（≤40 实例约束由调用方数据保证，缓冲按 64 预留）；
+ *  - 角色：外骨骼 7 部件单次实例化绘制（部件号失配顶点在裁剪空间退化），
+ *    行走/挥砍/挖掘动画在 CPU 侧按部件枢轴合成模型矩阵；
+ *  - 相机：弹簧臂第三人称轨道（yaw/pitch/distance），DDA 射线防穿模收臂；
+ *  - 特效：刀光带 / 相机对齐光束（加性）+ 红色 AoE 预警贴花（α 混合）
+ *    + 确定性挖掘粒子（gl.POINTS 软圆点，池 256）。
+ *
+ * draw() 恰好 ≤ 8 次 draw call（预算 15）；HUD（血条/技能栏/目标信息）由
+ * 调用方在 2D 层绘制，本类不触碰 DOM。
+ *
+ * renderData 契约（全部字段可选，缺省安全跳过）：
+ *   character : { x, y, z, yaw, state('idle'|'run'|'attack'|'dig'|'hurt'),
+ *                 animT, attackT(0..1), flash(0..1) }
+ *   camera    : { yaw, pitch, dist }           —— 期望轨道参数（弹簧平滑在渲染器内）
+ *   buildings : [{ x, y, z, sx?, sy?, sz?, rotY?, category }]
+ *   conveyor  : { paths: [{ pts: [[x,y,z],...], speed?, spacing? }] }（世界坐标折线）
+ *   colonists : [{ x, y, z, rotY?, walk?, phase? }]
+ *   enemies   : [{ kind('grunt'|'heavy'|'turret'|'boss'), x, y, z, yaw?, phase?, flash? }]
+ *   effects   : { slashes: [{ x, y, z, yaw, arc, t, color? }],
+ *                 beams:   [{ a:[x,y,z], b:[x,y,z], color?, width? }],
+ *                 aoe:     [{ x, z, r, t }],
+ *                 digEvents: [{ x, y, z, matId }] }
+ * opts 契约：{ time(秒), dt(秒), bloom/exposure 由 PostProcessor 处理，本类不读 }
+ *
+ * 约束：顶层不触碰 document/window；全程确定性（无 Math.random）；
+ * GLSL 均为手写 GLSL ES 3.0 字符串（#version 行由 GLCore 前置）。
+ */
+
+const { mat4: mat4, mat4Multiply: mat4Multiply, mat4Perspective: mat4Perspective, mat4LookAt: mat4LookAt, mat4Invert: mat4Invert, mat4Translate: mat4Translate, mat4RotateX: mat4RotateX, mat4RotateY: mat4RotateY, mat4RotateZ: mat4RotateZ, vec3ApplyMat4: vec3ApplyMat4 } = __require("src/render/gl/Mat4.js");
+const { buildExosuitMesh: buildExosuitMesh, buildGruntMesh: buildGruntMesh, buildHeavyMesh: buildHeavyMesh, buildTurretMesh: buildTurretMesh, buildBossMesh: buildBossMesh, buildColonistMesh: buildColonistMesh, buildConveyorBelt: buildConveyorBelt, buildUnitBox: buildUnitBox } = __require("src/render/meshes/GroundMeshes.js");
+const { greedyMeshChunk: greedyMeshChunk, ddaRaycast: ddaRaycast, getSurfaceHeight: getSurfaceHeight, SURFACE_SIZE: SURFACE_SIZE, SURFACE_MAT: SURFACE_MAT, MATERIAL_COLORS: MATERIAL_COLORS } = __require("src/domain/ground/SurfaceSandbox.js");
+
+// ———— 场景配色（按行星类别 / 恒星 / 建筑类别） ————————————————
+
+/** 天空渐变基色（zenith 天顶 / horizon 地平线；按 atmosphere 关键词再修正） */
+const SKY_BY_CATEGORY = {
+  rocky:      { zenith: [0.30, 0.42, 0.62], horizon: [0.72, 0.66, 0.55] },
+  ocean:      { zenith: [0.25, 0.45, 0.70], horizon: [0.68, 0.80, 0.85] },
+  ice:        { zenith: [0.35, 0.48, 0.66], horizon: [0.80, 0.88, 0.95] },
+  desert:     { zenith: [0.42, 0.46, 0.58], horizon: [0.88, 0.72, 0.48] },
+  gasGiant:   { zenith: [0.45, 0.35, 0.28], horizon: [0.85, 0.60, 0.36] },
+  lava:       { zenith: [0.13, 0.07, 0.09], horizon: [0.55, 0.22, 0.12] },
+  toxic:      { zenith: [0.28, 0.38, 0.24], horizon: [0.60, 0.68, 0.34] },
+  artificial: { zenith: [0.18, 0.28, 0.48], horizon: [0.52, 0.60, 0.70] },
+};
+
+/** 恒星色温（直接光照与太阳盘颜色，按 system.star.typeId） */
+const SUN_BY_STAR = {
+  yellowDwarf: [1.00, 0.96, 0.84],
+  redDwarf: [1.00, 0.60, 0.42],
+  blueGiant: [0.70, 0.84, 1.05],
+  whiteDwarf: [0.95, 0.97, 1.05],
+  neutronStar: [0.85, 0.85, 1.10],
+  pulsar: [1.00, 0.72, 0.95],
+  blackHole: [0.45, 0.42, 0.55],
+};
+
+/** 建筑实例色（buildings.js 九大类） */
+const BUILDING_COLORS = {
+  mining: [0.85, 0.60, 0.28],
+  refining: [0.74, 0.74, 0.80],
+  industry: [0.64, 0.67, 0.72],
+  agri: [0.45, 0.80, 0.50],
+  science: [0.42, 0.68, 0.90],
+  service: [0.85, 0.68, 0.58],
+  military: [0.52, 0.55, 0.52],
+  admin: [0.82, 0.78, 0.58],
+  energy: [0.95, 0.84, 0.32],
+};
+
+/** 敌人实例色（与网格顶点色在着色器中混合） */
+const ENEMY_COLORS = {
+  grunt: [0.90, 0.42, 0.32],
+  heavy: [0.62, 0.66, 0.74],
+  turret: [0.70, 0.72, 0.76],
+  boss: [0.72, 0.40, 1.00],
+};
+
+/** actor 图集网格位（实例 iB.y 与逐顶点 aMesh 匹配） */
+const ACTOR_MESH_ID = { grunt: 0, heavy: 1, turret: 2, boss: 3, colonist: 4, conveyor: 5 };
+
+// ———— GLSL ————
+
+const SKY_VS = `
+layout(location = 0) in vec3 aPos;
+out vec2 vXY;
+void main() {
+  vXY = aPos.xy;
+  gl_Position = vec4(aPos.xy, 0.99999, 1.0);
+}`;
+
+const SKY_FS = `
+precision highp float;
+in vec2 vXY;
+uniform mat4 uInvVP;
+uniform vec3 uCamPos;
+uniform vec3 uZenith;
+uniform vec3 uHorizon;
+uniform vec3 uGround;
+uniform vec3 uSunDir;
+uniform vec3 uSunColor;
+uniform float uStars;
+uniform float uTime;
+out vec4 fragColor;
+/* 确定性哈希星空（无随机数） */
+float hash13(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.zyx + 31.32);
+  return fract((p.x + p.y) * p.z);
+}
+void main() {
+  vec4 p4 = uInvVP * vec4(vXY, 0.5, 1.0);
+  vec3 dir = normalize(p4.xyz / p4.w - uCamPos);
+  float up = dir.y;
+  vec3 col = mix(uHorizon, uZenith, pow(clamp(up, 0.0, 1.0), 0.55));
+  col = mix(col, uGround, smoothstep(0.0, -0.30, up));
+  float s = max(dot(dir, uSunDir), 0.0);
+  col += uSunColor * (pow(s, 800.0) * 3.2 + pow(s, 20.0) * 0.20);
+  if (uStars > 0.5 && up > 0.02) {
+    vec3 sp = floor(dir * 220.0);
+    float st = hash13(sp);
+    col += vec3(1.1, 1.15, 1.25) * step(0.9975, st) * (0.55 + 0.45 * sin(uTime * 2.0 + st * 40.0));
+  }
+  fragColor = vec4(col, 1.0);
+}`;
+
+const TERRAIN_VS = `
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec3 aColor;
+uniform mat4 uVP;
+out vec3 vN;
+out vec3 vC;
+out vec3 vW;
+void main() {
+  vN = aNormal;
+  vC = aColor;
+  vW = aPos;
+  gl_Position = uVP * vec4(aPos, 1.0);
+}`;
+
+const TERRAIN_FS = `
+precision highp float;
+in vec3 vN;
+in vec3 vC;
+in vec3 vW;
+uniform vec3 uSunDir;
+uniform vec3 uSunColor;
+uniform vec3 uCamPos;
+uniform vec3 uFogColor;
+uniform vec2 uFogRange;
+out vec4 fragColor;
+void main() {
+  vec3 N = normalize(vN);
+  float diff = max(dot(N, uSunDir), 0.0);
+  float hemi = 0.44 + 0.18 * (N.y * 0.5 + 0.5);
+  vec3 col = vC * uSunColor * (hemi + diff * 0.72);
+  float fog = smoothstep(uFogRange.x, uFogRange.y, distance(vW, uCamPos));
+  fragColor = vec4(mix(col, uFogColor, fog), 1.0);
+}`;
+
+/** 通用实例化（单位盒：建筑 / 传送带货箱） */
+const BOX_VS = `
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec3 iPos;
+layout(location = 3) in vec3 iScale;
+layout(location = 4) in vec3 iColor;
+layout(location = 5) in vec2 iRotEmit;
+uniform mat4 uVP;
+out vec3 vN;
+out vec3 vC;
+out vec3 vW;
+out float vF;
+out float vE;
+void main() {
+  float c = cos(iRotEmit.x);
+  float s = sin(iRotEmit.x);
+  vec3 p = aPos * iScale;
+  vec3 w = iPos + vec3(p.x * c + p.z * s, p.y, -p.x * s + p.z * c);
+  vN = vec3(aNormal.x * c + aNormal.z * s, aNormal.y, -aNormal.x * s + aNormal.z * c);
+  vW = w;
+  vC = iColor;
+  vF = 0.0;
+  vE = iRotEmit.y;
+  gl_Position = uVP * vec4(w, 1.0);
+}`;
+
+/** 多网格实例图集（actor：grunt/heavy/turret/boss/colonist/conveyor） */
+const ACTOR_VS = `
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec3 aColor;
+layout(location = 3) in float aMesh;
+layout(location = 4) in vec4 iA;
+layout(location = 5) in vec4 iB;
+layout(location = 6) in vec4 iC;
+uniform mat4 uVP;
+out vec3 vN;
+out vec3 vC;
+out vec3 vW;
+out float vF;
+out float vE;
+void main() {
+  if (abs(aMesh - iB.y) > 0.5) {
+    // 网格位失配：退化到裁剪空间外（单 draw call 多网格实例化的 discard 技法）
+    vN = vec3(0.0, 1.0, 0.0);
+    vC = vec3(0.0);
+    vW = vec3(0.0);
+    vF = 0.0;
+    vE = 0.0;
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    return;
+  }
+  float c = cos(iA.w);
+  float s = sin(iA.w);
+  vec3 p = aPos * iB.x;
+  vec3 w = iA.xyz + vec3(p.x * c + p.z * s, p.y, -p.x * s + p.z * c);
+  vW = w;
+  vN = vec3(aNormal.x * c + aNormal.z * s, aNormal.y, -aNormal.x * s + aNormal.z * c);
+  vC = mix(aColor, iC.rgb, 0.6);
+  vF = iB.z;
+  vE = iC.w;
+  gl_Position = uVP * vec4(w, 1.0);
+}`;
+
+/** 共享 lit 片元（盒体 / actor / 角色）：漫反射 + 半球 + 雾 + 闪白 + 自发光 */
+const LIT_FS = `
+precision highp float;
+in vec3 vN;
+in vec3 vC;
+in vec3 vW;
+in float vF;
+in float vE;
+uniform vec3 uSunDir;
+uniform vec3 uSunColor;
+uniform vec3 uCamPos;
+uniform vec3 uFogColor;
+uniform vec2 uFogRange;
+out vec4 fragColor;
+void main() {
+  vec3 N = normalize(vN);
+  float diff = max(dot(N, uSunDir), 0.0);
+  float hemi = 0.46 + 0.16 * (N.y * 0.5 + 0.5);
+  vec3 col = vC * uSunColor * (hemi + diff * 0.66) + vC * vE;
+  col = mix(col, vec3(2.0, 2.0, 2.1), vF);
+  float fog = smoothstep(uFogRange.x, uFogRange.y, distance(vW, uCamPos));
+  fragColor = vec4(mix(col, uFogColor, fog), 1.0);
+}`;
+
+/** 角色七部件：逐实例模型矩阵 + 部件号失配退化 */
+const CHAR_VS = `
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec3 aColor;
+layout(location = 3) in float aPart;
+layout(location = 4) in vec4 iM0;
+layout(location = 5) in vec4 iM1;
+layout(location = 6) in vec4 iM2;
+layout(location = 7) in vec4 iM3;
+layout(location = 8) in vec4 iMisc;
+uniform mat4 uVP;
+out vec3 vN;
+out vec3 vC;
+out vec3 vW;
+out float vF;
+out float vE;
+void main() {
+  if (abs(aPart - iMisc.x) > 0.5) {
+    vN = vec3(0.0, 1.0, 0.0);
+    vC = vec3(0.0);
+    vW = vec3(0.0);
+    vF = 0.0;
+    vE = 0.0;
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    return;
+  }
+  mat4 M = mat4(iM0, iM1, iM2, iM3);
+  vec4 w4 = M * vec4(aPos, 1.0);
+  vW = w4.xyz;
+  vN = mat3(M) * aNormal;
+  vC = aColor;
+  vF = iMisc.y;
+  vE = iMisc.z;
+  gl_Position = uVP * w4;
+}`;
+
+/** 特效/贴花通用四元色 */
+const QUADC_VS = `
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec4 aColor;
+uniform mat4 uVP;
+out vec4 vC;
+void main() {
+  vC = aColor;
+  gl_Position = uVP * vec4(aPos, 1.0);
+}`;
+
+const QUADC_FS = `
+precision highp float;
+in vec4 vC;
+uniform float uTime;
+uniform float uPulse;
+out vec4 fragColor;
+void main() {
+  float a = vC.a;
+  if (uPulse > 0.5) a *= 0.72 + 0.28 * sin(uTime * 7.0);
+  fragColor = vec4(vC.rgb, a);
+}`;
+
+/** 挖掘粒子（gl.POINTS 软圆点，加性） */
+const PART_VS = `
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec4 aColor;
+layout(location = 2) in float aSize;
+uniform mat4 uVP;
+uniform float uPointScale;
+out vec4 vC;
+void main() {
+  vec4 cp = uVP * vec4(aPos, 1.0);
+  gl_Position = cp;
+  gl_PointSize = clamp(aSize * uPointScale / max(cp.w, 0.1), 1.5, 26.0);
+  vC = aColor;
+}`;
+
+const PART_FS = `
+precision highp float;
+in vec4 vC;
+out vec4 fragColor;
+void main() {
+  vec2 d = gl_PointCoord - 0.5;
+  float m = smoothstep(0.5, 0.12, length(d));
+  fragColor = vec4(vC.rgb * m * vC.a, vC.a * m);
+}`;
+
+// ———— 工具 ————
+
+/** 缓存程序 uniform 位置表 */
+function locMap(gl, prog, names) {
+  const m = {};
+  for (const n of names) m[n] = gl.getUniformLocation(prog, n);
+  return m;
+}
+
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
+/** 确定性整数哈希 → [0,1)（粒子初速等视觉扰动；绝不使用 Math.random） */
+function hash01(n) {
+  let h = (Math.imul(n ^ 0x9e3779b9, 0x85ebca6b) >>> 0);
+  h ^= h >>> 13;
+  h = Math.imul(h, 0xc2b2ae35) >>> 0;
+  h ^= h >>> 16;
+  return h / 4294967296;
+}
+
+/** 外骨骼部件枢轴（局部坐标，与 GroundMeshes.buildExosuitMesh 部件布局一致） */
+const EXO_PIVOTS = {
+  head: [0, 1.38, 0],
+  torso: [0, 0.80, 0],
+  armL: [0, 1.26, -0.30],
+  armR: [0, 1.26, 0.30],
+  legL: [0, 0.76, -0.145],
+  legR: [0, 0.76, 0.145],
+  backpack: [0, 1.10, 0],
+};
+
+// ———— 渲染器 ————
+
+class PlanetSurface3D {
+  /**
+   * @param {import('./GLCore.js').GLContext} glc GLContext 实例（CanvasManager.glc）
+   * @param {number} tier 渲染层级 1|2|3（tier≥3 由调用方整体跳过 GL；2 减特效密度）
+   */
+  constructor(glc, tier = 1) {
+    if (!glc || !glc.gl) throw new Error('[PlanetSurface3D] 需要 GLContext 实例');
+    this.glc = glc;
+    this.gl = glc.gl;
+    this.tier = tier;
+    this.sw = null;                 // init(sceneWorld) 后持有体素世界
+    this.pickDist = 7.5;            // DDA 拾取距离（体素）
+    this.stats = { triangles: 0, drawCalls: 0, chunkRebuilds: 0 };
+
+    this._destroyed = false;
+    this._inited = false;
+    this._vw = 1;
+    this._vh = 1;
+    this._springDist = -1;          // 弹簧臂当前臂长（首帧吸附）
+    this._spawnSeq = 0;             // 挖掘粒子批次序号（确定性初速源）
+
+    // —— GL 资源（init 建立程序；其余缓冲随 init/destroy 管理） ——
+    const glc2 = this.glc;
+    this.progSky = glc2.createProgram(SKY_VS, SKY_FS, { label: 'surface:sky', attributes: { aPos: 0 } });
+    this.progTerrain = glc2.createProgram(TERRAIN_VS, TERRAIN_FS, { label: 'surface:terrain' });
+    this.progBox = glc2.createProgram(BOX_VS, LIT_FS, { label: 'surface:box' });
+    this.progActor = glc2.createProgram(ACTOR_VS, LIT_FS, { label: 'surface:actor' });
+    this.progChar = glc2.createProgram(CHAR_VS, LIT_FS, { label: 'surface:char', attributes: { aPos: 0, aNormal: 1, aColor: 2, aPart: 3, iM0: 4, iM1: 5, iM2: 6, iM3: 7, iMisc: 8 } });
+    this.progQuadC = glc2.createProgram(QUADC_VS, QUADC_FS, { label: 'surface:quadc' });
+    this.progPart = glc2.createProgram(PART_VS, PART_FS, { label: 'surface:part' });
+
+    const gl = this.gl;
+    this._u = {
+      sky: locMap(gl, this.progSky, ['uInvVP', 'uCamPos', 'uZenith', 'uHorizon', 'uGround', 'uSunDir', 'uSunColor', 'uStars', 'uTime']),
+      terrain: locMap(gl, this.progTerrain, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange']),
+      box: locMap(gl, this.progBox, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange']),
+      actor: locMap(gl, this.progActor, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange']),
+      char: locMap(gl, this.progChar, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange']),
+      quadc: locMap(gl, this.progQuadC, ['uVP', 'uTime', 'uPulse']),
+      part: locMap(gl, this.progPart, ['uVP', 'uPointScale']),
+    };
+
+    // —— 通用光照 uniform 载荷（每帧一次性写入的共享数组） ——
+    this._sunDir = [0.42, 0.78, 0.32];
+    this._sunColor = [1.0, 0.96, 0.84];
+    this._fogColor = [0.6, 0.62, 0.66];
+    this._sky = { zenith: [0.3, 0.42, 0.62], horizon: [0.72, 0.66, 0.55], ground: [0.36, 0.33, 0.28], stars: 0 };
+    this._fogRange = [34.0, 120.0];
+
+    // —— 相机/矩阵草稿（零分配约定：渲染循环内不新建矩阵） ——
+    this.camera = { eye: [0, 0, 0], target: [0, 0, 0], dist: 9, yaw: 0.8, pitch: 0.55 };
+    this._m = {
+      proj: mat4(), view: mat4(), vp: mat4(), invVp: mat4(),
+      base: mat4(), piv: mat4(), rot: mat4(), tmp: mat4(), part: mat4(),
+    };
+    this._v3a = [0, 0, 0];
+    this._v3b = [0, 0, 0];
+    this._v3c = [0, 0, 0];
+
+    // —— 实例缓冲描述（init 时创建 VAO；上传走 _uploadInstances） ——
+    this._terr = null;              // { vao, vboP, vboN, vboC, vertCount }
+    this._chunkMesh = new Array(SURFACE_SIZE.CHUNK_COUNT).fill(null);
+    this._host = { pos: new Float32Array(0), nor: new Float32Array(0), col: new Float32Array(0) };
+    this._box = null;               // 建筑+货箱实例
+    this._actor = null;             // 敌人+殖民者+传送带实例
+    this._char = null;              // 角色部件实例
+    this._fx = null;                // 刀光/光束（加性）
+    this._decal = null;             // AoE 贴花（α）
+    this._particle = null;          // 挖掘粒子（点）
+    this._skyVao = null;
+
+    // —— 挖掘粒子池（结构化数组，256 容量） ——
+    const PCAP = 256;
+    this._pool = {
+      cap: PCAP,
+      n: 0,
+      x: new Float32Array(PCAP), y: new Float32Array(PCAP), z: new Float32Array(PCAP),
+      vx: new Float32Array(PCAP), vy: new Float32Array(PCAP), vz: new Float32Array(PCAP),
+      life: new Float32Array(PCAP), life0: new Float32Array(PCAP),
+      size: new Float32Array(PCAP), matId: new Uint8Array(PCAP),
+    };
+  }
+
+  // —— 初始化 / 网格化 ————————————————
+
+  /**
+   * 绑定体素世界并完成全部静态资源构建：
+   * 贪心网格化 16 区块并合并上传、actor 图集与实例 VAO、角色部件 VAO、天空三角。
+   * @param {object} sceneWorld SurfaceSandbox.createSurfaceWorld 的返回实体
+   */
+  init(sceneWorld) {
+    if (this._destroyed) throw new Error('[PlanetSurface3D] 已销毁，不可重复 init');
+    if (!sceneWorld || sceneWorld.kind !== 'surfaceWorld') {
+      throw new Error('[PlanetSurface3D] init 需要 SurfaceSandbox.createSurfaceWorld 的实体');
+    }
+    this.sw = sceneWorld;
+    this._inited = true;
+
+    const glc = this.glc;
+    const gl = this.gl;
+
+    // —— 天空全屏三角 ——
+    this._skyVao = glc.createVAO((g) => {
+      const buf = g.createBuffer(new Float32Array([-1, -1, 0, 3, -1, 0, -1, 3, 0]));
+      g.bindBuffer(g.ARRAY_BUFFER, buf);
+      g.enableVertexAttribArray(0);
+      g.vertexAttribPointer(0, 3, g.FLOAT, false, 0, 0);
+    });
+
+    // —— 地形：全部区块贪心网格化 → 合并上传 ——
+    for (let ci = 0; ci < SURFACE_SIZE.CHUNK_COUNT; ci++) this._remeshChunk(ci);
+    const tP = glc.createBuffer(new Float32Array(0));
+    const tN = glc.createBuffer(new Float32Array(0));
+    const tC = glc.createBuffer(new Float32Array(0));
+    this._terr = { vao: null, vboP: tP, vboN: tN, vboC: tC, vertCount: 0 };
+    this._terr.vao = glc.createVAO((g) => {
+      g.bindBuffer(g.ARRAY_BUFFER, tP);
+      g.enableVertexAttribArray(0);
+      g.vertexAttribPointer(0, 3, g.FLOAT, false, 0, 0);
+      g.bindBuffer(g.ARRAY_BUFFER, tN);
+      g.enableVertexAttribArray(1);
+      g.vertexAttribPointer(1, 3, g.FLOAT, false, 0, 0);
+      g.bindBuffer(g.ARRAY_BUFFER, tC);
+      g.enableVertexAttribArray(2);
+      g.vertexAttribPointer(2, 3, g.FLOAT, false, 0, 0);
+    });
+    this._uploadTerrain();
+
+    // —— 单位盒实例（建筑 + 货箱） ——
+    const boxMesh = buildUnitBox();
+    this._box = this._makeInstVAO(boxMesh, 11, [
+      { loc: 2, size: 3, off: 0 }, { loc: 3, size: 3, off: 12 },
+      { loc: 4, size: 3, off: 24 }, { loc: 5, size: 2, off: 36 },
+    ], 1024);
+
+    // —— actor 图集：grunt/heavy/turret/boss/colonist/conveyor ——
+    const atlasMeshes = [
+      buildGruntMesh(), buildHeavyMesh(), buildTurretMesh(),
+      buildBossMesh(), buildColonistMesh(), buildConveyorBelt(),
+    ];
+    const atlas = this._concatAtlas(atlasMeshes);
+    this._actor = this._makeInstVAO(atlas, 12, [
+      { loc: 4, size: 4, off: 0 }, { loc: 5, size: 4, off: 16 }, { loc: 6, size: 4, off: 32 },
+    ], 768);
+
+    // —— 角色外骨骼（7 部件，逐实例模型矩阵；部件号 = partNames 序） ——
+    const exo = buildExosuitMesh();
+    this._exoMesh = exo;
+    this._charArr = new Float32Array(7 * 20);
+    const exoId = new Float32Array(exo.positions.length / 3);
+    for (let pi = 0; pi < exo.partNames.length; pi++) {
+      const p = exo.partNames[pi];
+      exoId.fill(pi, p.start, p.start + p.count);
+    }
+    const eP = glc.createBuffer(exo.positions);
+    const eN = glc.createBuffer(exo.normals);
+    const eC = glc.createBuffer(exo.colors);
+    const eId = glc.createBuffer(exoId);
+    const eInst = glc.createBuffer(new Float32Array(7 * 20));
+    this._char = {
+      vao: null, inst: eInst, capF: 7 * 20, count: 0, meshCount: exo.triCount * 3,
+      partNames: exo.partNames.map((p) => p.name),
+    };
+    this._char.vao = glc.createVAO((g) => {
+      g.bindBuffer(g.ARRAY_BUFFER, eP);
+      g.enableVertexAttribArray(0);
+      g.vertexAttribPointer(0, 3, g.FLOAT, false, 0, 0);
+      g.bindBuffer(g.ARRAY_BUFFER, eN);
+      g.enableVertexAttribArray(1);
+      g.vertexAttribPointer(1, 3, g.FLOAT, false, 0, 0);
+      g.bindBuffer(g.ARRAY_BUFFER, eC);
+      g.enableVertexAttribArray(2);
+      g.vertexAttribPointer(2, 3, g.FLOAT, false, 0, 0);
+      g.bindBuffer(g.ARRAY_BUFFER, eId);
+      g.enableVertexAttribArray(3);
+      g.vertexAttribPointer(3, 1, g.FLOAT, false, 0, 0);
+      g.bindBuffer(g.ARRAY_BUFFER, eInst);
+      for (let k = 0; k < 4; k++) {
+        g.enableVertexAttribArray(4 + k);
+        g.vertexAttribPointer(4 + k, 4, g.FLOAT, false, 80, k * 16);
+        g.vertexAttribDivisor(4 + k, 1);
+      }
+      g.enableVertexAttribArray(8);
+      g.vertexAttribPointer(8, 4, g.FLOAT, false, 80, 64);
+      g.vertexAttribDivisor(8, 1);
+    });
+
+    // —— 特效 / 贴花 / 粒子动态缓冲 ——
+    this._fx = this._makeDynamicVAO(9216);
+    this._decal = this._makeDynamicVAO(6144);
+    this._particle = this._makeDynamicVAO(2048, 8);
+
+    // —— 天空 / 光照：按行星档案求值一次 ——
+    this._evalEnvironment();
+
+    gl.bindVertexArray(null);
+    return this;
+  }
+
+  /**
+   * 增量重建受影响区块：重建 (cx,cz) 及因跨界编辑被标脏的邻接区块，
+   * 并重新合并上传地形缓冲。挖掘/放置后由调用方触发。
+   * @returns {{rebuilt:number, triangles:number}}
+   */
+  digChunk(cx, cz) {
+    const sw = this.sw;
+    if (!sw || this._destroyed) return { rebuilt: 0, triangles: this.stats.triangles };
+    const { CHUNKS_X, CHUNKS_Z } = SURFACE_SIZE;
+    const targets = new Set();
+    const add = (a, b) => {
+      if (a >= 0 && a < CHUNKS_X && b >= 0 && b < CHUNKS_Z) targets.add(b * CHUNKS_X + a);
+    };
+    add(cx, cz);
+    for (const [da, db] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const a = cx + da;
+      const b = cz + db;
+      if (a >= 0 && a < CHUNKS_X && b >= 0 && b < CHUNKS_Z && sw.chunks[b * CHUNKS_X + a].dirty) add(a, b);
+    }
+    let rebuilt = 0;
+    for (const ci of targets) {
+      this._remeshChunk(ci);
+      rebuilt++;
+    }
+    if (rebuilt > 0) {
+      this._uploadTerrain();
+      this.stats.chunkRebuilds += rebuilt;
+    }
+    return { rebuilt, triangles: this.stats.triangles };
+  }
+
+  /** 贪心网格化单个区块（缓存顶点数据；清除脏标记） */
+  _remeshChunk(ci) {
+    const ch = this.sw.chunks[ci];
+    const mesh = greedyMeshChunk(this.sw, ch.cx, ch.cz);
+    this._chunkMesh[ci] = mesh;
+    ch.dirty = false;
+  }
+
+  /** 合并全部区块顶点并重新上传地形缓冲（区块数量少，整传开销可忽略） */
+  _uploadTerrain() {
+    const gl = this.gl;
+    const t = this._terr;
+    let total = 0;
+    for (const m of this._chunkMesh) if (m) total += m.positions.length;
+    const host = this._host;
+    if (host.pos.length < total) {
+      host.pos = new Float32Array(total * 2);
+      host.nor = new Float32Array(total * 2);
+      host.col = new Float32Array(total * 2);
+    }
+    let o = 0;
+    for (const m of this._chunkMesh) {
+      if (!m) continue;
+      host.pos.set(m.positions, o);
+      host.nor.set(m.normals, o);
+      host.col.set(m.colors, o);
+      o += m.positions.length;
+    }
+    const verts = o / 3;
+    gl.bindBuffer(gl.ARRAY_BUFFER, t.vboP);
+    gl.bufferData(gl.ARRAY_BUFFER, host.pos.subarray(0, o), gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, t.vboN);
+    gl.bufferData(gl.ARRAY_BUFFER, host.nor.subarray(0, o), gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, t.vboC);
+    gl.bufferData(gl.ARRAY_BUFFER, host.col.subarray(0, o), gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    t.vertCount = verts;
+    this.stats.triangles = Math.floor(verts / 3);
+  }
+
+  // —— 实例缓冲装配 ————————————————
+
+  /** 静态网格 + 实例属性的通用 VAO（instanceStrideF 为每实例浮点数） */
+  _makeInstVAO(mesh, instanceStrideF, instAttribs, maxInstances) {
+    const glc = this.glc;
+    const gl = this.gl;
+    const vboP = glc.createBuffer(mesh.positions);
+    const vboN = glc.createBuffer(mesh.normals);
+    const vboC = glc.createBuffer(mesh.colors || new Float32Array(mesh.positions.length));
+    let vboId = null;
+    if (mesh.meshIds) vboId = glc.createBuffer(mesh.meshIds);
+    const vboI = glc.createBuffer(new Float32Array(maxInstances * instanceStrideF));
+    const strideB = instanceStrideF * 4;
+    const vao = glc.createVAO((g) => {
+      g.bindBuffer(g.ARRAY_BUFFER, vboP);
+      g.enableVertexAttribArray(0);
+      g.vertexAttribPointer(0, 3, g.FLOAT, false, 0, 0);
+      g.bindBuffer(g.ARRAY_BUFFER, vboN);
+      g.enableVertexAttribArray(1);
+      g.vertexAttribPointer(1, 3, g.FLOAT, false, 0, 0);
+      g.bindBuffer(g.ARRAY_BUFFER, vboC);
+      g.enableVertexAttribArray(2);
+      g.vertexAttribPointer(2, 3, g.FLOAT, false, 0, 0);
+      if (vboId) {
+        g.bindBuffer(g.ARRAY_BUFFER, vboId);
+        g.enableVertexAttribArray(3);
+        g.vertexAttribPointer(3, 1, g.FLOAT, false, 0, 0);
+      }
+      g.bindBuffer(g.ARRAY_BUFFER, vboI);
+      for (const a of instAttribs) {
+        g.enableVertexAttribArray(a.loc);
+        g.vertexAttribPointer(a.loc, a.size, g.FLOAT, false, strideB, a.off);
+        g.vertexAttribDivisor(a.loc, 1);
+      }
+    });
+    return { vao, inst: vboI, strideF: instanceStrideF, capF: maxInstances * instanceStrideF, count: 0, meshCount: mesh.triCount * 3 };
+  }
+
+  /** 多网格图集拼接：positions/normals/colors + 逐顶点 meshIds */
+  _concatAtlas(meshes) {
+    let total = 0;
+    for (const m of meshes) total += m.positions.length;
+    const pos = new Float32Array(total);
+    const nor = new Float32Array(total);
+    const col = new Float32Array(total);
+    const ids = new Float32Array(total / 3);
+    let o = 0;
+    let vi = 0;
+    for (let mi = 0; mi < meshes.length; mi++) {
+      const m = meshes[mi];
+      pos.set(m.positions, o);
+      nor.set(m.normals, o);
+      col.set(m.colors || new Float32Array(m.positions.length), o);
+      const vc = m.positions.length / 3;
+      ids.fill(mi, vi, vi + vc);
+      vi += vc;
+      o += m.positions.length;
+    }
+    return { positions: pos, normals: nor, colors: col, meshIds: ids, triCount: total / 9 };
+  }
+
+  /** 动态四元色/粒子缓冲（每帧 CPU 填充后 bufferSubData） */
+  _makeDynamicVAO(capFloats, strideF = 7) {
+    const glc = this.glc;
+    const gl = this.gl;
+    const vbo = glc.createBuffer(new Float32Array(capFloats));
+    const vao = glc.createVAO((g) => {
+      g.bindBuffer(g.ARRAY_BUFFER, vbo);
+      g.enableVertexAttribArray(0);
+      g.vertexAttribPointer(0, 3, g.FLOAT, false, strideF * 4, 0);
+      if (strideF >= 7) {
+        g.enableVertexAttribArray(1);
+        g.vertexAttribPointer(1, 4, g.FLOAT, false, strideF * 4, 12);
+      }
+      if (strideF >= 8) {
+        g.enableVertexAttribArray(2);
+        g.vertexAttribPointer(2, 1, g.FLOAT, false, strideF * 4, 28);
+      }
+    });
+    return { vao, vbo, capF: capFloats, strideF, count: 0 };
+  }
+
+  /** 实例缓冲上传（超容量时按需重分配） */
+  _uploadInstances(entry, arr, count) {
+    const gl = this.gl;
+    entry.count = count;
+    if (count <= 0) return;
+    const need = count * entry.strideF;
+    gl.bindBuffer(gl.ARRAY_BUFFER, entry.inst || entry.vbo);
+    if (need > entry.capF) {
+      gl.bufferData(gl.ARRAY_BUFFER, arr.subarray(0, need), gl.DYNAMIC_DRAW);
+      entry.capF = need;
+    } else {
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, arr.subarray(0, need));
+    }
+  }
+
+  // —— 环境求值 ————————————————
+
+  /** 按 planet.category / atmosphere / star.typeId 求天空渐变、太阳色温与雾色 */
+  _evalEnvironment() {
+    const sw = this.sw;
+    const skyCfg = SKY_BY_CATEGORY[sw.category] || SKY_BY_CATEGORY.rocky;
+    const zenith = skyCfg.zenith.slice();
+    const horizon = skyCfg.horizon.slice();
+    let stars = 0;
+    const atmo = String(sw.atmosphere || '');
+    if (atmo.includes('无大气') || atmo.includes('稀薄')) {
+      stars = 1;
+      for (let i = 0; i < 3; i++) { zenith[i] *= 0.55; horizon[i] *= 0.80; }
+    }
+    if (atmo.includes('酸性') || atmo.includes('氯系')) {
+      zenith[1] = Math.min(1, zenith[1] * 1.25 + 0.03);
+      horizon[1] = Math.min(1, horizon[1] * 1.15 + 0.03);
+    }
+    if (atmo.includes('氢氦')) {
+      horizon[0] = Math.min(1, horizon[0] * 1.10 + 0.04);
+    }
+    if (atmo.includes('高压')) {
+      for (let i = 0; i < 3; i++) horizon[i] = Math.min(1, horizon[i] * 1.18);
+    }
+    this._sky = {
+      zenith,
+      horizon,
+      ground: [horizon[0] * 0.45, horizon[1] * 0.45, horizon[2] * 0.45],
+      stars,
+    };
+    const sun = SUN_BY_STAR[sw.starTypeId] || SUN_BY_STAR.yellowDwarf;
+    this._sunColor = sun.slice();
+    this._fogColor = [horizon[0], horizon[1], horizon[2]];
+  }
+
+  // —— 相机 ————————————————
+
+  /**
+   * 第三人称弹簧臂相机：目标 = 角色胸口，轨道 (yaw/pitch/dist)，
+   * 从目标向眼位做 DDA，命中地形即收臂防穿模。
+   */
+  _updateCamera(w, h, rd, opts) {
+    const cam = rd.camera || {};
+    const ch = rd.character;
+    const target = this._v3a;
+    target[0] = ch ? ch.x : (cam.tx != null ? cam.tx : SURFACE_SIZE.X / 2);
+    target[1] = (ch ? ch.y : (cam.ty != null ? cam.ty : SURFACE_SIZE.Y - 6)) + 1.55;
+    target[2] = ch ? ch.z : (cam.tz != null ? cam.tz : SURFACE_SIZE.Z / 2);
+    const yaw = cam.yaw != null ? cam.yaw : 0.8;
+    const pitch = clamp(cam.pitch != null ? cam.pitch : 0.55, -0.10, 1.45);
+    const want = clamp(cam.dist != null ? cam.dist : 9, 2.5, 26);
+
+    // 弹簧平滑臂长（指数趋近；dt 缺省按 1/30 固定步）
+    const dt = opts.dt != null ? Math.max(1e-4, opts.dt) : 1 / 30;
+    if (this._springDist < 0) this._springDist = want;
+    this._springDist += (want - this._springDist) * (1 - Math.exp(-dt * 6));
+
+    // DDA 防穿模：目标 → 眼位方向
+    const dir = this._v3b;
+    dir[0] = Math.cos(pitch) * Math.sin(yaw);
+    dir[1] = Math.sin(pitch);
+    dir[2] = Math.cos(pitch) * Math.cos(yaw);
+    let dist = this._springDist;
+    if (this.sw) {
+      const hit = ddaRaycast(this.sw, target, dir, this._springDist + 0.6);
+      if (hit.hit) dist = Math.max(1.4, hit.t - 0.45);
+    }
+
+    const eye = this._v3c;
+    eye[0] = target[0] + dir[0] * dist;
+    eye[1] = target[1] + dir[1] * dist;
+    eye[2] = target[2] + dir[2] * dist;
+
+    const m = this._m;
+    mat4Perspective(m.proj, 1.05, w / Math.max(1, h), 0.1, 220);
+    mat4LookAt(m.view, eye, target, [0, 1, 0]);
+    mat4Multiply(m.vp, m.proj, m.view);
+
+    this.camera.eye = [eye[0], eye[1], eye[2]];
+    this.camera.target = [target[0], target[1], target[2]];
+    this.camera.dist = dist;
+    this.camera.yaw = yaw;
+    this.camera.pitch = pitch;
+    this._vw = w;
+    this._vh = h;
+  }
+
+  /**
+   * 屏幕点拾取（DDA）：优先使用调用方向量；否则以上一帧 VP 反投影。
+   * @returns {{hit:boolean, vx:number, vy:number, vz:number, nx:number, ny:number,
+   *            nz:number, matId:number, t:number, px:number, py:number, pz:number}}
+   */
+  pick(sx, sy, camPos, camDir) {
+    const miss = { hit: false, vx: 0, vy: 0, vz: 0, nx: 0, ny: 0, nz: 0, matId: 0, t: Infinity, px: 0, py: 0, pz: 0 };
+    if (!this.sw || this._destroyed) return miss;
+    const o = [camPos[0] != null ? camPos[0] : camPos.x, camPos[1] != null ? camPos[1] : camPos.y, camPos[2] != null ? camPos[2] : camPos.z];
+    let dx;
+    let dy;
+    let dz;
+    if (camDir && (camDir[0] || camDir[1] || camDir[2] || camDir.x || camDir.y || camDir.z)) {
+      dx = camDir[0] != null ? camDir[0] : camDir.x;
+      dy = camDir[1] != null ? camDir[1] : camDir.y;
+      dz = camDir[2] != null ? camDir[2] : camDir.z;
+    } else {
+      // 屏幕坐标 → NDC → 世界射线（依赖上一帧 VP；注意 UI y 向下）
+      const m = this._m;
+      mat4Invert(m.invVp, this._m.vp);
+      const nx = (sx / Math.max(1, this._vw)) * 2 - 1;
+      const ny = 1 - (sy / Math.max(1, this._vh)) * 2;
+      const p0 = vec3ApplyMat4([0, 0, 0], m.invVp, [nx, ny, -1]);
+      const p1 = vec3ApplyMat4([0, 0, 0], m.invVp, [nx, ny, 1]);
+      dx = p1[0] - p0[0];
+      dy = p1[1] - p0[1];
+      dz = p1[2] - p0[2];
+    }
+    const len = Math.hypot(dx, dy, dz);
+    if (!(len > 1e-8)) return miss;
+    const dir = [dx / len, dy / len, dz / len];
+    const hit = ddaRaycast(this.sw, o, dir, this.pickDist);
+    if (hit.hit) {
+      hit.px = o[0] + dir[0] * hit.t;
+      hit.py = o[1] + dir[1] * hit.t;
+      hit.pz = o[2] + dir[2] * hit.t;
+    }
+    return hit;
+  }
+
+  // —— 帧绘制 ————————————————
+
+  /**
+   * 绘制一帧地表场景（在 CanvasManager.beginGLFrame() 之后调用）。
+   * @param {WebGL2RenderingContext} gl
+   * @param {number} w 物理像素宽  @param {number} h 物理像素高
+   * @param {object} renderData 场景数据（见文件头契约）
+   * @param {{time?:number, dt?:number}} [opts]
+   */
+  draw(gl, w, h, renderData, opts = {}) {
+    if (this._destroyed || !this._inited || !this.sw) return this.stats;
+    const rd = renderData || {};
+    const time = opts.time || 0;
+    const tier = this.tier;
+    let dc = 0;
+
+    this._updateCamera(w, h, rd, opts);
+    const m = this._m;
+    const eye = this.camera.eye;
+
+    // —— 0. 天空（无深度写入；覆盖全屏故无需清色） ——
+    gl.clear(gl.DEPTH_BUFFER_BIT);
+    gl.disable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+    gl.useProgram(this.progSky);
+    const uSky = this._u.sky;
+    gl.uniformMatrix4fv(uSky.uInvVP, false, mat4Invert(m.invVp, m.vp));
+    gl.uniform3f(uSky.uCamPos, eye[0], eye[1], eye[2]);
+    gl.uniform3fv(uSky.uZenith, this._sky.zenith);
+    gl.uniform3fv(uSky.uHorizon, this._sky.horizon);
+    gl.uniform3fv(uSky.uGround, this._sky.ground);
+    gl.uniform3fv(uSky.uSunDir, this._sunDir);
+    gl.uniform3fv(uSky.uSunColor, this._sunColor);
+    gl.uniform1f(uSky.uStars, this._sky.stars);
+    gl.uniform1f(uSky.uTime, time);
+    gl.bindVertexArray(this._skyVao);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    dc++;
+    gl.depthMask(true);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LEQUAL);
+
+    // —— 1. 地形（单缓冲单 draw call） ——
+    if (this._terr.vertCount > 0) {
+      gl.useProgram(this.progTerrain);
+      const u = this._u.terrain;
+      gl.uniformMatrix4fv(u.uVP, false, m.vp);
+      gl.uniform3fv(u.uSunDir, this._sunDir);
+      gl.uniform3fv(u.uSunColor, this._sunColor);
+      gl.uniform3f(u.uCamPos, eye[0], eye[1], eye[2]);
+      gl.uniform3fv(u.uFogColor, this._fogColor);
+      gl.uniform2f(u.uFogRange, this._fogRange[0], this._fogRange[1]);
+      gl.bindVertexArray(this._terr.vao);
+      gl.drawArrays(gl.TRIANGLES, 0, this._terr.vertCount);
+      dc++;
+    }
+
+    // —— 2. 建筑货箱实例（单位盒） ——
+    this._fillBoxInstances(rd, time);
+    if (this._box.count > 0) {
+      this._uploadInstances(this._box, this._boxArr, this._box.count);
+      gl.useProgram(this.progBox);
+      const u = this._u.box;
+      gl.uniformMatrix4fv(u.uVP, false, m.vp);
+      gl.uniform3fv(u.uSunDir, this._sunDir);
+      gl.uniform3fv(u.uSunColor, this._sunColor);
+      gl.uniform3f(u.uCamPos, eye[0], eye[1], eye[2]);
+      gl.uniform3fv(u.uFogColor, this._fogColor);
+      gl.uniform2f(u.uFogRange, this._fogRange[0], this._fogRange[1]);
+      gl.bindVertexArray(this._box.vao);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, this._box.meshCount, this._box.count);
+      dc++;
+    }
+
+    // —— 3. actor 图集（敌人 + 殖民者 + 传送带段） ——
+    this._fillActorInstances(rd, time);
+    if (this._actor.count > 0) {
+      this._uploadInstances(this._actor, this._actorArr, this._actor.count);
+      gl.useProgram(this.progActor);
+      const u = this._u.actor;
+      gl.uniformMatrix4fv(u.uVP, false, m.vp);
+      gl.uniform3fv(u.uSunDir, this._sunDir);
+      gl.uniform3fv(u.uSunColor, this._sunColor);
+      gl.uniform3f(u.uCamPos, eye[0], eye[1], eye[2]);
+      gl.uniform3fv(u.uFogColor, this._fogColor);
+      gl.uniform2f(u.uFogRange, this._fogRange[0], this._fogRange[1]);
+      gl.bindVertexArray(this._actor.vao);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, this._actor.meshCount, this._actor.count);
+      dc++;
+    }
+
+    // —— 4. 角色七部件（单 draw call，部件矩阵逐实例） ——
+    this._fillCharInstances(rd, opts, time);
+    if (this._char.count > 0) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, this._char.inst);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, this._charArr.subarray(0, this._char.count * 20));
+      gl.useProgram(this.progChar);
+      const u = this._u.char;
+      gl.uniformMatrix4fv(u.uVP, false, m.vp);
+      gl.uniform3fv(u.uSunDir, this._sunDir);
+      gl.uniform3fv(u.uSunColor, this._sunColor);
+      gl.uniform3f(u.uCamPos, eye[0], eye[1], eye[2]);
+      gl.uniform3fv(u.uFogColor, this._fogColor);
+      gl.uniform2f(u.uFogRange, this._fogRange[0], this._fogRange[1]);
+      gl.bindVertexArray(this._char.vao);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, this._char.meshCount, this._char.count);
+      dc++;
+    }
+
+    // —— 5. AoE 预警贴花（α 混合，深度不写） ——
+    this._buildDecals(rd, time);
+    if (this._decal.count > 0) {
+      this._uploadDynamic(this._decal, this._decalArr);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.depthMask(false);
+      gl.useProgram(this.progQuadC);
+      gl.uniformMatrix4fv(this._u.quadc.uVP, false, m.vp);
+      gl.uniform1f(this._u.quadc.uTime, time);
+      gl.uniform1f(this._u.quadc.uPulse, 1);
+      gl.bindVertexArray(this._decal.vao);
+      gl.drawArrays(gl.TRIANGLES, 0, this._decal.count);
+      dc++;
+      gl.disable(gl.BLEND);
+      gl.depthMask(true);
+    }
+
+    // —— 6. 刀光带 / 光束（加性，深度不写） ——
+    this._buildFx(rd, eye);
+    if (this._fx.count > 0) {
+      this._uploadDynamic(this._fx, this._fxArr);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+      gl.depthMask(false);
+      gl.useProgram(this.progQuadC);
+      gl.uniformMatrix4fv(this._u.quadc.uVP, false, m.vp);
+      gl.uniform1f(this._u.quadc.uTime, time);
+      gl.uniform1f(this._u.quadc.uPulse, 0);
+      gl.bindVertexArray(this._fx.vao);
+      gl.drawArrays(gl.TRIANGLES, 0, this._fx.count);
+      dc++;
+      gl.disable(gl.BLEND);
+      gl.depthMask(true);
+    }
+
+    // —— 7. 挖掘粒子（加性点精灵） ——
+    this._updateParticles(rd, opts.dt != null ? opts.dt : 1 / 30, tier);
+    if (this._pool.n > 0) {
+      const n = this._packParticles(tier);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+      gl.depthMask(false);
+      gl.useProgram(this.progPart);
+      gl.uniformMatrix4fv(this._u.part.uVP, false, m.vp);
+      gl.uniform1f(this._u.part.uPointScale, h * 0.5 * m.proj[5]);
+      gl.bindVertexArray(this._particle.vao);
+      gl.drawArrays(gl.POINTS, 0, n);
+      dc++;
+      gl.disable(gl.BLEND);
+      gl.depthMask(true);
+    }
+
+    gl.bindVertexArray(null);
+    gl.depthFunc(gl.LEQUAL);
+    this.stats.drawCalls = dc;
+    return this.stats;
+  }
+
+  /** 动态缓冲上传（fx/decal 共用；粒子独立打包） */
+  _uploadDynamic(entry, arr) {
+    const gl = this.gl;
+    gl.bindBuffer(gl.ARRAY_BUFFER, entry.vbo);
+    if (entry.count * entry.strideF > entry.capF) {
+      gl.bufferData(gl.ARRAY_BUFFER, arr.subarray(0, entry.count * entry.strideF), gl.DYNAMIC_DRAW);
+      entry.capF = entry.count * entry.strideF;
+    } else {
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, arr.subarray(0, entry.count * entry.strideF));
+    }
+  }
+
+  // —— 实例填充（CPU 侧；全部确定性） ————————————————
+
+  /** 建筑 + 传送带货箱 → 单位盒实例流 */
+  _fillBoxInstances(rd, time) {
+    if (!this._boxArr) this._boxArr = new Float32Array(1024 * 11);
+    const arr = this._boxArr;
+    let n = 0;
+    const push = (x, y, z, sx, sy, sz, rotY, r, g, b, emit) => {
+      if (n >= 1024) return;
+      let o = n * 11;
+      arr[o] = x; arr[o + 1] = y; arr[o + 2] = z;
+      arr[o + 3] = sx; arr[o + 4] = sy; arr[o + 5] = sz;
+      arr[o + 6] = r; arr[o + 7] = g; arr[o + 8] = b;
+      arr[o + 9] = rotY; arr[o + 10] = emit;
+      n++;
+    };
+
+    // 建筑（按 category 着色；y 为底面 → 实例中心抬半高）
+    const buildings = rd.buildings || [];
+    for (const b of buildings) {
+      const sx = b.sx != null ? b.sx : 2.4;
+      const sy = b.sy != null ? b.sy : 1.8;
+      const sz = b.sz != null ? b.sz : 2.4;
+      const c = BUILDING_COLORS[b.category] || [0.68, 0.70, 0.74];
+      push(b.x, (b.y || 0) + sy / 2, b.z, sx, sy, sz, b.rotY || 0, c[0], c[1], c[2], 0.04);
+    }
+
+    // 传送带货箱：沿路径弧长匀速滑动（≤200，确定性相位）
+    const paths = rd.conveyor && rd.conveyor.paths ? rd.conveyor.paths : [];
+    let crates = 0;
+    const CAP_CRATES = 200;
+    for (const path of paths) {
+      if (crates >= CAP_CRATES) break;
+      const pts = path.pts;
+      if (!pts || pts.length < 2) continue;
+      const speed = path.speed != null ? path.speed : 1.6;
+      const spacing = path.spacing != null ? path.spacing : 1.1;
+      // 弧长表
+      let total = 0;
+      const segLen = [];
+      for (let i = 1; i < pts.length; i++) {
+        const l = Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1], pts[i][2] - pts[i - 1][2]);
+        segLen.push(l);
+        total += l;
+      }
+      if (!(total > 0)) continue;
+      const count = Math.min(Math.floor(total / spacing), CAP_CRATES - crates);
+      for (let k = 0; k < count; k++) {
+        let s = (time * speed + k * spacing) % total;
+        let i = 0;
+        while (i < segLen.length && s > segLen[i]) { s -= segLen[i]; i++; }
+        if (i >= segLen.length) i = segLen.length - 1;
+        const a = pts[i];
+        const b = pts[i + 1];
+        const f = segLen[i] > 1e-6 ? s / segLen[i] : 0;
+        const px = a[0] + (b[0] - a[0]) * f;
+        const py = a[1] + (b[1] - a[1]) * f;
+        const pz = a[2] + (b[2] - a[2]) * f;
+        const rotY = Math.atan2(-(b[2] - a[2]), b[0] - a[0]);
+        push(px, py + 0.32, pz, 0.26, 0.26, 0.26, rotY, 1.35, 0.92, 0.30, 0.30);
+        crates++;
+      }
+    }
+    this._box.count = n;
+  }
+
+  /** 敌人 + 殖民者 + 传送带段 → actor 图集实例流 */
+  _fillActorInstances(rd, time) {
+    if (!this._actorArr) this._actorArr = new Float32Array(768 * 12);
+    const arr = this._actorArr;
+    let n = 0;
+    const push = (x, y, z, rotY, scale, meshId, flash, phase, r, g, b, emit) => {
+      if (n >= 768) return;
+      const o = n * 12;
+      arr[o] = x; arr[o + 1] = y; arr[o + 2] = z; arr[o + 3] = rotY;
+      arr[o + 4] = scale; arr[o + 5] = meshId; arr[o + 6] = flash; arr[o + 7] = phase;
+      arr[o + 8] = r; arr[o + 9] = g; arr[o + 10] = b; arr[o + 11] = emit;
+      n++;
+    };
+
+    // 传送带段（meshId 5；逐 1.0 单元采样折线）
+    const paths = rd.conveyor && rd.conveyor.paths ? rd.conveyor.paths : [];
+    let belts = 0;
+    const CAP_BELTS = 600;
+    for (const path of paths) {
+      if (belts >= CAP_BELTS) break;
+      const pts = path.pts;
+      if (!pts || pts.length < 2) continue;
+      for (let i = 1; i < pts.length && belts < CAP_BELTS; i++) {
+        const a = pts[i - 1];
+        const b = pts[i];
+        const segLen = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+        const rotY = Math.atan2(-(b[2] - a[2]), b[0] - a[0]);
+        const steps = Math.max(1, Math.round(segLen)); // 四舍五入保证带段无缝搭接
+        for (let k = 0; k < steps && belts < CAP_BELTS; k++) {
+          const f = steps > 0 ? k / steps : 0;
+          push(a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f,
+            rotY, 1.0, ACTOR_MESH_ID.conveyor, 0, 0, 0.42, 0.43, 0.46, 0);
+          belts++;
         }
       }
     }
 
-    // 目标物（objectives 里的 interactables）
-    for (const obj of view.objectives || []) {
-      if (!obj.position) continue;
-      const p = this._t2s(obj.position.x, obj.position.y);
-      const px = ox + p.x + TILE / 2;
-      const py = oy + p.y + TILE / 2;
-      const done = obj.done;
-      ctx.fillStyle = done ? '#62d98a' : obj.kind === 'boss' ? '#e85f5f' : '#e8b04f';
-      ctx.beginPath();
-      ctx.arc(px, py, 7, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#07090e';
-      ctx.stroke();
+    // 敌人（≤40 总量约束由任务数据保证；boss 相位提升自发光）
+    const enemies = rd.enemies || [];
+    for (const e of enemies) {
+      const kind = ACTOR_MESH_ID[e.kind] != null ? e.kind : 'grunt';
+      const c = ENEMY_COLORS[kind];
+      const bob = kind === 'boss' ? Math.sin(time * 1.5 + (e.phase || 0)) * 0.08 : 0;
+      const emit = kind === 'boss' ? 0.10 + 0.14 * (e.phase || 1) : 0;
+      push(e.x, e.y + bob, e.z, e.yaw || 0, 1.0, ACTOR_MESH_ID[kind],
+        e.flash || 0, e.phase || 1, c[0], c[1], c[2], emit);
     }
 
-    // 敌人
-    for (const e of view.enemies || []) {
-      if (e.state === 'dead') continue;
-      const px = ox + e.x;
-      const py = oy + e.y;
-      ctx.fillStyle = e.type === 'boss' ? '#e85f5f' : e.state === 'windup' ? '#e8b04f' : '#c96a6a';
-      ctx.beginPath();
-      ctx.arc(px, py, e.type === 'boss' ? 12 : 7, 0, Math.PI * 2);
-      ctx.fill();
-      if (e.state === 'windup') {
-        ctx.strokeStyle = '#ffd27a';
-        ctx.lineWidth = 2;
-        ctx.stroke();
-        ctx.lineWidth = 1;
+    // 殖民者（行走上下颠簸在 CPU 侧按相位确定性合成）
+    const colonists = rd.colonists || [];
+    for (const p of colonists) {
+      const bob = p.walk ? Math.abs(Math.sin(time * 7 + (p.phase || 0) * 6.2832)) * 0.05 : 0;
+      push(p.x, p.y + bob, p.z, p.rotY || 0, 1.0, ACTOR_MESH_ID.colonist, 0, 0, 0.95, 0.72, 0.42, 0);
+    }
+    this._actor.count = n;
+  }
+
+  /**
+   * 角色七部件模型矩阵：base = T(脚位+起伏) · Ry(yaw)，部件 = base · T(piv) · Rx · T(-piv)。
+   * 状态动画：run 摆臂摆腿 / dig 右臂钻振 / attack 劈砍（attackT 0..1）/ hurt 前倾。
+   */
+  _fillCharInstances(rd, opts, time) {
+    const ch = rd.character;
+    this._char.count = 0;
+    if (!ch || !this._charArr) return;
+    const arr = this._charArr;
+    const m = this._m;
+    const state = ch.state || 'idle';
+    const walkT = state === 'run' ? (ch.animT || 0) * 9 : 0;
+    const swing = state === 'run' ? Math.sin(walkT) : 0;
+    const bob = state === 'run'
+      ? Math.abs(Math.cos(walkT)) * 0.05
+      : Math.sin(time * 2.0) * 0.012;
+
+    // 基座：脚位 + 朝向
+    mat4Translate(m.base, ch.x, (ch.y || 0) + bob, ch.z);
+    mat4RotateY(m.tmp, ch.yaw || 0);
+    mat4Multiply(m.base, m.base, m.tmp);
+
+    // 部件姿态角（rx 绕枢轴局部 X，rz 次要）
+    const pose = {
+      head: { rx: state === 'run' ? -swing * 0.05 : 0, rz: 0 },
+      torso: { rx: state === 'run' ? swing * 0.06 : (state === 'hurt' ? 0.30 : 0), rz: 0 },
+      armL: { rx: state === 'run' ? swing * 0.6 : Math.sin(time * 1.7) * 0.05, rz: 0 },
+      armR: { rx: 0, rz: 0 },
+      legL: { rx: -swing * 0.75, rz: 0 },
+      legR: { rx: swing * 0.75, rz: 0 },
+      backpack: { rx: 0, rz: 0 },
+    };
+    if (state === 'dig') pose.armR.rx = -1.10 + Math.sin(time * 13.0) * 0.55;
+    else if (state === 'attack') pose.armR.rx = -2.30 + clamp(ch.attackT || 0, 0, 1) * 2.60;
+    else pose.armR.rx = state === 'run' ? -swing * 0.6 : -Math.sin(time * 1.7) * 0.05;
+
+    const names = this._char.partNames;
+    let count = 0;
+    for (let pi = 0; pi < names.length && count < 7; pi++) {
+      const name = names[pi];
+      const pv = EXO_PIVOTS[name] || [0, 1, 0];
+      const ang = pose[name] || { rx: 0, rz: 0 };
+      // part = base · T(piv) · Rx(rx) · Rz(rz) · T(-piv)
+      mat4Translate(m.piv, pv[0], pv[1], pv[2]);
+      mat4RotateX(m.rot, ang.rx);
+      mat4Multiply(m.piv, m.piv, m.rot);
+      mat4RotateZ(m.rot, ang.rz);
+      mat4Multiply(m.piv, m.piv, m.rot);
+      mat4Translate(m.tmp, -pv[0], -pv[1], -pv[2]);
+      mat4Multiply(m.piv, m.piv, m.tmp);
+      mat4Multiply(m.part, m.base, m.piv);
+
+      const o = count * 20;
+      for (let k = 0; k < 16; k++) arr[o + k] = m.part[k];
+      arr[o + 16] = pi;                  // iMisc.x 部件号
+      arr[o + 17] = ch.flash || 0;       // iMisc.y 闪白
+      arr[o + 18] = 0;                   // iMisc.z 自发光
+      arr[o + 19] = 0;                   // iMisc.w 保留
+      count++;
+    }
+    this._char.count = count;
+  }
+
+  // —— 特效 ————————————————
+
+  /** 刀光带 + 相机对齐光束 → 加性四元色缓冲 */
+  _buildFx(rd, eye) {
+    if (!this._fxArr) this._fxArr = new Float32Array(this._fx.capF);
+    const arr = this._fxArr;
+    let n = 0;
+    const cap = this._fx.capF;
+    const push = (x, y, z, r, g, b, a) => {
+      if (n + 7 > cap) return;
+      arr[n] = x; arr[n + 1] = y; arr[n + 2] = z; arr[n + 3] = r; arr[n + 4] = g; arr[n + 5] = b; arr[n + 6] = a;
+      n += 7;
+    };
+    const K = this.tier === 1 ? 10 : 6;
+
+    // 刀光带：内缘 r0 → 外缘 r1 的扇形缎带，进度 t 控制扫掠角
+    const slashes = (rd.effects && rd.effects.slashes) || [];
+    for (const s of slashes) {
+      const arc = s.arc != null ? s.arc : Math.PI * 0.9;
+      const prog = clamp(s.t != null ? s.t : 1, 0, 1);
+      const col = s.color || [0.55, 0.95, 1.20];
+      const r0 = 0.55;
+      const r1 = 1.30;
+      const y0 = 0.45;
+      const y1 = 1.50;
+      const start = (s.yaw || 0) - arc / 2;
+      let prev = null;
+      for (let k = 0; k <= K; k++) {
+        const a = start + arc * (k / K) * prog;
+        const ca = Math.cos(a);
+        const sa = Math.sin(a);
+        const inner = [s.x + r0 * ca, s.y + y0, s.z - r0 * sa];
+        const outer = [s.x + r1 * ca, s.y + y1, s.z - r1 * sa];
+        const fade = 1 - k / K;
+        if (prev) {
+          const a0 = prev.a * 0.85;
+          const a1 = fade * 0.85;
+          push(prev.i[0], prev.i[1], prev.i[2], col[0], col[1], col[2], a0);
+          push(inner[0], inner[1], inner[2], col[0], col[1], col[2], a1);
+          push(outer[0], outer[1], outer[2], col[0], col[1], col[2], a1);
+          push(prev.i[0], prev.i[1], prev.i[2], col[0], col[1], col[2], a0);
+          push(outer[0], outer[1], outer[2], col[0], col[1], col[2], a1);
+          push(prev.o[0], prev.o[1], prev.o[2], col[0], col[1], col[2], a0);
+        }
+        prev = { i: inner, o: outer, a: fade };
       }
-      // 血条
-      ctx.fillStyle = '#07090e';
-      ctx.fillRect(px - 10, py - 14, 20, 3);
-      ctx.fillStyle = '#e85f5f';
-      ctx.fillRect(px - 10, py - 14, 20 * Math.max(0, e.hp / e.hpMax), 3);
     }
 
-    // 玩家小队
-    for (const u of view.playerUnits || []) {
-      const px = ox + u.x;
-      const py = oy + u.y;
-      if (u.state === 'dead') {
-        ctx.fillStyle = '#46586e';
-        ctx.fillRect(px - 6, py - 2, 12, 4);
+    // 光束：两张正交相机对齐长条（保证任意视角可见）
+    const beams = (rd.effects && rd.effects.beams) || [];
+    for (const b of beams) {
+      const a = b.a;
+      const bb = b.b;
+      const col = b.color || [0.7, 1.0, 1.6];
+      const width = (b.width != null ? b.width : 0.09) / 2;
+      const dx = bb[0] - a[0];
+      const dy = bb[1] - a[1];
+      const dz = bb[2] - a[2];
+      const len = Math.hypot(dx, dy, dz) || 1e-4;
+      const ux = dx / len;
+      const uy = dy / len;
+      const uz = dz / len;
+      // side = normalize(u × (a - eye))；up = u × side
+      const wx = a[0] - eye[0];
+      const wy = a[1] - eye[1];
+      const wz = a[2] - eye[2];
+      let sx = uy * wz - uz * wy;
+      let sy = uz * wx - ux * wz;
+      let sz = ux * wy - uy * wx;
+      const sl = Math.hypot(sx, sy, sz) || 1;
+      sx /= sl; sy /= sl; sz /= sl;
+      const tx = uy * sz - uz * sy;
+      const ty = uz * sx - ux * sz;
+      const tz = ux * sy - uy * sx;
+      const quads = [[sx, sy, sz], [tx, ty, tz]];
+      for (const q of quads) {
+        const hw = width;
+        push(a[0] - q[0] * hw, a[1] - q[1] * hw, a[2] - q[2] * hw, col[0], col[1], col[2], 0.95);
+        push(a[0] + q[0] * hw, a[1] + q[1] * hw, a[2] + q[2] * hw, col[0], col[1], col[2], 0.95);
+        push(bb[0] + q[0] * hw, bb[1] + q[1] * hw, bb[2] + q[2] * hw, col[0], col[1], col[2], 0.35);
+        push(a[0] - q[0] * hw, a[1] - q[1] * hw, a[2] - q[2] * hw, col[0], col[1], col[2], 0.95);
+        push(bb[0] + q[0] * hw, bb[1] + q[1] * hw, bb[2] + q[2] * hw, col[0], col[1], col[2], 0.35);
+        push(bb[0] - q[0] * hw, bb[1] - q[1] * hw, bb[2] - q[2] * hw, col[0], col[1], col[2], 0.35);
+      }
+    }
+    this._fx.count = n / this._fx.strideF;
+  }
+
+  /** 红色 AoE 预警贴花：地表圆盘 + 亮边环（α 混合，脉冲由着色器 uPulse 驱动） */
+  _buildDecals(rd, time) {
+    if (!this._decalArr) this._decalArr = new Float32Array(this._decal.capF);
+    const arr = this._decalArr;
+    let n = 0;
+    const cap = this._decal.capF;
+    const push = (x, y, z, r, g, b, a) => {
+      if (n + 7 > cap) return;
+      arr[n] = x; arr[n + 1] = y; arr[n + 2] = z; arr[n + 3] = r; arr[n + 4] = g; arr[n + 5] = b; arr[n + 6] = a;
+      n += 7;
+    };
+    const K = 16;
+    const aoes = (rd.effects && rd.effects.aoe) || [];
+    for (const d of aoes) {
+      const r = d.r != null ? d.r : 2.2;
+      const hy = getSurfaceHeight(this.sw, d.x, d.z);
+      const y = (hy >= 0 ? hy + 1 : (d.y != null ? d.y : 0)) + 0.05;
+      const grow = clamp(d.t != null ? d.t : 1, 0, 1);
+      const rr = r * (0.25 + 0.75 * grow);
+      // 内盘（暗）
+      for (let k = 0; k < K; k++) {
+        const a0 = (k / K) * Math.PI * 2;
+        const a1 = ((k + 1) / K) * Math.PI * 2;
+        push(d.x, y, d.z, 1.0, 0.16, 0.12, 0.20);
+        push(d.x + rr * Math.cos(a0), y, d.z + rr * Math.sin(a0), 1.0, 0.16, 0.12, 0.24);
+        push(d.x + rr * Math.cos(a1), y, d.z + rr * Math.sin(a1), 1.0, 0.16, 0.12, 0.24);
+      }
+      // 边环（亮）
+      for (let k = 0; k < K; k++) {
+        const a0 = (k / K) * Math.PI * 2;
+        const a1 = ((k + 1) / K) * Math.PI * 2;
+        const r0 = rr * 0.82;
+        push(d.x + r0 * Math.cos(a0), y, d.z + r0 * Math.sin(a0), 1.0, 0.22, 0.14, 0.55);
+        push(d.x + rr * Math.cos(a0), y, d.z + rr * Math.sin(a0), 1.0, 0.22, 0.14, 0.65);
+        push(d.x + rr * Math.cos(a1), y, d.z + rr * Math.sin(a1), 1.0, 0.22, 0.14, 0.65);
+        push(d.x + r0 * Math.cos(a0), y, d.z + r0 * Math.sin(a0), 1.0, 0.22, 0.14, 0.55);
+        push(d.x + rr * Math.cos(a1), y, d.z + rr * Math.sin(a1), 1.0, 0.22, 0.14, 0.65);
+        push(d.x + r0 * Math.cos(a1), y, d.z + r0 * Math.sin(a1), 1.0, 0.22, 0.14, 0.55);
+      }
+    }
+    void time; // 脉冲由 uPulse 着色器分支驱动
+    this._decal.count = n / this._decal.strideF;
+  }
+
+  // —— 挖掘粒子 ————————————————
+
+  /** 消费 digEvents 按确定性哈希初速喷发粒子并步进池（重力 + 寿命） */
+  _updateParticles(rd, dt, tier) {
+    const pool = this._pool;
+    // —— 喷发 ——
+    const events = (rd.effects && rd.effects.digEvents) || [];
+    for (const ev of events) {
+      const nSpawn = tier === 1 ? 8 : 4;
+      for (let i = 0; i < nSpawn && pool.n < pool.cap; i++) {
+        const id = this._spawnSeq++;
+        const p = pool.n++;
+        const f1 = hash01(id * 4 + 1);
+        const f2 = hash01(id * 4 + 2);
+        const f3 = hash01(id * 4 + 3);
+        const f4 = hash01(id * 4 + 4);
+        pool.x[p] = ev.x + 0.5 + (f1 - 0.5) * 0.6;
+        pool.y[p] = ev.y + 0.5 + (f2 - 0.5) * 0.6;
+        pool.z[p] = ev.z + 0.5 + (f3 - 0.5) * 0.6;
+        pool.vx[p] = (f1 - 0.5) * 3.4;
+        pool.vy[p] = 2.0 + f4 * 2.6;
+        pool.vz[p] = (f3 - 0.5) * 3.4;
+        pool.life[p] = 0.5 + f4 * 0.3;
+        pool.life0[p] = pool.life[p];
+        pool.size[p] = 0.09 + f2 * 0.07;
+        pool.matId[p] = ev.matId != null ? ev.matId : SURFACE_MAT.ROCK;
+      }
+    }
+    // —— 步进（倒序交换删除） ——
+    for (let p = pool.n - 1; p >= 0; p--) {
+      pool.life[p] -= dt;
+      if (pool.life[p] <= 0) {
+        const last = pool.n - 1;
+        if (p !== last) {
+          pool.x[p] = pool.x[last]; pool.y[p] = pool.y[last]; pool.z[p] = pool.z[last];
+          pool.vx[p] = pool.vx[last]; pool.vy[p] = pool.vy[last]; pool.vz[p] = pool.vz[last];
+          pool.life[p] = pool.life[last]; pool.life0[p] = pool.life0[last];
+          pool.size[p] = pool.size[last]; pool.matId[p] = pool.matId[last];
+        }
+        pool.n--;
         continue;
       }
-      const isControlled = u.controlled;
-      ctx.fillStyle = isControlled ? '#4fd8e8' : '#7ea8ff';
-      if (u.state === 'dodge') ctx.globalAlpha = 0.55;
-      ctx.beginPath();
-      ctx.arc(px, py, 8, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.globalAlpha = 1;
-      // 朝向
-      ctx.strokeStyle = '#c9d6e3';
-      ctx.beginPath();
-      ctx.moveTo(px, py);
-      ctx.lineTo(px + Math.cos(u.facing || 0) * 13, py + Math.sin(u.facing || 0) * 13);
-      ctx.stroke();
-      // 状态环
-      if (u.state === 'block') {
-        ctx.strokeStyle = '#e8b04f';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(px, py, 11, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.lineWidth = 1;
-      }
-      if (u.state === 'attack') {
-        ctx.strokeStyle = '#ffffff';
-        ctx.beginPath();
-        ctx.arc(px, py, 10, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-      // 血/盾/耐力条
-      ctx.fillStyle = '#07090e';
-      ctx.fillRect(px - 12, py - 18, 24, 6);
-      ctx.fillStyle = '#62d98a';
-      ctx.fillRect(px - 12, py - 18, 24 * Math.max(0, u.hp / u.hpMax), 3);
-      ctx.fillStyle = '#4fd8e8';
-      ctx.fillRect(px - 12, py - 15, 24 * Math.max(0, u.shield / u.shieldMax), 3);
-      if (isControlled) {
-        ctx.fillStyle = '#e8b04f';
-        ctx.fillRect(px - 12, py - 12, 24 * Math.max(0, u.stamina / 100), 2);
-      }
+      pool.vy[p] -= 13.0 * dt;
+      pool.x[p] += pool.vx[p] * dt;
+      pool.y[p] += pool.vy[p] * dt;
+      pool.z[p] += pool.vz[p] * dt;
     }
+  }
 
-    // HUD 文本
-    ctx.fillStyle = '#71839a';
-    ctx.font = '11px monospace';
-    ctx.fillText(`T+${Math.round(view.time)}s  目标 ${view.objectivesDone}/${view.objectivesTotal || (view.objectives || []).length}`, 10, 16);
+  /** 粒子池 → 点精灵缓冲（颜色 = 材质基色提亮，α = 剩余寿命比） */
+  _packParticles(tier) {
+    if (!this._partArr) this._partArr = new Float32Array(this._particle.capF);
+    const arr = this._partArr;
+    const pool = this._pool;
+    const maxN = tier === 1 ? 256 : 128;
+    let n = 0;
+    for (let p = 0; p < pool.n && n < maxN; p++) {
+      const o = n * 8;
+      const c = MATERIAL_COLORS[pool.matId[p]] || MATERIAL_COLORS[2];
+      arr[o] = pool.x[p];
+      arr[o + 1] = pool.y[p];
+      arr[o + 2] = pool.z[p];
+      arr[o + 3] = Math.min(1.6, c[0] * 1.7 + 0.08);
+      arr[o + 4] = Math.min(1.6, c[1] * 1.7 + 0.08);
+      arr[o + 5] = Math.min(1.6, c[2] * 1.7 + 0.08);
+      arr[o + 6] = clamp(pool.life[p] / Math.max(1e-4, pool.life0[p]), 0, 1);
+      arr[o + 7] = pool.size[p];
+      n++;
+    }
+    this._uploadDynamic(this._particle, arr);
+    return n;
+  }
+
+  // —— 生命周期 ————
+
+  /** 释放本类直接持有的 GL 资源（glc.destroy() 仍会兜底清册回收） */
+  destroy() {
+    if (this._destroyed) return;
+    this._destroyed = true;
+    const gl = this.gl;
+    if (!gl) return;
+    const delBuf = (b) => { if (b) gl.deleteBuffer(b); };
+    if (this._terr) { delBuf(this._terr.vboP); delBuf(this._terr.vboN); delBuf(this._terr.vboC); gl.deleteVertexArray(this._terr.vao); }
+    for (const e of [this._box, this._actor]) {
+      if (e) { delBuf(e.inst); gl.deleteVertexArray(e.vao); }
+    }
+    if (this._char) { delBuf(this._char.inst); gl.deleteVertexArray(this._char.vao); }
+    for (const e of [this._fx, this._decal, this._particle]) {
+      if (e) { delBuf(e.vbo); gl.deleteVertexArray(e.vao); }
+    }
+    if (this._skyVao) gl.deleteVertexArray(this._skyVao);
+    for (const p of [this.progSky, this.progTerrain, this.progBox, this.progActor, this.progChar, this.progQuadC, this.progPart]) {
+      if (p) gl.deleteProgram(p);
+    }
+    this._terr = null;
+    this._box = null;
+    this._actor = null;
+    this._char = null;
+    this._fx = null;
+    this._decal = null;
+    this._particle = null;
+    this._skyVao = null;
+    this._inited = false;
   }
 }
 
-Object.assign(__exports, { GroundRenderer });
+Object.assign(__exports, { PlanetSurface3D });
 
 });
 __register("src/render/CanvasManager.js", function (__exports, __require) {
@@ -20293,238 +25143,6 @@ function availableHullIds() {
 Object.assign(__exports, { buildHullMesh, availableHullIds });
 
 });
-__register("src/render/gl/Mat4.js", function (__exports, __require) {
-/**
- * render/gl/Mat4.js — 4x4 列主序矩阵工具（WebGL 约定）
- *
- * 移植自参考实现 simulation-matrix/common/math/mat4.js，并补全：
- *  - mat4TRS：欧拉角（yaw=Y, pitch=X, roll=Z，合成顺序 R = Ry·Rx·Rz）模型矩阵；
- *  - vec3ApplyMat4 / mat4MulVec4：向量变换。
- *
- * 零分配约定：所有 out 均由调用方传入 Float32Array(16)（vec3 为 Float32Array(3)），
- * 渲染循环内不产生任何新数组。存储布局：m[col * 4 + row]（列主序）。
- */
-
-/** 新建单位矩阵（唯一的分配点：仅限初始化阶段调用） */
-function mat4() {
-  const m = new Float32Array(16);
-  m[0] = 1; m[5] = 1; m[10] = 1; m[15] = 1;
-  return m;
-}
-
-/** out = 单位矩阵 */
-function mat4Identity(out) {
-  out.fill(0);
-  out[0] = 1; out[5] = 1; out[10] = 1; out[15] = 1;
-  return out;
-}
-
-/** out = a * b（列主序；语义为先施加 b 再施加 a） */
-function mat4Multiply(out, a, b) {
-  const a00 = a[0], a01 = a[1], a02 = a[2], a03 = a[3];
-  const a10 = a[4], a11 = a[5], a12 = a[6], a13 = a[7];
-  const a20 = a[8], a21 = a[9], a22 = a[10], a23 = a[11];
-  const a30 = a[12], a31 = a[13], a32 = a[14], a33 = a[15];
-  for (let i = 0; i < 4; i++) {
-    const b0 = b[i * 4], b1 = b[i * 4 + 1], b2 = b[i * 4 + 2], b3 = b[i * 4 + 3];
-    out[i * 4] = b0 * a00 + b1 * a10 + b2 * a20 + b3 * a30;
-    out[i * 4 + 1] = b0 * a01 + b1 * a11 + b2 * a21 + b3 * a31;
-    out[i * 4 + 2] = b0 * a02 + b1 * a12 + b2 * a22 + b3 * a32;
-    out[i * 4 + 3] = b0 * a03 + b1 * a13 + b2 * a23 + b3 * a33;
-  }
-  return out;
-}
-
-/** 透视投影矩阵（fovy 为竖直视场角，弧度） */
-function mat4Perspective(out, fovyRad, aspect, near, far) {
-  const f = 1 / Math.tan(fovyRad / 2);
-  out.fill(0);
-  out[0] = f / aspect;
-  out[5] = f;
-  out[10] = (far + near) / (near - far);
-  out[11] = -1;
-  out[14] = (2 * far * near) / (near - far);
-  return out;
-}
-
-/** 正交投影矩阵 */
-function mat4Ortho(out, left, right, bottom, top, near, far) {
-  out.fill(0);
-  out[0] = 2 / (right - left);
-  out[5] = 2 / (top - bottom);
-  out[10] = -2 / (far - near);
-  out[12] = -(right + left) / (right - left);
-  out[13] = -(top + bottom) / (top - bottom);
-  out[14] = -(far + near) / (far - near);
-  out[15] = 1;
-  return out;
-}
-
-/** 视图矩阵：相机位于 eye，看向 center，up 为世界上方向（右手系） */
-function mat4LookAt(out, eye, center, up) {
-  let zx = eye[0] - center[0];
-  let zy = eye[1] - center[1];
-  let zz = eye[2] - center[2];
-  let len = Math.sqrt(zx * zx + zy * zy + zz * zz);
-  if (len === 0) { zx = 0; zy = 0; zz = 1; len = 1; }
-  zx /= len; zy /= len; zz /= len;
-  let xx = up[1] * zz - up[2] * zy;
-  let xy = up[2] * zx - up[0] * zz;
-  let xz = up[0] * zy - up[1] * zx;
-  len = Math.sqrt(xx * xx + xy * xy + xz * xz);
-  if (len === 0) { xx = 1; xy = 0; xz = 0; } else { xx /= len; xy /= len; xz /= len; }
-  const yx = zy * xz - zz * xy;
-  const yy = zz * xx - zx * xz;
-  const yz = zx * xy - zy * xx;
-  out[0] = xx; out[1] = yx; out[2] = zx; out[3] = 0;
-  out[4] = xy; out[5] = yy; out[6] = zy; out[7] = 0;
-  out[8] = xz; out[9] = yz; out[10] = zz; out[11] = 0;
-  out[12] = -(xx * eye[0] + xy * eye[1] + xz * eye[2]);
-  out[13] = -(yx * eye[0] + yy * eye[1] + yz * eye[2]);
-  out[14] = -(zx * eye[0] + zy * eye[1] + zz * eye[2]);
-  out[15] = 1;
-  return out;
-}
-
-/** 一般 4x4 求逆（伴随展开法）。奇异矩阵返回 null。 */
-function mat4Invert(out, m) {
-  const a00 = m[0], a01 = m[1], a02 = m[2], a03 = m[3];
-  const a10 = m[4], a11 = m[5], a12 = m[6], a13 = m[7];
-  const a20 = m[8], a21 = m[9], a22 = m[10], a23 = m[11];
-  const a30 = m[12], a31 = m[13], a32 = m[14], a33 = m[15];
-
-  const b00 = a00 * a11 - a01 * a10;
-  const b01 = a00 * a12 - a02 * a10;
-  const b02 = a00 * a13 - a03 * a10;
-  const b03 = a01 * a12 - a02 * a11;
-  const b04 = a01 * a13 - a03 * a11;
-  const b05 = a02 * a13 - a03 * a12;
-  const b06 = a20 * a31 - a21 * a30;
-  const b07 = a20 * a32 - a22 * a30;
-  const b08 = a20 * a33 - a23 * a30;
-  const b09 = a21 * a32 - a22 * a31;
-  const b10 = a21 * a33 - a23 * a31;
-  const b11 = a22 * a33 - a23 * a32;
-
-  let det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
-  if (!det) return null;
-  det = 1.0 / det;
-
-  out[0] = (a11 * b11 - a12 * b10 + a13 * b09) * det;
-  out[1] = (a02 * b10 - a01 * b11 - a03 * b09) * det;
-  out[2] = (a31 * b05 - a32 * b04 + a33 * b03) * det;
-  out[3] = (a22 * b04 - a21 * b05 - a23 * b03) * det;
-  out[4] = (a12 * b08 - a10 * b11 - a13 * b07) * det;
-  out[5] = (a00 * b11 - a02 * b08 + a03 * b07) * det;
-  out[6] = (a32 * b02 - a30 * b05 - a33 * b01) * det;
-  out[7] = (a20 * b05 - a22 * b02 + a23 * b01) * det;
-  out[8] = (a10 * b10 - a11 * b08 + a13 * b06) * det;
-  out[9] = (a01 * b08 - a00 * b10 - a03 * b06) * det;
-  out[10] = (a30 * b04 - a31 * b02 + a33 * b00) * det;
-  out[11] = (a21 * b02 - a20 * b04 - a23 * b00) * det;
-  out[12] = (a11 * b07 - a10 * b09 - a12 * b06) * det;
-  out[13] = (a00 * b09 - a01 * b07 + a02 * b06) * det;
-  out[14] = (a31 * b01 - a30 * b03 - a32 * b00) * det;
-  out[15] = (a20 * b03 - a21 * b01 + a22 * b00) * det;
-  return out;
-}
-
-/** 平移矩阵（覆盖 out，非右乘叠加） */
-function mat4Translate(out, x, y, z) {
-  mat4Identity(out);
-  out[12] = x; out[13] = y; out[14] = z;
-  return out;
-}
-
-/** 缩放矩阵（覆盖 out） */
-function mat4Scale(out, x, y, z) {
-  mat4Identity(out);
-  out[0] = x; out[5] = y; out[10] = z;
-  return out;
-}
-
-/** 绕 X 轴旋转矩阵（弧度，右手系；覆盖 out） */
-function mat4RotateX(out, rad) {
-  mat4Identity(out);
-  const c = Math.cos(rad), s = Math.sin(rad);
-  out[5] = c; out[6] = s; out[9] = -s; out[10] = c;
-  return out;
-}
-
-/** 绕 Y 轴旋转矩阵（弧度，右手系；覆盖 out） */
-function mat4RotateY(out, rad) {
-  mat4Identity(out);
-  const c = Math.cos(rad), s = Math.sin(rad);
-  out[0] = c; out[2] = -s; out[8] = s; out[10] = c;
-  return out;
-}
-
-/** 绕 Z 轴旋转矩阵（弧度，右手系；覆盖 out） */
-function mat4RotateZ(out, rad) {
-  mat4Identity(out);
-  const c = Math.cos(rad), s = Math.sin(rad);
-  out[0] = c; out[1] = s; out[4] = -s; out[5] = c;
-  return out;
-}
-
-/**
- * 欧拉合成模型矩阵：out = T(t) · Ry(ry) · Rx(rx) · Rz(rz) · S(s)
- * 约定：ry = yaw（偏航，绕 Y），rx = pitch（俯仰，绕 X），rz = roll（翻滚，绕 Z），
- * 旋转合成顺序为 R = Ry·Rx·Rz（先 roll，再 pitch，最后 yaw）。
- * 解析展开一次写就，避免中间矩阵与临时分配。
- */
-function mat4TRS(out, tx, ty, tz, rx, ry, rz, s) {
-  const cx = Math.cos(rx), sx = Math.sin(rx);
-  const cy = Math.cos(ry), sy = Math.sin(ry);
-  const cz = Math.cos(rz), sz = Math.sin(rz);
-
-  // R = Ry·Rx·Rz 的三个列向量（展开自 (cy·cz + sy·sx·sz) 等解析式）
-  out[0] = (cy * cz + sy * sx * sz) * s;   // 列 0 行 0：R·e_x.x
-  out[1] = cx * sz * s;                    // 列 0 行 1
-  out[2] = (-sy * cz + cy * sx * sz) * s;  // 列 0 行 2
-  out[3] = 0;
-  out[4] = (-cy * sz + sy * sx * cz) * s;  // 列 1 行 0：R·e_y.x
-  out[5] = cx * cz * s;                    // 列 1 行 1
-  out[6] = (sy * sz + cy * sx * cz) * s;   // 列 1 行 2
-  out[7] = 0;
-  out[8] = sy * cx * s;                    // 列 2 行 0：R·e_z.x
-  out[9] = -sx * s;                        // 列 2 行 1
-  out[10] = cy * cx * s;                   // 列 2 行 2
-  out[11] = 0;
-  out[12] = tx;                            // 列 3：平移
-  out[13] = ty;
-  out[14] = tz;
-  out[15] = 1;
-  return out;
-}
-
-/**
- * 用 4x4 矩阵变换三维点/向量（隐含 w=1）并做透视除法（w=0 时按 1 处理）。
- * out 为 Float32Array(3)，允许 out === v。
- */
-function vec3ApplyMat4(out, m, v) {
-  const x = v[0], y = v[1], z = v[2];
-  const w = m[3] * x + m[7] * y + m[11] * z + m[15];
-  const inv = w !== 0 ? 1 / w : 1;
-  out[0] = (m[0] * x + m[4] * y + m[8] * z + m[12]) * inv;
-  out[1] = (m[1] * x + m[5] * y + m[9] * z + m[13]) * inv;
-  out[2] = (m[2] * x + m[6] * y + m[10] * z + m[14]) * inv;
-  return out;
-}
-
-/** 用 4x4 矩阵变换四维向量（完整分量，含 w 行），允许 out === v。 */
-function mat4MulVec4(out, m, v) {
-  const x = v[0], y = v[1], z = v[2], w = v[3];
-  out[0] = m[0] * x + m[4] * y + m[8] * z + m[12] * w;
-  out[1] = m[1] * x + m[5] * y + m[9] * z + m[13] * w;
-  out[2] = m[2] * x + m[6] * y + m[10] * z + m[14] * w;
-  out[3] = m[3] * x + m[7] * y + m[11] * z + m[15] * w;
-  return out;
-}
-
-Object.assign(__exports, { mat4, mat4Identity, mat4Multiply, mat4Perspective, mat4Ortho, mat4LookAt, mat4Invert, mat4Translate, mat4Scale, mat4RotateX, mat4RotateY, mat4RotateZ, mat4TRS, vec3ApplyMat4, mat4MulVec4 });
-
-});
 __register("src/app/Router.js", function (__exports, __require) {
 /**
  * app/Router.js — hash 路由（任务书 8.6：#/galaxy 形式，兼容 GitHub Pages 二级路径）
@@ -21547,7 +26165,8 @@ __register("src/ui/screens/ColonyView.js", function (__exports, __require) {
 /**
  * ui/screens/ColonyView.js — 殖民地管理视图（任务书 6.2 colonyDetail）
  *
- * 结构：.vf-view > .vf-view-head（标题 + 殖民地下拉 + 名称/标签 + 稳定度仪表 + 升级按钮）
+ * 结构：.vf-view > .vf-view-head（标题 + 殖民地下拉 + 名称/标签 + 稳定度仪表
+ *            + 3D 地表模式切换 + 升级按钮）
  *            + .vf-view-body.pad（三列 grid：人口与环境 / 建筑与建造 / 库存与账本）
  *
  * 数据来源：simulation/ViewModels.colonyDetail（只读）+ 快照 colonies 列表；
@@ -21809,7 +26428,7 @@ const ColonyView = {
     this._bodyEl.scrollLeft = savedLeft;
   },
 
-  /** 头部动态区：名称 / 前哨标签 / 稳定度仪表 / 升级按钮 */
+  /** 头部动态区：名称 / 前哨标签 / 稳定度仪表 / 3D 地表切换 / 升级按钮 */
   _renderHead(detail) {
     if (!this._headDyn) return;
     clearEl(this._headDyn);
@@ -21825,6 +26444,24 @@ const ColonyView = {
       value: Math.round(detail.stability), max: 100, label: '稳定度', width: 132, height: 76,
     }));
     this._headDyn.appendChild(el('span', { class: 'vf-grow' }));
+
+    // 头部 3D 地表切换：直达全 3D 行星地表视图（体素地形 + 第三人称 RPG）；
+    // 目标行星经 app._groundTargetPlanet 传给 GroundView
+    const app = this.app;
+    const groundPlanetId = detail.planet ? detail.planet.id : null;
+    this._headDyn.appendChild(el('button', {
+      class: 'vf-btn primary',
+      text: '🌍 3D 地表模式',
+      title: '切换到全 3D 行星地表视图（体素地形 + 第三人称 RPG）',
+      disabled: groundPlanetId ? null : true,
+      on: {
+        click: () => {
+          // 设置 GroundView 的目标行星
+          app._groundTargetPlanet = groundPlanetId;
+          app.goto('ground');
+        },
+      },
+    }));
 
     if (detail.isOutpost) {
       // 升级失败（资源不足等）由命令总线 toast 反馈
@@ -22525,6 +27162,8 @@ const SystemView = {
    * 行星卡：名称/类别/宜居度/重力/大气（+层级≥3 时的矿藏）与操作按钮。
    * 「建立前哨」条件：调查层级≥3、宜居度≥20、无殖民地（FoundOutpost 命令还需
    * 一支在本星系的己方舰队 —— 无舰队时按钮禁用并给出提示）。
+   * 「登陆行星地表」条件：调查层级≥3 且该行星无进行中的地面行动（active 任务）——
+   * 主操作入口直达全 3D 行星地表视图（目标行星经 app._groundTargetPlanet 传给 GroundView）。
    */
   _planetCard(p, lvl) {
     const app = this.app;
@@ -22575,6 +27214,22 @@ const SystemView = {
           click: () => {
             // FoundOutpost 校验要求执行舰队；附带本系玩家舰队使命令可直接成立
             app.dispatch('FoundOutpost', fleetId ? { planetId: p.id, fleetId } : { planetId: p.id });
+          },
+        },
+      }));
+    }
+
+    // 卡片底部主操作：登陆行星地表（调查层级≥3 且无进行中的地面行动时提供）
+    if (lvl >= 3 && !this._hasActiveGroundMission(p.id)) {
+      card.appendChild(el('button', {
+        class: 'vf-btn primary mt-1',
+        text: '🚀 登陆行星地表',
+        title: '降落小队 / 视察殖民地 — 进入全 3D 行星地表',
+        on: {
+          click: () => {
+            // 设置 GroundView 的目标行星
+            app._groundTargetPlanet = p.id;
+            app.goto('ground');
           },
         },
       }));
@@ -22667,6 +27322,15 @@ const SystemView = {
     if (node && typeof node.scrollIntoView === 'function') {
       node.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
+  },
+
+  /** 该行星是否已有进行中的地面行动（active 状态；有则不重复提供登陆入口） */
+  _hasActiveGroundMission(planetId) {
+    const w = this.app.world;
+    if (!w || !w.entities || !w.entities.groundMissions) return false;
+    return Object.values(w.entities.groundMissions).some(
+      (m) => m && m.status === 'active' && m.planetId === planetId,
+    );
   },
 
   /** 本星系第一支可执行命令的玩家舰队（非在途），无则 null */
@@ -28800,27 +33464,267 @@ Object.assign(__exports, { MenuView });
 });
 __register("src/render/AudioManager.js", function (__exports, __require) {
 /**
- * render/AudioManager.js — Web Audio 合成音效管理器（任务书 6.8 / 1.3）
+ * render/AudioManager.js — Web Audio 合成音效管理器（任务书 6.8 / 1.3；R9 环境音扩展）
  *
  * 全部程序化合成（无音频文件）；首次用户交互后 resume；
- * 音量总线：master → { sfx }；静音不影响任何游戏规则。
+ * 音量总线：master → { sfx（短音直连总输出）, music（环境音总线） }；静音不影响任何游戏规则。
+ *
+ * R9 多场景程序化环境音层（startAmbient / stopAmbient / setScene / setMusicVolume）：
+ *  - 每个场景一条持续合成音底：振荡器 + 滤波器 + LFO + 噪声源，全部 Web Audio 实时合成；
+ *  - 场景层经独立 GainNode（交叉淡化包络）接入 musicVolume 音乐总线再出总输出；
+ *  - 场景切换 / 停止均为 1.5s 线性交叉淡化；
+ *  - ground 场景的偶发鸟鸣/机械短音由确定性整数哈希触发（绝不使用 Math.random）；
+ *  - 本模块顶层不触碰 document/window：AudioContext 与定时器均延迟到方法调用中创建。
  */
 
 const LS_KEY = 'vf-audio-v1';
+
+/** 场景交叉淡化时长（秒） */
+const AMBIENT_XFADE_SEC = 1.5;
+
+/** 各场景环境音层的目标电平（交叉淡化终点；经 musicVolume 总线二次缩放） */
+const SCENE_LEVEL = {
+  deepSpace: 0.55,
+  starCorona: 0.32,
+  planet: 0.45,
+  combat: 0.3,
+  ground: 0.5,
+  menu: 0.5,
+};
+
+/** 确定性整数哈希 → [0,1)（ground 偶发事件触发源；绝不使用 Math.random） */
+function hash01(n) {
+  let h = Math.imul(n ^ 0x9e3779b9, 0x85ebca6b) >>> 0;
+  h ^= h >>> 13;
+  h = Math.imul(h, 0xc2b2ae35) >>> 0;
+  h ^= h >>> 16;
+  return h / 4294967296;
+}
+
+/** 确定性 xorshift32 伪随机流（噪声缓冲填充；种子固定 → 波形可复现） */
+function xorshift32(seed) {
+  let s = seed >>> 0;
+  return () => {
+    s ^= s << 13; s >>>= 0;
+    s ^= s >>> 17;
+    s ^= s << 5; s >>>= 0;
+    return s / 4294967296;
+  };
+}
+
+/** 软削波失真曲线（combat 场景 WaveShaper；确定性生成） */
+function distortionCurve(k = 24) {
+  const n = 256;
+  const curve = new Float32Array(n);
+  const norm = Math.tanh(k);
+  for (let i = 0; i < n; i++) {
+    const x = (i / (n - 1)) * 2 - 1;
+    curve[i] = Math.tanh(x * k) / norm;
+  }
+  return curve;
+}
+
+/**
+ * 场景环境音配方（全部 Web Audio 实时合成，无采样文件；全程确定性，无 Math.random）。
+ * kit: { stops: 需 stop 的源[], timers: 需 clearInterval 的定时器[], noise: 共享噪声缓冲 }
+ */
+const AMBIENT_BUILDERS = {
+  /** deepSpace：低频正弦 55Hz + 慢速 LFO 音高调制 + 白噪声 lowpass 200Hz（星海嗡鸣） */
+  deepSpace(ctx, out, kit) {
+    const sub = ctx.createOscillator();
+    sub.type = 'sine';
+    sub.frequency.value = 55;
+    const subGain = ctx.createGain();
+    subGain.gain.value = 0.5;
+    sub.connect(subGain).connect(out);
+    const lfo = ctx.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.value = 0.07; // 慢速漂移
+    const lfoDepth = ctx.createGain();
+    lfoDepth.gain.value = 9;    // 音高摆动 ±9Hz
+    lfo.connect(lfoDepth).connect(sub.frequency);
+    const noise = ctx.createBufferSource();
+    noise.buffer = kit.noise;
+    noise.loop = true;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 200;
+    const noiseGain = ctx.createGain();
+    noiseGain.gain.value = 0.18;
+    noise.connect(lp).connect(noiseGain).connect(out);
+    sub.start();
+    lfo.start();
+    noise.start();
+    kit.stops.push(sub, lfo, noise);
+  },
+
+  /** starCorona：中频锯齿 110Hz → bandpass 800Hz + 快速 LFO 幅度调制（日冕等离子涌动） */
+  starCorona(ctx, out, kit) {
+    const saw = ctx.createOscillator();
+    saw.type = 'sawtooth';
+    saw.frequency.value = 110;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = 800;
+    bp.Q.value = 2.2;
+    const amp = ctx.createGain();
+    amp.gain.value = 0.55;
+    saw.connect(bp).connect(amp).connect(out);
+    const lfo = ctx.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.value = 5.4; // 快速涌动
+    const lfoDepth = ctx.createGain();
+    lfoDepth.gain.value = 0.26;
+    lfo.connect(lfoDepth).connect(amp.gain);
+    saw.start();
+    lfo.start();
+    kit.stops.push(saw, lfo);
+  },
+
+  /** planet：噪声 bandpass 400–1200Hz 缓慢扫掠 + 缓慢音量摆动（行星风声） */
+  planet(ctx, out, kit) {
+    const noise = ctx.createBufferSource();
+    noise.buffer = kit.noise;
+    noise.loop = true;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = 800; // 400–1200 中点
+    bp.Q.value = 0.9;
+    const wind = ctx.createGain();
+    wind.gain.value = 0.6;
+    noise.connect(bp).connect(wind).connect(out);
+    const sweep = ctx.createOscillator();
+    sweep.type = 'sine';
+    sweep.frequency.value = 0.05;
+    const sweepDepth = ctx.createGain();
+    sweepDepth.gain.value = 400; // ±400Hz → 通带 400..1200Hz
+    sweep.connect(sweepDepth).connect(bp.frequency);
+    const sway = ctx.createOscillator();
+    sway.type = 'sine';
+    sway.frequency.value = 0.031;
+    const swayDepth = ctx.createGain();
+    swayDepth.gain.value = 0.22; // 缓慢音量摆动
+    sway.connect(swayDepth).connect(wind.gain);
+    noise.start();
+    sweep.start();
+    sway.start();
+    kit.stops.push(noise, sweep, sway);
+  },
+
+  /** combat：低频 80Hz 方波脉冲 → WaveShaper 失真 + 快速 LFO 幅度脉动 */
+  combat(ctx, out, kit) {
+    const sq = ctx.createOscillator();
+    sq.type = 'square';
+    sq.frequency.value = 80;
+    const shaper = ctx.createWaveShaper();
+    shaper.curve = distortionCurve();
+    shaper.oversample = '2x';
+    const amp = ctx.createGain();
+    amp.gain.value = 0.5;
+    sq.connect(shaper).connect(amp).connect(out);
+    const lfo = ctx.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.value = 6.0; // 快速脉动
+    const lfoDepth = ctx.createGain();
+    lfoDepth.gain.value = 0.28;
+    lfo.connect(lfoDepth).connect(amp.gain);
+    sq.start();
+    lfo.start();
+    kit.stops.push(sq, lfo);
+  },
+
+  /** ground：噪声 lowpass 600Hz + 中速 LFO + 确定性偶发高频短音（鸟鸣/机械哨声） */
+  ground(ctx, out, kit) {
+    const noise = ctx.createBufferSource();
+    noise.buffer = kit.noise;
+    noise.loop = true;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 600;
+    const amp = ctx.createGain();
+    amp.gain.value = 0.3;
+    noise.connect(lp).connect(amp).connect(out);
+    const lfo = ctx.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.value = 0.22; // 中速起伏
+    const lfoDepth = ctx.createGain();
+    lfoDepth.gain.value = 0.12;
+    lfo.connect(lfoDepth).connect(amp.gain);
+    noise.start();
+    lfo.start();
+    kit.stops.push(noise, lfo);
+
+    // 偶发短促高频事件：确定性哈希决定触发与音高（约 45% 节拍触发一次）；
+    // 触发在层输出 GainNode 下游，随交叉淡化一并淡出。
+    let step = 0;
+    const timer = setInterval(() => {
+      step++;
+      if (hash01(step * 7 + 1) > 0.45) return;
+      const t = ctx.currentTime;
+      const chirp = ctx.createOscillator();
+      chirp.type = 'sine';
+      chirp.frequency.value = 1600 + hash01(step * 13 + 5) * 1600; // 1.6–3.2kHz
+      const env = ctx.createGain();
+      env.gain.setValueAtTime(0.0001, t);
+      env.gain.exponentialRampToValueAtTime(0.08 + hash01(step * 17 + 9) * 0.05, t + 0.02);
+      env.gain.exponentialRampToValueAtTime(0.0001, t + 0.10 + hash01(step * 23 + 3) * 0.18);
+      chirp.connect(env).connect(out);
+      chirp.start(t);
+      chirp.stop(t + 0.4);
+    }, 1400);
+    kit.timers.push(timer);
+  },
+
+  /** menu：柔和正弦和弦（A3 220 + C#4 277 + E4 330）+ 慢速 LFO 音量呼吸 */
+  menu(ctx, out, kit) {
+    const chord = ctx.createGain();
+    chord.gain.value = 0.24;
+    chord.connect(out);
+    for (const f of [220, 277, 330]) {
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = f;
+      const voice = ctx.createGain();
+      voice.gain.value = 1 / 3;
+      osc.connect(voice).connect(chord);
+      osc.start();
+      kit.stops.push(osc);
+    }
+    const lfo = ctx.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.value = 0.08; // 慢速呼吸
+    const depth = ctx.createGain();
+    depth.gain.value = 0.07;
+    lfo.connect(depth).connect(chord.gain);
+    lfo.start();
+    kit.stops.push(lfo);
+  },
+};
 
 class AudioManager {
   constructor() {
     this.ctx = null;
     this.enabled = true;
-    this.volumes = { master: 0.7, sfx: 0.8 };
+    this.volumes = { master: 0.7, sfx: 0.8, music: 0.6 };
     try {
       const saved = JSON.parse(localStorage.getItem(LS_KEY) || 'null');
       if (saved && typeof saved.master === 'number') this.volumes = saved;
     } catch { /* ignore */ }
+    if (typeof this.volumes.music !== 'number') this.volumes.music = 0.6; // 旧存档补齐音乐总线
+    // —— 环境音层状态（_ensureCtx 建立总线后生效） ——
+    this._musicBus = null;      // musicVolume 总线：master × music → destination
+    this._ambient = null;       // 当前场景层句柄 { out, level, dispose }
+    this._currentScene = null;  // 已应用场景名
+    this._desiredScene = null;  // AudioContext 挂起态下暂存的目标场景
+    this._noiseBuf = null;      // 共享白噪声缓冲（懒建，全场景复用）
     // 首次交互解锁
     const unlock = () => {
       this._ensureCtx();
-      if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
+      if (this.ctx && this.ctx.state === 'suspended') {
+        this.ctx.resume().then(() => this._applyDesiredScene()).catch(() => { /* 保持挂起 */ });
+      } else {
+        this._applyDesiredScene();
+      }
       window.removeEventListener('pointerdown', unlock);
       window.removeEventListener('keydown', unlock);
     };
@@ -28835,6 +33739,12 @@ class AudioManager {
     } catch {
       this.enabled = false;
     }
+    // 音乐总线：环境音层 → 独立 GainNode → musicVolume 总线 → destination
+    if (this.ctx) {
+      this._musicBus = this.ctx.createGain();
+      this._musicBus.gain.value = this._musicBusGain();
+      this._musicBus.connect(this.ctx.destination);
+    }
   }
 
   setVolume(bus, v) {
@@ -28842,6 +33752,142 @@ class AudioManager {
     try {
       localStorage.setItem(LS_KEY, JSON.stringify(this.volumes));
     } catch { /* ignore */ }
+    // master / music 任一变化都会改变音乐总线实时增益
+    if (bus === 'master' || bus === 'music') this._applyMusicBusGain(0.08);
+  }
+
+  // ———— 环境音层 API（R9） ————
+
+  /**
+   * 启动 / 切换场景环境音层。
+   * @param {'deepSpace'|'starCorona'|'planet'|'combat'|'ground'|'menu'} scene
+   * 场景切换走 1.5s 交叉淡化；AudioContext 尚未解锁时暂存目标场景，
+   * 首次用户交互（构造器 unlock）后自动补启。由各视图 mount/unmount 调用。
+   */
+  startAmbient(scene) {
+    if (!AMBIENT_BUILDERS[scene]) return; // 未知场景静默忽略（调用方语义错误不致命）
+    this._desiredScene = scene;
+    this._ensureCtx();
+    if (!this.ctx) return;
+    if (this.ctx.state !== 'running') {
+      // 挂起态（未获用户手势）：尝试唤醒，成功后由 _applyDesiredScene 补启
+      if (this.ctx.state === 'suspended') {
+        this.ctx.resume().then(() => this._applyDesiredScene()).catch(() => { /* 保持挂起 */ });
+      }
+      return;
+    }
+    this._applyScene(scene);
+  }
+
+  /** setScene 别名：App / 视图层语义化入口（同样 1.5s 交叉淡化切换） */
+  setScene(scene) {
+    this.startAmbient(scene);
+  }
+
+  /** 停止环境音层（1.5s 淡出后释放全部节点与定时器） */
+  stopAmbient() {
+    this._desiredScene = null;
+    if (!this.ctx || !this._ambient) return;
+    this._fadeOutDispose(this._ambient);
+    this._ambient = null;
+    this._currentScene = null;
+  }
+
+  /** 独立音乐音量总线（0..1；持久化与实时增益一并生效） */
+  setMusicVolume(v) {
+    this.setVolume('music', v);
+  }
+
+  // ———— 环境音内部实现 ————
+
+  /** 音乐总线实时增益 = master × music（两总线任一变化都需重算） */
+  _musicBusGain() {
+    const m = typeof this.volumes.master === 'number' ? this.volumes.master : 0.7;
+    const mu = typeof this.volumes.music === 'number' ? this.volumes.music : 0.6;
+    return Math.max(0, Math.min(1, m * mu));
+  }
+
+  /** 重设音乐总线增益（短斜坡避免音量跳变） */
+  _applyMusicBusGain(rampSec = 0.08) {
+    if (!this.ctx || !this._musicBus) return;
+    const g = this._musicBus.gain;
+    const target = this._musicBusGain();
+    const t = this.ctx.currentTime;
+    g.cancelScheduledValues(t);
+    if (rampSec > 0) {
+      g.setValueAtTime(Math.max(0.0001, g.value), t);
+      g.linearRampToValueAtTime(target, t + rampSec);
+    } else {
+      g.value = target;
+    }
+  }
+
+  /** AudioContext 就绪后补启挂起期间请求的场景 */
+  _applyDesiredScene() {
+    if (this._desiredScene && this.ctx && this.ctx.state === 'running') {
+      this._applyScene(this._desiredScene);
+    }
+  }
+
+  /** 应用场景层：旧层 1.5s 淡出、新层 1.5s 淡入（交叉淡化） */
+  _applyScene(scene) {
+    if (!this.ctx || !this._musicBus || this.ctx.state !== 'running') return;
+    if (this._currentScene === scene && this._ambient) return;
+    const t = this.ctx.currentTime;
+    if (this._ambient) {
+      this._fadeOutDispose(this._ambient);
+      this._ambient = null;
+    }
+    const handle = this._buildScene(scene);
+    this._ambient = handle;
+    this._currentScene = scene;
+    const g = handle.out.gain;
+    g.setValueAtTime(0.0001, t);
+    g.linearRampToValueAtTime(handle.level, t + AMBIENT_XFADE_SEC);
+  }
+
+  /** 构建场景层：层输出 GainNode → musicVolume 总线；节点/定时器登记进 kit 统一释放 */
+  _buildScene(scene) {
+    const ctx = this.ctx;
+    const out = ctx.createGain();
+    out.gain.value = 0.0001; // 交叉淡化起点（_applyScene 调度淡入曲线）
+    out.connect(this._musicBus);
+    const kit = { stops: [], timers: [], noise: this._noiseBuffer(ctx) };
+    AMBIENT_BUILDERS[scene](ctx, out, kit);
+    const handle = {
+      out,
+      level: SCENE_LEVEL[scene] || 0.5,
+      dispose: () => {
+        for (const s of kit.stops) {
+          try { s.stop(); } catch { /* 已停止的源重复 stop 会抛错，忽略 */ }
+        }
+        for (const tm of kit.timers) clearInterval(tm);
+        try { out.disconnect(); } catch { /* 已断开 */ }
+      },
+    };
+    return handle;
+  }
+
+  /** 淡出场景层并在淡化结束后释放（释放前保留节点以完成 1.5s 尾音） */
+  _fadeOutDispose(handle) {
+    const t = this.ctx.currentTime;
+    const g = handle.out.gain;
+    g.cancelScheduledValues(t);
+    g.setValueAtTime(Math.max(0.0001, g.value), t);
+    g.linearRampToValueAtTime(0.0001, t + AMBIENT_XFADE_SEC);
+    setTimeout(() => handle.dispose(), AMBIENT_XFADE_SEC * 1000 + 150);
+  }
+
+  /** 共享白噪声缓冲（2s 循环；确定性 xorshift 填充，绝不使用 Math.random） */
+  _noiseBuffer(ctx) {
+    if (this._noiseBuf) return this._noiseBuf;
+    const len = Math.floor(ctx.sampleRate * 2);
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    const rng = xorshift32(0x9e3779b9);
+    for (let i = 0; i < len; i++) data[i] = rng() * 2 - 1;
+    this._noiseBuf = buf;
+    return buf;
   }
 
   /** UI 提示音（确定性合成） */
