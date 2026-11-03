@@ -8,7 +8,6 @@
  * 动画时间仅作视觉 uniform，绝不触碰 world 状态。
  */
 
-import { GLSL_VERSION } from './GLCore.js';
 import {
   mat4, mat4Identity, mat4Multiply, mat4Perspective, mat4LookAt,
   mat4Invert, mat4TRS, vec3ApplyMat4,
@@ -23,7 +22,7 @@ export function logicalToWorld(x, y, out = [0, 0, 0]) {
   return out;
 }
 
-const SHIP_VS = GLSL_VERSION + `
+const SHIP_VS = `
 in vec3 aPos;
 in vec3 aNormal;
 uniform mat4 uMVP;
@@ -38,7 +37,7 @@ void main() {
   gl_Position = uMVP * wp;
 }`;
 
-const SHIP_FS = GLSL_VERSION + `
+const SHIP_FS = `
 precision highp float;
 in vec3 vNormal;
 in vec3 vWorldPos;
@@ -61,19 +60,19 @@ void main() {
   fragColor = vec4(col, 1.0);
 }`;
 
-const THRUST_VS = GLSL_VERSION + `
+const THRUST_VS = `
 in vec3 aPos;
 uniform mat4 uMVP;
 void main() { gl_Position = uMVP * vec4(aPos, 1.0); }`;
 
-const THRUST_FS = GLSL_VERSION + `
+const THRUST_FS = `
 precision highp float;
 uniform vec3 uColor;
 uniform float uIntensity;
 out vec4 fragColor;
 void main() { fragColor = vec4(uColor * uIntensity, 1.0); }`;
 
-const SHIELD_VS = GLSL_VERSION + `
+const SHIELD_VS = `
 in vec3 aPos;
 uniform mat4 uMVP;
 uniform mat4 uModel;
@@ -86,7 +85,7 @@ void main() {
   gl_Position = uMVP * wp;
 }`;
 
-const SHIELD_FS = GLSL_VERSION + `
+const SHIELD_FS = `
 precision highp float;
 in vec3 vLocal;
 in vec3 vWorldPos;
@@ -113,7 +112,7 @@ void main() {
   fragColor = vec4(col * a, clamp(a, 0.0, 0.85));
 }`;
 
-const QUAD_VS = GLSL_VERSION + `
+const QUAD_VS = `
 in vec3 aPos;
 in vec2 aUV;
 uniform mat4 uMVP;
@@ -123,7 +122,7 @@ void main() {
   gl_Position = uMVP * vec4(aPos, 1.0);
 }`;
 
-const BEAM_FS = GLSL_VERSION + `
+const BEAM_FS = `
 precision highp float;
 in vec2 vUV;             // u: 沿光束 0..1；v: 横向 -1..1
 uniform vec3 uColor;
@@ -138,7 +137,7 @@ void main() {
   fragColor = vec4(col * pulse * endFade, clamp(core + glow, 0.0, 0.9) * endFade);
 }`;
 
-const GLOW_FS = GLSL_VERSION + `
+const GLOW_FS = `
 precision highp float;
 in vec2 vUV;             // -1..1
 uniform vec3 uColor;
@@ -149,7 +148,7 @@ void main() {
   fragColor = vec4(uColor * d * uIntensity, d * 0.8);
 }`;
 
-const WARP_FS = GLSL_VERSION + `
+const WARP_FS = `
 precision highp float;
 in vec2 vUV;             // -1..1（锥面展开）
 uniform float uCharge;   // 0..1 蓄能比
@@ -164,12 +163,12 @@ void main() {
   fragColor = vec4(col * a * 2.4, clamp(a, 0.0, 0.9));
 }`;
 
-const BG_VS = GLSL_VERSION + `
+const BG_VS = `
 in vec3 aPos;
 out vec2 vXY;
 void main() { vXY = aPos.xy; gl_Position = vec4(aPos.xy, 0.9999, 1.0); }`;
 
-const BG_FS = GLSL_VERSION + `
+const BG_FS = `
 precision highp float;
 in vec2 vXY;
 uniform float uTime;
@@ -227,6 +226,7 @@ export class Battle3D {
     this._unitCache = new Map();   // shipId → { prevShield, flashUntil }
     this._scratch = {
       mvp: mat4(), model: mat4(), view2: mat4(), tmp: mat4(),
+      proj: mat4(), view: mat4(),
       camPos: [0, 0, 0], inv: mat4(),
     };
   }

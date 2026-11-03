@@ -16163,6 +16163,35 @@ class GLContext {
     this._tracked = { programs: [], buffers: [], vaos: [], textures: [], fbos: [] };
     this.errorCount = 0;
     void opts; // 预留：后续如需按 opts 差异化初始化在此扩展
+    // 调试模式（window.__GL_THROW_ON_ERROR）：包装全部 gl 方法（原型链完整
+    // 遍历），调用后立即 getError，非 NO_ERROR 即抛出带方法名的错误。
+    if (typeof window !== 'undefined' && window.__GL_THROW_ON_ERROR) {
+      let proto = Object.getPrototypeOf(gl);
+      let count = 0;
+      while (proto && proto !== Object.prototype) {
+        for (const name of Object.getOwnPropertyNames(proto)) {
+          if (name === 'constructor' || typeof gl[name] !== 'function') continue;
+          // getError 自引用会导致无限递归； getContext 不可重入 —— 排除
+          if (name === 'getError' || name === 'getContext') continue;
+          const orig = gl[name].bind(gl);
+          const wrapped = (...a) => {
+            const r = orig(...a);
+            const err = gl.getError();
+            if (err !== gl.NO_ERROR) {
+              const args = a.slice(0, 4).map((v) => (typeof v === 'number' ? v : (v && v.length !== undefined ? 'arr/' + v.length : String(v)))).join(',');
+              throw new Error(`[GL_DEBUG] gl.${name} → 0x${err.toString(16)} (${args})`);
+            }
+            return r;
+          };
+          try {
+            Object.defineProperty(gl, name, { value: wrapped, writable: true, configurable: true });
+            count++;
+          } catch { /* 不可包装的方法跳过 */ }
+        }
+        proto = Object.getPrototypeOf(proto);
+      }
+      this.debugWrapped = count;
+    }
   }
 
   get isLost() {
@@ -16175,8 +16204,7 @@ class GLContext {
     const err = gl.getError();
     if (err !== gl.NO_ERROR) {
       this.errorCount++;
-      const probe = this.lastProbe || '';
-      throw new Error(`WebGL error 0x${err.toString(16)} at ${where}${probe ? ' [' + probe + ']' : ''}`);
+      throw new Error(`WebGL error 0x${err.toString(16)} at ${where}`);
     }
   }
 
@@ -19208,7 +19236,6 @@ __register("src/render/gl/Battle3D.js", function (__exports, __require) {
  * 动画时间仅作视觉 uniform，绝不触碰 world 状态。
  */
 
-const { GLSL_VERSION: GLSL_VERSION } = __require("src/render/gl/GLCore.js");
 const { mat4: mat4, mat4Identity: mat4Identity, mat4Multiply: mat4Multiply, mat4Perspective: mat4Perspective, mat4LookAt: mat4LookAt, mat4Invert: mat4Invert, mat4TRS: mat4TRS, vec3ApplyMat4: vec3ApplyMat4 } = __require("src/render/gl/Mat4.js");
 const { buildHullMesh: buildHullMesh } = __require("src/render/meshes/ShipMeshes.js");
 
@@ -19220,7 +19247,7 @@ function logicalToWorld(x, y, out = [0, 0, 0]) {
   return out;
 }
 
-const SHIP_VS = GLSL_VERSION + `
+const SHIP_VS = `
 in vec3 aPos;
 in vec3 aNormal;
 uniform mat4 uMVP;
@@ -19235,7 +19262,7 @@ void main() {
   gl_Position = uMVP * wp;
 }`;
 
-const SHIP_FS = GLSL_VERSION + `
+const SHIP_FS = `
 precision highp float;
 in vec3 vNormal;
 in vec3 vWorldPos;
@@ -19258,19 +19285,19 @@ void main() {
   fragColor = vec4(col, 1.0);
 }`;
 
-const THRUST_VS = GLSL_VERSION + `
+const THRUST_VS = `
 in vec3 aPos;
 uniform mat4 uMVP;
 void main() { gl_Position = uMVP * vec4(aPos, 1.0); }`;
 
-const THRUST_FS = GLSL_VERSION + `
+const THRUST_FS = `
 precision highp float;
 uniform vec3 uColor;
 uniform float uIntensity;
 out vec4 fragColor;
 void main() { fragColor = vec4(uColor * uIntensity, 1.0); }`;
 
-const SHIELD_VS = GLSL_VERSION + `
+const SHIELD_VS = `
 in vec3 aPos;
 uniform mat4 uMVP;
 uniform mat4 uModel;
@@ -19283,7 +19310,7 @@ void main() {
   gl_Position = uMVP * wp;
 }`;
 
-const SHIELD_FS = GLSL_VERSION + `
+const SHIELD_FS = `
 precision highp float;
 in vec3 vLocal;
 in vec3 vWorldPos;
@@ -19310,7 +19337,7 @@ void main() {
   fragColor = vec4(col * a, clamp(a, 0.0, 0.85));
 }`;
 
-const QUAD_VS = GLSL_VERSION + `
+const QUAD_VS = `
 in vec3 aPos;
 in vec2 aUV;
 uniform mat4 uMVP;
@@ -19320,7 +19347,7 @@ void main() {
   gl_Position = uMVP * vec4(aPos, 1.0);
 }`;
 
-const BEAM_FS = GLSL_VERSION + `
+const BEAM_FS = `
 precision highp float;
 in vec2 vUV;             // u: 沿光束 0..1；v: 横向 -1..1
 uniform vec3 uColor;
@@ -19335,7 +19362,7 @@ void main() {
   fragColor = vec4(col * pulse * endFade, clamp(core + glow, 0.0, 0.9) * endFade);
 }`;
 
-const GLOW_FS = GLSL_VERSION + `
+const GLOW_FS = `
 precision highp float;
 in vec2 vUV;             // -1..1
 uniform vec3 uColor;
@@ -19346,7 +19373,7 @@ void main() {
   fragColor = vec4(uColor * d * uIntensity, d * 0.8);
 }`;
 
-const WARP_FS = GLSL_VERSION + `
+const WARP_FS = `
 precision highp float;
 in vec2 vUV;             // -1..1（锥面展开）
 uniform float uCharge;   // 0..1 蓄能比
@@ -19361,12 +19388,12 @@ void main() {
   fragColor = vec4(col * a * 2.4, clamp(a, 0.0, 0.9));
 }`;
 
-const BG_VS = GLSL_VERSION + `
+const BG_VS = `
 in vec3 aPos;
 out vec2 vXY;
 void main() { vXY = aPos.xy; gl_Position = vec4(aPos.xy, 0.9999, 1.0); }`;
 
-const BG_FS = GLSL_VERSION + `
+const BG_FS = `
 precision highp float;
 in vec2 vXY;
 uniform float uTime;
@@ -19424,6 +19451,7 @@ class Battle3D {
     this._unitCache = new Map();   // shipId → { prevShield, flashUntil }
     this._scratch = {
       mvp: mat4(), model: mat4(), view2: mat4(), tmp: mat4(),
+      proj: mat4(), view: mat4(),
       camPos: [0, 0, 0], inv: mat4(),
     };
   }
@@ -22801,7 +22829,7 @@ const ORBIT_INCLINE = 20 * Math.PI / 180;
 const CAM_PITCH = 62 * Math.PI / 180;
 const CAM_FOV = 50 * Math.PI / 180;
 /** 黑洞事件视界（RS=1）对应的世界半径：BH 着色器以 RS 为单位 */
-const BH_RS_WORLD = 0.26;
+const BH_RS_WORLD = 0.6; // 相机 ~6.2 世界单位 → ~10.3 RS（落在 22 RS 积分域内，吸积盘 1.65..6.2 RS 可见）
 /** 日冕半径 = 恒星本体 × 2.6；脉冲星磁层网格缩放 */
 const CORONA_K = 2.6;
 const PULSAR_K = 2.4;
@@ -23384,6 +23412,9 @@ class System3D {
     /** @type {{entries:Object[], count:number, ...相机缓存}|null} 最近一帧拾取缓存 */
     this.pickData = null;
 
+    // 舰队动态缓冲数据（pos3 + t1 × 3 顶点）—— 必须先于 _buildResources 分配
+    this._fleetData = new Float32Array(FLEET_MAX * 3 * 4);
+
     this._incCos = Math.cos(ORBIT_INCLINE);
     this._incSin = Math.sin(ORBIT_INCLINE);
     this._coronaRes = this.tier === 2 ? CORONA_RES_LOW : CORONA_RES_FULL;
@@ -23416,9 +23447,6 @@ class System3D {
     // —— 拾取条目池 ——
     this._entries = [];
     this._entryCount = 0;
-
-    // —— 舰队动态缓冲数据（pos3 + t1 × 3 顶点） ——
-    this._fleetData = new Float32Array(FLEET_MAX * 3 * 4);
   }
 
   /** 切换 LOD 档位（1|2）；档位变化时重建日冕离屏目标分辨率 */
@@ -23472,10 +23500,15 @@ class System3D {
     const aspect = width / Math.max(1, height);
     const halfY = CAM_FOV / 2;
     const halfX = Math.atan(Math.tan(halfY) * aspect);
-    const dist = (rMax / Math.sin(Math.min(halfY, halfX))) * 1.06;
-    const yaw = 0.55 + time * 0.02 + (Number(opts.yaw) || 0);
-    const cp = Math.cos(CAM_PITCH);
-    const sp = Math.sin(CAM_PITCH);
+    // 黑洞星系：专用低角度运镜（吸积盘近景，Interstellar 式构图）；
+    // 盘世界半径 = 6.2 × BH_RS_WORLD，相机略高于盘面并保持完整透镜环入画
+    const isBHCam = typeId === 'blackHole';
+    const camPitch = isBHCam ? 0.24 : CAM_PITCH;
+    // 黑洞：固定世界距离 7.0 → 11.7 RS，保证吸积盘（1.65..6.2 RS）完整入画
+    const dist = isBHCam ? 4.6 : (camRMax / Math.sin(Math.min(halfY, halfX))) * 1.06;
+    const yaw = 0.55 + time * (isBHCam ? 0.008 : 0.02) + (Number(opts.yaw) || 0);
+    const cp = Math.cos(camPitch);
+    const sp = Math.sin(camPitch);
     s.eye[0] = dist * cp * Math.sin(yaw);
     s.eye[1] = dist * sp;
     s.eye[2] = dist * cp * Math.cos(yaw);
@@ -24882,6 +24915,10 @@ void main() {
   }
 
   col += vec3(dither * 0.004);
+  // Reinhard 输出压缩：吸积盘多普勒束流峰值 HDR 可达 ~190，在 RGBA8 回退
+  // 模式下会被钳制成纯白块；x/(1+x)×2.2 保留环带结构并适配 0..2.2 输出域
+  // （真 RGBA16F 管线下核心仍 >1.0，正常触发 Bloom 溢出）
+  col = col / (1.0 + col) * 2.2;
   fragColor = vec4(max(col, vec3(0.0)), 1.0);
 }
 `;
