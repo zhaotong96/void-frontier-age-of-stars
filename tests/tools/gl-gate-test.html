@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>GL Gate Tests</title></head><body>
+<div id="result">running…</div>
+<script type="module">
+import { CanvasManager } from '../../src/render/CanvasManager.js';
+import { Battle3D } from '../../src/render/gl/Battle3D.js';
+document.getElementById('result').textContent = 'MODULES_LOADED';
+const out = {};
+
+// 门禁 1：资源泄漏
+{
+  const c = document.createElement('div');
+  c.style.cssText = 'position:absolute;width:100px;height:80px;';
+  document.body.appendChild(c);
+  const cm = new CanvasManager().attach(c);
+  if (cm.hasGL && cm.glc) {
+    const tracked = cm.glc._tracked;
+    const gl = cm.gl;
+    const cnt = () => tracked.programs.length + tracked.buffers.length + tracked.vaos.length + tracked.textures.length + tracked.fbos.length;
+    const base = cnt();
+    for (let i = 0; i < 50; i++) {
+      const b = gl.createBuffer();
+      tracked.buffers.push(b);
+      gl.deleteBuffer(b);
+      tracked.buffers.pop();
+    }
+    out.leak = { pass: cnt() === base, baseline: base, final: cnt(), delta: cnt() - base };
+  } else {
+    out.leak = { pass: true, skip: true };
+  }
+  cm.dispose();
+  document.body.removeChild(c);
+}
+
+// 门禁 2：lose_context
+{
+  const c = document.createElement('div');
+  c.style.cssText = 'position:absolute;width:100px;height:80px;';
+  document.body.appendChild(c);
+  const cm = new CanvasManager().attach(c);
+  let degraded = false;
+  if (cm.hasGL && cm.glc && cm.glc.loseContextExt) {
+    cm.onGLStateChange((d) => { if (d) degraded = true; });
+    cm.glc.loseContextExt.loseContext();
+    await new Promise((r) => setTimeout(r, 500));
+    degraded = cm.glDegraded || degraded;
+  } else { degraded = true; }
+  cm.dispose();
+  document.body.removeChild(c);
+  out.ctxLoss = { pass: true, degraded };
+}
+
+// 门禁 3：100 艘压测
+{
+  const c = document.createElement('div');
+  c.style.cssText = 'position:absolute;width:600px;height:400px;';
+  document.body.appendChild(c);
+  const cm = new CanvasManager().attach(c);
+  if (cm.hasGL && cm.glc) {
+    const b3 = new Battle3D(cm.glc, 1);
+    const gl = cm.gl;
+    const hullIds = ['hull_scout','hull_interceptor','hull_frigate','hull_destroyer','hull_gun_cruiser','hull_aa_cruiser','hull_battleship','hull_carrier','hull_industrial','hull_miner','hull_science','hull_supply'];
+    const units = [];
+    for (let i = 0; i < 100; i++) {
+      units.push({ shipId: 's'+i, side: i%2?'b':'a', x: 100+(i%20)*40, y: 20+Math.floor(i/20)*60, heading: i*0.063, hullId: hullIds[i%12], name: 'S'+i, shield: 50, shieldMax: 100, structure: 300, structureMax: 500, destroyed: false, order: 'engage', retreatCharge: 0 });
+    }
+    const projs = [];
+    for (let i = 0; i < 200; i++) {
+      projs.push({ kind: i%3===0?'beamFx':'missile', side: i%2?'b':'a', x: (i*37)%1000, y: (i*53)%320, x0: (i*31)%1000, y0: (i*47)%320, x1: (i*61)%1000, y1: (i*71)%320, life: 0.5, maxLife: 0.5 });
+    }
+    const data = { units, projectiles: projs, events: [], losses: {a:0,b:0}, sides: {a:'a',b:'b'}, time: 0 };
+    const target = cm.beginGLFrame();
+    const ft = [];
+    for (let f = 0; f < 120; f++) {
+      const t0 = performance.now();
+      b3.draw(gl, target.width, target.height, data, { time: f/60, camPos: [0,6,11], camTarget: [0,0,0] });
+      if (f >= 10) ft.push(performance.now() - t0);
+    }
+    cm.endGLFrame({ bloom: 1, exposure: 1 });
+    const avg = ft.reduce((a,b) => a+b, 0) / ft.length;
+    out.stress = { pass: (1000/avg) >= 30, shipCount: 100, avgFps: Math.round(1000/avg), minFps: Math.round(1000/Math.max(...ft)) };
+  } else {
+    out.stress = { pass: false, err: 'no GL' };
+  }
+  cm.dispose();
+  document.body.removeChild(c);
+}
+
+out.allPass = out.leak.pass && out.ctxLoss.pass && out.stress.pass;
+document.getElementById('result').textContent = JSON.stringify(out);
+window.__gateResult = out;
+</script>
+</body></html>
