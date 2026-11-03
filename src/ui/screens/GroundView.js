@@ -506,7 +506,8 @@ export const GroundView = {
     const w = app.world;
     this._setHead('简报', []);
 
-    const box = el('div', { class: 'pad vf-col', style: { overflowY: 'auto' } });
+    // 沉浸式全屏 body：内边距避开悬浮侧栏与顶栏（R7 毛玻璃 chrome）
+    const box = el('div', { class: 'pad vf-col', style: { overflowY: 'auto', padding: '64px 200px 24px 72px' } });
     const p1 = panel({ title: '发起地面行动', open: true });
     const planetSel = el('select', { 'aria-label': '目标行星' });
     for (const c of Object.values(w.entities.colonies || {})) {
