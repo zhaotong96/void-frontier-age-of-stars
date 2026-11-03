@@ -3141,11 +3141,13 @@ function createGroundMission(world, opts = {}) {
   const template = findMissionTemplate(templateId);
   if (!template) throw new Error(`ground: 未知任务模板 ${templateId}`);
   const ids = (squadCharacterIds || []).slice(0, 3);
-  if (!ids.length) throw new Error('ground: 小队至少需要 1 名角色');
+  // 允许无角色小队：自动创建未命名陆战队员（1-3 名）
+  if (!ids.length) {
+    ids = ['marine_auto_1', 'marine_auto_2', 'marine_auto_3'];
+  }
   for (const cid of ids) {
-    if (!world.entities.characters || !world.entities.characters[cid]) {
-      throw new Error(`ground: 角色不存在 ${cid}`);
-    }
+    if (world.entities.characters && world.entities.characters[cid]) continue;
+    // 未命名陆战队员不需要角色实体
   }
 
   // GROUND-01：独立地图 RNG——由世界种子与当前序号派生，不消耗世界主 RNG；
@@ -15419,6 +15421,7 @@ const GroundView = {
     this._digCd = 0;
     this._placeCd = 0;
     this._aim = null;                  // 准星 DDA 结果（采掘/建造/信息条共用）
+    this._aimFar = false;              // 瞄准点超出角色触及范围
     this._eye = [0, 0, 0];
     this._fwd = [0, 0, 0];
     this._m = { proj: mat4(), view: mat4(), vp: mat4() };
@@ -15457,6 +15460,8 @@ const GroundView = {
   _build(param) {
     if (!this._mounted) return;
     const app = this.app;
+    // 「简报」按钮的一次性覆盖：先取走标记再复位（本帧内强制进简报）
+    const forceBriefing = this._forceBriefing === true;
     this._teardownScene();
     this.body.innerHTML = '';
     this._resultShown = false;
@@ -15477,7 +15482,7 @@ const GroundView = {
     if (param) mission = missions.find((m) => m.id === param || m.planetId === param) || null;
     else mission = missions[0] || null;
 
-    if (mission && !this._forceBriefing) {
+    if (mission && !forceBriefing) {
       this._buildMission(mission);
       return;
     }
@@ -15514,12 +15519,10 @@ const GroundView = {
     const box = el('div', { class: 'pad vf-col', style: { overflowY: 'auto' } });
     const p1 = panel({ title: '发起地面行动', open: true });
     const planetSel = el('select', { 'aria-label': '目标行星' });
-    const colonyOf = {};
     for (const c of Object.values(w.entities.colonies || {})) {
       if (c.factionId !== w.playerFactionId) continue;
       const planet = w.entities.planets[c.planetId];
       if (!planet) continue;
-      colonyOf[planet.id] = c;
       planetSel.appendChild(el('option', { value: planet.id, text: planet.name || planet.id }));
     }
     if (!planetSel.childElementCount) {
@@ -16278,7 +16281,11 @@ const GroundView = {
     return this._fwd;
   },
 
-  /** 每帧准星 DDA：采掘/建造目标与 HUD 信息（同时是防穿模同源射线） */
+  /**
+   * 每帧准星两段 DDA：第一段沿相机前向求瞄准点（臂长 + 视距），
+   * 第二段从角色胸口指向瞄准点、以角色为基准的采掘触及范围（AIM_REACH）。
+   * 第三人称下准星与挖掘目标因此始终一致，且触及半径不随臂长缩放。
+   */
   _updateAim(dt) {
     this._digCd = Math.max(0, this._digCd - dt);
     this._placeCd = Math.max(0, this._placeCd - dt);
@@ -16292,7 +16299,25 @@ const GroundView = {
     this._eye[1] = c.y + 1.55 + sp * d;
     this._eye[2] = c.z + cp * cy * d;
     const fwd = this._camForward();
-    const hit = ddaRaycast(this.sw, this._eye, fwd, AIM_REACH);
+
+    // 第一段：相机 → 瞄准点（命中地形取命中点，否则取视距延伸点）
+    const camRay = ddaRaycast(this.sw, this._eye, fwd, d + AIM_REACH);
+    const camT = camRay.hit ? camRay.t : d + 4;
+    const aimPt = [
+      this._eye[0] + fwd[0] * camT,
+      this._eye[1] + fwd[1] * camT,
+      this._eye[2] + fwd[2] * camT,
+    ];
+    // 第二段：角色胸口 → 瞄准点（触及范围内才有效）
+    const chest = [c.x, c.y + 1.25, c.z];
+    const ddx = aimPt[0] - chest[0];
+    const ddy = aimPt[1] - chest[1];
+    const ddz = aimPt[2] - chest[2];
+    const len = Math.hypot(ddx, ddy, ddz) || 1;
+    this._aimFar = len > AIM_REACH + 0.6;
+    const hit = this._aimFar
+      ? { hit: false }
+      : ddaRaycast(this.sw, chest, [ddx / len, ddy / len, ddz / len], AIM_REACH);
     this._aim = hit.hit ? hit : null;
     if (this._aim) this._aim.dug = false;   // 本帧是否实际挖到（角色采掘姿态用）
 
@@ -16358,18 +16383,21 @@ const GroundView = {
   // —— 特效 ————————————————
 
   /**
-   * 打击拍检测：任务单元 struck 由 false 翻 true 的那一帧发出刀光/光束。
-   * 远程光束目标取射程内最近存活敌人（视觉近似，判定以 domain 为准）。
+   * 打击拍检测：每个攻击回合（state 进入 attack）内 struck 首次翻 true 的那一帧
+   * 发出刀光/光束。armed 标记防止同一回合重复触发（struck 在回合内保持 true）。
    */
   _detectStrikes(view) {
     for (const u of view.playerUnits) {
       if (u.state === 'dead') continue;
       const key = u.unitId;
-      const prev = this._strikeSeen.get(key);
-      if (u.state === 'attack' && u.struck && prev && !prev.struck) {
+      const prev = this._strikeSeen.get(key) || { state: null, armed: false };
+      let armed = prev.armed;
+      if (u.state === 'attack' && prev.state !== 'attack') armed = false; // 新攻击回合
+      if (u.state === 'attack' && u.struck && !armed) {
+        armed = true;
         this._emitMissionStrike(view, u);
       }
-      this._strikeSeen.set(key, { struck: !!u.struck, state: u.state });
+      this._strikeSeen.set(key, { state: u.state, armed });
     }
     if (this._strikeSeen.size > 8) this._strikeSeen.clear();
   },
@@ -16395,9 +16423,14 @@ const GroundView = {
         }
       }
       const a = [wx, this.char3d.y + 1.25, wz];
-      const b = tgt
-        ? [tgt.x * kx, this._groundAt(tgt.x * kx, tgt.y * kz) + 0.8, tgt.y * kz]
-        : [wx - Math.cos(u.facing) * 18 * kx, this.char3d.y + 1.25, wz - Math.sin(u.facing) * 18 * kz];
+      let b;
+      if (tgt) {
+        const gy = this._groundAt(tgt.x * kx, tgt.y * kz);
+        b = [tgt.x * kx, (gy === Infinity ? this.char3d.y : gy) + 0.8, tgt.y * kz];
+      } else {
+        // 空放：沿任务朝向（像素系 atan2 → 世界 x/z）打出一道曳光
+        b = [wx + Math.cos(u.facing) * 18 * kx, this.char3d.y + 1.25, wz + Math.sin(u.facing) * 18 * kz];
+      }
       this._fx.beams.push({ a, b, age: 0, life: 0.12 });
     } else {
       this._fx.slashes.push({
@@ -16622,8 +16655,9 @@ const GroundView = {
       if (u.state === 'dead' || u.unitId === activeId) continue;
       const ux = u.x * kx;
       const uz = u.y * kz;
+      const gy = this._groundAt(ux, uz);
       rd.colonists.push({
-        x: ux, y: this._groundAt(ux, uz), z: uz,
+        x: ux, y: gy === Infinity ? fallY : gy, z: uz,
         rotY: -u.facing, walk: u.state === 'move', phase: 0.5,
       });
     }
@@ -16632,8 +16666,9 @@ const GroundView = {
       if (n.state === 'safe') continue;
       const nx = n.x * kx;
       const nz = n.y * kz;
+      const gy = this._groundAt(nx, nz);
       rd.colonists.push({
-        x: nx, y: this._groundAt(nx, nz), z: nz,
+        x: nx, y: gy === Infinity ? fallY : gy, z: nz,
         rotY: 0, walk: n.state === 'follow', phase: 0.5,
       });
     }
@@ -16643,6 +16678,7 @@ const GroundView = {
   /** 建筑批处理实例表：殖民地建筑 + 任务目标物 + 数据核心 + 体素选择框 */
   _bmeshList() {
     const list = this._buildingLayout.slice();
+    const fallY = this.char3d.y || 0;
     const view = this._lastView;
     if (view && this.mode === 'mission') {
       const m = this.mission;
@@ -16652,9 +16688,10 @@ const GroundView = {
         if (t.done) continue;
         const tx = t.x * kx;
         const tz = t.y * kz;
+        const gy = this._groundAt(tx, tz);
         const hurt = t.hp < t.hpMax;
         list.push({
-          x: tx, y: this._groundAt(tx, tz), z: tz,
+          x: tx, y: gy === Infinity ? fallY : gy, z: tz,
           rotY: 0.7, scale: 0.8, meshId: MESH_OF_CATEGORY('military'),
           emit: hurt ? 0.15 : 0,
           flash: hurt && (m.time % 0.5) < 0.25 ? 0.3 : 0,
@@ -16664,22 +16701,22 @@ const GroundView = {
         if (it.done) continue;
         const ix = it.x * kx;
         const iz = it.y * kz;
+        const gy = this._groundAt(ix, iz);
         list.push({
-          x: ix, y: this._groundAt(ix, iz) + 0.5, z: iz,
+          x: ix, y: (gy === Infinity ? fallY : gy) + 0.5, z: iz,
           rotY: this._clock * 0.8, scale: 0.38, meshId: MESH_OF_CATEGORY('selector'),
           emit: 0.9,
         });
       }
     }
-    // 体素选择框（采掘：命中格；建造：放置格）
+    // 体素选择框：建造（右键）时高亮放置格，采掘时高亮命中格
     const aim = this._aim;
     if (this._buildMode && aim) {
-      const px = this._buildMode && this._mouse.rDown && aim.nx !== undefined && (aim.nx || aim.ny || aim.nz)
-        ? aim.vx + aim.nx : aim.vx;
-      const py = this._buildMode && this._mouse.rDown && (aim.nx || aim.ny || aim.nz)
-        ? aim.vy + aim.ny : aim.vy;
-      const pz = this._buildMode && this._mouse.rDown && (aim.nx || aim.ny || aim.nz)
-        ? aim.vz + aim.nz : aim.vz;
+      const hasNormal = aim.nx !== 0 || aim.ny !== 0 || aim.nz !== 0;
+      const placing = this._mouse.rDown && hasNormal;
+      const px = placing ? aim.vx + aim.nx : aim.vx;
+      const py = placing ? aim.vy + aim.ny : aim.vy;
+      const pz = placing ? aim.vz + aim.nz : aim.vz;
       list.push({
         x: px + 0.5, y: py + 0.5, z: pz + 0.5,
         rotY: 0, scale: 1.04, meshId: MESH_OF_CATEGORY('selector'),
@@ -16740,7 +16777,7 @@ const GroundView = {
       ctx.fillText(
         aim
           ? `${MAT_ZH[aim.matId] || '未知'}（${aim.vx},${aim.vy},${aim.vz}） 左键采掘 · 右键建造`
-          : '超出采掘范围',
+          : (this._aimFar ? '超出采掘范围' : '未瞄准体素'),
         cx, cy + 30,
       );
     } else {
@@ -16778,7 +16815,7 @@ const GroundView = {
     ctx.font = '11px "Segoe UI", system-ui, sans-serif';
     const limit = view.timeLimitSeconds > 0 ? ` / ${fmtClock(view.timeLimitSeconds)}` : '';
     ctx.fillText(`任务时间 ${fmtClock(view.time)}${limit} · 风险 ${m.riskLevel}/5`, 22, 50);
-    ctx.fillText(`小队指令：${STANCES[this._stanceIdx]}${this._buildMode ? ' · 采掘/建造模式' : ''}`, 22, 62 - 6 + 8 - 6);
+    ctx.fillText(`小队指令：${STANCES[this._stanceIdx]}${this._buildMode ? ' · 采掘/建造模式' : ''}`, 22, 62);
 
     // —— 小队成员迷你血条 ——
     let uy = 84;
@@ -16800,7 +16837,6 @@ const GroundView = {
 
     // —— 右上：目标列表 + 行动日志 ——
     const boxW = 268;
-    let y = 14;
     ctx.fillStyle = 'rgba(8,14,22,0.72)';
     ctx.fillRect(W - boxW - 12, 12, boxW, 30 + view.objectives.length * 18);
     ctx.strokeRect(W - boxW - 11.5, 12.5, boxW - 1, 29 + view.objectives.length * 18);
@@ -16820,7 +16856,7 @@ const GroundView = {
     }
 
     // —— 行动日志（最近 4 条，右上目标框下方） ——
-    y = 60 + view.objectives.length * 18;
+    const y = 60 + view.objectives.length * 18;
     ctx.fillStyle = 'rgba(8,14,22,0.55)';
     ctx.fillRect(W - boxW - 12, y, boxW, 14 + Math.min(4, view.log.length) * 15);
     ctx.font = '10px "Segoe UI", system-ui, sans-serif';
@@ -16934,7 +16970,7 @@ const GroundView = {
       : null;
     const stamOk = au ? au.stamina >= 15 : this.char3d.stamina >= 15;
     const atkReady = au ? au.cooldowns.attack <= 0 : this.char3d.atkCd <= 0;
-    const atkCdMax = 0.68;
+    const atkCdMax = 0.75;   // 最长动作链（heavy 0.5 + 0.25）
     for (let i = 0; i < SKILLS.length; i++) {
       const sk = SKILLS[i];
       const x = x0 + i * (S + GAP);
@@ -17004,16 +17040,8 @@ const GroundView = {
 
   // —— 生命周期 ————————————————
 
-  /** 快照推送：简报页在任务结束后自动切到简报列表；任务/自由模式由 rAF 自驱 */
-  onSnapshot() {
-    if (!this._mounted) return;
-    if (this.mode === 'briefing' && this.app.world) {
-      const active = Object.values(this.app.world.entities.groundMissions || {})
-        .some((mm) => mm.status === 'active');
-      // 有进行中任务且当前处于简报 → 保持简报（由「恢复行动」进入），不强行切换
-      void active;
-    }
-  },
+  /** 快照推送：任务/自由模式由 rAF 自驱读取世界；简报页保持静态（经「恢复行动」进入） */
+  onSnapshot() {},
 
   /** 卸载：停 rAF、移除监听、释放 GL 与画布 */
   unmount() {
