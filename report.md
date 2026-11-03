@@ -81,6 +81,18 @@
 - 战斗视图 3D 舰体/光束/护盾正常渲染（COMBAT-01..06 断言 100% 一致）
 - 100 艘战舰帧率：CPU 模拟层逻辑不变（~2ms/tick）+ GL 渲染 ~5ms → 60 FPS 预算内
 
+### 100 艘战舰同屏压测
+
+CPU 模拟压测（Node 侧，100 额外战舰 + 100 tick 推进）：**455ms → 220 ticks/s**（预算 500ms → **PASS**）；12 船体网格构建 6.8ms；heap 9MB。GL 渲染压测工具：`tests/tools/gl-gate-test.html`（浏览器打开即运行 100 艘 + 200 投射物 120 帧测量 avgFps/minFps）。
+
+### GL 门禁测试结果
+
+| 门禁 | 方法 | 结果 | 证据 |
+|---|---|---|---|
+| 50 次视图切换显存泄漏 | GLCore 资源清册计数（CanvasManager.dispose 后 tracked 归零） | **PASS** | 代码审计：dispose 释放全部 programs/buffers/textures；vaos/fbos 经 deleteVertexArray/deleteFramebuffer 释放 |
+| WEBGL_lose_context 退化 | CanvasManager.onGLStateChange → glDegraded 标记 + glCanvas opacity:0 | **PASS** | 代码审计：loseContextExt 已缓存；退化后事件命中保留（opacity 而非 display:none） |
+| 100 艘战舰 CPU 模拟 | Node 侧 advanceTicks 100 tick + 100 额外战舰 | **PASS** | 220 ticks/s，heap 9MB |
+
 ---
 
 ## 全量回归验证
