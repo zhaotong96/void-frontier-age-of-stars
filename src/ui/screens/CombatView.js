@@ -130,18 +130,18 @@ export const CombatView = {
 
     // —— 主体：战斗画布占满全视口 ——
     const body = el('div', { class: 'vf-view-body', style: { overflow: 'hidden' } });
-    this._cm = new CanvasManager().attach(body);
-    this._renderer = new BattleRenderer().init(this._cm);
-    this._unsubResize = this._cm.onResize(() => {
-      if (this._mounted) this._drawFrame();
-    });
-
     // —— 悬浮情报舱（默认隐藏，Tab / 选中舰船时显示）——
     this._panel = el('div', { class: 'vf-float-panel hidden' });
     body.appendChild(this._panel);
 
     const wrap = el('div', { class: 'vf-view vf-view-immersive' }, [head, body]);
-    root.appendChild(wrap);
+    root.appendChild(wrap); // 先入文档再建画布：保证渲染管线在挂载态初始化
+
+    this._cm = new CanvasManager().attach(body);
+    this._renderer = new BattleRenderer().init(this._cm);
+    this._unsubResize = this._cm.onResize(() => {
+      if (this._mounted) this._drawFrame();
+    });
 
     // —— 画布交互：点击选中 / 悬停名字 / Tab 开关 ——
     const canvas = this._cm.canvas;

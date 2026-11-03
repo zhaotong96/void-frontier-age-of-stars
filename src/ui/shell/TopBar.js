@@ -27,7 +27,7 @@ export class TopBar {
     const w = app.world;
     const bar = this.el;
     // 增量更新：仅当数据变化时重建（避免高频 innerHTML 清空吞点击）
-    const sig = JSON.stringify([w?.tick, led?.credits, app.speedIdx]);
+    const sig = JSON.stringify([w?.tick, app.snapshot?.resources?.balances?.credits ?? null, app.speedIdx]);
     if (this._lastSig === sig) return;
     this._lastSig = sig;
     bar.innerHTML = '';

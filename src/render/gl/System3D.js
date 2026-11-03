@@ -737,7 +737,8 @@ export class System3D {
     const isBHCam = typeId === 'blackHole';
     const camPitch = isBHCam ? 0.24 : CAM_PITCH;
     // 黑洞：固定世界距离 7.0 → 11.7 RS，保证吸积盘（1.65..6.2 RS）完整入画
-    const dist = isBHCam ? 4.6 : (camRMax / Math.sin(Math.min(halfY, halfX))) * 1.06;
+    // （修复：camRMax 为未定义标识符，场景半径即上方 rMax —— 原 GL 帧必然抛错退化 2D）
+    const dist = isBHCam ? 4.6 : (rMax / Math.sin(Math.min(halfY, halfX))) * 1.06;
     const yaw = 0.55 + time * (isBHCam ? 0.008 : 0.02) + (Number(opts.yaw) || 0);
     const cp = Math.cos(camPitch);
     const sp = Math.sin(camPitch);

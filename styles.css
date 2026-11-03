@@ -553,6 +553,25 @@ input[type="range"] { accent-color: var(--accent); }
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7);
 }
 .vf-modal.wide { min-width: 640px; max-width: 900px; }
+/* 模态头布局（标题 + 关闭按钮同行；modal.js 输出 .vf-modal-head 结构） */
+.vf-modal-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.vf-modal-head .vf-modal-title { border-bottom: none; padding-bottom: 0; flex: 1 1 auto; }
+.vf-modal-close {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--ink-dim);
+  font-size: 16px;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.vf-modal-close:hover { color: var(--danger); }
 /* 居中全息模态舱：大型事件裁决 / 剧情演出用（App 动态附加该类） */
 .vf-holo-modal {
   position: fixed;
@@ -667,12 +686,13 @@ input[type="range"] { accent-color: var(--accent); }
 .vf-view-canvas { position: absolute; inset: 0; }
 .vf-view-canvas canvas { display: block; }
 
-/* —— 悬浮情报面板（R7）：3D 视口右侧的毛玻璃信息舱 ——
-   星系行星档案 / 战斗单位情报等原先的固定右栏内容移入此处。 */
+/* —— 悬浮情报面板（R7）：3D 视口左侧的毛玻璃信息舱 ——
+   星系行星档案 / 战斗单位情报等原先的固定右栏内容移入此处；
+   置于左侧与右侧全局检视器抽屉互不遮挡。 */
 .vf-float-panel {
   position: absolute;
   top: 106px;
-  right: 12px;
+  left: 68px;
   bottom: 48px;
   width: 316px;
   z-index: 8;
@@ -690,7 +710,7 @@ input[type="range"] { accent-color: var(--accent); }
 .vf-float-panel-toggle {
   position: absolute;
   top: 106px;
-  right: 12px;
+  left: 68px;
   z-index: 9;
 }
 
