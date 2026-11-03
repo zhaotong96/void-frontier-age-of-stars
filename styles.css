@@ -87,6 +87,8 @@ html, body {
 /* —— 主菜单毛玻璃面板（无 ERP 包围感的悬浮舱）—— */
 .vf-menu-panel {
   pointer-events: auto;
+  position: relative;
+  z-index: 3; /* 叠于 3D 画布（.vf-view-canvas）之上 */
   width: min(460px, 92vw);
   max-height: min(72vh, 640px);
   overflow-y: auto;
@@ -102,9 +104,11 @@ html, body {
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
 }
 .vf-menu-panel .vf-panel { background: rgba(14, 21, 32, 0.6); }
-.vf-menu-titleblock { text-align: center; pointer-events: none; margin-bottom: 4px; }
+.vf-menu-titleblock { position: relative; z-index: 3; text-align: center; pointer-events: none; margin-bottom: 4px; }
 .vf-menu-actions { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
 .vf-menu-foot {
+  position: relative;
+  z-index: 3;
   text-align: center;
   color: var(--ink-faint);
   font-size: 10.5px;

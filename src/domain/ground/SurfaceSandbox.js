@@ -79,14 +79,14 @@ const NORMALS = [
  *  isle      true = 悬浮平台（气态巨行星：边缘之外为虚空）
  */
 export const CATEGORY_TERRAIN = {
-  rocky:      { base: 9.0,  amp: 5.0, ridge: 0.55, ore: 1.0, cave: 0.16, tint: [1.00, 0.90, 0.76] },
-  ocean:      { base: 6.5,  amp: 3.2, ridge: 0.18, ore: 0.7, cave: 0.08, tint: [0.58, 0.78, 0.72] },
-  ice:        { base: 10.0, amp: 6.0, ridge: 0.75, ore: 0.9, cave: 0.10, tint: [0.85, 0.92, 1.00] },
-  desert:     { base: 8.0,  amp: 3.6, ridge: 0.22, ore: 1.1, cave: 0.12, tint: [1.00, 0.86, 0.58] },
-  gasGiant:   { base: 11.0, amp: 2.2, ridge: 0.10, ore: 1.3, cave: 0.05, tint: [0.96, 0.82, 0.62], isle: true },
-  lava:       { base: 9.0,  amp: 5.2, ridge: 0.60, ore: 1.5, cave: 0.20, tint: [0.66, 0.46, 0.42] },
-  toxic:      { base: 8.5,  amp: 4.4, ridge: 0.45, ore: 1.2, cave: 0.18, tint: [0.64, 0.76, 0.46] },
-  artificial: { base: 9.5,  amp: 1.6, ridge: 0.06, ore: 0.6, cave: 0.05, tint: [0.80, 0.82, 0.88] },
+  rocky:      { base: 9.0,  amp: 3.8, ridge: 0.50, ore: 1.0, cave: 0.10, tint: [1.00, 0.90, 0.76] },
+  ocean:      { base: 6.5,  amp: 2.6, ridge: 0.15, ore: 0.7, cave: 0.05, tint: [0.58, 0.78, 0.72] },
+  ice:        { base: 10.0, amp: 4.4, ridge: 0.70, ore: 0.9, cave: 0.08, terrace: 2, tint: [0.85, 0.92, 1.00] },
+  desert:     { base: 8.0,  amp: 3.0, ridge: 0.20, ore: 1.1, cave: 0.08, tint: [1.00, 0.86, 0.58] },
+  gasGiant:   { base: 11.0, amp: 2.0, ridge: 0.10, ore: 1.3, cave: 0.04, tint: [0.96, 0.82, 0.62], isle: true },
+  lava:       { base: 9.0,  amp: 4.0, ridge: 0.55, ore: 1.5, cave: 0.10, terrace: 2, tint: [0.66, 0.46, 0.42] },
+  toxic:      { base: 8.5,  amp: 3.8, ridge: 0.40, ore: 1.2, cave: 0.12, tint: [0.64, 0.76, 0.46] },
+  artificial: { base: 9.5,  amp: 1.4, ridge: 0.06, ore: 0.6, cave: 0.04, tint: [0.80, 0.82, 0.88] },
 };
 
 // ———— 基础工具 ————
@@ -348,15 +348,17 @@ function _generateTerrain(sw, deposits) {
 
   for (let z = 0; z < Z; z++) {
     for (let x = 0; x < X; x++) {
-      // —— 高度场：大陆 fBm + 山脊（ridged）噪声 ——
-      const cont = fbm2(noise, x * 0.042, z * 0.042, 4);
+      // —— 高度场：大陆 fBm + 山脊（ridged）噪声（3 八度控制碎面数量） ——
+      const cont = fbm2(noise, x * 0.042, z * 0.042, 3);
       let ridge = 1 - Math.abs(noise.noise2D(x * 0.021 + 37.2, z * 0.021 - 11.7));
       ridge = ridge * ridge;
       let h = prof.base + cont * prof.amp + ridge * prof.ridge * prof.amp;
 
-      // 海洋类：洼地峡谷（低频负值区下切）；人工天体：台地量化
+      // 海洋类：洼地峡谷（低频负值区下切）；人工天体：台地量化；
+      // 冰封/熔岩：阶地量化（梯田式平台显著改善贪心合并，兼具地貌辨识度）
       if (sw.category === 'ocean' && cont < -0.18) h -= 2.4;
       if (sw.category === 'artificial') h = Math.round(h / 3) * 3;
+      if (prof.terrace) h = Math.floor(h / prof.terrace) * prof.terrace + 1;
 
       // 悬浮平台（气态巨行星）：Chebyshev 边缘 + 噪声海岸线之外的列为虚空
       if (prof.isle) {
@@ -373,10 +375,10 @@ function _generateTerrain(sw, deposits) {
         let mat = SURFACE_MAT.ROCK;
         if (y === top) mat = SURFACE_MAT.SURFACE;
         else if (y <= 1) mat = SURFACE_MAT.BEDROCK;          // 基岩层（不可采）
-        // —— 3D 洞穴雕刻（保留顶面与基岩完整） ——
-        if (y > 1 && y < top - 1 && prof.cave > 0) {
-          const c = fbm3(noise, x * 0.085, y * 0.125, z * 0.085, 3);
-          if (c > 0.58 - prof.cave) mat = SURFACE_MAT.AIR;
+        // —— 3D 洞穴雕刻（保留 2 层表壳与基岩完整；高阈值控制暴露面数量） ——
+        if (y > 2 && y < top - 2 && prof.cave > 0) {
+          const c = fbm3(noise, x * 0.085, y * 0.125, z * 0.085, 2);
+          if (c > 0.68 - prof.cave) mat = SURFACE_MAT.AIR;
         }
         v[idx(sw, x, y, z)] = mat;
       }

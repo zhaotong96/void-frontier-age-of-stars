@@ -1,9 +1,12 @@
 /**
- * ui/screens/CombatView.js — 战术战斗视图（路由 #/combat/<battleId>）
+ * ui/screens/CombatView.js — 战术战斗视图（路由 #/combat/<battleId>，R7 全屏沉浸式重构）
  *
- * 布局：.vf-view > .vf-view-head（返回 + 标题 + 星系名/战斗时间 + 全局时间控制 +
- *       撤退按钮）+ .vf-view-body（左 2/3 战斗画布 BattleRenderer +
- *       右 1/3 信息列：单位检视 / 战斗事件时间线 / 双方损失）。
+ * 布局：.vf-view.vf-view-immersive > .vf-view-head（悬浮玻璃条：返回 + 标题 +
+ *       星系名/战斗时间 + 全局时间控制 + 情报开关 + 撤退按钮）
+ *       + .vf-view-body（战斗画布 BattleRenderer 占满全视口）。
+ *       原右侧固定 HUD 列移除 —— 战斗态势条/铭牌/血条已由 BattleRenderer._renderHUD
+ *       在 2D 层绘制；单位检视 / 损失统计 / 事件时间线收进 .vf-float-panel 悬浮
+ *       毛玻璃情报舱，按 Tab（或头部「情报」按钮）切换显示，选中舰船时自动弹出。
  *
  * 行为：
  *  - param 缺省时取 snapshot.battles[0]?.id；无战斗 → 「当前无战斗」+ 活跃战斗列表；
@@ -13,12 +16,12 @@
  *  - 撤退：对玩家一侧舰队 dispatch('OrderFleetRetreat', {fleetId})；fleetId 从
  *    world.battles.active[id].fleetIds 按玩家 factionId 所在一侧只读取得
  *    （battleView 未暴露 fleetIds，此处经许可的只读世界查询补齐）；
- *  - 点击画布单位 → 右侧检视（名称/船体/护盾/装甲/结构/航向/命令）；
+ *  - 点击画布单位 → 情报舱检视（名称/船体/护盾/装甲/结构/航向/命令）；
  *    悬停单位 → 画布名字标签（BattleRenderer）。
  *
  * 数据来源纪律：battleView / snapshot 只读消费；装甲与撤退蓄能等 battleView
  * 未暴露的字段经只读 world 查询补齐，绝不写世界状态。
- * onSnapshot 250ms 节流；unmount 停 rAF、移除画布监听并 dispose 画布。
+ * onSnapshot 250ms 节流；unmount 停 rAF、移除画布与 window 监听并 dispose 画布。
  */
 
 import { el, clearEl } from '../components/dom.js';
@@ -71,12 +74,13 @@ export const CombatView = {
     this._hoverShipId = null;
     this._data = null;        // battleView() 只读数据缓存（onSnapshot 刷新）
     this._raf = 0;
-    this._handlers = {};
+    this._handlers = [];
     this._unsubResize = null;
+    this._panelOpen = false;  // 悬浮情报舱显隐（Tab / 头部按钮切换）
 
     root.innerHTML = '';
 
-    // —— 头部 ——
+    // —— 头部（悬浮玻璃条）——
     const head = el('div', { class: 'vf-view-head' });
     head.appendChild(el('button', {
       class: 'vf-btn small',
@@ -103,7 +107,16 @@ export const CombatView = {
       this._speedBtns.push(b);
       head.appendChild(b);
     });
-    head.appendChild(el('span', { class: 'vf-faint vf-small', text: '提示：战斗持续进行，建议暂停逐帧观察' }));
+    head.appendChild(el('span', { class: 'vf-faint vf-small', text: '战斗持续进行，建议暂停逐帧观察 · Tab 切换情报舱' }));
+
+    // —— 情报舱开关 ——
+    this._panelBtn = el('button', {
+      class: 'vf-btn small',
+      text: '情报 ▤',
+      title: '切换战斗情报舱（单位检视 / 损失 / 事件时间线，快捷键 Tab）',
+      on: { click: () => this._togglePanel() },
+    });
+    head.appendChild(this._panelBtn);
 
     // —— 撤退按钮 ——
     this._retreatBtn = el('button', {
@@ -115,32 +128,30 @@ export const CombatView = {
     });
     head.appendChild(this._retreatBtn);
 
-    // —— 主体：左画布 + 右信息列 ——
-    const body = el('div', { class: 'vf-view-body', style: { display: 'flex', overflow: 'hidden' } });
-    const left = el('div', { style: { flex: '2 1 0', position: 'relative', minWidth: '0' } });
-    this._infoCol = el('div', {
-      style: { flex: '1 1 0', minWidth: '300px', overflowY: 'auto', padding: '10px', borderLeft: '1px solid var(--line)' },
-    });
-    body.appendChild(left);
-    body.appendChild(this._infoCol);
-
-    this._cm = new CanvasManager().attach(left);
+    // —— 主体：战斗画布占满全视口 ——
+    const body = el('div', { class: 'vf-view-body', style: { overflow: 'hidden' } });
+    this._cm = new CanvasManager().attach(body);
     this._renderer = new BattleRenderer().init(this._cm);
     this._unsubResize = this._cm.onResize(() => {
       if (this._mounted) this._drawFrame();
     });
 
-    const wrap = el('div', { class: 'vf-view' }, [head, body]);
+    // —— 悬浮情报舱（默认隐藏，Tab / 选中舰船时显示）——
+    this._panel = el('div', { class: 'vf-float-panel hidden' });
+    body.appendChild(this._panel);
+
+    const wrap = el('div', { class: 'vf-view vf-view-immersive' }, [head, body]);
     root.appendChild(wrap);
 
-    // —— 画布交互：点击选中 / 悬停名字 ——
+    // —— 画布交互：点击选中 / 悬停名字 / Tab 开关 ——
     const canvas = this._cm.canvas;
     const onCanvasClick = (e) => {
       const rect = canvas.getBoundingClientRect();
       const hit = this._renderer.pick(e.clientX - rect.left, e.clientY - rect.top);
       this._selectedShipId = hit || null;
       this._renderer.setSelection(hit);
-      this._buildInfoColumn();
+      if (hit && !this._panelOpen) this._togglePanel(true); // 选中舰船自动弹出情报舱
+      this._buildPanel();
     };
     const onCanvasMove = (e) => {
       const rect = canvas.getBoundingClientRect();
@@ -154,13 +165,20 @@ export const CombatView = {
       this._hoverShipId = null;
       this._renderer.setHover(null);
     };
+    const onKeyTab = (e) => {
+      if (e.key !== 'Tab') return;
+      e.preventDefault(); // 阻止焦点漫游，战斗中 Tab 专用于情报舱
+      this._togglePanel();
+    };
     canvas.addEventListener('click', onCanvasClick);
     canvas.addEventListener('mousemove', onCanvasMove);
     canvas.addEventListener('mouseleave', onCanvasLeave);
+    window.addEventListener('keydown', onKeyTab);
     this._handlers = [
       { target: canvas, type: 'click', fn: onCanvasClick },
       { target: canvas, type: 'mousemove', fn: onCanvasMove },
       { target: canvas, type: 'mouseleave', fn: onCanvasLeave },
+      { target: window, type: 'keydown', fn: onKeyTab },
     ];
 
     this._resolveBattleId();
@@ -212,11 +230,21 @@ export const CombatView = {
     }
     this._renderer = null;
     this._data = null;
-    this._infoCol = null;
+    this._panel = null;
+    this._panelBtn = null;
     this._speedBtns = [];
   },
 
   // —— 内部实现 ——————————————————————————————————
+
+  /** 情报舱显隐切换（force=true 强制显示） */
+  _togglePanel(force) {
+    this._panelOpen = force === true ? true : !this._panelOpen;
+    if (this._panel) this._panel.classList.toggle('hidden', !this._panelOpen);
+    if (this._panelBtn) {
+      this._panelBtn.classList.toggle('primary', this._panelOpen);
+    }
+  },
 
   /** 确定 battleId：param 缺省时回落到 snapshot.battles[0]?.id */
   _resolveBattleId() {
@@ -226,14 +254,14 @@ export const CombatView = {
     if (first) this._battleId = first.id;
   },
 
-  /** 整体刷新：重建数据缓存 + 头部状态 + 右侧信息列 */
+  /** 整体刷新：重建数据缓存 + 头部状态 + 情报舱内容 */
   _refreshAll() {
     this._resolveBattleId();
     const w = this.app.world;
     // battleView 对已结束/不存在的战斗返回 null（战斗结束判定依据）
     this._data = this._battleId ? battleView(w, this._battleId) : null;
     this._updateHead();
-    this._buildInfoColumn();
+    this._buildPanel();
   },
 
   /** 头部：标题/星系名/时间档高亮/撤退按钮可用性 */
@@ -310,7 +338,7 @@ export const CombatView = {
     return map;
   },
 
-  /** 渲染一帧战斗视图（数据来自 onSnapshot 缓存） */
+  /** 渲染一帧战斗视图（数据来自 onSnapshot 缓存；HUD 态势条由渲染器 2D 层绘制） */
   _drawFrame() {
     const cm = this._cm;
     const r = this._renderer;
@@ -324,30 +352,30 @@ export const CombatView = {
     });
   },
 
-  // —— 右侧信息列 ——————————————————————————————————
+  // —— 悬浮情报舱 ——————————————————————————————————
 
-  _buildInfoColumn() {
-    const col = this._infoCol;
-    if (!col) return;
-    clearEl(col);
+  _buildPanel() {
+    const box = this._panel;
+    if (!box) return;
+    clearEl(box);
     const d = this._data;
     const w = this.app.world;
 
     if (!d) {
       // —— 战斗结束 / 无战斗 ——
-      col.appendChild(panel({
+      box.appendChild(panel({
         title: this._battleId ? '战斗已结束' : '当前无战斗',
         content: el('div', { class: 'vf-faint vf-small', text: this._battleId
           ? '该战斗已脱离活跃列表（全歼 / 全员撤离 / 结算完成）。'
           : '当前星域没有正在进行的战斗。' }),
       }));
-      this._buildHistorySummary(col);
-      this._buildBattleList(col);
+      this._buildHistorySummary(box);
+      this._buildBattleList(box);
       return;
     }
 
     // —— 1) 单位检视 ——
-    col.appendChild(this._unitPanel(d));
+    box.appendChild(this._unitPanel(d));
 
     // —— 2) 双方损失统计 ——
     const colorOf = (fid) => (w.entities.factions[fid] && w.entities.factions[fid].name) || fid;
@@ -356,7 +384,7 @@ export const CombatView = {
       [`${colorOf(d.sides.a)}（a 方）损失`, d.losses ? d.losses.a : 0],
       [`${colorOf(d.sides.b)}（b 方）损失`, d.losses ? d.losses.b : 0],
     ]));
-    col.appendChild(lossP);
+    box.appendChild(lossP);
 
     // —— 3) 战斗事件时间线（最近 30 条） ——
     const evP = panel({ title: '战斗事件', open: true, dense: true });
@@ -372,7 +400,7 @@ export const CombatView = {
         el('span', { class: 'vf-faint vf-small vf-grow', style: { textAlign: 'right' }, text: `${fmtTime(e.t)}` }),
       ]));
     }
-    col.appendChild(evP);
+    box.appendChild(evP);
   },
 
   /** 单位检视面板（点击画布选中后展示；装甲经只读 world 补齐） */

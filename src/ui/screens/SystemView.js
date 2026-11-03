@@ -1,17 +1,26 @@
 /**
- * ui/screens/SystemView.js — 星系详情视图（路由 #/system/<systemId>）
+ * ui/screens/SystemView.js — 星系详情视图（路由 #/system/<systemId>，R7 全屏沉浸式重构）
  *
- * 布局：.vf-view > .vf-view-head（返回银河 + 标题）+ .vf-view-body
- *       （左 2/3 轨道画布 SystemRenderer + 右 1/3 信息列，可滚动）
+ * 布局：.vf-view.vf-view-immersive > .vf-view-head（悬浮玻璃条：返回银河 + 标题 +
+ *       总览检视）+ .vf-view-body（3D 轨道画布 SystemRenderer 占满全视口）。
+ *       原右侧固定信息列移除，改为 .vf-float-panel 悬浮毛玻璃情报舱：
+ *       星系档案 → 行星卡列表 → 在系舰队 → 异常列表。
  *
- * 信息列（右）：星系档案（kvList）→ 行星卡列表（panel）→ 在系舰队 → 异常列表。
+ * 交互：
+ *  - 鼠标左键拖拽：旋转轨道相机（增量传给 SystemRenderer opts.yaw，渲染器内部
+ *    俯仰固定，仅水平环绕）；
+ *  - 滚轮：数字变焦（画布容器 transform: scale 1.0–2.6，拾取坐标按比例反解）；
+ *  - 单击行星 → app.select('planet', id)（全局选中态联动）+ 情报舱行星卡高亮；
+ *    单击空白 → 清除选中；「定位」按钮反向联动；
+ *  - 头部「总览检视」→ app.select('system', id) 打开右侧全局检视器抽屉。
+ *
  * 信息分层：恒星/行星情报需调查层级≥2，危险度/资源评级/矿藏需≥3（与 scan.js 语义一致）。
  *
  * 数据来源纪律：只读消费 app.snapshot / app.world（绝不写世界字段）+
  * simulation/ViewModels.js 的导出（explorationView，异常只读视图）；
  * 写操作一律经 app.dispatch（FoundOutpost / IssueScanOrder / InvestigateAnomaly）。
  *
- * onSnapshot 以 250ms 节流刷新右侧列表；同视图路由参数变化（ViewRegistry 对相同
+ * onSnapshot 以 250ms 节流刷新情报舱；同视图路由参数变化（ViewRegistry 对相同
  * 视图不重新 mount）时通过 parseHash 感知并整体重建。unmount 释放画布与全部监听。
  */
 
@@ -35,6 +44,12 @@ const FLEET_STATUS = {
   idle: '待命', scanning: '扫描中', investigating: '调查中',
   combat: '交战中', docked: '停泊', moving: '机动中', retreat: '撤退中',
 };
+
+/** 拖拽旋转灵敏度（弧度/逻辑像素） */
+const YAW_SPEED = 0.005;
+/** 数字变焦范围（画布容器 transform scale） */
+const ZOOM_MIN = 1;
+const ZOOM_MAX = 2.6;
 
 /**
  * 常用资源中文名（键 = content/resources.js 资源 id）。
@@ -67,14 +82,17 @@ export const SystemView = {
     this._selectedPlanetId = null;
     this._lastRefresh = 0;
     this._raf = 0;
-    this._handlers = {};
+    this._handlers = [];   // unmount 时统一移除的监听 {target, type, fn}
     this._unsubResize = null;
     this._planetCards = new Map(); // planetId → 行星卡根节点（联动高亮）
-    this._data = null;             // 只读数据包（信息列 + 渲染共享）
+    this._data = null;             // 只读数据包（情报舱 + 渲染共享）
+    this._yaw = 0;                 // 用户拖拽附加偏航（→ SystemRenderer opts.yaw）
+    this._zoom = 1;                // 数字变焦倍率（容器 transform scale）
+    this._drag = { active: false, moved: false, startX: 0, startY: 0, lastX: 0, lastY: 0 };
 
     root.innerHTML = '';
 
-    // —— 头部 ——
+    // —— 头部（悬浮玻璃条）——
     const head = el('div', { class: 'vf-view-head' });
     head.appendChild(el('button', {
       class: 'vf-btn small',
@@ -85,21 +103,17 @@ export const SystemView = {
     this._titleEl = el('h2', { text: L('ui.system') });
     head.appendChild(this._titleEl);
     head.appendChild(el('span', { class: 'vf-grow' }));
-    head.appendChild(el('span', { class: 'vf-dim vf-small', text: '单击轨道图行星可联动右侧档案卡' }));
+    head.appendChild(el('span', { class: 'vf-dim vf-small', text: '拖拽旋转 · 滚轮缩放 · 单击行星联动档案' }));
+    head.appendChild(el('button', {
+      class: 'vf-btn small',
+      text: '总览检视',
+      title: '在右侧检视器抽屉中打开星系总览档案',
+      on: { click: () => app.select('system', this._systemId) },
+    }));
 
-    // —— 主体：左轨道画布 + 右信息列 ——
-    const body = el('div', { class: 'vf-view-body', style: { display: 'flex', overflow: 'hidden' } });
-    const left = el('div', { style: { flex: '2 1 0', position: 'relative', minWidth: '0' } });
-    this._infoCol = el('div', {
-      style: {
-        flex: '1 1 0', minWidth: '300px', overflowY: 'auto',
-        padding: '10px', borderLeft: '1px solid var(--line)', // var(--line) ≈ #1d2a3a
-      },
-    });
-    body.appendChild(left);
-    body.appendChild(this._infoCol);
-
-    this._cm = new CanvasManager().attach(left);
+    // —— 主体：3D 轨道画布占满全视口 ——
+    const body = el('div', { class: 'vf-view-body', style: { overflow: 'hidden' } });
+    this._cm = new CanvasManager().attach(body);
     this._renderer = new SystemRenderer();
     this._renderer.init(this._cm); // GL 通道接线（WebGL2 不可用时内部自动退化 2D）
     // 画布尺寸变化 → 立即补绘一帧（日常逐帧渲染由 rAF 循环承担）
@@ -107,19 +121,15 @@ export const SystemView = {
       if (this._mounted) this._drawFrame();
     });
 
-    const wrap = el('div', { class: 'vf-view' }, [head, body]);
+    // —— 悬浮情报舱（原右栏内容：档案 / 行星 / 舰队 / 异常）——
+    this._dossier = el('div', { class: 'vf-float-panel' });
+    body.appendChild(this._dossier);
+
+    const wrap = el('div', { class: 'vf-view vf-view-immersive' }, [head, body]);
     root.appendChild(wrap);
 
-    // 轨道画布单击 → pick 行星 → 高亮行星卡并滚动到可见
-    const canvas = this._cm.canvas;
-    const onCanvasClick = (e) => {
-      const rect = canvas.getBoundingClientRect();
-      const hit = this._renderer.pick(e.clientX - rect.left, e.clientY - rect.top);
-      this._selectedPlanetId = hit || null;
-      this._highlightPlanetCard(hit);
-    };
-    canvas.addEventListener('click', onCanvasClick);
-    this._handlers.canvasClick = { target: canvas, fn: onCanvasClick };
+    // —— 画布交互：拖拽旋转 / 滚轮缩放 / 单击选择 ——
+    this._bindCanvasEvents();
 
     this._refreshAll();
 
@@ -132,7 +142,7 @@ export const SystemView = {
     this._raf = requestAnimationFrame(loop);
   },
 
-  /** 快照推送：路由参数变化时整体重建；否则 250ms 节流刷新右侧列表 */
+  /** 快照推送：路由参数变化时整体重建；否则 250ms 节流刷新情报舱 */
   onSnapshot(snap) {
     if (!this._mounted) return;
     void snap; // 数据统一经 _buildData 从 app.snapshot / world 只读拉取
@@ -156,9 +166,10 @@ export const SystemView = {
       cancelAnimationFrame(this._raf);
       this._raf = 0;
     }
-    const H = this._handlers || {};
-    if (H.canvasClick) H.canvasClick.target.removeEventListener('click', H.canvasClick.fn);
-    this._handlers = {};
+    for (const h of this._handlers || []) {
+      h.target.removeEventListener(h.type, h.fn);
+    }
+    this._handlers = [];
     if (this._unsubResize) {
       this._unsubResize();
       this._unsubResize = null;
@@ -169,19 +180,102 @@ export const SystemView = {
     }
     this._renderer = null;
     this._data = null;
-    this._infoCol = null;
+    this._dossier = null;
     this._titleEl = null;
     this._planetCards = new Map();
   },
 
   // —— 内部实现 ——————————————————————————————————
 
-  /** 整体刷新：重建数据包 + 标题 + 右侧信息列 */
+  /** 绑定画布交互（全部登记到 _handlers 供 unmount 移除） */
+  _bindCanvasEvents() {
+    const canvas = this._cm.canvas;
+    const drag = this._drag;
+
+    /** 事件坐标 → 渲染器逻辑像素坐标（数字变焦时按容器实际尺寸反解） */
+    const toLocal = (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const k = this._cm.width / Math.max(1, rect.width);
+      return { x: (e.clientX - rect.left) * k, y: (e.clientY - rect.top) * k };
+    };
+
+    const mousedown = (e) => {
+      if (e.button !== 0) return; // 仅左键拖拽旋转
+      drag.active = true;
+      drag.moved = false;
+      drag.startX = drag.lastX = e.clientX;
+      drag.startY = drag.lastY = e.clientY;
+      canvas.style.cursor = 'grabbing';
+    };
+    const mousemove = (e) => {
+      if (!drag.active) return;
+      const rect = canvas.getBoundingClientRect();
+      const k = this._cm.width / Math.max(1, rect.width); // 变焦时位移按比例还原
+      const dx = (e.clientX - drag.lastX) * k;
+      const dy = e.clientY - drag.lastY;
+      drag.lastX = e.clientX;
+      drag.lastY = e.clientY;
+      if (!drag.moved && Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) > 4) {
+        drag.moved = true;
+      }
+      if (drag.moved) this._yaw += dx * YAW_SPEED; // 垂直分量忽略：渲染器俯仰固定
+    };
+    const mouseup = () => {
+      drag.active = false;
+      if (canvas.style.cursor === 'grabbing') canvas.style.cursor = 'grab';
+    };
+    const click = (e) => {
+      if (drag.moved) { drag.moved = false; return; } // 拖拽结束不触发选择
+      const p = toLocal(e);
+      const hit = this._renderer.pick(p.x, p.y);
+      this._selectedPlanetId = hit || null;
+      this._highlightPlanetCard(hit);
+      if (hit) {
+        this.app.select('planet', hit); // 全局选中态联动（检视器不弹抽屉）
+      } else {
+        this.app.select(null); // 空白处清除选中
+      }
+    };
+    const wheel = (e) => {
+      e.preventDefault(); // 阻止页面滚动
+      const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+      this._setZoom(this._zoom * factor);
+    };
+    const mouseleave = () => {
+      if (!drag.active && canvas.style.cursor !== 'grab') canvas.style.cursor = 'grab';
+    };
+
+    canvas.style.cursor = 'grab';
+    canvas.addEventListener('mousedown', mousedown);
+    canvas.addEventListener('click', click);
+    canvas.addEventListener('wheel', wheel, { passive: false });
+    canvas.addEventListener('mouseleave', mouseleave);
+    window.addEventListener('mousemove', mousemove);
+    window.addEventListener('mouseup', mouseup);
+    this._handlers = [
+      { target: canvas, type: 'mousedown', fn: mousedown },
+      { target: canvas, type: 'click', fn: click },
+      { target: canvas, type: 'wheel', fn: wheel },
+      { target: canvas, type: 'mouseleave', fn: mouseleave },
+      { target: window, type: 'mousemove', fn: mousemove },
+      { target: window, type: 'mouseup', fn: mouseup },
+    ];
+  },
+
+  /** 数字变焦：缩放画布容器（GL 与 HUD 2D 同步），拾取坐标已按实际尺寸反解 */
+  _setZoom(z) {
+    this._zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+    const canvas = this._cm && this._cm.canvas;
+    const wrap = canvas && canvas.parentNode; // .vf-view-canvas 包裹层
+    if (wrap) wrap.style.transform = `scale(${this._zoom})`;
+  },
+
+  /** 整体刷新：重建数据包 + 标题 + 悬浮情报舱 */
   _refreshAll() {
     this._buildData();
     const d = this._data;
     this._titleEl.textContent = d ? `${L('ui.system')} · ${d.system.name}` : L('ui.system');
-    this._buildInfoColumn();
+    this._buildDossier();
   },
 
   /** 从 app.world / app.snapshot / ViewModels 只读构建数据包（绝不写世界） */
@@ -250,7 +344,7 @@ export const SystemView = {
     };
   },
 
-  /** 渲染一帧轨道视图 */
+  /** 渲染一帧轨道视图（yaw 来自用户拖拽累计） */
   _drawFrame() {
     const cm = this._cm;
     const r = this._renderer;
@@ -269,17 +363,19 @@ export const SystemView = {
       selectedPlanetId: this._selectedPlanetId,
       reducedEffects: !!(w && w.settings && w.settings.reducedEffects),
       time: performance.now() / 1000, // 仅表现动画，不进模拟
+      yaw: this._yaw, // 用户拖拽旋转增量（渲染器俯仰固定，仅水平环绕）
     });
   },
 
-  /** 构建右侧信息列：档案 → 行星 → 舰队 → 异常 */
-  _buildInfoColumn() {
-    const col = this._infoCol;
-    clearEl(col);
+  /** 构建悬浮情报舱：档案 → 行星 → 舰队 → 异常 */
+  _buildDossier() {
+    const box = this._dossier;
+    if (!box) return;
+    clearEl(box);
     this._planetCards = new Map();
     const d = this._data;
     if (!d) {
-      col.appendChild(el('div', { class: 'vf-faint vf-center mt-3', text: '未找到目标星系 —— 请从银河地图双击进入' }));
+      box.appendChild(el('div', { class: 'vf-faint vf-center mt-3', text: '未找到目标星系 —— 请从银河地图双击进入' }));
       return;
     }
     const w = this.app.world;
@@ -303,24 +399,24 @@ export const SystemView = {
     if (lvl < 2) {
       file.appendChild(el('div', { class: 'vf-faint vf-small mt-1', text: '情报不足：派遣舰队扫描以提升调查层级。' }));
     }
-    col.appendChild(file);
+    box.appendChild(file);
 
     // 2) 行星列表（分类层级后揭示）
     if (lvl >= 2) {
       const list = panel({ title: `行星（${d.planets.length}）`, open: true });
       for (const p of d.planets) list.appendChild(this._planetCard(p, lvl));
-      col.appendChild(list);
+      box.appendChild(list);
     } else {
       const list = panel({ title: '行星', open: true });
       list.appendChild(el('div', { class: 'vf-faint vf-small', text: '完成「分类」层级后揭示行星情报。' }));
-      col.appendChild(list);
+      box.appendChild(list);
     }
 
     // 3) 在系舰队
-    col.appendChild(this._fleetPanel(d));
+    box.appendChild(this._fleetPanel(d));
 
     // 4) 异常列表
-    col.appendChild(this._anomalyPanel(d));
+    box.appendChild(this._anomalyPanel(d));
   },
 
   /**
@@ -337,7 +433,15 @@ export const SystemView = {
       title: p.name,
       open: true,
       dense: true,
-      tools: [{ label: '定位', title: '在轨道图中高亮该行星', onClick: () => { this._selectedPlanetId = p.id; } }],
+      tools: [{
+        label: '定位',
+        title: '在轨道图中高亮该行星并设为全局选中',
+        onClick: () => {
+          this._selectedPlanetId = p.id;
+          this._highlightPlanetCard(p.id);
+          app.select('planet', p.id);
+        },
+      }],
     });
 
     const pairs = [
