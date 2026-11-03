@@ -374,7 +374,7 @@ export function createGroundMission(world, opts = {}) {
   const { templateId, planetId = null, squadCharacterIds = [] } = opts;
   const template = findMissionTemplate(templateId);
   if (!template) throw new Error(`ground: 未知任务模板 ${templateId}`);
-  const ids = (squadCharacterIds || []).slice(0, 3);
+  let ids = (squadCharacterIds || []).slice(0, 3);
   // 允许无角色小队：自动创建未命名陆战队员（1-3 名）
   if (!ids.length) {
     ids = ['marine_auto_1', 'marine_auto_2', 'marine_auto_3'];
