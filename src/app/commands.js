@@ -182,6 +182,17 @@ registerCommand('BuildOnColony', {
     if (cmd.actorId && colony.factionId !== cmd.actorId) return { ok: false, code: 'FORBIDDEN', reason: '非己方殖民地' };
     const def = buildingDef(cmd.params.defId);
     if (!def) return { ok: false, code: 'NO_DEF', reason: '未知建筑' };
+    // 采掘类建筑必须与行星矿藏匹配（任务书 0.2：禁止装饰性数据）
+    if (def.category === 'mining' && colony.planetId) {
+      const planet = ctx.world.entities.planets[colony.planetId];
+      if (planet && planet.deposits) {
+        const depMap = { bld_mine_ferro: 'ferro', bld_mine_silicate: 'silicate', bld_mine_rare: 'rareEarth', bld_mine_heavy: 'heavyMetal', bld_volatile_well: 'hydrogen', bld_gas_harvester: 'helium3' };
+        const need = depMap[def.id];
+        if (need && !(planet.deposits[need] > 0)) {
+          return { ok: false, code: 'NO_DEPOSIT', reason: `该行星缺乏${need}矿藏` };
+        }
+      }
+    }
     if (def.techReq && !(ctx.world.research[colony.factionId]?.completed || []).includes(def.techReq)) {
       return { ok: false, code: 'NO_TECH', reason: '科技未解锁' };
     }

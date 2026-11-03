@@ -57,7 +57,7 @@ export function foundColony(world, planetId, factionId, initialPop = 6, isOutpos
     isOutpost,
     population: { total: initialPop, strata: { worker: initialPop } },
     housing: isOutpost ? 8 : 12,
-    buildings: isOutpost ? [{ defId: 'bld_admin_post', level: 1, state: 'active', progress: 0 }] : [],
+    buildings: isOutpost ? [{ defId: 'bld_admin_center', level: 1, state: 'active', progress: 0 }] : [],
     stockpile: { food: 90, water: 70, ferro: 0, silicate: 0, powerCell: 4, medicine: 4 },
     stability: 60,
     powerBalance: 0,

@@ -6,6 +6,7 @@
 import { registerDaily } from './TickPipeline.js';
 import { dailyEventCheck, expirePendingChoices } from '../domain/events/narrative.js';
 import { dailyPolicySettlement } from '../domain/politics/policy.js';
+import { buildingDef } from '../domain/planets/colony.js';
 import { dailyPopulation } from '../domain/planets/colony.js';
 import { closeDailyLedgers, applyDecay } from '../domain/economy/ledger.js';
 import { updateMarketPrices } from '../domain/economy/market.js';
@@ -21,6 +22,29 @@ registerDaily('population', (world) => {
     const r = dailyPopulation(world, colony);
     if (r.after <= 0 && r.before > 0) {
       emit(world, 'ColonyLost', { colonyId: id, planetId: colony.planetId }, 'colony');
+    }
+  }
+});
+
+registerDaily('upkeep', (world) => {
+  // 建筑维护费扣费（任务书 4.6：建筑 upkeep 必须实际结算）
+  for (const cid of Object.keys(world.entities.colonies).sort()) {
+    const col = world.entities.colonies[cid];
+    for (const b of col.buildings || []) {
+      if (b.state !== 'active') continue;
+      const def = buildingDef(b.defId);
+      if (!def || !def.upkeep) continue;
+      for (const [rid, amt] of Object.entries(def.upkeep)) {
+        const need = Math.ceil(amt * (b.level || 1));
+        if (rid === 'credits') {
+          col.stockpile.credits = Math.max(0, (col.stockpile.credits || 0) - need);
+        } else {
+          // 原料从殖民地仓储扣
+          const cur = col.stockpile[rid] || 0;
+          if (cur >= need) { col.stockpile[rid] -= need; }
+          else { b.state = 'starved'; break; }
+        }
+      }
     }
   }
 });
