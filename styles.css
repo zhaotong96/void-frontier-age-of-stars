@@ -24,10 +24,19 @@
   --radius-lg: 8px;
   --font: "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
   --mono: "Cascadia Code", Consolas, "Courier New", monospace;
-  --topbar-h: 44px;
-  --sidebar-w: 176px;
-  --inspector-w: 340px;
-  --bottombar-h: 96px;
+  /* —— R7 全屏沉浸式 HUD 布局变量：玻璃岛 / 导航栏 / 抽屉的尺寸与位置统一由此驱动 —— */
+  --hud-bg: rgba(8, 14, 24, 0.72);
+  --hud-bg-strong: rgba(10, 16, 26, 0.78);
+  --hud-line: rgba(79, 216, 232, 0.28);
+  --hud-blur: blur(12px);
+  --rail-left: 10px;     /* 左侧图标导航栏距视口左缘 */
+  --rail-w: 46px;        /* 左侧图标导航栏宽度 */
+  --topbar-top: 10px;
+  --topbar-h: 38px;
+  --topbar-left: 68px;   /* 让开左侧导航栏 */
+  --topbar-right: 16px;
+  --bottombar-h: 32px;
+  --inspector-w: 320px;
 }
 
 * { box-sizing: border-box; }
@@ -44,15 +53,20 @@ html, body {
   overflow: hidden;
 }
 
-/* —— 启动画面 —— */
+/* —— 启动画面 / 主菜单叠加层（R7：全屏 3D 背景叠加层样式）——
+   主菜单将其复用为全屏容器：底层是自动环绕运镜的 3D 银河画布，
+   本层只提供暗角渐变与居中内容，本身不拦截鼠标（面板自行恢复交互）。 */
 .boot-screen {
-  height: 100vh;
+  position: fixed;
+  inset: 0;
+  z-index: 2;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 12px;
-  background: radial-gradient(ellipse at 50% 30%, #0d1626 0%, var(--bg) 70%);
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% 30%, rgba(13, 22, 38, 0.5) 0%, rgba(7, 11, 18, 0.88) 74%);
 }
 .boot-title {
   font-size: 34px;
@@ -70,36 +84,85 @@ html, body {
   font-size: 15px;
 }
 
-/* —— 应用主框架 —— */
-.vf-shell {
-  display: grid;
-  height: 100vh;
-  grid-template-areas:
-    "top top top"
-    "nav main inspector"
-    "bottom bottom bottom";
-  grid-template-rows: var(--topbar-h) 1fr var(--bottombar-h);
-  grid-template-columns: var(--sidebar-w) 1fr var(--inspector-w);
+/* —— 主菜单毛玻璃面板（无 ERP 包围感的悬浮舱）—— */
+.vf-menu-panel {
+  pointer-events: auto;
+  width: min(460px, 92vw);
+  max-height: min(72vh, 640px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px 20px;
+  background: rgba(10, 16, 26, 0.72);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(79, 216, 232, 0.3);
+  border-radius: 12px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
 }
-.vf-shell.no-inspector { grid-template-columns: var(--sidebar-w) 1fr 0; }
-.vf-shell.no-bottombar { grid-template-rows: var(--topbar-h) 1fr 0; }
+.vf-menu-panel .vf-panel { background: rgba(14, 21, 32, 0.6); }
+.vf-menu-titleblock { text-align: center; pointer-events: none; margin-bottom: 4px; }
+.vf-menu-actions { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+.vf-menu-foot {
+  text-align: center;
+  color: var(--ink-faint);
+  font-size: 10.5px;
+  letter-spacing: 2px;
+  font-family: var(--mono);
+}
 
-.vf-topbar { grid-area: top; }
-.vf-sidebar { grid-area: nav; }
-.vf-main { grid-area: main; position: relative; overflow: hidden; }
-.vf-inspector { grid-area: inspector; }
-.vf-bottombar { grid-area: bottom; }
+/* —— 应用主框架（R7 全屏沉浸式：100vw×100vh 3D 视口 + 悬浮毛玻璃 HUD）—— */
+.vf-shell {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+/* 主视口：固定铺满整个视口，3D 画布在此全屏绘制，全部 HUD 悬浮其上 */
+.vf-main {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 1;
+}
+/* 主菜单路由下隐藏战略顶栏与遥测条（菜单自带全屏银河 + 毛玻璃面板） */
+.vf-shell.in-menu .vf-topbar,
+.vf-shell.in-menu .vf-bottombar { display: none; }
 
-/* —— 顶栏 —— */
+/* —— 顶栏：透明容器 + 三个独立悬浮 HUD 岛 —— */
 .vf-topbar {
+  position: fixed;
+  top: 10px;
+  left: 68px;
+  right: 16px;
+  height: 38px;
+  z-index: 40;
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  pointer-events: none; /* 容器不拦截视口事件；各岛自行恢复交互 */
+  background: transparent;
+  border: none;
+}
+.vf-hud-island {
+  pointer-events: auto;
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 0 12px;
-  background: linear-gradient(180deg, var(--panel2), var(--panel));
-  border-bottom: 1px solid var(--line);
-  z-index: 30;
+  gap: 10px;
+  background: rgba(8, 14, 24, 0.72);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(79, 216, 232, 0.28);
+  border-radius: 6px;
+  padding: 4px 12px;
+  min-height: 38px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
 }
+.vf-hud-island.island-mid { margin-left: auto; }
+/* TopBar 的单行渲染源容器退化为透明行（内容已由 App 分发进三岛） */
+.vf-topbar .vf-topbar-inner { display: contents; }
 .vf-topbar .brand {
   font-family: var(--mono);
   letter-spacing: 3px;
@@ -107,32 +170,52 @@ html, body {
   font-size: 13px;
   white-space: nowrap;
 }
-.vf-topbar .spacer { flex: 1; }
+.vf-topbar .spacer { display: none; }
 .vf-date { font-family: var(--mono); color: var(--ink); min-width: 150px; }
 .vf-speed-controls { display: flex; gap: 2px; }
 .vf-topbar .vf-chip { flex-shrink: 0; }
 
-/* —— 侧栏 —— */
+/* —— 侧栏：左侧悬浮图标导航栏（默认仅图标，hover / .expanded 展开文字）—— */
 .vf-sidebar {
-  background: var(--bg2);
-  border-right: 1px solid var(--line);
-  overflow-y: auto;
-  padding: 8px 6px;
+  position: fixed;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 46px;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: rgba(8, 14, 24, 0.75);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(79, 216, 232, 0.25);
+  border-radius: 8px;
+  padding: 6px 4px;
+  max-height: calc(100vh - 110px);
+  overflow: hidden auto;
+  transition: width 0.18s ease;
 }
+.vf-sidebar:hover,
+.vf-sidebar.expanded { width: 176px; }
 .vf-nav-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 9px;
   width: 100%;
-  padding: 8px 10px;
+  padding: 7px 8px;
   margin: 1px 0;
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--radius);
   color: var(--ink-dim);
   font: inherit;
+  font-size: 12.5px;
   text-align: left;
   cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
 }
 .vf-nav-item:hover { background: var(--panel); color: var(--ink); }
 .vf-nav-item.is-active {
@@ -140,10 +223,20 @@ html, body {
   color: var(--accent);
   border-color: var(--line);
 }
-.vf-nav-item .icon { width: 18px; text-align: center; opacity: 0.9; }
+.vf-nav-item .icon { width: 26px; flex: 0 0 26px; text-align: center; opacity: 0.9; font-size: 14px; }
+/* 文字标签：默认隐藏，导航栏展开时淡入 */
+.vf-nav-item > span:not(.icon):not(.badge) {
+  opacity: 0;
+  transform: translateX(-4px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.vf-sidebar:hover .vf-nav-item > span:not(.icon):not(.badge),
+.vf-sidebar.expanded .vf-nav-item > span:not(.icon):not(.badge) { opacity: 1; transform: none; }
 .vf-nav-item .badge {
-  margin-left: auto;
-  min-width: 18px;
+  position: absolute;
+  top: 2px;
+  right: 3px;
+  min-width: 14px;
   text-align: center;
   background: var(--danger);
   color: #14090a;
@@ -152,15 +245,30 @@ html, body {
   padding: 0 4px;
   font-weight: 700;
 }
+.vf-sidebar:hover .vf-nav-item .badge,
+.vf-sidebar.expanded .vf-nav-item .badge { position: static; margin-left: auto; }
 .vf-nav-item .badge.idle { background: var(--line-bright); color: var(--ink); }
 
-/* —— 检视器 —— */
+/* —— 检视器：右侧悬浮毛玻璃抽屉（默认滑出隐藏，.open 滑入）—— */
 .vf-inspector {
-  background: var(--bg2);
-  border-left: 1px solid var(--line);
-  overflow-y: auto;
+  position: fixed;
+  top: 58px;
+  right: 12px;
+  bottom: 48px;
+  width: 320px;
+  z-index: 35;
+  background: rgba(10, 16, 26, 0.78);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(79, 216, 232, 0.2);
+  border-radius: 10px;
   padding: 10px;
+  overflow-y: auto;
+  transform: translateX(calc(100% + 24px));
+  transition: transform 0.22s ease;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
 }
+.vf-inspector.open { transform: translateX(0); }
 .vf-inspector h3 {
   margin: 4px 0 10px;
   font-size: 13px;
@@ -170,16 +278,63 @@ html, body {
   padding-bottom: 6px;
 }
 
-/* —— 底部信息带 —— */
+/* —— 底部遥测条：单行流式（队列 / 告警 / 日志压成一行横向流动）—— */
 .vf-bottombar {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1.2fr;
+  position: fixed;
+  bottom: 8px;
+  left: 68px;
+  right: 16px;
+  height: 32px;
+  z-index: 40;
+  display: flex;
   gap: 8px;
-  padding: 6px 8px;
-  background: var(--bg2);
-  border-top: 1px solid var(--line);
+  align-items: center;
+  pointer-events: none;
   overflow: hidden;
 }
+.vf-bottombar .vf-panel {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  height: 32px;
+  flex: 1 1 0;
+  min-width: 0;
+  background: rgba(8, 14, 24, 0.72);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(79, 216, 232, 0.22);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.vf-bottombar .vf-panel-head {
+  cursor: default;
+  flex: 0 0 auto;
+  padding: 0 2px 0 10px;
+  background: transparent;
+  border: none;
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+.vf-bottombar .vf-panel-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 14px;
+  padding: 0 10px 0 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.vf-bottombar .vf-log-line,
+.vf-bottombar .vf-alert-row { flex: 0 0 auto; }
+.vf-bottombar .vf-alert-row { border-bottom: none; padding: 2px 0; }
+.vf-bottombar .vf-alert-row .vf-grow { flex: 0 0 auto; }
 
 /* —— 面板通用 —— */
 .vf-panel {
@@ -379,18 +534,40 @@ input[type="range"] { accent-color: var(--accent); }
   justify-content: center;
   z-index: 300;
 }
+/* 全息毛玻璃模态（R7）：所有模态统一为深空玻璃质感 */
 .vf-modal {
-  background: var(--panel);
-  border: 1px solid var(--line-bright);
-  border-radius: var(--radius-lg);
+  background: rgba(10, 16, 26, 0.84);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(79, 216, 232, 0.3);
+  border-radius: 10px;
   min-width: 380px;
   max-width: 560px;
   max-height: 82vh;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7);
 }
 .vf-modal.wide { min-width: 640px; max-width: 900px; }
+/* 居中全息模态舱：大型事件裁决 / 剧情演出用（App 动态附加该类） */
+.vf-holo-modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(1180px, 88vw);
+  height: min(760px, 82vh);
+  min-width: 0;
+  max-width: none;
+  max-height: none;
+  background: rgba(10, 16, 26, 0.84);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(79, 216, 232, 0.35);
+  border-radius: 12px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(79, 216, 232, 0.12) inset;
+  z-index: 50;
+}
 .vf-modal-title {
   padding: 10px 14px;
   border-bottom: 1px solid var(--line);
@@ -456,15 +633,29 @@ input[type="range"] { accent-color: var(--accent); }
   display: flex;
   flex-direction: column;
 }
+/* 视图头：悬浮毛玻璃条（R7：去 ERP 实心条，全部悬浮于视口之上） */
 .vf-view-head {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--line);
-  background: rgba(14, 21, 32, 0.85);
+  padding: 7px 12px;
+  margin: 58px 16px 8px 68px;
+  border: 1px solid var(--hud-line);
+  border-radius: 8px;
+  background: var(--hud-bg);
+  backdrop-filter: var(--hud-blur);
+  -webkit-backdrop-filter: var(--hud-blur);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.4);
   z-index: 5;
   flex-wrap: wrap;
+}
+/* 沉浸式视图（星系/战斗等 3D 视口）：头部完全悬浮，画布占满全视口 */
+.vf-view-immersive .vf-view-head {
+  position: absolute;
+  top: 58px;
+  left: 68px;
+  right: 16px;
+  margin: 0;
 }
 .vf-view-head h2 { margin: 0; font-size: 14px; letter-spacing: 2px; color: var(--ink); font-weight: 500; }
 .vf-view-body { flex: 1; position: relative; overflow: auto; }
@@ -472,14 +663,43 @@ input[type="range"] { accent-color: var(--accent); }
 .vf-view-canvas { position: absolute; inset: 0; }
 .vf-view-canvas canvas { display: block; }
 
+/* —— 悬浮情报面板（R7）：3D 视口右侧的毛玻璃信息舱 ——
+   星系行星档案 / 战斗单位情报等原先的固定右栏内容移入此处。 */
+.vf-float-panel {
+  position: absolute;
+  top: 106px;
+  right: 12px;
+  bottom: 48px;
+  width: 316px;
+  z-index: 8;
+  background: rgba(10, 16, 26, 0.72);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(79, 216, 232, 0.2);
+  border-radius: 10px;
+  padding: 8px;
+  overflow-y: auto;
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.5);
+}
+.vf-float-panel.hidden { display: none; }
+/* 浮面板可折叠时的收起按钮条 */
+.vf-float-panel-toggle {
+  position: absolute;
+  top: 106px;
+  right: 12px;
+  z-index: 9;
+}
+
 /* —— 地图图层控件 —— */
 .vf-layers {
   position: absolute;
   top: 10px;
-  left: 10px;
+  left: 68px; /* 让开左侧悬浮导航栏 */
   z-index: 6;
-  background: rgba(14, 21, 32, 0.92);
-  border: 1px solid var(--line);
+  background: rgba(10, 16, 26, 0.72);
+  backdrop-filter: var(--hud-blur);
+  -webkit-backdrop-filter: var(--hud-blur);
+  border: 1px solid rgba(79, 216, 232, 0.22);
   border-radius: var(--radius);
   padding: 8px;
   display: flex;
@@ -499,10 +719,7 @@ input[type="range"] { accent-color: var(--accent); }
 }
 .vf-layers label:hover { color: var(--ink); }
 
-/* —— 底部带内部 —— */
-.vf-bottombar .vf-panel { margin: 0; height: 100%; display: flex; flex-direction: column; }
-.vf-bottombar .vf-panel-body { flex: 1; overflow-y: auto; padding: 4px 8px; }
-.vf-bottombar .vf-panel-head { cursor: default; padding: 4px 8px; }
+/* —— 底部带内部（R7：单行遥测，见顶部 .vf-bottombar 区块）—— */
 .vf-log-line { font-size: 11px; color: var(--ink-dim); padding: 1px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .vf-log-line .t { color: var(--ink-faint); font-family: var(--mono); margin-right: 6px; }
 .vf-log-line.warn { color: var(--warn); }
@@ -574,37 +791,21 @@ input[type="range"] { accent-color: var(--accent); }
   * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
 
-/* —— 响应式 —— */
+/* —— 响应式（R7：HUD 全悬浮、无网格折叠；仅做尺寸收缩）—— */
 @media (max-width: 1080px) {
-  .vf-shell {
-    grid-template-columns: var(--sidebar-w) 1fr 0;
-  }
-  .vf-inspector {
-    position: fixed;
-    right: 0;
-    top: var(--topbar-h);
-    bottom: var(--bottombar-h);
-    width: min(360px, 88vw);
-    z-index: 40;
-    transform: translateX(100%);
-    transition: transform 0.2s;
-    box-shadow: -8px 0 30px rgba(0, 0, 0, 0.5);
-  }
-  .vf-inspector.open { transform: none; }
+  .vf-inspector { width: min(320px, 86vw); }
+  .vf-float-panel { width: min(316px, 84vw); }
+  .vf-holo-modal { width: min(1180px, 94vw); }
 }
 @media (max-width: 760px) {
-  .vf-shell { grid-template-columns: 0 1fr 0; }
-  .vf-sidebar {
-    position: fixed;
-    left: 0;
-    top: var(--topbar-h);
-    bottom: var(--bottombar-h);
-    width: 200px;
-    z-index: 40;
-    transform: translateX(-100%);
-    transition: transform 0.2s;
-  }
-  .vf-sidebar.open { transform: none; }
-  .vf-bottombar { grid-template-columns: 1fr; }
-  :root { --bottombar-h: 70px; }
+  .vf-topbar { left: 10px; }
+  .vf-topbar .vf-hud-island.island-mid { display: none; } /* 窄屏折叠资源态势岛 */
+  .vf-view-head { margin-left: 10px; margin-top: 54px; }
+  .vf-view-immersive .vf-view-head { left: 10px; top: 54px; }
+  .vf-bottombar { left: 10px; }
+  .vf-layers { left: 10px; }
+  .vf-sidebar:hover,
+  .vf-sidebar.expanded { width: 156px; }
+  .vf-inspector { top: 54px; }
+  .vf-float-panel { top: 100px; }
 }

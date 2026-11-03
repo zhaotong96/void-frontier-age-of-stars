@@ -912,7 +912,8 @@ export class GalaxyRenderer {
 
   /** GL 模式 HUD：星点 → 势力范围 → 星系标记 → 舰队 → 标签 → 前线 */
   _drawHud(ctx, w, h, snap, L, opts, reduced, t) {
-    this._drawHudStars(ctx, w, h);
+    ctx.clearRect(0, 0, w, h);
+    if (this._mode !== 'gl') this._drawHudStars(ctx, w, h);
     if (!snap || !Array.isArray(snap.systems)) return;
     const facColor = this._facHex;
     const posFn = this._hudPosFn();

@@ -56,7 +56,7 @@ export const GroundView = {
     this._raf = null;
 
     // 活动任务查找（param 可为 missionId 或 planetId）
-    const missions = Object.values(w.entities.groundMissions).filter((m) => m.state === 'active');
+    const missions = Object.values(w.entities.groundMissions).filter((m) => m.status === 'active');
     let mission = null;
     if (param) mission = missions.find((m) => m.id === param || m.planetId === param) || null;
     else mission = missions[0] || null;
@@ -112,13 +112,13 @@ export const GroundView = {
     p1.appendChild(tplBox);
     box.appendChild(p1);
     // 已结束任务结果列表
-    const done = Object.values(this.app.world.entities.groundMissions).filter((m) => m.state !== 'active');
+    const done = Object.values(this.app.world.entities.groundMissions).filter((m) => m.status !== 'active');
     if (done.length > 0) {
       const p2 = panel({ title: '既往行动记录', open: false });
       for (const m of done.slice(-8)) {
         const tpl = findMissionTemplate(m.templateId);
         p2.appendChild(el('div', { class: 'vf-log-line' }, [
-          el('span', { text: `${tpl?.nameZh || m.templateId} — ${({ success: '成功', failed: '失败', aborted: '中止' })[m.state] || m.state}` }),
+          el('span', { text: `${tpl?.nameZh || m.templateId} — ${({ success: '成功', failed: '失败', aborted: '中止' })[m.status] || m.status}` }),
         ]));
       }
       box.appendChild(p2);
@@ -200,7 +200,7 @@ export const GroundView = {
       if (!this._raf) return;
       const w2 = this.app.world;
       const m = w2.entities.groundMissions[this.missionId];
-      if (!m || m.state !== 'active') {
+      if (!m || m.status !== 'active') {
         this._raf = null;
         // 任务结束：显示结算并返回简报
         this._showResult(m);

@@ -16,6 +16,7 @@ import { SPEEDS, dateStr } from '../core/clock.js';
 import { buildSnapshot } from '../simulation/SnapshotBuilder.js';
 import { SaveManager } from '../persistence/SaveManager.js';
 import { toast, showModal } from '../ui/components/index.js';
+import { el } from '../ui/components/dom.js';
 import { L, setLanguage } from '../core/i18n.js';
 import { AudioManager } from '../render/AudioManager.js';
 import { recentLog } from '../core/eventBus.js';
@@ -43,6 +44,8 @@ import { TopBar } from '../ui/shell/TopBar.js';
 import { SideNav } from '../ui/shell/SideNav.js';
 import { Inspector } from '../ui/shell/Inspector.js';
 import { BottomBar } from '../ui/shell/BottomBar.js';
+
+let app_keysBound = false;
 
 export class App {
   constructor(rootEl) {
@@ -98,6 +101,26 @@ export class App {
     this._onRoute(parseHash());
     mark('route:done');
     mark('boot:end');
+    // 全局键盘快捷键（任务书 6.6：不依赖设置页是否被打开；R7 追加 N / Esc）
+    if (!app_keysBound) {
+      app_keysBound = true;
+      window.addEventListener('keydown', (e) => {
+        const tag = ((e.target && e.target.tagName) || '').toLowerCase();
+        if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+        // Esc：模态自身监听并关闭弹窗，这里避免重复动作；否则取消选中并收起抽屉
+        if (e.key === 'Escape') {
+          if (document.querySelector('.vf-modal-backdrop')) return;
+          if (this.selection) this.select(null);
+          else this.setInspectorOpen(false);
+          return;
+        }
+        if (!this.inGame) return;
+        if (e.code === 'Space') { e.preventDefault(); this.togglePause(); }
+        else if (e.key >= '1' && e.key <= '4') { this.setSpeed(parseInt(e.key, 10)); }
+        else if (e.key === 'g' || e.key === 'G') { this.goto('galaxy'); }
+        else if (e.key === 'n' || e.key === 'N') { this.openNextEvent(); }
+      });
+    }
     // rAF 看门狗：后台/失焦标签页 rAF 被冻结时以低频维持模拟（降频不冻结）
     this._watchdog = setInterval(() => {
       if (performance.now() - this.lastFrame > 600) this._frame(performance.now());
@@ -107,24 +130,78 @@ export class App {
     requestAnimationFrame(this._frame);
   }
 
+  /**
+   * 构建应用外壳（R7 全屏沉浸式）：
+   *   .vf-main 固定铺满 100vw×100vh 承载 3D 视口；顶栏 / 导航栏 / 遥测条 /
+   *   检视器全部改为悬浮毛玻璃 HUD，叠加在视口之上（见 styles.css）。
+   * 初始带 .in-menu（首路由是菜单），由 _onRoute 维护。
+   */
   buildShell() {
     this.root.innerHTML = '';
     const shell = document.createElement('div');
-    shell.className = 'vf-shell';
+    shell.className = 'vf-shell in-menu';
     shell.innerHTML = `
+      <main class="vf-main" id="vf-main"></main>
       <header class="vf-topbar" id="vf-topbar"></header>
       <nav class="vf-sidebar" id="vf-sidebar" aria-label="主导航"></nav>
-      <main class="vf-main" id="vf-main"></main>
-      <aside class="vf-inspector" id="vf-inspector"></aside>
+      <aside class="vf-inspector" id="vf-inspector" aria-label="上下文检视器"></aside>
       <footer class="vf-bottombar" id="vf-bottombar"></footer>
     `;
     this.root.appendChild(shell);
     this.shellEl = shell;
+    this.mainEl = document.getElementById('vf-main');
+    this.inspectorEl = document.getElementById('vf-inspector');
     this.topBar = new TopBar(document.getElementById('vf-topbar'), this);
     this.sideNav = new SideNav(document.getElementById('vf-sidebar'), this);
-    this.inspector = new Inspector(document.getElementById('vf-inspector'), this);
+    this.inspector = new Inspector(this.inspectorEl, this);
     this.bottomBar = new BottomBar(document.getElementById('vf-bottombar'), this);
-    this.mainEl = document.getElementById('vf-main');
+    // 顶栏拆分为三个悬浮 HUD 岛（品牌/星历/倍率 · 资源态势 · 通知）
+    this._hudIslandsInit();
+  }
+
+  /**
+   * 把 TopBar 的单行内容分发到三个 .vf-hud-island（TopBar 本身只负责渲染行，
+   * 每次 render 后重新分发：左岛=品牌/星历/时间倍率，中岛=资源与威胁态势，右岛=通知）。
+   */
+  _hudIslandsInit() {
+    const bar = document.getElementById('vf-topbar');
+    if (!bar) return;
+    const mk = (cls) => {
+      const d = document.createElement('div');
+      d.className = `vf-hud-island ${cls}`;
+      return d;
+    };
+    this._islandL = mk('island-left');
+    this._islandM = mk('island-mid');
+    this._islandR = mk('island-right');
+    bar.appendChild(this._islandL);
+    bar.appendChild(this._islandM);
+    bar.appendChild(this._islandR);
+    const tb = this.topBar;
+    const redistribute = () => {
+      const inner = tb && tb.el;
+      if (!inner || !this._islandL) return;
+      for (const box of [this._islandL, this._islandM, this._islandR]) box.innerHTML = '';
+      for (const node of Array.from(inner.children)) {
+        const cls = node.classList;
+        if (cls.contains('spacer')) continue; // 岛间距由顶栏 flex gap 提供
+        if (cls.contains('brand') || cls.contains('vf-date') || cls.contains('vf-speed-controls')) {
+          this._islandL.appendChild(node);
+        } else if (node.tagName === 'BUTTON') {
+          this._islandR.appendChild(node);
+        } else {
+          this._islandM.appendChild(node);
+        }
+      }
+    };
+    const origRender = tb.render.bind(tb);
+    tb.render = () => { origRender(); redistribute(); };
+    tb.render();
+  }
+
+  /** 悬浮检视器抽屉开合（.vf-inspector.open，见 styles.css） */
+  setInspectorOpen(open) {
+    if (this.inspectorEl) this.inspectorEl.classList.toggle('open', !!open);
   }
 
   /** 是否处于战役内 */
@@ -175,9 +252,31 @@ export class App {
   }
 
   enterGame() {
-    this.shellEl.classList.remove('no-inspector');
+    this.setInspectorOpen(false); // 抽屉默认收起，选中实体时再滑出
     this.sideNav.refresh();
     this.running = true;
+  }
+
+  /** 语言切换后原地刷新外壳与当前活动视图（不调 buildShell、不销毁外壳结构） */
+  refreshLocaleUI() {
+    this.topBar.render();
+    this.sideNav.refresh();
+    this.bottomBar.refresh();
+    const view = this._activeViewObj;
+    if (view && typeof view.mount === 'function') {
+      // 先卸载再重挂：保证画布/rAF/监听被视图自身清理，不泄漏
+      if (typeof view.unmount === 'function') {
+        try { view.unmount(); } catch (e) { console.warn('视图卸载异常', e); }
+      }
+      try {
+        view.mount({ root: this.mainEl, app: this, param: this._routeParam || null });
+      } catch (e) {
+        console.error('视图本地化重挂异常', e);
+      }
+      this.refreshSnapshot();
+    } else {
+      this.inspector.render(this.snapshot);
+    }
   }
 
   exitToMenu() {
@@ -185,6 +284,9 @@ export class App {
     this.world = null;
     this.running = false;
     this.snapshot = null;
+    this.selection = null;
+    this.pendingEvent = null;
+    this.setInspectorOpen(false);
     this.sideNav.refresh();
     navigate('menu');
   }
@@ -276,13 +378,91 @@ export class App {
   }
 
   _checkPendingEvent() {
-    if (this.pendingEvent) return;
     const w = this.world;
-    if (w.narrative && w.narrative.pendingChoices && w.narrative.pendingChoices.length > 0) {
-      this.pendingEvent = w.narrative.pendingChoices[0];
-      this.setSpeed(0);
-      this.goto('events');
+    if (!w || !w.narrative || !Array.isArray(w.narrative.pendingChoices)) return;
+    const next = w.narrative.pendingChoices[0] || null;
+    if (!next) {
+      this.pendingEvent = null;
+      return;
     }
+    // 同一事件已弹出时不重复打断；绝不 goto('events') 卸载当前 3D 视图
+    if (this.pendingEvent && this.pendingEvent.eventId === next.eventId) return;
+    this.pendingEvent = next;
+    this.setSpeed(0);
+    this._openNonIntrusiveEventModal(next);
+  }
+
+  /**
+   * 非侵入式事件模态窗（R7）：以全息模态舱叠加在当前 3D 视口之上，
+   * 不销毁底层视图、不跳转路由。裁决成功后清除 pendingEvent；
+   * 裁决被拒（命令校验失败）时保持打开，由 dispatch 内部 toast 原因。
+   * 关闭弹窗而不裁决（Esc / 遮罩）：事件仍待决，时间维持暂停。
+   */
+  _openNonIntrusiveEventModal(event) {
+    const ev = event || {};
+    const w = this.world;
+    const live = w && w.narrative && Array.isArray(w.narrative.pendingChoices)
+      ? w.narrative.pendingChoices.find((p) => p.eventId === ev.eventId)
+      : null;
+    const def = live || ev;
+    const body = el('div', { class: 'vf-col' });
+    body.appendChild(el('div', {
+      class: 'vf-dim',
+      style: { whiteSpace: 'pre-wrap', lineHeight: '1.7' },
+      text: def.bodyZh || '（无正文）',
+    }));
+    const choices = Array.isArray(def.choices) ? def.choices : [];
+    const actions = choices.map((c) => ({
+      label: c.labelZh || c.id || '选项',
+      kind: 'primary',
+      onClick: () => {
+        const res = this.dispatch('ResolveEventChoice', { eventId: ev.eventId, choiceId: c.id });
+        if (res && res.ok) {
+          this.pendingEvent = null;
+          this.sideNav.refresh();
+          return; // 默认关闭模态
+        }
+        return false; // 裁决失败保持打开
+      },
+    }));
+    if (!choices.length) {
+      actions.push({ label: L('ui.cancel'), kind: 'ghost', onClick: () => {} });
+    }
+    showModal({
+      title: `◈ ${def.titleZh || '叙事事件'}`,
+      body,
+      actions,
+      wide: true,
+      onClose: () => {
+        // 仅当该事件仍在待决队列时保留 pendingEvent（裁决成功后队列已移除）
+        const stillPending = this.world && this.world.narrative
+          && Array.isArray(this.world.narrative.pendingChoices)
+          && this.world.narrative.pendingChoices.some((p) => p.eventId === ev.eventId);
+        if (!stillPending) this.pendingEvent = null;
+      },
+    });
+    // 附加全息模态舱样式（.vf-holo-modal，见 styles.css）
+    const backdrop = document.body.lastElementChild;
+    if (backdrop && backdrop.classList && backdrop.classList.contains('vf-modal-backdrop')) {
+      const dlg = backdrop.querySelector('.vf-modal');
+      if (dlg) dlg.classList.add('vf-holo-modal');
+    }
+  }
+
+  /** N 键：弹出下一个待决事件（无待决事件时给出轻提示） */
+  openNextEvent() {
+    const w = this.world;
+    const queue = w && w.narrative && Array.isArray(w.narrative.pendingChoices)
+      ? w.narrative.pendingChoices : [];
+    if (!queue.length) {
+      toast('当前没有待裁决的事件', { kind: 'info' });
+      return;
+    }
+    const next = this.pendingEvent
+      && queue.some((p) => p.eventId === this.pendingEvent.eventId)
+      ? this.pendingEvent : queue[0];
+    this.setSpeed(0);
+    this._openNonIntrusiveEventModal(next);
   }
 
   /** 重建只读快照并通知当前视图/检视器 */
@@ -315,7 +495,12 @@ export class App {
 
   _onRoute(route) {
     this._route = route.screen;
-    if (!this.inGame && route.screen !== 'menu') {
+    this._routeParam = route.param; // 供 refreshLocaleUI 原地重挂当前视图
+    // 主菜单路由隐藏战略顶栏与遥测条（.vf-shell.in-menu，见 styles.css）
+    if (this.shellEl) this.shellEl.classList.toggle('in-menu', route.screen === 'menu');
+    // 战役外白名单：菜单 / 设置 / 诊断可直达，其余一律弹回菜单
+    const preGameAllowed = route.screen === 'menu' || route.screen === 'settings' || route.screen === 'diagnostics';
+    if (!this.inGame && !preGameAllowed) {
       navigate('menu');
       return;
     }
@@ -335,9 +520,17 @@ export class App {
     navigate(screen, param);
   }
 
-  /** 选中实体（检视器 + 地图联动） */
+  /** 检视器支持的选中类型（planet 等由视图内浮面板自行呈现，不弹抽屉） */
+  static get INSPECTOR_KINDS() {
+    return ['system', 'fleet', 'colony', 'faction'];
+  }
+
+  /** 选中实体（检视器 + 地图联动）：有支持类型的选中即滑出抽屉，清空即收起 */
   select(kind, id) {
     this.selection = kind && id ? { kind, id } : null;
+    const supported = !!this.selection
+      && App.INSPECTOR_KINDS.includes(this.selection.kind);
+    this.setInspectorOpen(supported);
     this.refreshSnapshot();
   }
 

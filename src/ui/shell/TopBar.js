@@ -26,6 +26,10 @@ export class TopBar {
     const app = this.app;
     const w = app.world;
     const bar = this.el;
+    // 增量更新：仅当数据变化时重建（避免高频 innerHTML 清空吞点击）
+    const sig = JSON.stringify([w?.tick, led?.credits, app.speedIdx]);
+    if (this._lastSig === sig) return;
+    this._lastSig = sig;
     bar.innerHTML = '';
 
     bar.appendChild(elBrand());
@@ -104,21 +108,29 @@ function researchRate(app) {
   const fid = w.playerFactionId;
   const rs = w.research[fid];
   if (!rs) return 0;
-  let labs = 0;
+  let rate = 1;
   for (const cid of Object.keys(w.entities.colonies)) {
     const c = w.entities.colonies[cid];
     if (c.factionId !== fid) continue;
     for (const b of c.buildings) {
-      if (b.state === 'active' && b.defId === 'bld_lab') labs++;
+      if (b.state !== 'active') continue;
+      if (b.defId === 'bld_lab') rate += 1.5;
+      else if (b.defId === 'bld_deepspace_analytics') rate += 3;
     }
   }
-  return Math.round((1 + labs * 1.5) * 10) / 10;
+  // 科技与政策修正
+  const mult = w.research[fid]?.effectIndex?.researchOutput;
+  if (mult) for (const e of mult) rate *= e.value;
+  return Math.round(rate * 10) / 10;
 }
 
 function threatLevel(world) {
   let wars = 0;
+  const pid = world.playerFactionId;
   for (const wid of Object.keys(world.entities.wars)) {
-    if (world.entities.wars[wid].status === 'active') wars++;
+    const wr = world.entities.wars[wid];
+    if (wr.status !== 'active') continue;
+    if (wr.attackers.includes(pid) || wr.defenders.includes(pid)) wars++;
   }
   if (wars > 0) return { label: '战争', tone: 'danger' };
   let tension = 0;

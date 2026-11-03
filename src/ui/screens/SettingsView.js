@@ -48,7 +48,7 @@ export const SettingsView = {
       setLanguage(langSel.value);
       saveLocalSettings({ language: langSel.value });
       // 重建 shell 文本
-      app.buildShell();
+      app.refreshLocaleUI();
       app.sideNav.refresh();
     });
     p1.appendChild(langWrap(langSel));
@@ -101,23 +101,7 @@ export const SettingsView = {
     wrap.appendChild(body);
     root.appendChild(wrap);
 
-    // 全局键盘快捷键（App 级，一次绑定）
-    if (!app._keysBound) {
-      app._keysBound = true;
-      window.addEventListener('keydown', (e) => {
-        if (!app.inGame) return;
-        const tag = (e.target.tagName || '').toLowerCase();
-        if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
-        if (e.code === 'Space') {
-          e.preventDefault();
-          app.togglePause();
-        } else if (e.key >= '1' && e.key <= '4') {
-          app.setSpeed(parseInt(e.key, 10));
-        } else if (e.key === 'g' || e.key === 'G') {
-          app.goto('galaxy');
-        }
-      });
-    }
+// 快捷键已移至 App.boot() 全局绑定
   },
 
   unmount() {},

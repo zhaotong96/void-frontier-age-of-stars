@@ -176,6 +176,7 @@ export class CanvasManager {
   beginFrame() {
     if (!this.ctx) return;
     this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    this.ctx.clearRect(0, 0, this.width, this.height);
   }
 
   /**
