@@ -7,7 +7,8 @@
  *  - createProgram 支持 { label } 标签化错误报告；保留 _tracked 资源清册，
  *    destroy() 统一回收并经 WEBGL_lose_context 主动丢弃上下文（防 iframe/切页泄漏）；
  *  - createFloatTarget：单附件 RGBA16F（floatOk=false 时回退 RGBA8 并标记）FBO，
- *    线性采样，检查 FRAMEBUFFER_COMPLETE，登记清册；
+ *    线性采样，检查 FRAMEBUFFER_COMPLETE，登记清册；opts.depth=true 时挂载
+ *    DEPTH_COMPONENT24 渲染缓冲（场景 FBO 深度生效的前提，doc7 TERRAIN-07）；
  *  - createFullscreenVAO：单位四边形（aPos vec2，[-1..1]，TRIANGLE_STRIP 4 顶点），
  *    供全屏后处理 pass 复用；
  *  - 静态工厂 fromExisting(canvas, gl)：复用调用方已取得的 gl 上下文
@@ -64,7 +65,8 @@ export class GLContext {
     this.floatLinearOk = !!gl.getExtension('OES_texture_float_linear');
     this.loseContextExt = gl.getExtension('WEBGL_lose_context');
     this.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
-    this._tracked = { programs: [], buffers: [], vaos: [], textures: [], fbos: [] };
+    // 资源清册：rbos 为 createFloatTarget({depth:true}) 的 DEPTH_COMPONENT24 渲染缓冲
+    this._tracked = { programs: [], buffers: [], vaos: [], textures: [], fbos: [], rbos: [] };
     this.errorCount = 0;
     void opts; // 预留：后续如需按 opts 差异化初始化在此扩展
     // 调试模式（window.__GL_THROW_ON_ERROR）：包装全部 gl 方法（原型链完整
@@ -218,13 +220,17 @@ export class GLContext {
   /**
    * 创建单附件浮点渲染目标（HDR 管线用）。
    *  - floatOk=true：RGBA16F + HALF_FLOAT；若驱动仍报 FBO 不完整则自动回退 RGBA8；
-   *  - floatOk=false：直接 RGBA8 + UNSIGNED_BYTE（由 PostProcessor 做 HDR 模拟）。
+   *  - floatOk=false：直接 RGBA8 + UNSIGNED_BYTE（由 PostProcessor 做 HDR 模拟）；
+   *  - depth=true：额外创建 DEPTH_COMPONENT24 渲染缓冲挂 DEPTH_ATTACHMENT
+   *    （doc7 TERRAIN-07：场景 FBO 必须有 24 位深度附件，gl.clear(DEPTH) 才生效）。
    * @param {number} width
    * @param {number} height
-   * @param {{linear?:boolean}} [opts] 采样过滤（默认 LINEAR，供降/升采样双线性）
-   * @returns {{texture:WebGLTexture, fbo:WebGLFramebuffer, width:number, height:number, float:boolean}}
+   * @param {{linear?:boolean, depth?:boolean}} [opts] linear 采样过滤（默认 LINEAR，
+   *        供降/升采样双线性）；depth 是否挂载 24 位深度渲染缓冲（默认 false）
+   * @returns {{texture:WebGLTexture, fbo:WebGLFramebuffer, rbo:WebGLRenderbuffer|null,
+   *            width:number, height:number, float:boolean, hasDepth:boolean}}
    */
-  createFloatTarget(width, height, { linear = true } = {}) {
+  createFloatTarget(width, height, { linear = true, depth = false } = {}) {
     const gl = this.gl;
     const make = (floatMode) => {
       const tex = gl.createTexture();
@@ -242,9 +248,16 @@ export class GLContext {
       const fbo = gl.createFramebuffer();
       gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      let rbo = null;
+      if (depth) {
+        rbo = gl.createRenderbuffer();
+        gl.bindRenderbuffer(gl.RENDERBUFFER, rbo);
+        gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, width, height);
+        gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, rbo);
+      }
       const complete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      return { tex, fbo, complete };
+      return { tex, fbo, rbo, complete };
     };
 
     let res = make(this.floatOk);
@@ -253,17 +266,23 @@ export class GLContext {
       // 驱动/实现不支持渲染到 RGBA16F：降级 RGBA8（float 标记为 false）
       gl.deleteTexture(res.tex);
       gl.deleteFramebuffer(res.fbo);
+      if (res.rbo) gl.deleteRenderbuffer(res.rbo);
       res = make(false);
       float = false;
     }
     if (!res.complete) {
       gl.deleteTexture(res.tex);
       gl.deleteFramebuffer(res.fbo);
+      if (res.rbo) gl.deleteRenderbuffer(res.rbo);
       throw new Error(`float target FBO incomplete (${width}x${height})`);
     }
     this._tracked.textures.push(res.tex);
     this._tracked.fbos.push(res.fbo);
-    return { texture: res.tex, fbo: res.fbo, width, height, float };
+    if (res.rbo) this._tracked.rbos.push(res.rbo);
+    return {
+      texture: res.tex, fbo: res.fbo, rbo: res.rbo,
+      width, height, float, hasDepth: !!res.rbo,
+    };
   }
 
   /**
@@ -328,7 +347,7 @@ export class GLContext {
    * 清空清册但不做删除调用（对失效句柄的删除本为空操作，清空可防清册无限膨胀）。
    */
   resetTracking() {
-    this._tracked = { programs: [], buffers: [], vaos: [], textures: [], fbos: [] };
+    this._tracked = { programs: [], buffers: [], vaos: [], textures: [], fbos: [], rbos: [] };
     this.errorCount = 0;
     // 调试钩子：window.__GL_TRACE 时包装全部 gl 方法，记录最后 N 次调用（含参数摘要）
     if (typeof window !== 'undefined' && window.__GL_TRACE) {
@@ -356,7 +375,8 @@ export class GLContext {
     for (const v of this._tracked.vaos) gl.deleteVertexArray(v);
     for (const t of this._tracked.textures) gl.deleteTexture(t);
     for (const f of this._tracked.fbos) gl.deleteFramebuffer(f);
-    this._tracked = { programs: [], buffers: [], vaos: [], textures: [], fbos: [] };
+    for (const r of this._tracked.rbos) gl.deleteRenderbuffer(r);
+    this._tracked = { programs: [], buffers: [], vaos: [], textures: [], fbos: [], rbos: [] };
     if (this.loseContextExt) this.loseContextExt.loseContext();
   }
 }

@@ -2,8 +2,11 @@
  * render/gl/PostProcessor.js — HDR Bloom 后处理管线（VOID FRONTIER 渲染底座 R2）
  *
  * 管线（tier 1，物理像素分辨率）：
- *  1. beginScene() 绑定场景浮点 FBO（RGBA16F；无浮点渲染能力时回退 RGBA8 模拟），
- *     调用方在其中渲染 HDR 场景（颜色可 >1，模拟模式下须先除以 hdrRange 预缩放）；
+ *  1. beginScene() 绑定场景浮点 FBO（RGBA16F + 24 位深度渲染缓冲；无浮点渲染能力时
+ *     回退 RGBA8 模拟），并执行 8 步清屏/状态复位契约（见 beginScene 注释）——
+ *     beginScene 是场景 FBO 清屏的【唯一所有者】（doc6 规范 6 §3.2：一个显式所有者
+ *     + 注释 + 测试；调用方随后的 clearColor/clear 属允许的冗余防御，不构成第二所有者）。
+ *     调用方在返回的目标中渲染 HDR 场景（颜色可 >1，模拟模式下须先除以 hdrRange 预缩放）；
  *  2. endScene()：
  *     a) 软膝盖高亮提取（threshold 0.85 / knee 0.55，smoothstep 软过渡）+ 半分辨率降采样；
  *     b) 4 级金字塔（1/2、1/4、1/8、1/16），每级水平+垂直 9-tap 可分离高斯模糊；
@@ -29,6 +32,8 @@ const BRIGHT_KNEE = 0.55;
 /** tier 1 完整金字塔级数；tier 2 减为 2 级 */
 const PYRAMID_LEVELS_FULL = 4;
 const PYRAMID_LEVELS_LOW = 2;
+/** beginScene 默认清屏色（深空底色；调用方可传入主题天空/地平线色覆盖） */
+const DEFAULT_SCENE_CLEAR = [0.02, 0.03, 0.06, 1.0];
 
 // —— GLSL ES 3.0 着色器（手写字符串，#version 由 GLCore.createProgram 前置） ——
 
@@ -169,7 +174,7 @@ export class PostProcessor {
     this._progUp = null;
     this._progComp = null;
     this._quadVao = null;
-    this._scene = null;   // { texture, fbo, width, height, float }
+    this._scene = null;   // { texture, fbo, rbo, width, height, float, hasDepth }
     this._levels = [];    // 金字塔：[{ a, b, width, height }]，a 为主缓冲，b 为模糊中转
     this._u = { bright: null, blur: null, up: null, comp: null };
 
@@ -217,16 +222,42 @@ export class PostProcessor {
   }
 
   /**
-   * 开始场景 pass：绑定场景 FBO 并返回其信息；调用方负责 clear 与场景绘制。
-   * tier>=3 或目标未就绪时返回 null（调用方应整体跳过 GL）。
+   * 开始场景 pass：绑定场景 FBO，执行 8 步清屏/状态复位契约，返回目标信息。
+   * 本方法是场景 FBO 清屏与初始渲染状态的【唯一所有者】（doc6 §3.2：唯一显式
+   * 所有者 + 注释 + 测试；doc7 §2.2 修复 2）——每帧固定顺序：
+   *   1. bindFramebuffer(_scene.fbo)
+   *   2. viewport(0, 0, w, h)
+   *   3. disable(SCISSOR_TEST)
+   *   4. disable(BLEND)
+   *   5. colorMask(true, true, true, true)
+   *   6. depthMask(true)
+   *   7. frontFace(CCW) + cullFace(BACK) + disable(CULL_FACE)（声明默认绕序，不开启剔除）
+   *   8. clearColor(clearColor || 深空底色) + clearDepth(1.0)
+   *      + clear(COLOR_BUFFER_BIT | DEPTH_BUFFER_BIT)
+   * 背景"懒刷新"重影的根治点：不再依赖"天空恰好覆盖所有像素"间接清色，
+   * 残留状态（blend/colorMask/scissor）在此统一复位。tier>=3 或目标未就绪时
+   * 返回 null（调用方应整体跳过 GL）。
+   * @param {[number,number,number,number]?} clearColor 可选清屏色 RGBA
    * @returns {{fbo:WebGLFramebuffer, width:number, height:number}|null}
    */
-  beginScene() {
+  beginScene(clearColor = null) {
     if (this.tier >= 3 || !this._scene) return null;
     const gl = this.gl;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this._scene.fbo);
-    gl.viewport(0, 0, this._scene.width, this._scene.height);
-    return { fbo: this._scene.fbo, width: this._scene.width, height: this._scene.height };
+    const s = this._scene;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, s.fbo); // 1
+    gl.viewport(0, 0, s.width, s.height); // 2
+    gl.disable(gl.SCISSOR_TEST); // 3
+    gl.disable(gl.BLEND); // 4
+    gl.colorMask(true, true, true, true); // 5
+    gl.depthMask(true); // 6
+    gl.frontFace(gl.CCW); // 7：声明默认绕序（不开启剔除，由各渲染器按 pass 管理）
+    gl.cullFace(gl.BACK);
+    gl.disable(gl.CULL_FACE);
+    const cc = clearColor || DEFAULT_SCENE_CLEAR; // 8
+    gl.clearColor(cc[0], cc[1], cc[2], cc[3] != null ? cc[3] : 1.0);
+    gl.clearDepth(1.0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    return { fbo: s.fbo, width: s.width, height: s.height };
   }
 
   /**
@@ -377,8 +408,11 @@ export class PostProcessor {
     const w = this.width;
     const h = this.height;
 
-    // 场景浮点目标（floatOk=false 或 FBO 不完整时 GLCore 内部回退 RGBA8）
-    this._scene = glc.createFloatTarget(w, h, { linear: true });
+    // 场景浮点目标（floatOk=false 或 FBO 不完整时 GLCore 内部回退 RGBA8）。
+    // depth:true —— 挂载 DEPTH_COMPONENT24 渲染缓冲（doc7 TERRAIN-07）：场景 FBO
+    // 无深度附件时 gl.enable(DEPTH_TEST)/gl.clear(DEPTH_BUFFER_BIT) 均无效，
+    // 是"地形像被背面剔除"故障的根因；辉光金字塔缓冲保持无深度（纯颜色 pass）。
+    this._scene = glc.createFloatTarget(w, h, { linear: true, depth: true });
     // 以场景目标的实际格式为准刷新模拟标记（floatOk=true 但驱动回退的极端情况）
     this.hdrSimulated = !this._scene.float;
     this.hdrRange = this.hdrSimulated ? HDR_SIM_BASE : 1.0;
@@ -448,6 +482,7 @@ export class PostProcessor {
     if (this._scene) {
       gl.deleteFramebuffer(this._scene.fbo);
       gl.deleteTexture(this._scene.texture);
+      if (this._scene.rbo) gl.deleteRenderbuffer(this._scene.rbo); // 场景深度渲染缓冲
       this._scene = null;
     }
     for (const lv of this._levels) {
