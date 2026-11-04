@@ -31,7 +31,10 @@
  *   sulfur_marsh       病绿日光、gas 天空 uGasHeight≈4.5m（海拔锁定毒气湖）；
  *   biolume_canopy     青绿日光、spores 0.3、biolumePulse=1（压感涟漪 + 荧光脉络）；
  *   obsidian_lava      暗橙低日、ash 0.25、lavaEmissive=1（谷底岩浆黑体）。
- *   扩展钩子：cryomethane_sea（水位 -6）/ glassstorm_barrens（dust）已预置载荷通路。
+ *   扩展钩子（TASK-4.1/4.2）：11 扩展主题全部入表 — cryomethane_sea（水位 -6）、
+ *   glassstorm_barrens（dust）、cloud_giant_atolls（无水/云海甲板/特短视距/大气登陆）、
+ *   magnetar_aurora（强极光）、fractured_moon（真空满星/特长视距/0.25g）等，
+ *   配套 EXPANSION_GAMEPLAY 玩法规则表（landingMode/movementMod/visibilityMod/hazardNote）。
  *
  * 色板来源优先级：opts.palette → setThemePaletteSource 注册的外部注册表（D1 的
  * planetThemes.js 落地后由主代理接线）→ 本文件 FLAGSHIP_PALETTES（doc6 §4.4 最小
@@ -76,14 +79,51 @@ export const FLAGSHIP_PALETTES = {
     base: '#160F14', shadow: '#0A0709', highlight: '#5B171D', danger: '#E54B24',
     emissive: '#FFAA3C', atmosphere: '#2A1210',
   },
-  // —— 扩展主题预置（TASK-4.x 消费同一条载荷通路） ——
+  // —— 扩展主题预置（TASK-4.1/4.2 消费同一条载荷通路；色值与 planetThemes.js
+  //    doc6 §4.4 注册表逐位一致（外部源接线后自动优先于本表） ——
   cryomethane_sea: {
-    base: '#167C87', shadow: '#082B32', highlight: '#56C6C2', danger: '#B8E7E2',
-    emissive: '#56C6C2', atmosphere: '#29565E',
+    base: '#082B32', shadow: '#031418', highlight: '#56C6C2', danger: '#B8E7E2',
+    emissive: '#B8E7E2', atmosphere: '#167C87',
   },
   glassstorm_barrens: {
-    base: '#9C735D', shadow: '#33262E', highlight: '#E2BE93', danger: '#F5E0BB',
-    emissive: '#F5E0BB', atmosphere: '#8A6A5A',
+    base: '#33262E', shadow: '#15100F', highlight: '#9C735D', danger: '#E2BE93',
+    emissive: '#F5E0BB', atmosphere: '#9C735D',
+  },
+  prism_crystal: {
+    base: '#DCEFF7', shadow: '#5A7484', highlight: '#56CBE5', danger: '#9A83D8',
+    emissive: '#FFB7EC', atmosphere: '#56CBE5',
+  },
+  salt_mirror_desert: {
+    base: '#E8E1CD', shadow: '#8A8270', highlight: '#C7A8A2', danger: '#8B6C88',
+    emissive: '#D9B86C', atmosphere: '#C7A8A2',
+  },
+  tidal_lock_dusk: {
+    base: '#E2A05A', shadow: '#31445F', highlight: '#CDA978', danger: '#CDA06B',
+    emissive: '#80BCD5', atmosphere: '#80BCD5',
+  },
+  cloud_giant_atolls: {
+    base: '#E5A65A', shadow: '#6E4A2E', highlight: '#F2D6AA', danger: '#5D618F',
+    emissive: '#C87E67', atmosphere: '#F2D6AA',
+  },
+  fungal_catacombs: {
+    base: '#160F2C', shadow: '#0A0716', highlight: '#9B4DCA', danger: '#9B4DCA',
+    emissive: '#5AD3A8', atmosphere: '#4B2A71',
+  },
+  ancient_megastructure: {
+    base: '#161F29', shadow: '#0A0F14', highlight: '#6D7F8C', danger: '#6D7F8C',
+    emissive: '#42C3D6', atmosphere: '#42C3D6',
+  },
+  magnetar_aurora: {
+    base: '#091729', shadow: '#040B16', highlight: '#1A3F69', danger: '#6A56C4',
+    emissive: '#B9FFEB', atmosphere: '#6A56C4',
+  },
+  canopy_colossus: {
+    base: '#123D32', shadow: '#081B16', highlight: '#2F8D69', danger: '#2F8D69',
+    emissive: '#F4D979', atmosphere: '#2F8D69',
+  },
+  fractured_moon: {
+    base: '#39414B', shadow: '#181C22', highlight: '#8B7967', danger: '#D99A62',
+    emissive: '#B6C4D9', atmosphere: '#8A98AC',
   },
 };
 
@@ -205,6 +245,79 @@ const THEME_RENDER = {
     weather: { kind: 'dust', density: 0.5, wind: [3.8, 0.9] },
     heat: false,
   },
+  // —— 扩展主题渲染特化（doc6 §4.5.8-4.5.18 / doc7 §4.0 矩阵，TASK-4.1/4.2） ——
+  prism_crystal: {
+    waterLevel: WATERLEVEL_NONE,
+    fogRange: [60, 420],
+    sky: { skyMode: 0, stars: 0 },
+    sun: { az: 2.8, el: 1.0, color: [1.15, 1.2, 1.26] },   // 冷白高日，晨昏折射光带
+    weather: { kind: 'motes', density: 0.18, wind: [0.5, 0.3] },
+    heat: false,
+  },
+  salt_mirror_desert: {
+    waterLevel: WATERLEVEL_NONE,
+    fogRange: [80, 520],                                    // 极简空旷：天地镜像长视距
+    sky: { skyMode: 3, stars: 0, dustDensity: 0.25 },       // 浅粉薄尘
+    sun: { az: 5.0, el: 1.15, color: [1.35, 1.28, 1.12] },  // 强反光过曝风险由 haze 压制
+    weather: { kind: 'dust', density: 0.2, wind: [1.6, 0.5] },
+    heat: false,
+  },
+  tidal_lock_dusk: {
+    waterLevel: WATERLEVEL_NONE,
+    fogRange: [40, 300],
+    sky: { skyMode: 0, stars: 0.25 },                       // 暮光带：昼金夜蓝交汇，夜侧微星
+    sun: { az: 3.14, el: 0.12, color: [1.35, 0.95, 0.55] }, // 永昼侧贴地平线灼金低日
+    weather: { kind: 'motes', density: 0.15, wind: [1.0, 0.4] }, // 晨昏环带terminator风
+    heat: false,
+  },
+  cloud_giant_atolls: {
+    waterLevel: WATERLEVEL_NONE,                            // 无水体：地表切片即云海甲板
+    fogRange: [24, 130],                                    // 云层深度感 → 特短视距
+    sky: { skyMode: 2, stars: 0, gasHeightM: 10.0 },        // 云瀑雾带（气巨专属高度层）
+    sun: { az: 2.6, el: 0.75, color: [1.05, 0.88, 0.66] },  // 云金漫射日光
+    weather: { kind: 'dust', density: 0.75, wind: [5.2, 1.6] }, // 风暴墙高速旋转流
+    heat: false,
+  },
+  fungal_catacombs: {
+    waterLevel: WATERLEVEL_NONE,
+    fogRange: [20, 150],                                    // 菌盖层层遮蔽：近距雾
+    sky: { skyMode: 2, stars: 0, gasHeightM: 6.0 },         // 孢子紫浓雾（高度锁定雾层）
+    sun: { az: 1.2, el: 0.5, color: [0.42, 0.3, 0.55] },    // 菌褐紫幽光
+    weather: { kind: 'spores', density: 0.5, wind: [0.4, 0.3] }, // 孢子雨
+    heat: false,
+  },
+  ancient_megastructure: {
+    waterLevel: WATERLEVEL_NONE,
+    fogRange: [70, 460],
+    sky: { skyMode: 0, stars: 0 },
+    sun: { az: 0.4, el: 0.85, color: [0.95, 1.0, 1.08] },   // 受控排空大气：冷白金工日光
+    weather: { kind: 'motes', density: 0.12, wind: [0.4, 0.2] },
+    heat: false,
+  },
+  magnetar_aurora: {
+    waterLevel: WATERLEVEL_NONE,
+    fogRange: [45, 340],
+    sky: { skyMode: 1, stars: 0.9, auroraStrength: 1.5 },   // 强极光幕帘 + 周期磁暴脉冲
+    sun: { az: 4.0, el: 0.35, color: [0.22, 0.28, 0.42] },  // 极夜深蓝微光
+    weather: { kind: 'motes', density: 0.2, wind: [0.9, 0.4] }, // 电离粒子漂移
+    heat: false,
+  },
+  canopy_colossus: {
+    waterLevel: WATERLEVEL_NONE,
+    fogRange: [40, 280],
+    sky: { skyMode: 0, stars: 0 },
+    sun: { az: 0.3, el: 0.68, color: [0.5, 0.66, 0.4] },    // 湿绿林冠过滤日光
+    weather: { kind: 'spores', density: 0.35, wind: [0.7, 0.4] }, // 孢子金/上升气流
+    heat: false,
+  },
+  fractured_moon: {
+    waterLevel: WATERLEVEL_NONE,
+    fogRange: [200, 900],                                   // 真空：极低雾密度 → 特长视距
+    sky: { skyMode: 0, stars: 1.0 },                        // 无大气：天幕满星 + 碎环
+    sun: { az: 4.8, el: 0.5, color: [0.9, 0.72, 0.5] },     // 残阳橙低照度（母星反照）
+    weather: { kind: 'motes', density: 0.05, wind: [0.2, 0.1] }, // 仅微陨石尘埃火花
+    heat: false,
+  },
 };
 
 /** themeless 行星渲染兜底（按 category；generic 为最终回退） */
@@ -218,6 +331,87 @@ const CATEGORY_RENDER = {
   artificial:{ waterLevel: WATERLEVEL_NONE, fogRange: [70, 420], sky: { skyMode: 0, stars: 0 }, sun: { az: 1.1, el: 0.75, color: [1.0, 0.98, 0.92] }, weather: { kind: 'motes', density: 0.15, wind: [0.4, 0.2] }, heat: false },
   gasGiant:  { waterLevel: WATERLEVEL_NONE, fogRange: [80, 520], sky: { skyMode: 0, stars: 0 }, sun: { az: 2.6, el: 0.7, color: [1.05, 0.9, 0.7] }, weather: { kind: 'motes', density: 0.15, wind: [1.0, 0.4] }, heat: false },
   generic:   { waterLevel: WATERLEVEL_NONE, fogRange: [60, 420], sky: { skyMode: 0, stars: 0 }, sun: { az: 0.7, el: 0.8, color: [1.0, 0.96, 0.84] }, weather: { kind: 'motes', density: 0.15, wind: [0.6, 0.3] }, heat: false },
+};
+
+/**
+ * 扩展主题 GamePlay 规则表（doc6 §4.5.8-4.5.18 / doc7 §4.0 矩阵列九"危险与行动规则"，
+ * TASK-4.1/4.2；GroundView 接线消费）。与渲染配置同文件共置，便于主题身份整体评审。
+ *
+ * 字段约定：
+ *   landingMode   'surface' 常规地表登陆 | 'atmospheric' 高空浮台/探针模式
+ *                 （cloud_giant_atolls = 'atmospheric'，严禁普通地表登陆 — doc6 §4.5.12）
+ *   movementMod   移动修正：gravityScale 重力倍率（fractured_moon 0.25g 低重力）；
+ *                 windPush 风向推力倍率（glassstorm 顺逆风移速差异）
+ *   visibilityMod 可视距离倍率（雾/风暴/毒雾主题 <1，真空 >1；渲染 fogRange 的玩法镜像）
+ *   hazardNote    主题环境危险中文摘要（简报页展示）
+ */
+export const EXPANSION_GAMEPLAY = {
+  prism_crystal: {
+    landingMode: 'surface',
+    movementMod: {},
+    visibilityMod: 0.9,
+    hazardNote: '大型晶体干扰无线电与罗盘读数，折射光路需谐振校准导航',
+  },
+  salt_mirror_desert: {
+    landingMode: 'surface',
+    movementMod: {},
+    visibilityMod: 0.8,
+    hazardNote: '强反光造成光学测距误差，盐壳下暗藏塌陷卤水腔',
+  },
+  cryomethane_sea: {
+    landingMode: 'surface',
+    movementMod: {},
+    visibilityMod: 0.75,
+    hazardNote: '薄冰承重随机断裂，低温持续衰减外骨骼与船体性能',
+  },
+  tidal_lock_dusk: {
+    landingMode: 'surface',
+    movementMod: {},
+    visibilityMod: 1.0,
+    hazardNote: '昼侧灼热夜侧深寒，跨温区行动必须沿暮光带狭长走廊布局',
+  },
+  cloud_giant_atolls: {
+    landingMode: 'atmospheric',
+    movementMod: {},
+    visibilityMod: 0.55,
+    hazardNote: '严禁普通地表登陆：仅限高空浮台/气球探针/轨道无人机，风暴墙周期性撕毁浮台锚链',
+  },
+  fungal_catacombs: {
+    landingMode: 'surface',
+    movementMod: {},
+    visibilityMod: 0.7,
+    hazardNote: '孢子浓雾需过滤通风，巨菌盖崩落会封闭通道',
+  },
+  ancient_megastructure: {
+    landingMode: 'surface',
+    movementMod: {},
+    visibilityMod: 1.0,
+    hazardNote: '古代哨卫机甲与协议锁仍在线，能源脊短路电弧伤人',
+  },
+  glassstorm_barrens: {
+    landingMode: 'surface',
+    movementMod: { windPush: 1.0 },
+    visibilityMod: 0.6,
+    hazardNote: '高速碎玻璃风暴磨蚀装备，顺风逆风移速差异显著',
+  },
+  magnetar_aurora: {
+    landingMode: 'surface',
+    movementMod: {},
+    visibilityMod: 0.95,
+    hazardNote: '磁暴脉冲峰值期电子护盾与喷气背包静默，依托避雷屏蔽塔窗口行动',
+  },
+  canopy_colossus: {
+    landingMode: 'surface',
+    movementMod: {},
+    visibilityMod: 0.85,
+    hazardNote: '林冠掠食者沿树冠巡逻，垂直落差坠落即死',
+  },
+  fractured_moon: {
+    landingMode: 'surface',
+    movementMod: { gravityScale: 0.25 },
+    visibilityMod: 1.2,
+    hazardNote: '0.25g 低重力跳跃过冲，真空无声音警示仅骨传导',
+  },
 };
 
 // ———— 工具 ————————————————
