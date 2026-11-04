@@ -821,9 +821,10 @@ export const GroundView = {
         this.bmesh = new BuildingMeshBatch(this.cm.glc);
         // —— 主题载荷（doc7 TASK-3.1/3.2：planetThemes 九维色板 → 场景主题） ——
         //     对象/建筑 pass 与场景地形共用同一太阳/雾（THEME-02 一致性）。
+        const gvPlanet = this.planet || {};
         this._themePayload = buildThemePayload(
-          (planet && planet.primaryThemeId) || null, w, planet.id,
-          { category: planet && planet.category, fogRange: [90, 560] },
+          gvPlanet.primaryThemeId || null, this.app.world, gvPlanet.id || 'unknown',
+          { category: gvPlanet.category, fogRange: [90, 560] },
         );
         this.scene.setTheme(this._themePayload);
         if (this.ps3d) {
