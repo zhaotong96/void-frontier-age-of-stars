@@ -129,17 +129,27 @@ export const suite = {
       .filter((x) => x.factionId === pid)[Object.values(world.entities.blueprints).filter((x) => x.factionId === pid).length - 1];
     step(Object.values(world.entities.blueprints).filter((x) => x.factionId === pid).length === bpCount + 1, '7.蓝图入库');
     const shipCount0 = Object.keys(world.entities.ships).length;
-    // 真实玩家路径：出售盈余合金筹措造舰资金（验证 MarketSell 链路）
-    const r7s = executeCommand(world, {
-      type: 'MarketSell', actorId: pid,
-      params: { systemId: yard.systemId, resId: 'alloy', qty: 100 },
-    });
-    step(r7s.ok, '7.出售合金筹款', r7s.reason);
-    const r7b = executeCommand(world, {
-      type: 'ShipyardBuild', actorId: pid,
-      params: { blueprintId: bp.id, stationId: yard.id },
-    });
-    step(r7b.ok, '7.下单建造', r7b.reason);
+    // 真实玩家路径：出售盈余合金筹措造舰资金（验证 MarketSell 链路）。
+    // docs-4-7 施工注：WorldObjective 到期罚则（doc5 P1-01，credits 扣减）会
+    // 合法扰动战役经济，故筹款/下单采用「补筹重试」耐受扰动，不锁定精确数值。
+    let r7b = null;
+    let soldTotal = 0;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (soldTotal < 100 * (attempt + 1)) {
+        const r7s = executeCommand(world, {
+          type: 'MarketSell', actorId: pid,
+          params: { systemId: yard.systemId, resId: 'alloy', qty: 100 },
+        });
+        step(attempt === 0 ? r7s.ok : true, '7.出售合金筹款', r7s ? r7s.reason : undefined);
+        if (r7s.ok) soldTotal += 100;
+      }
+      r7b = executeCommand(world, {
+        type: 'ShipyardBuild', actorId: pid,
+        params: { blueprintId: bp.id, stationId: yard.id },
+      });
+      if (r7b.ok) break;
+    }
+    step(r7b && r7b.ok, '7.下单建造', r7b && r7b.reason);
     advanceTicks(world, 400); // 120h 工期 + 余量
     step(Object.keys(world.entities.ships).length === shipCount0 + 1, '7.新舰建成',
       `${shipCount0} → ${Object.keys(world.entities.ships).length}`);

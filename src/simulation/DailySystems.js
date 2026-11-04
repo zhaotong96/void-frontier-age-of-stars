@@ -5,6 +5,7 @@
 
 import { registerDaily } from './TickPipeline.js';
 import { dailyEventCheck, expirePendingChoices } from '../domain/events/narrative.js';
+import { dailyObjectiveSweep } from '../domain/events/objectives.js';
 import { dailyPolicySettlement } from '../domain/politics/policy.js';
 import { buildingDef } from '../domain/planets/colony.js';
 import { dailyPopulation } from '../domain/planets/colony.js';
@@ -76,6 +77,7 @@ registerDaily('ledger', (world) => {
 registerDaily('narrative', (world) => {
   dailyEventCheck(world);
   expirePendingChoices(world);
+  dailyObjectiveSweep(world);   // WorldObjective 到期结算（doc5 P1-01）
 });
 
 registerDaily('policies', (world) => {

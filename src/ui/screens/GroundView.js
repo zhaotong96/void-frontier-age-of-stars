@@ -45,6 +45,7 @@ import { L } from '../../core/i18n.js';
 import { CanvasManager } from '../../render/CanvasManager.js';
 import { PlanetSurface3D } from '../../render/gl/PlanetSurface3D.js';
 import { PlanetSurfaceScene } from '../../render/gl/PlanetSurfaceScene.js';
+import { buildThemePayload } from '../../render/gl/themePayload.js';
 import { mat4, mat4Perspective, mat4LookAt, mat4Multiply } from '../../render/gl/Mat4.js';
 import { buildBuildingMesh, buildUnitBox } from '../../render/meshes/GroundMeshes.js';
 import {
@@ -52,6 +53,7 @@ import {
   findSpawnPoint, SURFACE_SIZE, SURFACE_MAT,
 } from '../../domain/ground/SurfaceSandbox.js';
 import { buildTerrainField } from '../../domain/ground/terrainField.js';
+import { ensurePlanetPois, unexploredPoiCount } from '../../domain/ground/planetPOI.js';
 import { sampleTerrain, raycastTerrain } from '../../domain/ground/surfaceQueries.js';
 import { createGroundMission, stepMission, getMissionView } from '../../domain/ground/GroundMission.js';
 import { creditColony, debitColony } from '../../domain/economy/ledger.js';
@@ -817,19 +819,25 @@ export const GroundView = {
         this.ps3d.init(this.sw);
         this.ps3d.setObjectOnly(true);            // 地形/天空权威移交 PlanetSurfaceScene
         this.bmesh = new BuildingMeshBatch(this.cm.glc);
-        // —— 环境一致化：对象/建筑/地形共用同一太阳/雾（以 ps3d 行星档案求值为准；
-        //     雾距按 512m 场域尺度放宽，近距离保留地貌可读性） ——
-        if (this.scene.terrainRenderer) {
-          this.scene.setTheme({
-            sun: { dir: this.ps3d._sunDir.slice(), color: this.ps3d._sunColor.slice() },
-            fog: { color: this.ps3d._fogColor.slice(), range: [90, 560] },
-            sky: {
-              zenith: this.ps3d._sky.zenith.slice(),
-              horizon: this.ps3d._sky.horizon.slice(),
-              ground: this.ps3d._sky.ground.slice(),
-              stars: this.ps3d._sky.stars,
-            },
-          });
+        // —— 主题载荷（doc7 TASK-3.1/3.2：planetThemes 九维色板 → 场景主题） ——
+        //     对象/建筑 pass 与场景地形共用同一太阳/雾（THEME-02 一致性）。
+        this._themePayload = buildThemePayload(
+          (planet && planet.primaryThemeId) || null, w, planet.id,
+          { category: planet && planet.category, fogRange: [90, 560] },
+        );
+        this.scene.setTheme(this._themePayload);
+        if (this.ps3d) {
+          const env = this._themePayload;
+          this.ps3d._sunDir = env.terrain.sun.dir.slice();
+          this.ps3d._sunColor = env.terrain.sun.color.slice();
+          this.ps3d._fogColor = env.terrain.fog.color.slice();
+          this.ps3d._fogRange = env.terrain.fog.range.slice();
+          this.ps3d._sky = {
+            zenith: env.sky.zenith.slice(),
+            horizon: env.sky.horizon.slice(),
+            ground: env.sky.ground.slice(),
+            stars: env.sky.stars || 0,
+          };
         }
         // —— 诊断钩子接管：诊断模式路由到场景地形网格；GL 状态快照仍由 ps3d 供 ——
         if (typeof window !== 'undefined') {
@@ -1219,12 +1227,48 @@ export const GroundView = {
     this._renderFrame(view, dt);
   },
 
-  /** 自由模式帧：本地状态机 + 体素物理 → 渲染 */
+  /** 自由模式帧：本地状态机 + 体素物理 → 渲染（E 键消费 POI 采样） */
   _freeFrame(dt) {
     this._updateAim(dt);
+    if (this._oneShot.interact) {
+      this._oneShot.interact = false;
+      this._tryHarvestPoi();
+    }
     this._freePhysics(dt);
     this._updateFx(dt);
     this._renderFrame(null, dt);
+  },
+
+  /**
+   * E 键采样最近未勘探 POI（doc5 P1-05 / doc7 §6）：HarvestPlanetPOI 命令经
+   * CommandBus 领域结算（rewardPaid 严格幂等锁），奖励回写账本/殖民地仓储。
+   */
+  _tryHarvestPoi() {
+    if (!this._pois) return;
+    const c = this.char3d;
+    let best = null;
+    let bd = 3.0;                              // 交互半径（米）
+    for (const poi of Object.values(this._pois)) {
+      if (poi.rewardPaid || poi.state === 'explored') continue;
+      const px = poi.position.x - FIELD_OFFSET;
+      const pz = poi.position.z - FIELD_OFFSET;
+      const d = Math.hypot(px - c.x, pz - c.z);
+      if (d < bd) { bd = d; best = poi; }
+    }
+    if (!best) {
+      toast('附近没有可采样的兴趣点（靠近发光信标按 E）', { kind: 'info' });
+      return;
+    }
+    const res = this.app.dispatch('HarvestPlanetPOI', {
+      planetId: this.planet.id,
+      poiId: best.id,
+    });
+    if (res.ok) {
+      toast(`已采样：${best.id}（奖励入账）`, { kind: 'ok' });
+      this._tally.poiSampled = (this._tally.poiSampled || 0) + 1;
+    } else {
+      toast(res.reason || '采样失败', { kind: 'warn' });
+    }
   },
 
   /**
@@ -2039,6 +2083,21 @@ export const GroundView = {
         });
       }
     }
+    // 未勘探 POI 全息信标（doc5 P1-04：field 坐标 → 世界 = +FIELD_OFFSET）
+    if (this._pois) {
+      for (const poi of Object.values(this._pois)) {
+        if (poi.rewardPaid || poi.state === 'explored') continue;
+        const bx = poi.position.x - FIELD_OFFSET;
+        const bz = poi.position.z - FIELD_OFFSET;
+        const gy = this._groundAt(bx, bz);
+        if (!Number.isFinite(gy)) continue;
+        list.push({
+          x: bx, y: gy + 0.7 + Math.sin(this._clock * 2.2) * 0.12, z: bz,
+          rotY: this._clock * 0.6, scale: 0.9, meshId: MESH_OF_CATEGORY('selector'),
+          emit: 1.2,
+        });
+      }
+    }
     // 已放置结构体素（场域模式占位盒；Wave F 建筑系统替换为模块化结构网格）
     if (this._placedVoxels && this._placedVoxels.size) {
       for (const pv of this._placedVoxels.values()) {
@@ -2278,6 +2337,30 @@ export const GroundView = {
     ctx.fillStyle = '#9fb6c9';
     ctx.font = '11px "Segoe UI", system-ui, sans-serif';
     ctx.fillText(`采掘/建造模式：${this._buildMode ? '开' : '关'} · Esc 升空返回`, 22, 100);
+    // —— 最近未勘探 POI 罗盘（doc5 P1-04：方位 + 距离 + E 采样提示） ——
+    if (this._pois) {
+      let best = null;
+      let bd = Infinity;
+      for (const poi of Object.values(this._pois)) {
+        if (poi.rewardPaid || poi.state === 'explored') continue;
+        const px = poi.position.x - FIELD_OFFSET;
+        const pz = poi.position.z - FIELD_OFFSET;
+        const d = Math.hypot(px - c.x, pz - c.z);
+        if (d < bd) { bd = d; best = poi; }
+      }
+      const remain = unexploredPoiCount(this.planet || {});
+      if (best) {
+        const ang = Math.atan2(best.position.z - FIELD_OFFSET - c.z, best.position.x - FIELD_OFFSET - c.x);
+        const rel = normAngle(ang - this.cam.yaw + Math.PI);
+        const arrow = Math.abs(rel) < 0.5 ? '↑' : rel > 0 ? '→' : '←';
+        ctx.fillStyle = '#5debdf';
+        ctx.font = 'bold 11px "Segoe UI", system-ui, sans-serif';
+        ctx.fillText(`◆ 兴趣点 ${arrow} ${Math.round(bd)}m（靠近按 E 采样）· 剩余 ${remain}`, 22, 116);
+      } else if (remain === 0 && Object.keys(this._pois).length) {
+        ctx.fillStyle = '#7ee2a8';
+        ctx.fillText('本行星兴趣点已全部采样', 22, 116);
+      }
+    }
 
     // 本次采掘台账
     const keys = Object.keys(this._tally).filter((k) => this._tally[k] !== 0);
