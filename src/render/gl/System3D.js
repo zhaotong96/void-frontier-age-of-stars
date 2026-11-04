@@ -96,16 +96,17 @@ const PLANET_R = {
 const ORBIT_RGB = [0.31, 0.847, 0.91];
 const ANOMALY_RGB = [0.494, 0.659, 1.0];
 
-/** 类别 → 大气壳（GLOW）参数：[半径倍数, 强度, tint rgb] */
+/** 类别 → 大气壳（GLOW）参数：[shellScale 半径倍数, 强度, tint rgb]
+ *  （doc5 §3.1 处方 4：壳层缩放收敛于 1.045–1.09，贴体薄壳由片元菲涅尔塑形） */
 const GLOW_STYLE = {
-  rocky: [1.12, 0.55, [0.30, 0.50, 0.85]],
-  ocean: [1.16, 0.95, [0.25, 0.55, 0.95]],
-  ice: [1.10, 0.45, [0.55, 0.75, 0.95]],
-  desert: [1.11, 0.40, [0.78, 0.62, 0.36]],
-  gasGiant: [1.09, 0.45, [0.75, 0.65, 0.45]],
-  lava: [1.09, 0.40, [0.90, 0.30, 0.10]],
-  toxic: [1.30, 1.35, [0.55, 0.75, 0.22]],
-  artificial: [1.08, 0.30, [0.40, 0.70, 0.80]],
+  rocky: [1.05, 0.55, [0.30, 0.50, 0.85]],
+  ocean: [1.06, 0.95, [0.25, 0.55, 0.95]],
+  ice: [1.045, 0.45, [0.55, 0.75, 0.95]],
+  desert: [1.05, 0.40, [0.78, 0.62, 0.36]],
+  gasGiant: [1.09, 0.55, [0.75, 0.65, 0.45]],
+  lava: [1.05, 0.50, [0.90, 0.30, 0.10]],
+  toxic: [1.09, 1.35, [0.55, 0.75, 0.22]],
+  artificial: [1.045, 0.30, [0.40, 0.70, 0.80]],
 };
 
 /* ========================= 自有着色器（GLSL ES 3.0，#version 由 GLCore 前置） ========================= */
@@ -259,7 +260,13 @@ void main() {
 }
 `;
 
-/** 大气辉光壳层顶点着色器（GLOW 模式：壳层半径由 uRadius 放大） */
+/**
+ * 大气辉光壳层顶点着色器（GLOW 模式：壳层半径由 uRadius 放大）。
+ * 矩阵契约（doc5 §3.1 处方 1/2）：uMVP（P·V·M，M 已含平移 T(C)）只左乘局部坐标
+ * 一次——uModel 仅用于求世界空间 vWorld/vN（光照与视线求值）。
+ * 修复：旧版 gl_Position = uMVP * (uModel * local) 把平移矩阵平方，辉光壳体
+ * 漂移至 2× 轨道半径处。
+ */
 const GLOW_VERT = `
 uniform mat4 uMVP;
 uniform mat4 uModel;
@@ -268,14 +275,23 @@ in vec3 aPos;
 out vec3 vN;
 out vec3 vWorld;
 void main() {
-  vec4 w = uModel * vec4(aPos * uRadius, 1.0);
+  vec4 local = vec4(aPos * uRadius, 1.0);
+  vec4 w = uModel * local;
   vWorld = w.xyz;
-  vN = mat3(uModel) * aPos;
-  gl_Position = uMVP * w;
+  vN = normalize(mat3(uModel) * aPos);
+  gl_Position = uMVP * local;
 }
 `;
 
-/** 大气辉光壳层片元：正面加性菲涅尔（背面剔除在管线侧开启） */
+/**
+ * 大气辉光壳层片元（doc5 §3.1 处方 3：瑞利-菲涅尔晨昏线散射）：
+ * 双幂次菲涅尔（外缘 pow(1-ndv,2.4)×0.75 + 内缘 pow(1-ndv,5.0)×0.45）；
+ * 日照相位 dayFactor = smoothstep(-0.22,0.35,ndl)；晨昏线窄带高斯
+ * exp(-pow((ndl-0.02)/0.16,2))×fresnelOuter 以琥珀暖色渲染瑞利红移；
+ * 前向散射 pow(max(dot(-V,L),0),4)×0.35；illumination = 0.12+0.88×dayFactor
+ * + forward×dayFactor；alpha = clamp(fresnel×illumination×uPower,0,1)。
+ * 正面加性（背面剔除在管线侧开启）。
+ */
 const GLOW_FRAG = `precision highp float;
 uniform vec3 uCamPos;
 uniform vec3 uStarPos;
@@ -289,15 +305,30 @@ out vec4 fragColor;
 void main() {
   vec3 N = normalize(vN);
   vec3 V = normalize(uCamPos - vWorld);
-  float fres = pow(1.0 - abs(dot(N, V)), 2.6);
+  float ndv = clamp(abs(dot(N, V)), 0.0, 1.0);
+  float fresnelOuter = pow(1.0 - ndv, 2.4) * 0.75;
+  float fresnelInner = pow(1.0 - ndv, 5.0) * 0.45;
+  float fresnel = fresnelOuter + fresnelInner;
   vec3 L = normalize(uStarPos - uCenter);
-  float day = 0.30 + 0.70 * max(dot(normalize(vWorld - uCenter), L), 0.0);
-  float a = fres * day * uPower;
-  fragColor = vec4(uTint * a * uHdr, a);
+  float ndl = dot(normalize(vWorld - uCenter), L);
+  float dayFactor = smoothstep(-0.22, 0.35, ndl);
+  // 晨昏线窄带高斯：暖色琥珀（瑞利红移）
+  float band = exp(-pow((ndl - 0.02) / 0.16, 2.0)) * fresnelOuter;
+  vec3 scatterColor = mix(uTint, vec3(1.0, 0.48, 0.18), clamp(band, 0.0, 1.0) * 0.65);
+  // 前向散射（望相位增亮）
+  float forward = pow(max(dot(-V, L), 0.0), 4.0) * 0.35;
+  float illumination = (0.12 + 0.88 * dayFactor) + forward * dayFactor;
+  float alpha = clamp(fresnel * illumination * uPower, 0.0, 1.0);
+  fragColor = vec4(scatterColor * alpha * uHdr, alpha);
 }
 `;
 
-/** 环面（气态行星环 / 轨道站环）顶点着色器：aPos 为环局部 XZ 平面坐标 */
+/**
+ * 环面（气态行星环 / 轨道站环）顶点着色器：aPos 为环局部 XZ 平面坐标。
+ * 与 GLOW_VERT 同一矩阵契约：uMVP 只左乘局部坐标一次，uModel 仅求 vWorld。
+ * 修复：旧版 gl_Position = uMVP * (uModel * local) 二次左乘模型矩阵，环面
+ * 几何中心同样被平移平方推至 2C。
+ */
 const RING_VERT = `
 uniform mat4 uMVP;
 uniform mat4 uModel;
@@ -306,9 +337,10 @@ out vec3 vLocal;
 out vec3 vWorld;
 void main() {
   vLocal = aPos;
-  vec4 w = uModel * vec4(aPos, 1.0);
+  vec4 local = vec4(aPos, 1.0);
+  vec4 w = uModel * local;
   vWorld = w.xyz;
-  gl_Position = uMVP * w;
+  gl_Position = uMVP * local;
 }
 `;
 
@@ -644,6 +676,10 @@ export class System3D {
     /** @type {{entries:Object[], count:number, ...相机缓存}|null} 最近一帧拾取缓存 */
     this.pickData = null;
 
+    // —— 轨道聚焦（doc5 §3.2/P0-01：双击行星平滑推近，指数阻尼插值） ——
+    /** @type {string|null} 当前聚焦行星 id（SystemView 经 setOrbitFocus 设置） */
+    this._focusId = null;
+
     // 舰队动态缓冲数据（pos3 + t1 × 3 顶点）—— 必须先于 _buildResources 分配
     this._fleetData = new Float32Array(FLEET_MAX * 3 * 4);
 
@@ -671,6 +707,12 @@ export class System3D {
       tmp3: new Float32Array(3),
       bhBasis: new Float32Array(9),
       starSeed: 0.37,
+      // —— 相机轨道插值状态（focusCur/focusTarget + distCur + 帧时钟） ——
+      focusCur: new Float32Array(3),   // 当前注视点（世界）
+      focusTgt: new Float32Array(3),   // 目标注视点
+      distCur: 6.0,                    // 当前相机距离（指数阻尼逼近目标）
+      lastTime: 0,                     // 上一帧 opts.time（dt 计算）
+      camInit: false,                  // 首帧直接贴合目标距离（免上山式开场推拉）
     };
 
     // —— 行星布局缓存（复用对象，避免逐帧分配） ——
@@ -687,6 +729,20 @@ export class System3D {
     if (v === this.tier) return;
     this.tier = v;
     this._rebuildCoronaTarget(v === 2 ? CORONA_RES_LOW : CORONA_RES_FULL);
+  }
+
+  /**
+   * 相机聚焦行星（doc5 §3.5.2 双击运镜）：注视点逐帧追踪该行星世界坐标，
+   * 距离指数阻尼收敛到 max(0.75, radius×9.5)。id 不在场景时自动回退全景。
+   * @param {string|null} planetId 行星实体 id（null = 取消聚焦回全景）
+   */
+  setOrbitFocus(planetId) {
+    this._focusId = planetId || null;
+  }
+
+  /** 取消聚焦：注视点/距离阻尼回星系全景（原点） */
+  clearOrbitFocus() {
+    this._focusId = null;
   }
 
   /**
@@ -726,7 +782,8 @@ export class System3D {
     s.starSeed = hashSeed(seedSrc);
 
     // —— 布局与相机 ——
-    this._layout(planets, tick, time, selected);
+    const surveyed = Number((data && data.system && data.system.surveyedLevel) || 0);
+    this._layout(planets, tick, time, selected, surveyed);
     const n = Math.max(1, planets.length);
     const rMax = ORBIT_BASE + Math.max(0, n - 1) * ORBIT_STEP + 0.55;
     const aspect = width / Math.max(1, height);
@@ -738,15 +795,55 @@ export class System3D {
     const camPitch = isBHCam ? 0.24 : CAM_PITCH;
     // 黑洞：固定世界距离 7.0 → 11.7 RS，保证吸积盘（1.65..6.2 RS）完整入画
     // （修复：camRMax 为未定义标识符，场景半径即上方 rMax —— 原 GL 帧必然抛错退化 2D）
-    const dist = isBHCam ? 4.6 : (rMax / Math.sin(Math.min(halfY, halfX))) * 1.06;
-    const yaw = 0.55 + time * (isBHCam ? 0.008 : 0.02) + (Number(opts.yaw) || 0);
+    const distFit = isBHCam ? 4.6 : (rMax / Math.sin(Math.min(halfY, halfX))) * 1.06;
+
+    // —— 轨道聚焦解析 + 帧率无关指数阻尼插值（doc5 §3.2） ——
+    let hasFoc = false;
+    let focR = 0;
+    if (this._focusId != null) {
+      for (let i = 0; i < this._plCount; i++) {
+        if (this._pl[i].id === this._focusId) {
+          s.focusTgt[0] = this._pl[i].world[0];
+          s.focusTgt[1] = this._pl[i].world[1];
+          s.focusTgt[2] = this._pl[i].world[2];
+          focR = this._pl[i].radius;
+          hasFoc = true;
+          break;
+        }
+      }
+    }
+    if (!hasFoc) {
+      s.focusTgt[0] = 0;
+      s.focusTgt[1] = 0;
+      s.focusTgt[2] = 0;
+    }
+    const targetDist = hasFoc ? Math.max(0.75, focR * 9.5) : distFit;
+    const dt = Math.min(0.1, Math.max(0.001, time - s.lastTime)); // 帧时钟钳制
+    s.lastTime = time;
+    if (!s.camInit) {
+      // 首帧直接贴合（避免每次挂载都从 distCur=6.0 做开场推拉）
+      s.camInit = true;
+      s.distCur = targetDist;
+      s.focusCur[0] = s.focusTgt[0];
+      s.focusCur[1] = s.focusTgt[1];
+      s.focusCur[2] = s.focusTgt[2];
+    } else {
+      const alphaLerp = 1 - Math.exp(-8.5 * dt);
+      s.focusCur[0] += (s.focusTgt[0] - s.focusCur[0]) * alphaLerp;
+      s.focusCur[1] += (s.focusTgt[1] - s.focusCur[1]) * alphaLerp;
+      s.focusCur[2] += (s.focusTgt[2] - s.focusCur[2]) * alphaLerp;
+      s.distCur += (targetDist - s.distCur) * alphaLerp;
+    }
+
+    const dist = s.distCur;
+    const yaw = 0.55 + time * (isBHCam ? 0.008 : 0.015) + (Number(opts.yaw) || 0);
     const cp = Math.cos(camPitch);
     const sp = Math.sin(camPitch);
-    s.eye[0] = dist * cp * Math.sin(yaw);
-    s.eye[1] = dist * sp;
-    s.eye[2] = dist * cp * Math.cos(yaw);
+    s.eye[0] = s.focusCur[0] + dist * cp * Math.sin(yaw);
+    s.eye[1] = s.focusCur[1] + dist * sp;
+    s.eye[2] = s.focusCur[2] + dist * cp * Math.cos(yaw);
     mat4Perspective(s.proj, CAM_FOV, aspect, Math.max(0.02, dist * 0.02), dist + rMax * 8 + 30);
-    mat4LookAt(s.view, s.eye, LOOK_ORIGIN, LOOK_UP);
+    mat4LookAt(s.view, s.eye, s.focusCur, LOOK_UP);
     mat4Multiply(s.vp, s.proj, s.view);
     mat4Multiply(s.vpPick, s.proj, s.view); // 拾取专用 viewProj（s.vp 供各绘制层作草稿）
     // 视图基向量（列主序）：right/up/forward（forward = 观察方向）
@@ -822,14 +919,18 @@ export class System3D {
 
   // —————————————————————————— 内部：布局与缓存 ——————————————————————————
 
-  /** 行星布局：orbitIndex 均分角 + tick/时间缓慢公转，倾角 20° 统一（复用对象） */
-  _layout(planets, tick, time, selected) {
+  /**
+   * 行星布局：orbitIndex 均分角 + tick/时间缓慢公转，倾角 20° 统一（复用对象）。
+   * @param {number} surveyed 星系调查层级（<2 时天体标记 unknown，供未探测回波）
+   */
+  _layout(planets, tick, time, selected, surveyed = 0) {
     const n = Math.max(1, planets.length);
     this._plCount = planets.length;
     while (this._pl.length < planets.length) {
       this._pl.push({
         id: null, world: new Float32Array(3), radius: 0.1, cat: 0,
         colony: false, selected: false, orbitR: 1, seed: 0, category: 'rocky',
+        unknown: false,
       });
     }
     for (let i = 0; i < planets.length; i++) {
@@ -851,6 +952,7 @@ export class System3D {
       e.selected = !!selected && selected === p.id;
       e.orbitR = R;
       e.seed = hashSeed(p.id || `p${orbit}`);
+      e.unknown = surveyed < 2; // 未完成「分类」扫描：引力回波虚影（HUD 层绘制标签）
     }
   }
 
