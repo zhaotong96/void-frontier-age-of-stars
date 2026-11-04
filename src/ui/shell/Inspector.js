@@ -86,13 +86,14 @@ export class Inspector {
       ['资源评级', `${sys.resourceRating}/10`],
     ]));
     if (lvl >= 2) {
-      // 行星列表
+      // 行星列表（面板稳定键：跨快照折叠记忆，doc5 §3.4）
       const rows = sys.planetIds.map((pid) => w.entities.planets[pid]);
       for (const p of rows) {
         const pe = panel({
           title: `${p.name} · ${p.categoryName}`,
           open: false,
           dense: true,
+          id: `insp:planet:${p.id}`,
         });
         const pb = pe.querySelector('.vf-panel-body') || pe.lastChild;
         pb.appendChild(kvList([
