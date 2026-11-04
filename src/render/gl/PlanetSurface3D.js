@@ -20,6 +20,22 @@
  * draw() 恰好 ≤ 8 次 draw call（预算 15）；HUD（血条/技能栏/目标信息）由
  * 调用方在 2D 层绘制，本类不触碰 DOM。
  *
+ * Pass 状态隔离与诊断（doc7 §2.2 修复 3 / doc6 §3.2-3.3）：
+ *  - 场景 FBO 清屏唯一所有者为 PostProcessor.beginScene()（8 步契约）；draw() 首部
+ *    保留主题地平线色的双保险清屏（允许冗余防御，不构成第二所有者）；
+ *  - 天空 pass 显式关 DEPTH_TEST/depthMask(false)/关 BLEND/关 CULL_FACE；不透明
+ *    地形/建筑/actor/角色 pass 显式开 DEPTH_TEST(LEQUAL)/depthMask(true)/
+ *    frontFace(CCW)，并按 cullEnabled 开 CULL_FACE+BACK（greedyMeshChunk 与
+ *    GroundMeshes 均已验证 CCW-外向绕序）；贴花/特效/粒子透明 pass 关剔除、
+ *    BLEND 按材质声明、depthMask(false)，结束恢复；
+ *  - 三档地表诊断模式（setDebugMode / 循环 / getGLStateSnapshot）：
+ *    0=正式  1=unlit_nocull（无光照纯色+临时关剔除）  2=wireframe_normal（法线
+ *    RGB + 1m 世界格线）  3=winding_audit（gl_FrontFacing 正面翠绿/背面洋红，
+ *    需关剔除观察背面）。绝不以永久关闭剔除掩盖绕序问题；
+ *  - init() 注册 window.__vfSurfaceDebug（setDebugMode/cycleDebugMode/getSnapshot/
+ *    renderer），destroy() 注销 —— 诊断面板（DiagnosticsView）与 glGateTest 经此
+ *    钩子操作【当前挂载】的地表渲染器；本类不绑定键盘（F3 循环由视图层决定）。
+ *
  * renderData 契约（全部字段可选，缺省安全跳过）：
  *   character : { x, y, z, yaw, state('idle'|'run'|'attack'|'dig'|'hurt'),
  *                 animT, attackT(0..1), flash(0..1) }
@@ -130,12 +146,15 @@ float hash13(vec3 p) {
 }
 void main() {
   vec4 p4 = uInvVP * vec4(vXY, 0.5, 1.0);
-  vec3 dir = normalize(p4.xyz / p4.w - uCamPos);
+  /* 反投影分母非零保护：p4.w → 0 时除法产生 Inf/NaN，天空输出异常值残留在场景
+   * FBO 中被辉光金字塔逐帧放大（doc7 §2.2 修复 3 / doc6 §3.2） */
+  float pw = abs(p4.w) < 1e-6 ? (p4.w >= 0.0 ? 1e-6 : -1e-6) : p4.w;
+  vec3 dir = normalize(p4.xyz / pw - uCamPos);
   float up = dir.y;
   vec3 col = mix(uHorizon, uZenith, pow(clamp(up, 0.0, 1.0), 0.55));
   col = mix(col, uGround, smoothstep(0.0, -0.30, up));
   float s = max(dot(dir, uSunDir), 0.0);
-  col += uSunColor * (pow(s, 800.0) * 3.2 + pow(s, 20.0) * 0.20);
+  col += uSunColor * (pow(max(s, 1e-6), 800.0) * 3.2 + pow(max(s, 1e-6), 20.0) * 0.20);
   if (uStars > 0.5 && up > 0.02) {
     vec3 sp = floor(dir * 220.0);
     float st = hash13(sp);
@@ -169,8 +188,31 @@ uniform vec3 uSunColor;
 uniform vec3 uCamPos;
 uniform vec3 uFogColor;
 uniform vec2 uFogRange;
+uniform float uDebugMode; // 0=正式 1=unlit_nocull 2=wireframe_normal 3=winding_audit
 out vec4 fragColor;
 void main() {
+  /* 三档诊断模式（doc7 §2.2 / doc6 §3.3 B）：
+   *  1 无剔除 Unlit：纯色无光照，验证顶点在视锥内（剔除由渲染器侧临时关闭）；
+   *  2 线框与法线：法线 RGB + 1m 世界格线，排查法线翻转/退化三角形/接缝；
+   *  3 绕序审计：gl_FrontFacing 正面翠绿 / 背面洋红（剔除必须关闭才能看到背面） */
+  if (uDebugMode > 0.5) {
+    if (uDebugMode > 2.5) {
+      fragColor = gl_FrontFacing ? vec4(0.1, 0.9, 0.3, 1.0) : vec4(1.0, 0.0, 0.8, 1.0);
+      return;
+    }
+    vec3 dbg;
+    if (uDebugMode < 1.5) {
+      dbg = vC; // 无光照材质纯色
+    } else {
+      dbg = normalize(vN) * 0.5 + 0.5;
+      vec3 fw = abs(fract(vW) - 0.5);
+      float line = max(smoothstep(0.02, 0.06, fw.x),
+                       max(smoothstep(0.02, 0.06, fw.y), smoothstep(0.02, 0.06, fw.z)));
+      dbg = mix(dbg, vec3(1.0, 0.9, 0.2), line * 0.6); // 1m 世界格线（黄）
+    }
+    fragColor = vec4(dbg, 1.0);
+    return;
+  }
   vec3 N = normalize(vN);
   float diff = max(dot(N, uSunDir), 0.0);
   float hemi = 0.44 + 0.18 * (N.y * 0.5 + 0.5);
@@ -375,6 +417,28 @@ function hash01(n) {
   return h / 4294967296;
 }
 
+/** GL 枚举值 → 可读名（诊断快照用；未收录值回退 0x 十六进制串） */
+const GL_ENUM_NAMES = new Map([
+  [0x0000, 'ZERO'], [0x0001, 'ONE'],
+  [0x0200, 'NEVER'], [0x0201, 'LESS'], [0x0202, 'EQUAL'], [0x0203, 'LEQUAL'],
+  [0x0204, 'GREATER'], [0x0205, 'NOTEQUAL'], [0x0206, 'GEQUAL'], [0x0207, 'ALWAYS'],
+  [0x0404, 'FRONT'], [0x0405, 'BACK'], [0x0406, 'FRONT_AND_BACK'],
+  [0x0408, 'FRONT_AND_BACK'],
+  [0x2300, 'CW'], [0x2301, 'CCW'],
+  [0x0300, 'SRC_ALPHA'], [0x0301, 'ONE_MINUS_SRC_ALPHA'],
+  [0x0302, 'SRC_COLOR'], [0x0303, 'ONE_MINUS_SRC_COLOR'],
+  [0x0306, 'DST_ALPHA'], [0x0307, 'ONE_MINUS_DST_ALPHA'],
+  [0x0308, 'DST_COLOR'], [0x0309, 'ONE_MINUS_DST_COLOR'],
+  [0x8006, 'FUNC_ADD'], [0x8009, 'FUNC_SUBTRACT'], [0x800a, 'FUNC_REVERSE_SUBTRACT'],
+  [0x0500, 'INVALID_ENUM'], [0x0501, 'INVALID_VALUE'], [0x0502, 'INVALID_OPERATION'],
+  [0x0503, 'STACK_OVERFLOW'], [0x0504, 'STACK_UNDERFLOW'], [0x0505, 'OUT_OF_MEMORY'],
+  [0x0506, 'INVALID_FRAMEBUFFER_OPERATION'], [0x9242, 'CONTEXT_LOST_WEBGL'],
+]);
+/** 查枚举名；未收录回退 0x 十六进制串 */
+function glEnumName(v) {
+  return GL_ENUM_NAMES.has(v) ? GL_ENUM_NAMES.get(v) : '0x' + Number(v).toString(16);
+}
+
 /** 外骨骼部件枢轴（局部坐标，与 GroundMeshes.buildExosuitMesh 部件布局一致） */
 const EXO_PIVOTS = {
   head: [0, 1.38, 0],
@@ -401,6 +465,12 @@ export class PlanetSurface3D {
     this.sw = null;                 // init(sceneWorld) 后持有体素世界
     this.pickDist = 7.5;            // DDA 拾取距离（体素）
     this.stats = { triangles: 0, drawCalls: 0, chunkRebuilds: 0 };
+    // —— 地表诊断：0=off 1=unlit_nocull 2=wireframe_normal 3=winding_audit ——
+    // cullEnabled：正式模式背面剔除开关（默认 true —— greedyMeshChunk 已验证
+    // 全部 6 向面 CCW-外向；诊断模式 1/3 下强制临时关闭，结束自动恢复）。
+    // 公开字段：诊断侧可直接置 false 复现"无剔除"对照视图（不得以永久关闭掩盖绕序问题）
+    this._debugMode = 0;
+    this.cullEnabled = true;
 
     this._destroyed = false;
     this._inited = false;
@@ -422,7 +492,7 @@ export class PlanetSurface3D {
     const gl = this.gl;
     this._u = {
       sky: locMap(gl, this.progSky, ['uInvVP', 'uCamPos', 'uZenith', 'uHorizon', 'uGround', 'uSunDir', 'uSunColor', 'uStars', 'uTime']),
-      terrain: locMap(gl, this.progTerrain, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange']),
+      terrain: locMap(gl, this.progTerrain, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange', 'uDebugMode']),
       box: locMap(gl, this.progBox, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange']),
       actor: locMap(gl, this.progActor, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange']),
       char: locMap(gl, this.progChar, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange']),
@@ -582,6 +652,17 @@ export class PlanetSurface3D {
 
     // —— 天空 / 光照：按行星档案求值一次 ——
     this._evalEnvironment();
+
+    // —— 诊断钩子：注册到 window（DiagnosticsView / glGateTest / DevTools 经此
+    // 操作当前挂载的地表渲染器；destroy 注销）。键盘不在此绑定 —— F3 循环归视图层。
+    if (typeof window !== 'undefined') {
+      window.__vfSurfaceDebug = {
+        renderer: this,
+        setDebugMode: (m) => this.setDebugMode(m),
+        cycleDebugMode: () => this.cycleDebugMode(),
+        getSnapshot: () => this.getGLStateSnapshot(),
+      };
+    }
 
     gl.bindVertexArray(null);
     return this;
@@ -882,6 +963,112 @@ export class PlanetSurface3D {
     return hit;
   }
 
+  // —— 地表诊断 API（doc7 §2.2 三档诊断 / doc6 §3.3 证据链） ————————
+
+  /**
+   * 设置地表诊断渲染模式（不绑定键盘，视图层/诊断面板经 window.__vfSurfaceDebug 调用）。
+   *  0 = 正式渲染（按 cullEnabled 剔除）
+   *  1 = unlit_nocull：无光照纯色，临时关 CULL_FACE（验证顶点在视锥内）
+   *  2 = wireframe_normal：法线 RGB + 1m 世界格线（剔除保持开启，暴露正面消失破洞）
+   *  3 = winding_audit：gl_FrontFacing 正面翠绿 (0.1,0.9,0.3) / 背面洋红 (1.0,0.0,0.8)，
+   *      临时关 CULL_FACE（否则背面被剔除永远看不到洋红）
+   * @param {number} mode 0..3（越界回退 0）
+   * @returns {number} 实际生效的模式
+   */
+  setDebugMode(mode) {
+    const n = Math.round(Number(mode));
+    this._debugMode = n >= 0 && n <= 3 && Number.isFinite(n) ? n : 0;
+    return this._debugMode;
+  }
+
+  /** 循环诊断模式 0→1→2→3→0，返回新模式 */
+  cycleDebugMode() {
+    return this.setDebugMode((this._debugMode + 1) % 4);
+  }
+
+  /**
+   * GL 状态运行时快照（JSON-able；doc6 §3.3 A 证据链 / doc7 §3.4 诊断 JSON）。
+   * 采集当前绑定 FBO 的附件类型/尺寸、viewport/scissor、剔除与深度状态、混合状态、
+   * getError，以及地形顶点/三角形数、区块数与 drawCalls。
+   * @returns {object} 可直接 JSON.stringify 的快照
+   */
+  getGLStateSnapshot() {
+    const gl = this.gl;
+    const snap = {
+      generatedAt: new Date().toISOString(),
+      browser: null,
+      gpu: null,
+      viewport: null,
+      drawingBuffer: null,
+      sceneTarget: { width: this._vw, height: this._vh }, // draw() 收到的场景目标物理尺寸
+      boundFbo: { bound: false, colorAttachment: null, depthAttachment: null },
+      state: {},
+      glError: null,
+      terrain: {
+        vertCount: this._terr ? this._terr.vertCount : 0,
+        triCount: this.stats.triangles,
+      },
+      chunks: this._chunkMesh ? this._chunkMesh.length : 0,
+      drawCalls: this.stats.drawCalls,
+      debugMode: this._debugMode,
+      cullEnabled: this.cullEnabled,
+    };
+    if (!gl) return snap;
+    if (typeof navigator !== 'undefined' && navigator.userAgent) snap.browser = navigator.userAgent;
+    // GPU 渲染器字符串（WEBGL_debug_renderer_info 不可用时置 null）
+    try {
+      const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+      if (dbg) snap.gpu = gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL);
+    } catch (_) { /* 快照不因探测失败而中断 */ }
+
+    const enumName = glEnumName;
+    const boolOf = (v) => !!v;
+    const bound = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+    if (bound) {
+      snap.boundFbo.bound = true;
+      const describe = (attach) => {
+        try {
+          const type = gl.getFramebufferAttachmentParameter(gl.FRAMEBUFFER, attach, gl.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE);
+          if (type === gl.TEXTURE) return { type: 'texture' };
+          if (type === gl.RENDERBUFFER) {
+            const rbo = gl.getFramebufferAttachmentParameter(gl.FRAMEBUFFER, attach, gl.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME);
+            const prev = gl.getParameter(gl.RENDERBUFFER_BINDING);
+            gl.bindRenderbuffer(gl.RENDERBUFFER, rbo);
+            const size = {
+              type: 'renderbuffer',
+              width: gl.getRenderbufferParameter(gl.RENDERBUFFER, gl.RENDERBUFFER_WIDTH),
+              height: gl.getRenderbufferParameter(gl.RENDERBUFFER, gl.RENDERBUFFER_HEIGHT),
+            };
+            gl.bindRenderbuffer(gl.RENDERBUFFER, prev);
+            return size;
+          }
+          return null;
+        } catch (_) { return null; }
+      };
+      snap.boundFbo.colorAttachment = describe(gl.COLOR_ATTACHMENT0);
+      snap.boundFbo.depthAttachment = describe(gl.DEPTH_ATTACHMENT);
+    }
+    snap.viewport = Array.from(gl.getParameter(gl.VIEWPORT));
+    snap.drawingBuffer = { width: gl.drawingBufferWidth, height: gl.drawingBufferHeight };
+    snap.state = {
+      scissorTest: boolOf(gl.isEnabled(gl.SCISSOR_TEST)),
+      scissorBox: Array.from(gl.getParameter(gl.SCISSOR_BOX)),
+      cullFace: boolOf(gl.isEnabled(gl.CULL_FACE)),
+      cullFaceMode: enumName(gl.getParameter(gl.CULL_FACE_MODE)),
+      frontFace: enumName(gl.getParameter(gl.FRONT_FACE)),
+      depthTest: boolOf(gl.isEnabled(gl.DEPTH_TEST)),
+      depthFunc: enumName(gl.getParameter(gl.DEPTH_FUNC)),
+      depthMask: boolOf(gl.getParameter(gl.DEPTH_WRITEMASK)),
+      colorMask: Array.from(gl.getParameter(gl.COLOR_WRITEMASK), boolOf),
+      blend: boolOf(gl.isEnabled(gl.BLEND)),
+      blendSrcRgb: enumName(gl.getParameter(gl.BLEND_SRC_RGB)),
+      blendDstRgb: enumName(gl.getParameter(gl.BLEND_DST_RGB)),
+      blendEquationRgb: enumName(gl.getParameter(gl.BLEND_EQUATION_RGB)),
+    };
+    snap.glError = enumName(gl.getError());
+    return snap;
+  }
+
   // —— 帧绘制 ————————————————
 
   /**
@@ -902,10 +1089,21 @@ export class PlanetSurface3D {
     const m = this._m;
     const eye = this.camera.eye;
 
-    // —— 0. 天空（无深度写入；覆盖全屏故无需清色） ——
-    gl.clear(gl.DEPTH_BUFFER_BIT);
+    // —— 0. 双保险清屏（主题地平线色 + 深度） ——
+    // 场景 FBO 清屏唯一所有者是 PostProcessor.beginScene()（8 步契约）；此处为
+    // doc7 §2.2 允许的冗余防御：地表视图自带正确主题色，任何前序状态偏差
+    // （colorMask/scissor/blend 残留）也不至于依赖"天空恰好覆盖所有像素"。
+    // 场景 FBO 已挂 DEPTH_COMPONENT24（TASK-0.1），gl.clear(DEPTH) 自此真实生效。
+    const horizon = this._sky.horizon;
+    gl.clearColor(horizon[0], horizon[1], horizon[2], 1.0);
+    gl.clearDepth(1.0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    // —— 1. 天空（pass 状态隔离：关深度/不写深度/关混合/关剔除） ——
     gl.disable(gl.DEPTH_TEST);
     gl.depthMask(false);
+    gl.disable(gl.BLEND);
+    gl.disable(gl.CULL_FACE);
     gl.useProgram(this.progSky);
     const uSky = this._u.sky;
     gl.uniformMatrix4fv(uSky.uInvVP, false, mat4Invert(m.invVp, m.vp));
@@ -920,11 +1118,24 @@ export class PlanetSurface3D {
     gl.bindVertexArray(this._skyVao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     dc++;
-    gl.depthMask(true);
+
+    // —— 不透明状态基线（地形/建筑/actor/角色共用；进入 pass 前显式声明） ——
     gl.enable(gl.DEPTH_TEST);
     gl.depthFunc(gl.LEQUAL);
+    gl.depthMask(true);
+    gl.frontFace(gl.CCW);
+    // 剔除仅在绕序已验证时开启：greedyMeshChunk 全部 6 向面与 GroundMeshes 单位盒
+    // 均为 CCW-外向（TERRAIN-02）。诊断模式 1（无剔除 Unlit）与 3（绕序审计，需
+    // 看到背面染洋红）强制临时关闭；模式 2 保持开启以暴露"正面消失破洞"。
+    const cullOpaque = this.cullEnabled && this._debugMode !== 1 && this._debugMode !== 3;
+    if (cullOpaque) {
+      gl.enable(gl.CULL_FACE);
+      gl.cullFace(gl.BACK);
+    } else {
+      gl.disable(gl.CULL_FACE);
+    }
 
-    // —— 1. 地形（单缓冲单 draw call） ——
+    // —— 2. 地形（单缓冲单 draw call） ——
     if (this._terr.vertCount > 0) {
       gl.useProgram(this.progTerrain);
       const u = this._u.terrain;
@@ -934,6 +1145,7 @@ export class PlanetSurface3D {
       gl.uniform3f(u.uCamPos, eye[0], eye[1], eye[2]);
       gl.uniform3fv(u.uFogColor, this._fogColor);
       gl.uniform2f(u.uFogRange, this._fogRange[0], this._fogRange[1]);
+      gl.uniform1f(u.uDebugMode, this._debugMode);
       gl.bindVertexArray(this._terr.vao);
       gl.drawArrays(gl.TRIANGLES, 0, this._terr.vertCount);
       dc++;
@@ -991,10 +1203,11 @@ export class PlanetSurface3D {
       dc++;
     }
 
-    // —— 5. AoE 预警贴花（α 混合，深度不写） ——
+    // —— 5. AoE 预警贴花（α 混合，深度不写；贴花圆盘三角形朝 -Y，双面绘制关剔除） ——
     this._buildDecals(rd, time);
     if (this._decal.count > 0) {
       this._uploadDynamic(this._decal, this._decalArr);
+      gl.disable(gl.CULL_FACE); // 透明贴花/缎带按材质策略双面（doc6 §3.3 C）
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       gl.depthMask(false);
@@ -1009,10 +1222,11 @@ export class PlanetSurface3D {
       gl.depthMask(true);
     }
 
-    // —— 6. 刀光带 / 光束（加性，深度不写） ——
+    // —— 6. 刀光带 / 光束（加性，深度不写；正反两面都可见 → 关剔除） ——
     this._buildFx(rd, eye);
     if (this._fx.count > 0) {
       this._uploadDynamic(this._fx, this._fxArr);
+      gl.disable(gl.CULL_FACE);
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
       gl.depthMask(false);
@@ -1027,10 +1241,11 @@ export class PlanetSurface3D {
       gl.depthMask(true);
     }
 
-    // —— 7. 挖掘粒子（加性点精灵） ——
+    // —— 7. 挖掘粒子（加性点精灵；POINTS 不受剔除影响，状态隔离保持显式） ——
     this._updateParticles(rd, opts.dt != null ? opts.dt : 1 / 30, tier);
     if (this._pool.n > 0) {
       const n = this._packParticles(tier);
+      gl.disable(gl.CULL_FACE);
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
       gl.depthMask(false);
@@ -1459,6 +1674,11 @@ export class PlanetSurface3D {
   destroy() {
     if (this._destroyed) return;
     this._destroyed = true;
+    // 注销诊断钩子（仅当仍指向本实例——防误清新实例的钩子）
+    if (typeof window !== 'undefined' && window.__vfSurfaceDebug
+      && window.__vfSurfaceDebug.renderer === this) {
+      window.__vfSurfaceDebug = null;
+    }
     const gl = this.gl;
     if (!gl) return;
     const delBuf = (b) => { if (b) gl.deleteBuffer(b); };

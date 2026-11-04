@@ -1,12 +1,20 @@
 /**
  * ui/screens/DiagnosticsView.js — 系统诊断面板（任务书 10.4）
  * 在浏览器内运行全量/分组测试，展示编号、说明、耗时、通过/失败、实测/期望。
+ * 另含"地表渲染诊断"卡（doc7 §2.2 / doc6 §3.3）：循环地表诊断渲染模式、
+ * 导出 GL 状态快照 JSON —— 经 src/devtools/glGateTest.js 的地表诊断 API，
+ * 其底层通过 window.__vfSurfaceDebug 钩子（PlanetSurface3D.init 注册）操作
+ * 当前挂载的 GroundView 渲染器。
  */
 
 import { el } from '../components/dom.js';
 import { panel } from '../components/panels.js';
 import { progressBar } from '../components/progress.js';
 import { L } from '../../core/i18n.js';
+import { surfaceCycleDebugMode, surfaceGLSnapshot } from '../../devtools/glGateTest.js';
+
+/** 地表诊断模式显示名（0..3，与 PlanetSurface3D.setDebugMode 契约一致） */
+const SURFACE_MODE_NAMES = ['0 off', '1 unlit_nocull', '2 wireframe_normal', '3 winding_audit'];
 
 export const DiagnosticsView = {
   id: 'diagnostics',
@@ -32,9 +40,57 @@ export const DiagnosticsView = {
     body.appendChild(this.summary);
     this.resultsBox = el('div', { class: 'mt-2' });
     body.appendChild(this.resultsBox);
+    body.appendChild(this.buildSurfaceDiagCard());
     wrap.appendChild(body);
     root.appendChild(wrap);
     this.results = [];
+  },
+
+  /** 地表渲染诊断卡：循环诊断模式（F3 同效）+ 导出 GL 状态快照 JSON */
+  buildSurfaceDiagCard() {
+    const p = panel({ title: '地表渲染诊断', open: true });
+    const status = el('span', { class: 'vf-faint vf-small', text: '未挂载地表视图时不可用' });
+    const setStatus = (text, ok) => {
+      status.textContent = text;
+      status.className = ok ? 'vf-ok vf-small' : 'vf-faint vf-small';
+    };
+    setStatus('模式: -', false);
+
+    const cycleBtn = el('button', { class: 'vf-btn', text: '循环诊断模式' });
+    cycleBtn.addEventListener('click', () => {
+      const r = surfaceCycleDebugMode();
+      if (r.ok) setStatus(`模式: ${SURFACE_MODE_NAMES[r.debugMode] || r.debugMode}`, true);
+      else setStatus(r.reason || '不可用', false);
+    });
+
+    const snapBtn = el('button', { class: 'vf-btn', text: '导出诊断 JSON' });
+    snapBtn.addEventListener('click', () => {
+      const r = surfaceGLSnapshot();
+      if (!r.ok) {
+        setStatus(r.reason || '不可用', false);
+        return;
+      }
+      console.log('[地表渲染诊断快照]', r.snapshot);
+      try {
+        const blob = new Blob([JSON.stringify(r.snapshot, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'vf-surface-glsnapshot.json';
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        setStatus('快照已导出（vf-surface-glsnapshot.json，另见 Console）', true);
+      } catch (e) {
+        setStatus('快照已打印到 Console（下载失败: ' + (e && e.message) + '）', false);
+      }
+    });
+
+    const row = el('div', { class: 'vf-row' });
+    row.appendChild(cycleBtn);
+    row.appendChild(snapBtn);
+    row.appendChild(status);
+    p.appendChild(row);
+    return p;
   },
 
   async runAll() {
