@@ -43,6 +43,7 @@ import {
 } from '../shaders/StarCoronaShader.js';
 import { BLACKHOLE_VERT, BLACKHOLE_FRAG } from '../shaders/BlackHoleShader.js';
 import { GLSL_HASH, GLSL_NOISE, GLSL_FBM } from './NoiseGLSL.js';
+import { PLANET_THEMES, srgbToLinear } from '../../content/planetThemes.js';
 
 /* ========================= 场景常量 ========================= */
 
@@ -109,6 +110,92 @@ const GLOW_STYLE = {
   artificial: [1.045, 0.30, [0.40, 0.70, 0.80]],
 };
 
+/* ========================= 主题轨道视觉映射（doc7 TASK-3.1 / THEME-01） ========================= */
+
+/** 主题 id → 轨道视觉参数（render → content 只读引用；主题覆写类别默认值） */
+const THEME_ORBITAL = PLANET_THEMES;
+
+/** 无主题时行星环着色（与 RING_FRAG 旧版硬编码逐值一致，保证回退视觉零漂移） */
+const RING_TINT_DEFAULT = { lo: [0.55, 0.60, 0.66], hi: [0.86, 0.89, 0.93] };
+
+/** 无主题（themeless/旧档）回退参数：uThemeOn=0 时行星着色器不采样主题层 */
+const THEME_BANDS_OFF = Object.freeze({
+  on: 0,
+  themeId: null,
+  bandA: [0.2, 0.2, 0.2],
+  bandB: [0.6, 0.6, 0.6],
+  emitTint: [1.0, 1.0, 1.0],
+  iceCap: 0,
+  clouds: 0,
+  cloudTint: [0.5, 0.5, 0.5],
+  nightLights: 0,
+  glow: null,
+  ringOn: false,
+  ringLo: RING_TINT_DEFAULT.lo,
+  ringHi: RING_TINT_DEFAULT.hi,
+});
+
+function clamp01(v) {
+  return Math.min(1, Math.max(0, v));
+}
+
+function scaleRGB(v, k) {
+  return [v[0] * k, v[1] * k, v[2] * k];
+}
+
+/**
+ * 行星 → 轨道主题 uniforms（doc7 TASK-3.1；THEME-01 轨道盲测识别 / THEME-07 身份恒定）。
+ * 纯函数、无 GL 依赖（Node 侧可测）：
+ *  - planet.primaryThemeId 命中注册表 → 返回主题覆写层（色带/极冠/云带/夜光/环/辉光）；
+ *  - themeless/旧档 → 类别回退（uThemeOn=0，GLOW 走 GLOW_STYLE，环仅气巨默认）。
+ *  - 同主题跨行星：色板取自 paletteLinear 恒定；cloud/night/cap 按行星 id 哈希
+ *    做 ±16% 内确定性微抖动（THEME-07「自然变化但身份恒定」），环显隐按
+ *    ringChance 与 id 哈希滚点。
+ * @param {{id?:string|number, category?:string, primaryThemeId?:string}|null} planet 行星档案
+ */
+export function orbitalUniformsFor(planet) {
+  const p = planet || {};
+  const cat = String(p.category || 'rocky');
+  const theme = p.primaryThemeId ? (THEME_ORBITAL[p.primaryThemeId] || null) : null;
+  if (!theme || !theme.orbital) {
+    const st = GLOW_STYLE[cat] || GLOW_STYLE.rocky;
+    return Object.assign({}, THEME_BANDS_OFF, {
+      glow: { shellScale: st[0], power: st[1], tint: st[2] },
+      ringOn: cat === 'gasGiant',
+    });
+  }
+  const o = theme.orbital;
+  const pid = String(p.id || '');
+  const jit = (salt) => (hashSeed(pid + salt) - 0.5) * 2.0; // [-1,1) 确定性
+  const clouds = clamp01(o.cloudCover * (1 + jit('#cloud') * 0.16));
+  const nightLights = clamp01(o.nightLights * (1 + jit('#night') * 0.14));
+  const iceCap = clamp01(o.iceCap * (1 + jit('#cap') * 0.12));
+  const pal = theme.paletteLinear;
+  const glow = o.glow || {};
+  const bands = Array.isArray(o.bandColors) && o.bandColors.length > 0
+    ? o.bandColors : [theme.palette.base];
+  return {
+    on: 1,
+    themeId: theme.id,
+    bandA: pal.base,
+    bandB: pal.highlight,
+    emitTint: pal.emissive,
+    iceCap,
+    clouds,
+    cloudTint: srgbToLinear(o.cloudColor || theme.palette.atmosphere),
+    nightLights,
+    glow: {
+      shellScale: Number.isFinite(glow.shellScale) ? glow.shellScale : 1.05,
+      power: Number.isFinite(glow.power) ? glow.power : 0.5,
+      tint: hexToRGB(glow.tint || theme.palette.atmosphere),
+    },
+    ringOn: cat === 'gasGiant'
+      || (Number(o.ringChance) > 0 && hashSeed(pid + '#ring') < Number(o.ringChance)),
+    ringLo: scaleRGB(hexToRGB(bands[0]), 0.85),
+    ringHi: hexToRGB(bands[bands.length - 1]),
+  };
+}
+
 /* ========================= 自有着色器（GLSL ES 3.0，#version 由 GLCore 前置） ========================= */
 
 /** 行星/恒星/辉光共用球体顶点着色器（细分球：aPos 与 aNormal 同缓冲，单位球 normal=position） */
@@ -141,6 +228,15 @@ uniform float uSeed;
 uniform float uTime;
 uniform float uColony;      // 1.0 = 已殖民
 uniform float uHdr;         // HDR 模拟预除系数（真 HDR = 1）
+// —— 主题覆写层（doc7 TASK-3.1/THEME-01：uThemeOn=0 时整层旁路，类别外观原样） ——
+uniform float uThemeOn;     // 1.0 = planet.primaryThemeId 命中主题注册表
+uniform vec3 uBandA;        // 主题基色带（paletteLinear.base）
+uniform vec3 uBandB;        // 主题高光带（paletteLinear.highlight）
+uniform vec3 uEmitTint;     // 主题自发光/夜光色（paletteLinear.emissive）
+uniform float uIceCap;      // 极冠覆盖 0..1
+uniform float uClouds;      // 云带覆盖 0..1
+uniform vec3 uCloudTint;    // 云带色（线性）
+uniform float uNightLights; // 主题夜光强度 0..1
 
 in vec3 vLocal;
 in vec3 vWorld;
@@ -232,6 +328,19 @@ void main() {
   float emit;
   surface(p, albedo, spec, emit);
 
+  // —— 主题覆写层：色带 / 极冠 / 云带（保留类别纹理 18% 渗透，主题身份主导） ——
+  if (uThemeOn > 0.5) {
+    float bandN = fbm3D(vec3(p.x * 2.2, p.y * 6.5, p.z * 2.2) + uSeed) * 0.5 + 0.5;
+    albedo = mix(albedo, mix(uBandA, uBandB, bandN), 0.82);
+    float capEdge = 1.0 - uIceCap * 0.52;
+    float cap = smoothstep(capEdge - 0.07, capEdge + 0.07, abs(p.y)) * step(0.015, uIceCap);
+    albedo = mix(albedo, vec3(0.90, 0.94, 0.99), cap);
+    float cl = smoothstep(0.55 - uClouds * 0.36, 0.88 - uClouds * 0.30,
+      fbm3D(vec3(p.x * 2.3, p.y * 5.6, p.z * 2.3)
+        + vec3(uTime * 0.010, 0.0, uTime * 0.006) + uSeed * 1.71));
+    albedo = mix(albedo, uCloudTint, cl * clamp(uClouds, 0.0, 1.0) * 0.88);
+  }
+
   // 昼夜明暗（晨昏线软化）
   vec3 col = albedo * (0.09 + 1.05 * day);
   if (spec > 0.001 && day > 0.0) {
@@ -241,12 +350,14 @@ void main() {
   if (uCategory == 5) col += vec3(1.30, 0.40, 0.10) * emit;                    // 岩浆 HDR 自发光
   if (uCategory == 7) col += vec3(0.45, 0.85, 0.95) * emit * (0.30 + 0.90 * night);
 
-  // —— 已殖民：夜半球金色城市灯火（城市群掩码 × worley 灯网点） ——
-  if (uColony > 0.5 && night > 0.02) {
+  // —— 夜半球灯火：已殖民 = 金色城市灯网；主题夜光 = 自发光色调制
+  //    （殖民世界以金色为主，仅混入 35% 主题色；非殖民主题世界按 uNightLights 发光） ——
+  if (night > 0.02 && (uColony > 0.5 || uNightLights > 0.02)) {
     float cluster = smoothstep(-0.15, 0.45, simplex3D(p * 5.5 + uSeed * 3.1));
     float wcell = worley3D(p * 21.0 + uSeed * 9.0);
     float lights = (1.0 - smoothstep(0.06, 0.30, wcell)) * cluster * night;
-    col += vec3(1.35, 1.00, 0.50) * lights * 1.5;
+    float tn = clamp(uNightLights, 0.0, 1.0) * (uColony > 0.5 ? 0.35 : 1.0);
+    col += mix(vec3(1.35, 1.00, 0.50), uEmitTint * 1.7, tn) * lights * 1.5;
   }
 
   // 表面菲涅尔大气边缘（弱；厚大气 toxic 在 GLOW 壳层另行增强）
@@ -358,6 +469,8 @@ uniform float uSeed;
 uniform float uTime;
 uniform int uMode;         // 0=冰晶行星环 1=轨道站环
 uniform float uHdr;
+uniform vec3 uRingLo;      // 环内缘色（mode 0；主题覆写，缺省 = 旧版冰晶灰）
+uniform vec3 uRingHi;      // 环外缘色（mode 0）
 in vec3 vLocal;
 in vec3 vWorld;
 out vec4 fragColor;
@@ -378,7 +491,7 @@ void main() {
     float shadow = (proj > 0.0)
       ? mix(0.15, 1.0, smoothstep(uPlanetR * 0.9, uPlanetR * 1.25, perp))
       : 1.0;
-    vec3 ice = mix(vec3(0.55, 0.60, 0.66), vec3(0.86, 0.89, 0.93), n * 0.5 + 0.5);
+    vec3 ice = mix(uRingLo, uRingHi, n * 0.5 + 0.5);
     float alpha = clamp(dens, 0.0, 1.0) * 0.78;
     fragColor = vec4(ice * dens * shadow * uHdr, alpha);
   } else {
@@ -930,7 +1043,7 @@ export class System3D {
       this._pl.push({
         id: null, world: new Float32Array(3), radius: 0.1, cat: 0,
         colony: false, selected: false, orbitR: 1, seed: 0, category: 'rocky',
-        unknown: false,
+        unknown: false, ouKey: null, ou: null,
       });
     }
     for (let i = 0; i < planets.length; i++) {
@@ -953,6 +1066,12 @@ export class System3D {
       e.orbitR = R;
       e.seed = hashSeed(p.id || `p${orbit}`);
       e.unknown = surveyed < 2; // 未完成「分类」扫描：引力回波虚影（HUD 层绘制标签）
+      // 主题轨道参数（doc7 TASK-3.1）：仅 themeId|category 变化时重算（循环内零分配）
+      const ouKey = String(p.primaryThemeId || '') + '|' + e.category;
+      if (e.ouKey !== ouKey || !e.ou) {
+        e.ouKey = ouKey;
+        e.ou = orbitalUniformsFor(p);
+      }
     }
   }
 
@@ -1024,12 +1143,14 @@ export class System3D {
     reg('blit', BLIT_VERT, BLIT_FRAG, { aPos: 0 }, ['uTex']);
     reg('planet', PLANET_VERT, PLANET_FRAG, { aPos: 0, aNormal: 1 },
       ['uMVP', 'uModel', 'uNormalMatrix', 'uCamPos', 'uStarPos', 'uCategory',
-        'uSeed', 'uTime', 'uColony', 'uHdr']);
+        'uSeed', 'uTime', 'uColony', 'uHdr',
+        'uThemeOn', 'uBandA', 'uBandB', 'uEmitTint', 'uIceCap', 'uClouds',
+        'uCloudTint', 'uNightLights']);
     reg('glow', GLOW_VERT, GLOW_FRAG, { aPos: 0 },
       ['uMVP', 'uModel', 'uRadius', 'uCamPos', 'uStarPos', 'uCenter', 'uTint', 'uPower', 'uHdr']);
     reg('ring', RING_VERT, RING_FRAG, { aPos: 0 },
       ['uMVP', 'uModel', 'uStarPos', 'uPlanetPos', 'uPlanetR', 'uInner', 'uOuter',
-        'uSeed', 'uTime', 'uMode', 'uHdr']);
+        'uSeed', 'uTime', 'uMode', 'uHdr', 'uRingLo', 'uRingHi']);
     reg('line', LINE_VERT, LINE_FRAG, { aPos: 0, aT: 1 },
       ['uMVP', 'uColor', 'uDashFreq', 'uTime', 'uHdr']);
 
@@ -1423,6 +1544,18 @@ export class System3D {
       gl.uniform1f(P.u.uSeed, e.seed);
       gl.uniform1f(P.u.uTime, time);
       gl.uniform1f(P.u.uColony, e.colony ? 1.0 : 0.0);
+      // 主题覆写层（themeless 时 uThemeOn=0 → 着色器走类别分支原样）
+      const ou = e.ou || THEME_BANDS_OFF;
+      gl.uniform1f(P.u.uThemeOn, ou.on);
+      if (ou.on > 0.5) {
+        gl.uniform3fv(P.u.uBandA, ou.bandA);
+        gl.uniform3fv(P.u.uBandB, ou.bandB);
+        gl.uniform3fv(P.u.uEmitTint, ou.emitTint);
+        gl.uniform1f(P.u.uIceCap, ou.iceCap);
+        gl.uniform1f(P.u.uClouds, ou.clouds);
+        gl.uniform3fv(P.u.uCloudTint, ou.cloudTint);
+        gl.uniform1f(P.u.uNightLights, ou.nightLights);
+      }
       gl.drawElements(gl.TRIANGLES, this._icoCount, gl.UNSIGNED_SHORT, 0);
     }
   }
@@ -1438,16 +1571,30 @@ export class System3D {
     gl.bindVertexArray(this._vaoSphere);
     for (let i = 0; i < this._plCount; i++) {
       const e = this._pl[i];
-      const st = GLOW_STYLE[e.category] || GLOW_STYLE.rocky;
+      // 主题大气辉光覆写（doc7 THEME-01）；themeless → 类别默认 GLOW_STYLE
+      const ou = e.ou;
+      let shellScale;
+      let power;
+      let tint;
+      if (ou && ou.glow) {
+        shellScale = ou.glow.shellScale;
+        power = ou.glow.power;
+        tint = ou.glow.tint;
+      } else {
+        const gs = GLOW_STYLE[e.category] || GLOW_STYLE.rocky;
+        shellScale = gs[0];
+        power = gs[1];
+        tint = gs[2];
+      }
       mat4Translate(s.model, e.world[0], e.world[1], e.world[2]);
       mat4Multiply(s.vm, s.view, s.model);
       mat4Multiply(s.vp, s.proj, s.vm);
       gl.uniformMatrix4fv(P.u.uMVP, false, s.vp);
       gl.uniformMatrix4fv(P.u.uModel, false, s.model);
-      gl.uniform1f(P.u.uRadius, e.radius * st[0]);
+      gl.uniform1f(P.u.uRadius, e.radius * shellScale);
       gl.uniform3f(P.u.uCenter, e.world[0], e.world[1], e.world[2]);
-      gl.uniform3fv(P.u.uTint, st[2]);
-      gl.uniform1f(P.u.uPower, st[1]);
+      gl.uniform3fv(P.u.uTint, tint);
+      gl.uniform1f(P.u.uPower, power);
       gl.drawElements(gl.TRIANGLES, this._icoCount, gl.UNSIGNED_SHORT, 0);
     }
   }
@@ -1467,10 +1614,14 @@ export class System3D {
     gl.bindVertexArray(mode === 0 ? this._vaoGasRing : this._vaoStationRing);
     for (let i = 0; i < this._plCount; i++) {
       const e = this._pl[i];
-      if (mode === 0 && e.category !== 'gasGiant') continue;
+      const ou = e.ou || THEME_BANDS_OFF;
+      if (mode === 0 && !ou.ringOn) continue;
       if (mode === 1 && !e.colony) continue;
       if (mode === 0) {
         // 冰晶环：T·Rz(20°)·S(planetR·2.7)；内缘 1.5/2.7（局部单位）
+        // 环色随主题覆写（碎环月/机械圣骸/云海浮岛等 ringChance 滚点）；themeless = 旧版冰晶灰
+        gl.uniform3fv(P.u.uRingLo, ou.ringLo);
+        gl.uniform3fv(P.u.uRingHi, ou.ringHi);
         mat4RotateZ(s.mB, ORBIT_INCLINE);
         mat4Translate(s.mD, e.world[0], e.world[1], e.world[2]);
         mat4TRS(s.mA, 0, 0, 0, 0, 0, 0, e.radius * 2.7);

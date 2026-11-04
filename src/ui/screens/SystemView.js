@@ -561,6 +561,7 @@ export const SystemView = {
           planets: planets.map((p) => ({
             id: p.id, name: p.name, category: p.category,
             habitability: p.habitability, colonyId: p.colonyId, orbitIndex: p.orbitIndex,
+            primaryThemeId: p.primaryThemeId || null, // doc7 TASK-3.1：轨道主题视觉 feed
           })),
         },
         fleets: fleets.map((f) => ({

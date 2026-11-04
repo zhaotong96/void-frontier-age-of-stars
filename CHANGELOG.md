@@ -24,7 +24,7 @@
   离屏方向箭头 + 5 个 B 类事件空间化 + HarvestPlanetPOI/DispatchObjectiveFleet
   命令（OBJ-01/02、EVT-01/02、WORLD-03、SAVE-03）。
 - **伴生天体扩充（doc5 P3-01）**：星系生成新增每行星持久化 POI 与 objectives
-  实体容器（详见上）；世界哈希随之变化，金快照基线更新为 `452e8ba1`。
+  实体容器（详见上）；世界哈希随之变化，金快照基线更新为 `452e8ba1`；主题系统接入后为 `e81dd30b`。
 
 ### Added
 
