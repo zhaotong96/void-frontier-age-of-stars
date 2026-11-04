@@ -418,6 +418,7 @@ export const GroundView = {
     this._tally = {};                  // 本次入账（无殖民地的自由沙盒只记视图侧台账）
     this._resultShown = false;
     this._forceBriefing = false;       // 头部「简报」按钮一次性覆盖自动恢复
+    this._targetPlanetId = null;       // 路由传入的目标行星（doc5 §3.5 NAV-01/02）
     this._lastView = null;
     this._buildingLayout = [];         // 建筑实例（挂载时按殖民地确定性布局一次）
     this._buildingColonists = [];      // 建筑旁作业殖民者
@@ -444,7 +445,8 @@ export const GroundView = {
   // —— 页面分派 ————————————————
 
   /**
-   * 按 param（missionId | planetId）定位进行中任务；无任务 → 简报页。
+   * 按 param（missionId | planetId）定位进行中任务；param 匹配不到活动任务
+   * 但是一颗行星时 → 简报页并预选该行星（doc5 §3.5 NAV-02：未殖民行星准入）。
    * @param {string|null} param 路由参数
    */
   _build(param) {
@@ -472,6 +474,13 @@ export const GroundView = {
     if (param) mission = missions.find((m) => m.id === param || m.planetId === param) || null;
     else mission = missions[0] || null;
 
+    // —— 目标行星解析（_returnToOrbit 与简报预选共用） ——
+    if (mission) {
+      this._targetPlanetId = mission.planetId || null;
+    } else if (param && w.entities.planets[param]) {
+      this._targetPlanetId = w.entities.planets[param].id; // 显式行星参数（无任务）
+    }
+
     if (mission && !forceBriefing) {
       this._buildMission(mission);
       return;
@@ -497,28 +506,87 @@ export const GroundView = {
   // —— 简报页 ————————————————
 
   /**
-   * 任务简报：行星选择 + 模板列表 + 开始行动 + 自由探索模式 + 既往记录。
+   * 升空返回轨道（doc5 §3.5 NAV-01/03）：由 路由目标行星 / 自由探索行星 /
+   * 进行中任务行星 反查所属星系精确回跳；全部缺失时走 RouteStack 兜底回银河。
+   */
+  _returnToOrbit() {
+    const w = this.app.world;
+    const pid = this._targetPlanetId || this.freePlanetId
+      || (this.mission && this.mission.planetId) || null;
+    const planet = w && pid ? w.entities.planets[pid] : null;
+    if (planet && planet.systemId) this.app.goto('system', planet.systemId);
+    else this.app.goBack('galaxy');
+  },
+
+  /**
+   * 任务简报：行星选择 + 模板列表 + 开始行动 + 自由探索（先遣勘探）模式 + 既往记录。
+   * 头部无条件渲染逃逸按钮（← 返回星系 primary/Esc + ← 银河星图），解除软锁死。
+   * 目标行星选择器（data-focus-key="ground-planet-sel"）按去重 Set 依次填入：
+   * 路由目标行星（无论是否已殖民）→ 玩家全部殖民地行星 → 已完成定位扫描
+   * （surveyedBy≥3）星系下的无主行星（未殖民 · 可勘探，doc5 §3.5 NAV-02）。
    * @param {object|null} resumeMission 已存在的进行中任务（显示恢复入口）
    */
   _buildBriefing(resumeMission) {
     this.mode = 'briefing';
     const app = this.app;
     const w = app.world;
-    this._setHead('简报', []);
+
+    // —— 简报主语行星与所属星系（标题 + 返回按钮文案） ——
+    const targetPlanet = (resumeMission && w.entities.planets[resumeMission.planetId])
+      || (this._targetPlanetId ? w.entities.planets[this._targetPlanetId] : null)
+      || null;
+    const sysName = targetPlanet && targetPlanet.systemId
+      ? ((w.entities.systems[targetPlanet.systemId] || {}).name || '未知星系')
+      : null;
+    const headBtns = [
+      {
+        text: sysName ? `← 返回${sysName}星系` : '← 返回星系',
+        kind: 'primary',
+        title: `返回所属星系（Esc）${targetPlanet ? '' : ' · 未解析到目标行星时回退上一层'}`,
+        onClick: () => this._returnToOrbit(),
+      },
+      { text: '← 银河星图', title: '返回银河地图', onClick: () => app.goto('galaxy') },
+    ];
+    this._setHead(targetPlanet ? `${targetPlanet.name || targetPlanet.id} · 简报` : '简报', headBtns);
 
     // 沉浸式全屏 body：内边距避开悬浮侧栏与顶栏（R7 毛玻璃 chrome）
     const box = el('div', { class: 'pad vf-col', style: { overflowY: 'auto', padding: '64px 200px 24px 72px' } });
     const p1 = panel({ title: '发起地面行动', open: true });
     const planetSel = el('select', { 'aria-label': '目标行星' });
+    planetSel.setAttribute('data-focus-key', 'ground-planet-sel');
+
+    // —— 目标行星选项：去重 Set 依序填入（目标行星 → 殖民地 → 可勘探无主行星） ——
+    const seen = new Set();
+    const addOption = (planet, tag) => {
+      if (!planet || seen.has(planet.id)) return;
+      seen.add(planet.id);
+      planetSel.appendChild(el('option', {
+        value: planet.id,
+        text: `${planet.name || planet.id}${tag ? ` · ${tag}` : ''}`,
+      }));
+    };
+    // 1) 路由传入的目标行星（无论是否已殖民；NAV-02 未殖民准入）
+    if (targetPlanet) {
+      addOption(targetPlanet, targetPlanet.colonyId ? '己方殖民地' : '先遣勘探目标');
+    }
+    // 2) 玩家全部殖民地/前哨行星
     for (const c of Object.values(w.entities.colonies || {})) {
       if (c.factionId !== w.playerFactionId) continue;
-      const planet = w.entities.planets[c.planetId];
-      if (!planet) continue;
-      planetSel.appendChild(el('option', { value: planet.id, text: planet.name || planet.id }));
+      addOption(w.entities.planets[c.planetId], '己方殖民地');
+    }
+    // 3) 已完成「定位」（层级≥3）星系下的全部无主行星（先遣勘探准入）
+    const pid = w.playerFactionId;
+    for (const sys of Object.values(w.entities.systems || {})) {
+      if (((sys.surveyedBy || {})[pid] ?? 0) < 3) continue;
+      for (const plId of sys.planetIds || []) {
+        const pl = w.entities.planets[plId];
+        if (pl && !pl.colonyId) addOption(pl, '未殖民 · 可勘探');
+      }
     }
     if (!planetSel.childElementCount) {
-      p1.appendChild(el('div', { class: 'vf-faint vf-small', text: '尚无玩家殖民地——先在星系视图建立前哨站。' }));
+      p1.appendChild(el('div', { class: 'vf-faint vf-small', text: '暂无可降落目标——派遣舰队扫描星系（调查层级≥3）以解锁先遣勘探。' }));
     }
+    if (targetPlanet) planetSel.value = targetPlanet.id;
     p1.appendChild(el('label', { class: 'vf-col' }, [
       el('span', { class: 'vf-dim vf-small', text: '目标行星' }),
       planetSel,
@@ -544,9 +612,9 @@ export const GroundView = {
     }
     p1.appendChild(tplBox);
 
-    // —— 自由探索模式（无任务，纯沙盒采掘/建造） ——
+    // —— 自由探索 / 先遣勘探模式（无任务沙盒；无需殖民地，NAV-02） ——
     p1.appendChild(el('div', { class: 'vf-row mt-2' }, [
-      el('span', { class: 'vf-faint vf-small vf-grow', text: '不开任务，直接降落到行星地表进行体素采掘与建造（Esc 或「升空返回轨道」离开）。' }),
+      el('span', { class: 'vf-faint vf-small vf-grow', text: '不开任务，直接派遣先遣队降落地表进行勘探、采掘与建造（无需殖民地；Esc 或「升空返回轨道」离开）。' }),
       el('button', {
         class: 'vf-btn small',
         text: '自由探索模式',
@@ -606,7 +674,7 @@ export const GroundView = {
     if (res.ok) this._build(planetId);
   },
 
-  /** 自由探索模式：不创建任务，纯沙盒 */
+  /** 自由探索 / 先遣勘探模式：不创建任务，纯沙盒（无需殖民地，NAV-02） */
   _startFree(planetId) {
     const w = this.app.world;
     const planet = w.entities.planets[planetId];
@@ -616,6 +684,7 @@ export const GroundView = {
     }
     this.mode = 'free';
     this.freePlanetId = planetId;
+    this._targetPlanetId = planetId;
     this._teardownScene();
     this.body.innerHTML = '';
     this._setupScene(planet, null);
@@ -624,13 +693,9 @@ export const GroundView = {
     ]);
   },
 
-  /** 升空返回轨道：跳回行星所属星系（#/system/<systemId>） */
+  /** 升空返回轨道：跳回行星所属星系（#/system/<systemId>；无星系可回时走路由栈兜底） */
   _ascend() {
-    const w = this.app.world;
-    const pid = this.mode === 'mission' ? (this.mission && this.mission.planetId) : this.freePlanetId;
-    const planet = w && pid ? w.entities.planets[pid] : null;
-    if (planet && planet.systemId) this.app.goto('system', planet.systemId);
-    else this._build(null);
+    this._returnToOrbit();
   },
 
   // —— 场景装配（任务 / 自由共用） ————————————————
@@ -805,7 +870,15 @@ export const GroundView = {
   },
 
   _onKeyDown(e) {
-    if (!this._mounted || this.mode === 'briefing') return;
+    if (!this._mounted) return;
+    // 简报页 Escape 逃逸（doc5 §3.5 NAV-03）：无条件返回所属星系，解除软锁死
+    if (this.mode === 'briefing') {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        this._returnToOrbit();
+      }
+      return;
+    }
     const code = e.code;
     if (MOVE_CODES.has(code)) {
       this.keys[code] = true;

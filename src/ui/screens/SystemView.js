@@ -6,12 +6,18 @@
  *       原右侧固定信息列移除，改为 .vf-float-panel 悬浮毛玻璃情报舱：
  *       星系档案 → 行星卡列表 → 在系舰队 → 异常列表。
  *
- * 交互：
+ * 交互（doc5 §2.2 四层操作语法 / §3.5.2）：
  *  - 鼠标左键拖拽：旋转轨道相机（增量传给 SystemRenderer opts.yaw，渲染器内部
  *    俯仰固定，仅水平环绕）；
  *  - 滚轮：数字变焦（画布容器 transform: scale 1.0–2.6，拾取坐标按比例反解）；
  *  - 单击行星 → app.select('planet', id)（全局选中态联动）+ 情报舱行星卡高亮；
  *    单击空白 → 清除选中；「定位」按钮反向联动；
+ *  - 双击行星 → 选中 + System3D 相机指数阻尼聚焦（Orbit Lerp）+ 强制展开
+ *    行星操作舱；双击空白 → 复位聚焦至星系全景；
+ *  - 右键行星 → 抑制原生菜单并弹出 .vf-radial-menu 四向径向快捷指令环
+ *    （轨道扫描 / 建立前哨 / 派遣先遣队登陆 / 设为舰队目标）；
+ *  - 键盘：Escape 三级退避链（关径向菜单 → 取消聚焦 → 返回银河）；
+ *    Enter/Space 对选中天体首次聚焦、二次推进登陆（goto('ground', planetId)）；
  *  - 头部「总览检视」→ app.select('system', id) 打开右侧全局检视器抽屉。
  *
  * 信息分层：恒星/行星情报需调查层级≥2，危险度/资源评级/矿藏需≥3（与 scan.js 语义一致）。
@@ -27,11 +33,13 @@
 import { el, clearEl } from '../components/dom.js';
 import { panel, kvList } from '../components/panels.js';
 import { progressBar } from '../components/progress.js';
+import { toast } from '../components/index.js';
 import { L } from '../../core/i18n.js';
 import { parseHash } from '../../app/Router.js';
 import { CanvasManager } from '../../render/CanvasManager.js';
 import { SystemRenderer } from '../../render/SystemRenderer.js';
 import { explorationView } from '../../simulation/ViewModels.js';
+import { uiState } from '../state/UIStateStore.js';
 
 /** 调查层级中文名（0–4，与 SnapshotBuilder / Inspector 一致） */
 const SURVEY_LEVELS = ['未接触', '侦测', '分类', '定位', '调查完成'];
@@ -50,6 +58,8 @@ const YAW_SPEED = 0.005;
 /** 数字变焦范围（画布容器 transform scale） */
 const ZOOM_MIN = 1;
 const ZOOM_MAX = 2.6;
+/** 未探测天体回波编号（orbitIndex 0..7 → #I..#VIII，doc5 §3.2） */
+const GHOST_NUM = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII'];
 
 /**
  * 常用资源中文名（键 = content/resources.js 资源 id）。
@@ -89,6 +99,12 @@ export const SystemView = {
     this._yaw = 0;                 // 用户拖拽附加偏航（→ SystemRenderer opts.yaw）
     this._zoom = 1;                // 数字变焦倍率（容器 transform scale）
     this._drag = { active: false, moved: false, startX: 0, startY: 0, lastX: 0, lastY: 0 };
+    this._dossierSigVal = null;    // 情报舱轻量签名（未变动跳过 DOM 重建）
+    this._radial = null;           // 右键径向菜单根节点
+    this._radialOpen = false;
+
+    // —— 瞬态 UI 状态槽（跨快照/重挂载保持选中与聚焦） ——
+    uiState.view('system', { selectedPlanetId: null, focusedPlanetId: null });
 
     root.innerHTML = '';
 
@@ -103,7 +119,7 @@ export const SystemView = {
     this._titleEl = el('h2', { text: L('ui.system') });
     head.appendChild(this._titleEl);
     head.appendChild(el('span', { class: 'vf-grow' }));
-    head.appendChild(el('span', { class: 'vf-dim vf-small', text: '拖拽旋转 · 滚轮缩放 · 单击行星联动档案' }));
+    head.appendChild(el('span', { class: 'vf-dim vf-small', text: '拖拽旋转 · 滚轮缩放 · 单击选中 · 双击聚焦 · 右键快捷指令' }));
     head.appendChild(el('button', {
       class: 'vf-btn small',
       text: '总览检视',
@@ -117,7 +133,10 @@ export const SystemView = {
     this._dossier = el('div', { class: 'vf-float-panel' });
     body.appendChild(this._dossier);
 
-    const wrap = el('div', { class: 'vf-view vf-view-immersive' }, [head, body]);
+    // —— 右键径向快捷指令环（.vf-radial-menu，默认隐藏） ——
+    this._radial = el('div', { class: 'vf-radial-menu', hidden: '' });
+
+    const wrap = el('div', { class: 'vf-view vf-view-immersive' }, [head, body, this._radial]);
     root.appendChild(wrap); // 先入文档再建画布：保证 GL 上下文/System3D 在挂载态初始化
 
     this._cm = new CanvasManager().attach(body);
@@ -150,6 +169,9 @@ export const SystemView = {
     if (route.screen === 'system' && route.param && route.param !== this._systemId) {
       this._systemId = route.param;
       this._selectedPlanetId = null;
+      uiState.view('system').focusedPlanetId = null; // 换星系：聚焦失效
+      this._clearFocus();
+      this._hideRadialMenu();
       this._refreshAll();
       return;
     }
@@ -182,6 +204,8 @@ export const SystemView = {
     this._data = null;
     this._dossier = null;
     this._titleEl = null;
+    this._radial = null;
+    this._radialOpen = false;
     this._planetCards = new Map();
   },
 
@@ -229,12 +253,87 @@ export const SystemView = {
       const p = toLocal(e);
       const hit = this._renderer.pick(p.x, p.y);
       this._selectedPlanetId = hit || null;
+      uiState.view('system').selectedPlanetId = this._selectedPlanetId;
       this._highlightPlanetCard(hit);
       if (hit) {
         this.app.select('planet', hit); // 全局选中态联动（检视器不弹抽屉）
       } else {
         this.app.select(null); // 空白处清除选中
       }
+    };
+    // 双击（doc5 §2.2/§3.5.2）：命中行星 → 选中+相机平滑聚焦+展开深层操作舱；
+    // 双击空白 → 复位聚焦至星系全景
+    const dblclick = (e) => {
+      const p = toLocal(e);
+      const hit = this._renderer.pick(p.x, p.y);
+      const v = uiState.view('system');
+      if (hit) {
+        this._selectedPlanetId = hit;
+        v.selectedPlanetId = hit;
+        v.focusedPlanetId = hit;
+        this._highlightPlanetCard(hit);
+        this.app.select('planet', hit);
+        uiState.setPanelOpen(`sys:${this._systemId}:planets`, true);
+        uiState.setPanelOpen(`sys:planet:${hit}`, true);
+        this._dossierSigVal = null; // 强制重建以应用强制展开
+        this._buildDossier();
+        this._focusPlanet(hit);
+      } else {
+        v.focusedPlanetId = null;
+        this._clearFocus();
+      }
+    };
+    // 右键（doc5 §2.2）：抑制原生菜单，命中天体弹出径向快捷指令环
+    const contextmenu = (e) => {
+      e.preventDefault();
+      const p = toLocal(e);
+      const hit = this._renderer.pick(p.x, p.y);
+      if (hit) {
+        this._selectedPlanetId = hit;
+        uiState.view('system').selectedPlanetId = hit;
+        this._highlightPlanetCard(hit);
+        this.app.select('planet', hit);
+        this._showRadialMenu(e.clientX, e.clientY, hit);
+      } else {
+        this._hideRadialMenu();
+      }
+    };
+    // 键盘（doc5 §2.2）：Escape 三级退避链；Enter/Space 对选中天体默认推进
+    const keydown = (e) => {
+      if (!this._mounted) return;
+      const tag = ((e.target && e.target.tagName) || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+      if (e.key === 'Escape') {
+        if (this._radialOpen) { this._hideRadialMenu(); e.preventDefault(); return; } // 1. 关菜单
+        const v = uiState.view('system');
+        if (v.focusedPlanetId) { // 2. 取消聚焦回全景
+          v.focusedPlanetId = null;
+          this._clearFocus();
+          e.preventDefault();
+          return;
+        }
+        this.app.goto('galaxy'); // 3. 返回银河
+        return;
+      }
+      if ((e.key === 'Enter' || e.key === ' ') && this._selectedPlanetId) {
+        e.preventDefault();
+        const v = uiState.view('system');
+        if (v.focusedPlanetId === this._selectedPlanetId) {
+          this.app.goto('ground', this._selectedPlanetId); // 二次推进：登陆行星
+        } else {
+          v.focusedPlanetId = this._selectedPlanetId; // 首次：聚焦 + 展开行星舱
+          uiState.setPanelOpen(`sys:planet:${this._selectedPlanetId}`, true);
+          this._dossierSigVal = null;
+          this._buildDossier();
+          this._focusPlanet(this._selectedPlanetId);
+        }
+      }
+    };
+    // 径向菜单外点击关闭（capture 先于画布选择逻辑）
+    const docClick = (e) => {
+      if (!this._radialOpen) return;
+      if (e.target instanceof Element && e.target.closest('.vf-radial-menu')) return;
+      this._hideRadialMenu();
     };
     const wheel = (e) => {
       e.preventDefault(); // 阻止页面滚动
@@ -248,17 +347,123 @@ export const SystemView = {
     canvas.style.cursor = 'grab';
     canvas.addEventListener('mousedown', mousedown);
     canvas.addEventListener('click', click);
+    canvas.addEventListener('dblclick', dblclick);
+    canvas.addEventListener('contextmenu', contextmenu);
     canvas.addEventListener('wheel', wheel, { passive: false });
     canvas.addEventListener('mouseleave', mouseleave);
     window.addEventListener('mousemove', mousemove);
     window.addEventListener('mouseup', mouseup);
+    window.addEventListener('keydown', keydown);
+    document.addEventListener('click', docClick, true);
     this._handlers = [
       { target: canvas, type: 'mousedown', fn: mousedown },
       { target: canvas, type: 'click', fn: click },
+      { target: canvas, type: 'dblclick', fn: dblclick },
+      { target: canvas, type: 'contextmenu', fn: contextmenu },
       { target: canvas, type: 'wheel', fn: wheel },
       { target: canvas, type: 'mouseleave', fn: mouseleave },
       { target: window, type: 'mousemove', fn: mousemove },
       { target: window, type: 'mouseup', fn: mouseup },
+      { target: window, type: 'keydown', fn: keydown },
+      { target: document, type: 'click', fn: docClick },
+    ];
+  },
+
+  /** 相机聚焦行星（经 SystemRenderer 持有的 System3D；2D 退化路径安全跳过） */
+  _focusPlanet(planetId) {
+    const s3d = this._renderer && this._renderer._s3d;
+    if (s3d && typeof s3d.setOrbitFocus === 'function') s3d.setOrbitFocus(planetId);
+  },
+
+  /** 取消相机聚焦回星系全景 */
+  _clearFocus() {
+    const s3d = this._renderer && this._renderer._s3d;
+    if (s3d && typeof s3d.clearOrbitFocus === 'function') s3d.clearOrbitFocus();
+  },
+
+  // —— 右键径向快捷指令环（doc5 §3.5.2） ————————————————
+
+  /** 在光标处弹出径向菜单（四项高频空间指令，复用行星卡既有命令路径） */
+  _showRadialMenu(clientX, clientY, planetId) {
+    const menu = this._radial;
+    if (!menu) return;
+    menu.replaceChildren();
+    const items = this._radialItems(planetId);
+    const R = 64;
+    items.forEach((it, i) => {
+      const ang = -Math.PI / 2 + (i / Math.max(1, items.length)) * Math.PI * 2;
+      menu.appendChild(el('button', {
+        class: 'vf-radial-item' + (it.primary ? ' primary' : ''),
+        type: 'button',
+        text: it.label,
+        title: it.title || '',
+        style: {
+          left: `${Math.round(Math.cos(ang) * R)}px`,
+          top: `${Math.round(Math.sin(ang) * R)}px`,
+        },
+        on: {
+          click: (ev) => {
+            ev.stopPropagation();
+            this._hideRadialMenu();
+            it.onClick();
+          },
+        },
+      }));
+    });
+    menu.style.left = `${clientX}px`;
+    menu.style.top = `${clientY}px`;
+    menu.removeAttribute('hidden');
+    this._radialOpen = true;
+  },
+
+  /** 收起径向菜单 */
+  _hideRadialMenu() {
+    this._radialOpen = false;
+    if (this._radial) this._radial.setAttribute('hidden', '');
+  },
+
+  /** 径向菜单四项：轨道扫描 / 建立前哨 / 派遣先遣队登陆 / 设为舰队目标 */
+  _radialItems(planetId) {
+    const app = this.app;
+    const d = this._data;
+    const planet = d ? d.planets.find((p) => p.id === planetId) : null;
+    const lvl = d ? d.system.surveyedLevel : 0;
+    return [
+      {
+        label: '轨道扫描',
+        title: '派遣本系舰队对星系执行扫描',
+        onClick: () => {
+          const fleetId = this._firstInSystemPlayerFleet();
+          if (!fleetId || !this._fleetHasSensor(fleetId)) {
+            toast('轨道扫描需要一支在本星系且编有传感器的舰队', { kind: 'warn' });
+            return;
+          }
+          app.dispatch('IssueScanOrder', { fleetId, targetSystemId: this._systemId });
+        },
+      },
+      {
+        label: '建立前哨',
+        title: '在无主行星建立前哨站（层级≥3 · 宜居度≥20）',
+        onClick: () => {
+          if (!planet) return;
+          if (lvl < 3) { toast('需要调查层级≥3 才能建立前哨', { kind: 'warn' }); return; }
+          if (planet.colonyId) { toast('该行星已有殖民地/前哨', { kind: 'warn' }); return; }
+          if ((planet.habitability ?? 0) < 20) { toast('宜居度过低，无法建立前哨', { kind: 'warn' }); return; }
+          const fleetId = this._firstInSystemPlayerFleet();
+          app.dispatch('FoundOutpost', fleetId ? { planetId, fleetId } : { planetId });
+        },
+      },
+      {
+        label: '派遣先遣队登陆',
+        title: '进入行星地表简报（任务或先遣勘探）',
+        primary: true,
+        onClick: () => app.goto('ground', planetId),
+      },
+      {
+        label: '设为舰队目标',
+        title: '将行星设为舰队航行目标',
+        onClick: () => toast('暂未开放', { kind: 'info' }),
+      },
     ];
   },
 
@@ -273,12 +478,33 @@ export const SystemView = {
     }
   },
 
-  /** 整体刷新：重建数据包 + 标题 + 悬浮情报舱 */
+  /** 整体刷新：重建数据包 + 标题 + 悬浮情报舱（并恢复跨快照聚焦态） */
   _refreshAll() {
     this._buildData();
     const d = this._data;
     this._titleEl.textContent = d ? `${L('ui.system')} · ${d.system.name}` : L('ui.system');
+    // 恢复 uiState 中的聚焦行星（重挂载/换快照后相机重新对准）
+    const v = uiState.view('system');
+    if (v.focusedPlanetId) {
+      const alive = d && d.planets.some((p) => p.id === v.focusedPlanetId);
+      if (alive) this._focusPlanet(v.focusedPlanetId);
+      else v.focusedPlanetId = null;
+    }
     this._buildDossier();
+  },
+
+  /** 情报舱轻量签名：调查层级 + 行星归属 + 舰队状态 + 异常进度（未变动跳过重建） */
+  _dossierSignature() {
+    const d = this._data;
+    if (!d) return 'null';
+    return [
+      d.system.surveyedLevel,
+      d.system.ownerFactionId || '',
+      d.system.star ? d.system.star.name || '' : '',
+      d.planets.map((p) => `${p.id}:${p.colonyId || 0}`).join(','),
+      d.fleets.map((f) => `${f.id}:${f.status || ''}:${f.shipCount ?? 0}`).join(','),
+      d.anomalies.map((a) => `${a.id}:${a.state || ''}:${a.progress ?? 0}`).join(','),
+    ].join('|');
   },
 
   /** 从 app.world / app.snapshot / ViewModels 只读构建数据包（绝不写世界） */
@@ -327,10 +553,11 @@ export const SystemView = {
       fleets,
       anomalies,
       tick: w.tick,
-      // 渲染器专用轻量投影（舰队附阵营色，供小三角着色）
+      // 渲染器专用轻量投影（舰队附阵营色，供小三角着色；surveyedLevel 供未探测回波）
       render: {
         system: {
           star: { typeId: sys.star ? sys.star.typeId : null },
+          surveyedLevel: lvl,
           planets: planets.map((p) => ({
             id: p.id, name: p.name, category: p.category,
             habitability: p.habitability, colonyId: p.colonyId, orbitIndex: p.orbitIndex,
@@ -347,7 +574,7 @@ export const SystemView = {
     };
   },
 
-  /** 渲染一帧轨道视图（yaw 来自用户拖拽累计） */
+  /** 渲染一帧轨道视图（yaw 来自用户拖拽累计；帧末叠加未探测回波 HUD） */
   _drawFrame() {
     const cm = this._cm;
     const r = this._renderer;
@@ -368,10 +595,56 @@ export const SystemView = {
       time: performance.now() / 1000, // 仅表现动画，不进模拟
       yaw: this._yaw, // 用户拖拽旋转增量（渲染器俯仰固定，仅水平环绕）
     });
+    this._drawGhostOverlay(cm.ctx, cm.width, cm.height);
   },
 
-  /** 构建悬浮情报舱：档案 → 行星 → 舰队 → 异常 */
+  /**
+   * 未探测天体回波 HUD（doc5 §3.2）：调查层级<2 时对全部天体绘制
+   * 青色虚线扫描框 + `[? 引力回波 #I..#VIII]` 标签（复用渲染器拾取投影）。
+   */
+  _drawGhostOverlay(ctx, w, h) {
+    const d = this._data;
+    if (!ctx || !d || d.system.surveyedLevel >= 2) return;
+    const list = this._renderer && this._renderer._pickList;
+    if (!list || !list.length) return;
+    const orbitOf = new Map();
+    for (const p of d.planets) orbitOf.set(p.id, p.orbitIndex ?? 0);
+    ctx.save();
+    ctx.strokeStyle = 'rgba(79, 216, 232, 0.72)';
+    ctx.setLineDash([5, 4]);
+    ctx.lineWidth = 1.2;
+    ctx.fillStyle = 'rgba(143, 216, 232, 0.95)';
+    ctx.font = '10px "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    for (const e of list) {
+      if (e.x < -40 || e.y < -40 || e.x > w + 40 || e.y > h + 40) continue;
+      const half = Math.max(11, (e.r || 0) + 5);
+      ctx.strokeRect(e.x - half, e.y - half, half * 2, half * 2);
+      const idx = Math.min(GHOST_NUM.length - 1, orbitOf.get(e.id) ?? 0);
+      ctx.fillText(`[? 引力回波 #${GHOST_NUM[idx]}]`, e.x, e.y + half + 4);
+    }
+    ctx.restore();
+  },
+
+  /**
+   * 构建悬浮情报舱：档案 → 行星 → 舰队 → 异常。
+   * doc5 §3.4：重建包裹在 uiState.preserveScrollAndFocus 内（滚动/焦点跨重建保持）；
+   * 轻量签名未实质变动时直接跳过 DOM 替换（任意时钟倍速下折叠态与滚动条绝对稳定）。
+   */
   _buildDossier() {
+    const box = this._dossier;
+    if (!box) return;
+    const sig = this._dossierSignature();
+    if (sig === this._dossierSigVal && box.childElementCount > 0) return; // 未变动：跳过
+    this._dossierSigVal = sig;
+    uiState.preserveScrollAndFocus(`dossier:${this._systemId || 'none'}`, box, () => {
+      this._buildDossierInner();
+    });
+  },
+
+  /** 情报舱实际 DOM 构建（仅在签名变动时执行） */
+  _buildDossierInner() {
     const box = this._dossier;
     if (!box) return;
     clearEl(box);
@@ -381,12 +654,13 @@ export const SystemView = {
       box.appendChild(el('div', { class: 'vf-faint vf-center mt-3', text: '未找到目标星系 —— 请从银河地图双击进入' }));
       return;
     }
+    const sid = d.system.id;
     const w = this.app.world;
     const sys = d.system;
     const lvl = sys.surveyedLevel;
 
     // 1) 星系档案
-    const file = panel({ title: '星系档案', open: true });
+    const file = panel({ title: '星系档案', open: true, id: `sys:${sid}:dossier` });
     const pairs = [
       ['恒星', lvl >= 2 ? (sys.star.name || '未知') : '未分类'],
       ['归属', sys.ownerFactionId
@@ -404,13 +678,13 @@ export const SystemView = {
     }
     box.appendChild(file);
 
-    // 2) 行星列表（分类层级后揭示）
+    // 2) 行星列表（分类层级后揭示；未探测天体以引力回波虚影标注）
     if (lvl >= 2) {
-      const list = panel({ title: `行星（${d.planets.length}）`, open: true });
+      const list = panel({ title: `行星（${d.planets.length}）`, open: true, id: `sys:${sid}:planets` });
       for (const p of d.planets) list.appendChild(this._planetCard(p, lvl));
       box.appendChild(list);
     } else {
-      const list = panel({ title: '行星', open: true });
+      const list = panel({ title: '行星', open: true, id: `sys:${sid}:planets` });
       list.appendChild(el('div', { class: 'vf-faint vf-small', text: '完成「分类」层级后揭示行星情报。' }));
       box.appendChild(list);
     }
@@ -424,10 +698,11 @@ export const SystemView = {
 
   /**
    * 行星卡：名称/类别/宜居度/重力/大气（+层级≥3 时的矿藏）与操作按钮。
+   * 面板稳定键 sys:planet:<pid>（跨快照折叠记忆 + 双击聚焦强制展开，doc5 §3.4/§3.5）。
    * 「建立前哨」条件：调查层级≥3、宜居度≥20、无殖民地（FoundOutpost 命令还需
    * 一支在本星系的己方舰队 —— 无舰队时按钮禁用并给出提示）。
    * 「登陆行星地表」条件：调查层级≥3 且该行星无进行中的地面行动（active 任务）——
-   * 主操作入口直达全 3D 行星地表视图（目标行星经 app._groundTargetPlanet 传给 GroundView）。
+   * 主操作入口以显式路由参数直达地表简报：app.goto('ground', p.id)。
    */
   _planetCard(p, lvl) {
     const app = this.app;
@@ -438,11 +713,13 @@ export const SystemView = {
       title: p.name,
       open: true,
       dense: true,
+      id: `sys:planet:${p.id}`,
       tools: [{
         label: '定位',
         title: '在轨道图中高亮该行星并设为全局选中',
         onClick: () => {
           this._selectedPlanetId = p.id;
+          uiState.view('system').selectedPlanetId = p.id;
           this._highlightPlanetCard(p.id);
           app.select('planet', p.id);
         },
@@ -488,12 +765,11 @@ export const SystemView = {
       card.appendChild(el('button', {
         class: 'vf-btn primary mt-1',
         text: '🚀 登陆行星地表',
-        title: '降落小队 / 视察殖民地 — 进入全 3D 行星地表',
+        title: '降落小队 / 视察殖民地 / 先遣勘探 — 进入全 3D 行星地表',
         on: {
           click: () => {
-            // 设置 GroundView 的目标行星
-            app._groundTargetPlanet = p.id;
-            app.goto('ground');
+            // 显式路由参数：GroundView 按 planetId 预选简报目标（doc5 §3.5）
+            app.goto('ground', p.id);
           },
         },
       }));
@@ -505,7 +781,7 @@ export const SystemView = {
   /** 在系舰队面板：名称/状态 + 扫描本星系 + 对本系 detected 异常的「调查」 */
   _fleetPanel(d) {
     const app = this.app;
-    const p = panel({ title: `在系舰队（${d.fleets.length}）`, open: true });
+    const p = panel({ title: `在系舰队（${d.fleets.length}）`, open: true, id: `sys:${d.system.id}:fleets` });
     if (!d.fleets.length) {
       p.appendChild(el('div', { class: 'vf-faint vf-small', text: '本星系暂无已知舰队。' }));
       return p;
@@ -544,7 +820,7 @@ export const SystemView = {
 
   /** 异常面板：名称/状态/进度条；resolved 显示奖励摘要 */
   _anomalyPanel(d) {
-    const p = panel({ title: `异常（${d.anomalies.length}）`, open: true });
+    const p = panel({ title: `异常（${d.anomalies.length}）`, open: true, id: `sys:${d.system.id}:anomalies` });
     if (!d.anomalies.length) {
       p.appendChild(el('div', { class: 'vf-faint vf-small', text: '本星系暂无已知异常。' }));
       return p;

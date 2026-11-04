@@ -1,20 +1,34 @@
 /**
  * ui/components/panels.js — 可折叠面板与键值列表
  *
- *  - panel({ title, content, open = true, tools = [], dense }) → .vf-panel：
+ *  - panel({ title, content, open = true, tools = [], dense, id }) → .vf-panel：
  *    .vf-panel-head（.vf-panel-title + .vf-panel-tools + .vf-panel-toggle 折叠箭头）
  *    + .vf-panel-body（折叠时 body[hidden] + 根节点 is-collapsed，样式由 CSS 负责）。
  *    content：Node | (container) => void | 数组 | 字符串；点击头部空白也可折叠；
  *    tools: [{ label, title, onClick }] 渲染为 .vf-panel-tool 小按钮。
+ *    id：面板稳定键（挂 dataset.panelId 并作为 UIStateStore 折叠记忆键）；
+ *    未传时回退 `panel:${title}`（Node 标题取其 textContent）。
+ *    展开态经 uiState（UIStateStore）跨快照记忆：用户点击折叠/展开立即持久化；
+ *    重建时 uiState 已有记录则以记录为准，否则用 open 参数（不回写仓库）。
  *  - kvList(pairs)：pairs = [k, v][] 或 { k: v } → .vf-kv 两列网格；
  *    v 可为 Node（直接作为值单元格）或原始值（textContent 安全渲染）。
  * 顶层不触碰 document。
  */
 
 import { el } from './dom.js';
+import { uiState } from '../state/UIStateStore.js';
 
-export function panel({ title, content, open = true, tools = [], dense } = {}) {
-  let isOpen = open !== false;
+/** 面板稳定键：显式 id 优先，否则 panel:${title}（Node 标题取文本，空白归一） */
+function panelKey(opts) {
+  if (opts && opts.id != null && opts.id !== '') return String(opts.id);
+  const t = opts ? opts.title : null;
+  if (t instanceof Node) return `panel:${String(t.textContent || '').trim()}`;
+  return `panel:${t == null ? '' : String(t).trim()}`;
+}
+
+export function panel({ title, content, open = true, tools = [], dense, id } = {}) {
+  const stableId = panelKey({ title, id });
+  let isOpen = uiState.isPanelOpen(stableId, open !== false);
 
   const body = el('div', { class: 'vf-panel-body' });
   fillContent(body, content);
@@ -51,12 +65,15 @@ export function panel({ title, content, open = true, tools = [], dense } = {}) {
   toggle.addEventListener('click', () => setOpen(!isOpen));
 
   const root = el('section', { class: dense ? 'vf-panel is-dense' : 'vf-panel' }, [head, body]);
-  setOpen(isOpen);
+  if (stableId) root.dataset.panelId = stableId;
+  setOpen(isOpen, false); // 初始同步不回写：uiState 已有记录时以记录为准、否则保留调用方默认
   return root;
 
-  /** 应用展开/折叠态：根类名 + body[hidden] + 箭头字符 + aria-expanded */
-  function setOpen(next) {
+  /** 应用展开/折叠态：根类名 + body[hidden] + 箭头字符 + aria-expanded；
+   *  persist（默认 true）时写入 UIStateStore 跨快照记忆。 */
+  function setOpen(next, persist = true) {
     isOpen = next;
+    if (persist) uiState.setPanelOpen(stableId, next);
     root.classList.toggle('is-collapsed', !isOpen);
     if (isOpen) body.removeAttribute('hidden');
     else body.setAttribute('hidden', '');

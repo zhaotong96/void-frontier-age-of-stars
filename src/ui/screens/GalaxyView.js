@@ -97,7 +97,7 @@ export const GalaxyView = {
     }
     body.appendChild(layerBox);
 
-    const wrap = el('div', { class: 'vf-view' }, [head, body]);
+    const wrap = el('div', { class: 'vf-view vf-view-immersive' }, [head, body]);
     root.appendChild(wrap);
 
     this._bindEvents();

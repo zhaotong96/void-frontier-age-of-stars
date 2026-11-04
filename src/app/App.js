@@ -47,6 +47,9 @@ import { BottomBar } from '../ui/shell/BottomBar.js';
 
 let app_keysBound = false;
 
+/** 路由历史栈深度上限（doc5 §3.5：防御性视图栈） */
+const ROUTE_STACK_MAX = 16;
+
 export class App {
   constructor(rootEl) {
     this.root = rootEl;
@@ -62,9 +65,14 @@ export class App {
     this.tabGuard = new TabGuard();
     this.audio = new AudioManager();
     this.performance = { fps: 0, tickMs: 0, lastSnapshotAt: 0 };
+    // —— 防御性路由历史栈（doc5 §3.5 P0-05）：goto 压栈 / goBack 弹栈回退 ——
+    this._routeStack = [];
+    /** 跨视图切换时保留 Inspector 打开态的屏幕（其余一律自动收起，NAV-04） */
+    this.keepInspectorScreens = new Set(['galaxy']);
     this._frame = this._frame.bind(this);
     // 诊断/测试句柄（只读探测与自动化验证用；生产无副作用）
     window.__VF_APP = this;
+    window.__vfRouteStack = () => this._routeStack;
   }
 
   async boot() {
@@ -199,9 +207,22 @@ export class App {
     tb.render();
   }
 
-  /** 悬浮检视器抽屉开合（.vf-inspector.open，见 styles.css） */
+  /** 悬浮检视器抽屉开合（.vf-inspector.open + [hidden]，见 styles.css） */
   setInspectorOpen(open) {
-    if (this.inspectorEl) this.inspectorEl.classList.toggle('open', !!open);
+    if (this.inspectorEl) {
+      this.inspectorEl.classList.toggle('open', !!open);
+      if (open) this.inspectorEl.removeAttribute('hidden');
+      else this.inspectorEl.setAttribute('hidden', '');
+    }
+  }
+
+  /**
+   * 全局检视器清理（doc5 §3.5 P0-07 / NAV-04）：清空选中并收起抽屉。
+   * 路由切换守卫在 _onRoute 中调用（galaxy 等保留屏除外）。
+   */
+  closeInspector() {
+    this.selection = null;
+    this.setInspectorOpen(false);
   }
 
   /** 是否处于战役内 */
@@ -504,6 +525,10 @@ export class App {
       navigate('menu');
       return;
     }
+    // Inspector 路由守卫（NAV-04）：除保留屏外，切换视图一律收起抽屉并清空选中
+    if (!this.keepInspectorScreens.has(route.screen)) {
+      this.closeInspector();
+    }
     try {
       const view = activateView(route.screen, { root: this.mainEl, app: this, param: route.param });
       this._activeViewObj = view || null;
@@ -516,8 +541,43 @@ export class App {
     }
   }
 
-  goto(screen, param = null) {
+  /**
+   * 路由跳转（doc5 §3.5 P0-05）：目标路由与当前不同且非 replace 时，
+   * 把当前 {screen, param, selection} 压入防御性历史栈（上限 16，溢出 shift）。
+   * @param {string} screen 目标视图 id
+   * @param {string|null} [param=null] 路由参数（如 systemId / planetId / colonyId）
+   * @param {{replace?:boolean}} [opts={}] replace=true 时不压栈（兜底跳转）
+   */
+  goto(screen, param = null, opts = {}) {
+    const cur = parseHash();
+    const changed = screen !== cur.screen || (param ?? null) !== (cur.param ?? null);
+    if (changed && !opts.replace) {
+      this._routeStack.push({
+        screen: cur.screen,
+        param: cur.param || null,
+        selection: this.selection ? { ...this.selection } : null,
+      });
+      if (this._routeStack.length > ROUTE_STACK_MAX) this._routeStack.shift();
+    }
     navigate(screen, param);
+  }
+
+  /**
+   * 防御性回退（Escape 逐级退避的落点）：弹出历史栈上一跳并恢复其选中态；
+   * 栈空时兜底跳转 fallbackScreen（默认银河）。
+   * @param {string} [fallbackScreen='galaxy']
+   * @param {string|null} [fallbackParam=null]
+   * @returns {boolean} 是否成功弹栈（false = 走了兜底）
+   */
+  goBack(fallbackScreen = 'galaxy', fallbackParam = null) {
+    const prev = this._routeStack.pop();
+    if (prev) {
+      navigate(prev.screen, prev.param);
+      if (prev.selection) this.select(prev.selection.kind, prev.selection.id);
+      return true;
+    }
+    navigate(fallbackScreen, fallbackParam);
+    return false;
   }
 
   /** 检视器支持的选中类型（planet 等由视图内浮面板自行呈现，不弹抽屉） */
