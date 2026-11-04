@@ -11,7 +11,7 @@ import { canScanTarget, startScan, scanPower } from '../domain/exploration/scan.
 import { orderMove, addShipToFleet, createFleet } from '../domain/fleets/fleet.js';
 import { orderRetreat, findAttackTarget } from '../domain/combat/engagement.js';
 import { foundColony, buildingDef } from '../domain/planets/colony.js';
-import { canAfford, pay, debit, credit } from '../domain/economy/ledger.js';
+import { canAfford, pay, debit, credit, balance } from '../domain/economy/ledger.js';
 import { canStart, startResearch } from '../domain/research/research.js';
 import { marketBuy, marketSell } from '../domain/economy/market.js';
 import { validateFit, hullDef, computeShipStats } from '../domain/ships/ship.js';
@@ -393,6 +393,8 @@ registerCommand('ImproveRelations', {
 // —— 叙事 ————————————————————————————————————————
 
 import { resolveChoice } from '../domain/events/narrative.js';
+import { dispatchObjectiveFleet } from '../domain/events/objectives.js';
+import { harvestPlanetPoi } from '../domain/ground/planetPOI.js';
 import { canEnact, enactPolicy, revokePolicy } from '../domain/politics/policy.js';
 
 registerCommand('EnactPolicy', {
@@ -451,6 +453,48 @@ registerCommand('ContributeToCrisis', {
   execute(ctx, cmd) {
     const r = playerContribute(ctx.world, cmd.params.crisisId, cmd.params.amount || 20);
     if (!r.ok) throw new Error(r.reason);
+  },
+});
+
+// —— 空间任务目标（doc5 §3.6 / EVT-02） ————————————————————————
+
+registerCommand('DispatchObjectiveFleet', {
+  desc: '向空间任务目标派遣舰队（复用 OrderFleetMove 域路径）',
+  validate(ctx, cmd) {
+    const o = getEntity(ctx.world, 'objectives', cmd.params.objectiveId);
+    if (!o) return { ok: false, code: 'NO_TARGET', reason: '任务目标不存在' };
+    if (o.status !== 'active') return { ok: false, code: 'DONE', reason: '任务目标已结束' };
+    const { fleet, err } = ownFleet(ctx.world, cmd);
+    if (err) return { ok: false, code: 'NO_FLEET', reason: err };
+    if (fleet.shipIds.length === 0) return { ok: false, code: 'EMPTY', reason: '舰队没有舰船' };
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const res = dispatchObjectiveFleet(ctx.world, cmd.params.objectiveId, cmd.params.fleetId);
+    if (!res.ok) throw new Error(res.reason || '派遣失败');
+  },
+});
+
+// —— 行星 POI（doc5 §3.7 / SAVE-03） ——————————————————————————————
+
+registerCommand('HarvestPlanetPOI', {
+  desc: '采样行星兴趣点（rewardPaid 严格幂等锁，绝不重复发奖）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    const poi = (planet.pois || {})[cmd.params.poiId];
+    if (!poi) return { ok: false, code: 'NO_POI', reason: '兴趣点不存在' };
+    if (poi.rewardPaid || poi.state !== 'unexplored') {
+      return { ok: false, code: 'ALREADY_HARVESTED', reason: '该兴趣点已采样结算' };
+    }
+    if (poi.kind === 'storm_vortex' && balance(ctx.world, cmd.actorId, 'powerCell') < 2) {
+      return { ok: false, code: 'NO_FUNDS', reason: '大气探针需要 能量电池×2' };
+    }
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const res = harvestPlanetPoi(ctx.world, cmd.params.planetId, cmd.params.poiId, cmd.actorId);
+    if (!res.ok) throw new Error(res.reason || res.code);
   },
 });
 

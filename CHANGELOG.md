@@ -10,6 +10,24 @@
 
 ### Added
 
+- **行星主题与连续地形（docs 4-7 施工，Phase 0-2）**：场景 FBO 24 位深度附件与
+  beginScene 8 步清屏契约（TERRAIN-07/08）；F3 三档地表诊断渲染 + GL 状态 JSON
+  快照；GLOW/RING 顶点着色器双重模型变换修复（辉光 2× 轨道半径漂移根治，GL-01）
+  与晨昏线散射升级；UIStateStore/RouteStack/双模侧栏退避/GroundView 软锁解除
+  （UI-01..07、NAV-01..04）；确定性 planetSeeds 子流树 + 512m 连续三角网格场域
+  （terrainField，曲率自适应对角线 + CCW + 面积加权法线，TERRAIN-01/02/SITE-06
+  套件入库）；surfaceQueries 重心采样/射线求交/坡度 A*；PlanetTerrainMesh 三级
+  LOD + 裙边 + geomorph + 三平面 4 材质着色器（TERRAIN-03/04/09）；GroundView
+  场域化集成（连续地形视觉/碰撞/射线/采掘雕刻 + 体素补丁仅作资源数据底层）；
+  MissionSiteBlueprint ×8 + missionSiteFactory SDF 三层关卡架构（SITE-01..08）；
+  持久化行星 POI（8 类，rewardPaid 幂等）+ WorldObjective 空间任务目标 + 银河图
+  离屏方向箭头 + 5 个 B 类事件空间化 + HarvestPlanetPOI/DispatchObjectiveFleet
+  命令（OBJ-01/02、EVT-01/02、WORLD-03、SAVE-03）。
+- **伴生天体扩充（doc5 P3-01）**：星系生成新增每行星持久化 POI 与 objectives
+  实体容器（详见上）；世界哈希随之变化，金快照基线更新为 `452e8ba1`。
+
+### Added
+
 - **确定性模拟内核**：xoshiro128\*\* PRNG（拒绝采样）、战略时钟（8640 tick/游戏年）、
   确定性调度器、命令总线（事务回滚）、事件总线、不变量校验、稳定序列化与世界哈希、
   空间索引（`df247af`、`78752bc`）。

@@ -4,7 +4,14 @@
  *
  * conditions(world) 结合世界状态；choices 携带成本与效果算子。
  * 所有文本原创。
+ *
+ * B 类空间事件（doc5 §3.6）：尾部 SPATIAL_OBJECTIVE_RESOLVERS 提供
+ * 「事件 id → 空间锚点」的确定性解析（只增不改，34 个既有事件定义未动）；
+ * narrative.fireEvent 据此创建 WorldObjective（EVT-01）。
  */
+
+import { hash32 } from '../core/serialization.js';
+import { seedFromNumber, int as rngInt } from '../core/rng.js';
 
 const F = (world) => world.narrative.flags;
 const pid = (world) => world.playerFactionId;
@@ -979,3 +986,155 @@ export const EVENT_DEFS = [
     ],
   },
 ];
+
+// ———— B 类空间事件目标锚定（doc5 §3.6 / TASK-2.3；只增不改） ————————
+
+/** 玩家殖民地所在星系 id（去重、id 升序，确定性） */
+function playerColonySystems(world) {
+  const pid2 = pid(world);
+  const set = new Set();
+  for (const c of Object.values(world.entities.colonies)) {
+    if (c.factionId === pid2 && world.entities.planets[c.planetId]) {
+      set.add(world.entities.planets[c.planetId].systemId);
+    }
+  }
+  return [...set].sort();
+}
+
+/** 目标星系航路邻居中 id 最小者（可排除集合；无邻居返回 null） */
+function lowestLaneNeighbor(world, systemId, exclude) {
+  const sys = world.entities.systems[systemId];
+  if (!sys) return null;
+  const ex = exclude || new Set();
+  const ids = (sys.lanes || []).filter((lid) => lid !== systemId && !ex.has(lid) && world.entities.systems[lid]).sort();
+  return ids[0] || null;
+}
+
+/** 玩家锚点星系（母星系优先，回退殖民地星系；都没有返回 null） */
+function playerOriginSystem(world) {
+  const fac = world.entities.factions[pid(world)];
+  if (fac && fac.homeSystemId && world.entities.systems[fac.homeSystemId]) return fac.homeSystemId;
+  const cols = playerColonySystems(world);
+  return cols[0] || null;
+}
+
+/** 事件子随机流：world.seed ^ hash32(eventId) ^ world.tick 派生（不触碰 world.rng） */
+function eventRng(world, eventId) {
+  return seedFromNumber(((world.seed >>> 0) ^ hash32(eventId) ^ (world.tick >>> 0)) >>> 0);
+}
+
+/** 距锚点星系最近且测绘等级最低的未深查星系（确定性：距离 → id 排序） */
+function nearestUnderSurveyed(world, origin, maxLevel) {
+  if (!origin) return null;
+  const o = world.entities.systems[origin];
+  const lvl = (s) => (s.surveyedBy ? (s.surveyedBy[pid(world)] ?? 0) : 0);
+  let best = null;
+  let bestKey = null;
+  for (const s of Object.values(world.entities.systems)) {
+    if (s.id === origin || lvl(s) > maxLevel) continue;
+    const d = Math.hypot(s.x - o.x, s.y - o.y);
+    const key = `${Math.round(d * 100).toString(36).padStart(6, '0')}:${s.id}`;
+    if (!bestKey || key < bestKey) {
+      bestKey = key;
+      best = s;
+    }
+  }
+  return best;
+}
+
+/**
+ * B 类事件 → WorldObjective 锚点解析表。
+ * 返回 null 表示「无有效空间锚点」（如零殖民地），fireEvent 跳过建目标。
+ * 全部确定性：只用 id 序/几何距/事件子流，禁 Math.random 与 world.rng。
+ */
+export const SPATIAL_OBJECTIVE_RESOLVERS = {
+  // 航线劫掠：玩家最低 id 殖民地星系为护航目标，航路另一端取最低 id 邻居
+  evt_pirate_raid: (world) => {
+    const cols = playerColonySystems(world);
+    if (cols.length < 1) return null;
+    const targetSystemId = cols[0];
+    return {
+      kind: 'escort_lane',
+      titleZh: '护航：边域航路劫掠',
+      descZh: '无旗籍劫掠舰队袭扰商路，派遣舰队前往目标星系护航。',
+      targetSystemId,
+      secondarySystemId: lowestLaneNeighbor(world, targetSystemId),
+      priority: 'high',
+      penalty: { credits: 250 },
+    };
+  },
+  // 饥荒求援：事件子流随机抽一个玩家殖民地星系（带行星锚点）
+  evt_famine_relieef: (world) => {
+    const colonies = Object.values(world.entities.colonies).filter((c) => c.factionId === pid(world));
+    if (!colonies.length) return null;
+    const rng = eventRng(world, 'evt_famine_relieef');
+    const colony = colonies[rngInt(rng, colonies.length)];
+    const planet = world.entities.planets[colony.planetId];
+    return {
+      kind: 'relief_colony',
+      titleZh: '救援：生态循环故障',
+      descZh: '殖民地食物断供，运送救援物资并恢复生态循环。',
+      targetSystemId: planet ? planet.systemId : null,
+      targetPlanetId: colony.planetId,
+      priority: 'normal',
+      penalty: { credits: 150 },
+    };
+  },
+  // 边疆信号：调查距玩家锚点最近的未侦测星域
+  evt_signal_frontier: (world) => {
+    const sys = nearestUnderSurveyed(world, playerOriginSystem(world), 0);
+    if (!sys) return null;
+    return {
+      kind: 'investigate_system',
+      titleZh: '调查：边疆的回声',
+      descZh: '窄带信号源指向一片从未测绘的星域，派遣科考力量溯源。',
+      targetSystemId: sys.id,
+      priority: 'high',
+    };
+  },
+  // 非自然来源：同样锚定最近未侦测星域（与边疆信号独立触发、互不冲突）
+  evt_deepspace_signal: (world) => {
+    const sys = nearestUnderSurveyed(world, playerOriginSystem(world), 0) ||
+      nearestUnderSurveyed(world, playerOriginSystem(world), 1);
+    if (!sys) return null;
+    return {
+      kind: 'investigate_system',
+      titleZh: '解码：非自然来源',
+      descZh: '重复十七天的窄带脉冲需要抵近阵列解码，锁定信号源星系。',
+      targetSystemId: sys.id,
+      priority: 'high',
+    };
+  },
+  // 边境摩擦：巡逻对峙 —— 目标取最低 id 玩家殖民星系及其最低 id 航路邻居
+  evt_frontier_dispute: (world) => {
+    const cols = playerColonySystems(world);
+    if (!cols.length) return null;
+    const targetSystemId = cols[0];
+    return {
+      kind: 'escort_lane',
+      titleZh: '巡逻：边境摩擦对峙',
+      descZh: '边防巡逻与邻国舰队在无主星系边界对峙，保持航线存在感。',
+      targetSystemId,
+      secondarySystemId: lowestLaneNeighbor(world, targetSystemId),
+      priority: 'normal',
+    };
+  },
+};
+
+/** 事件 id → 锚点解析器（无则 null） */
+export function objectiveAnchorFor(eventId) {
+  return SPATIAL_OBJECTIVE_RESOLVERS[eventId] || null;
+}
+
+/** 事件 id 是否为 B 类空间事件（EventsView 目标卡判定用） */
+export function isSpatialEvent(eventId) {
+  return !!SPATIAL_OBJECTIVE_RESOLVERS[eventId];
+}
+
+/** 目标种类中文名（UI 用） */
+export const OBJECTIVE_KIND_ZH = {
+  escort_lane: '护航航线',
+  investigate_system: '调查星域',
+  relief_colony: '殖民地救援',
+  survey_planet: '行星勘探',
+};
