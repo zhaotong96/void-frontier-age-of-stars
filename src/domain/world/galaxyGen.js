@@ -18,6 +18,7 @@ import { kNearest, UnionFind, connectedComponents } from '../../core/spatial.js'
 import { createEntity } from '../entities/registry.js';
 import { BAL } from '../../content/constants.js';
 import { generatePlanetPois } from '../ground/planetPOI.js';
+import { assignTheme, THEME_ASSIGNMENT_VERSION } from '../../content/planetThemes.js';
 
 export const STAR_TYPES = [
   { id: 'yellowDwarf', name: '黄矮星', weight: 34, habitZone: 1.0, energy: 1.0, danger: 0, scanNoise: 0.1 },
@@ -174,7 +175,8 @@ export function generateGalaxy(world, config = {}) {
     sysIdByIdx[p.idx] = sys.id;
     sysData.push({ sys, p, star });
 
-    // 行星：2-8 个
+    // 行星：2-8 个（主题抽选/POI 走行星子流，同星系 takenThemes 去重不触碰 world.rng）
+    const takenThemes = new Set();
     const nPlanets = RNG.intRange(world, 2, 8);
     for (let orbit = 0; orbit < nPlanets; orbit++) {
       const cat = weightedPick(world, PLANET_CATEGORIES);
@@ -197,8 +199,16 @@ export function generateGalaxy(world, config = {}) {
         colonyId: null,
         terraform: null,      // { stage, progress }
       });
+      // 主题分配（doc7 TASK-3.1 / doc6 §4.3）：物理约束 + 同星系去重；
+      // 只消费 derivePlanetSeeds(world, planet.id).themeSeed 子流，绝不触碰 world.rng
+      const themePick = assignTheme(world, planet, star, takenThemes);
+      planet.primaryThemeId = themePick.primaryThemeId;
+      planet.secondaryThemeModifiers = themePick.secondaryThemeModifiers;
+      planet.themeAssignmentVersion = THEME_ASSIGNMENT_VERSION;
+      takenThemes.add(themePick.primaryThemeId);
       // 持久 POI（doc5 §3.7）：行星子流确定性生成，随存档持久化；
       // 只消费 derivePlanetSeeds 子流，不触碰 world.rng 主序列
+      // （POI 池在 primaryThemeId 就绪后取主题池，缺省回退类别池）
       planet.pois = generatePlanetPois(world, planet, star);
       sys.planetIds.push(planet.id);
     }
