@@ -20,6 +20,7 @@ import { panel } from '../components/panels.js';
 import { toast } from '../components/toast.js';
 import { L } from '../../core/i18n.js';
 import { dateStr } from '../../core/clock.js';
+import { isSpatialEvent, OBJECTIVE_KIND_ZH } from '../../content/events.js';
 
 /**
  * 事件/告警类型中文映射（键 = eventBus emit 的 type；未知类型回退原文）。
@@ -39,6 +40,9 @@ const EVENT_TYPE_ZH = {
   TechCompleted: '科技完成', ShipCompleted: '舰船建成', BuildingCompleted: '建筑完成',
   EmbargoChanged: '禁运变化', CrisisPhase: '危机阶段', StoryFlag: '剧情标记',
   AIError: 'AI 异常',
+  ObjectiveCreated: '空间目标建立', ObjectiveCompleted: '目标完成',
+  ObjectiveExpired: '目标超时', ObjectiveFleetDispatched: '目标舰队派遣',
+  PoiHarvested: 'POI 采样',
 };
 
 /** 告警优先级：type → 档位（high 危急红 / mid 警示琥珀 / low 通报青） */
@@ -91,12 +95,13 @@ export const EventsView = {
 
   // —— 内部实现 ——————————————————————————————————
 
-  /** 整体重建：待决事件 → 告警 → 近期日志 */
+  /** 整体重建：待决事件 → 空间目标 → 告警 → 近期日志 */
   _rebuild() {
     const body = this._body;
     if (!body) return;
     clearEl(body);
     body.appendChild(this._pendingEventPanel());
+    body.appendChild(this._objectivesPanel());
     body.appendChild(this._alertsPanel());
     body.appendChild(this._feedPanel());
   },
@@ -137,6 +142,132 @@ export const EventsView = {
         c.hintZh ? el('div', { class: 'vf-faint', style: { fontSize: '10px', textAlign: 'left' }, text: c.hintZh }) : null,
       ]);
       p.appendChild(btn);
+    }
+
+    // B 类空间事件：目标星系 + 剩余时间 + 直接空间操作入口（doc5 §3.6 / EVT-02）
+    if (isSpatialEvent(ev.eventId)) this._appendSpatialBlock(p, ev);
+    return p;
+  },
+
+  /**
+   * B 类事件目标块：读取 snapshot.objectives 中 sourceEventId 匹配的活跃目标，
+   * 展示目标星系与剩余小时；[聚焦目标] 跳银河图并定位，[派遣护航] 就近派遣
+   * 空闲舰队（确定性解析，同 GroundView._resolveSquad 模式）。
+   */
+  _appendSpatialBlock(p, ev) {
+    const app = this.app;
+    const snap = app.snapshot || {};
+    const objs = Array.isArray(snap.objectives) ? snap.objectives : [];
+    const obj = objs.find((o) => o.sourceEventId === ev.eventId) || null;
+    if (!obj) {
+      p.appendChild(el('div', {
+        class: 'vf-faint vf-small',
+        style: { marginTop: '8px' },
+        text: '本次事件未生成空间目标（无有效空间锚点）。',
+      }));
+      return;
+    }
+    const w = app.world;
+    const sysName = (id) => (w.entities.systems[id] && w.entities.systems[id].name) || id || '—';
+    const hoursLeft = Math.max(0, (obj.deadlineTick || 0) - (w.tick || 0));
+    const box = el('div', { style: { marginTop: '10px', paddingTop: '8px', borderTop: '1px solid rgba(29,42,58,0.5)' } }, [
+      el('div', { class: 'vf-tag', text: `${OBJECTIVE_KIND_ZH[obj.kind] || obj.kind} · ${obj.priority === 'high' ? '高危' : '常规'}` }),
+      el('div', { class: 'vf-small', style: { margin: '4px 0' } }, [
+        el('span', { class: 'vf-dim', text: '目标星系：' }),
+        el('span', { text: sysName(obj.targetSystemId) }),
+      ]),
+      obj.secondarySystemId
+        ? el('div', { class: 'vf-faint vf-small', text: `航路另一端：${sysName(obj.secondarySystemId)}` })
+        : null,
+      el('div', { class: 'vf-faint vf-small', text: `剩余行动窗口：${hoursLeft} 小时` }),
+    ]);
+    const row = el('div', { style: { display: 'flex', gap: '6px', marginTop: '6px' } });
+    row.appendChild(el('button', {
+      class: 'vf-btn',
+      type: 'button',
+      style: { flex: '1' },
+      on: { click: () => this._focusObjective(obj) },
+    }, [el('div', { text: '聚焦目标' })]));
+    row.appendChild(el('button', {
+      class: 'vf-btn',
+      type: 'button',
+      style: { flex: '1' },
+      on: { click: () => this._dispatchEscort(obj) },
+    }, [el('div', { text: '派遣护航' })]));
+    box.appendChild(row);
+    p.appendChild(box);
+  },
+
+  /** 聚焦目标：select + goto galaxy + toast 目标星系名（星图 Pin 同步可见） */
+  _focusObjective(obj) {
+    const app = this.app;
+    const w = app.world;
+    app.select('system', obj.targetSystemId);
+    app.goto('galaxy');
+    const name = (w.entities.systems[obj.targetSystemId] && w.entities.systems[obj.targetSystemId].name) || obj.targetSystemId;
+    toast(`目标星系：${name}`, { kind: 'info' });
+  },
+
+  /** 就近解析可出动舰队：优先目标星系驻留，其次在途/状态，最后按 id 稳定序 */
+  _resolveEscortFleet(w, targetSystemId) {
+    return Object.values(w.entities.fleets || {})
+      .filter((f) => f.factionId === w.playerFactionId &&
+        !f.transit &&
+        (f.shipIds || []).length > 0 &&
+        (f.status || 'idle') !== 'dissolved')
+      .sort((a, b) => (
+        ((a.systemId === targetSystemId ? 0 : 1) - (b.systemId === targetSystemId ? 0 : 1)) ||
+        (({ idle: 0, hold: 1, patrol: 2, aggressive: 3 }[a.status] ?? 4) - ({ idle: 0, hold: 1, patrol: 2, aggressive: 3 }[b.status] ?? 4)) ||
+        (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+      ))[0] || null;
+  },
+
+  /** 派遣护航：dispatch('DispatchObjectiveFleet')，失败 toast 由 App 总线提示 */
+  _dispatchEscort(obj) {
+    const app = this.app;
+    const w = app.world;
+    const fleet = this._resolveEscortFleet(w, obj.targetSystemId);
+    if (!fleet) {
+      toast('没有可出动的舰队', { kind: 'warn' });
+      return;
+    }
+    const res = app.dispatch('DispatchObjectiveFleet', {
+      objectiveId: obj.id,
+      fleetId: fleet.id,
+    });
+    if (res && res.ok) {
+      const name = (w.entities.systems[obj.targetSystemId] && w.entities.systems[obj.targetSystemId].name) || obj.targetSystemId;
+      toast(`已派遣 ${fleet.name} 前往 ${name}`, { kind: 'success' });
+    }
+  },
+
+  /** 进行中的空间目标追踪条（doc5 §3.6：Objective Tracker） */
+  _objectivesPanel() {
+    const snap = this.app.snapshot || {};
+    const objs = Array.isArray(snap.objectives) ? snap.objectives : [];
+    const p = panel({ title: `进行中的空间目标（${objs.length}）`, open: objs.length > 0 });
+    if (!objs.length) {
+      p.appendChild(el('div', { class: 'vf-faint vf-small', text: '当前没有进行中的空间任务目标。' }));
+      return p;
+    }
+    const w = this.app.world;
+    const sysName = (id) => (w.entities.systems[id] && w.entities.systems[id].name) || id || '—';
+    const fleetName = (id) => (w.entities.fleets[id] && w.entities.fleets[id].name) || null;
+    for (const o of objs) {
+      const hoursLeft = Math.max(0, (o.deadlineTick || 0) - (w.tick || 0));
+      p.appendChild(el('div', { class: 'vf-row', style: { borderBottom: '1px solid rgba(29,42,58,0.4)', padding: '4px 2px', cursor: 'pointer' },
+        title: '点击定位目标星系（银河地图）',
+        on: { click: () => this._focusObjective(o) },
+      }, [
+        el('span', {
+          style: { display: 'inline-block', width: '8px', height: '8px', borderRadius: '4px', background: o.priority === 'high' ? '#e85f5f' : '#e8b04f', flexShrink: '0' },
+          'aria-hidden': 'true',
+        }),
+        el('span', { class: 'vf-tag', text: OBJECTIVE_KIND_ZH[o.kind] || o.kind }),
+        el('span', { class: 'vf-small vf-grow', text: `${o.titleZh} → ${sysName(o.targetSystemId)}` }),
+        el('span', { class: 'vf-faint vf-small', text: fleetName(o.assignedFleetId) ? `已派 ${fleetName(o.assignedFleetId)}` : '未派遣' }),
+        el('span', { class: 'vf-faint vf-small', text: `余 ${hoursLeft}h` }),
+      ]));
     }
     return p;
   },

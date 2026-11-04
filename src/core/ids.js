@@ -17,6 +17,7 @@ const PREFIXES = {
   blueprint: 'blu',
   anomaly: 'ano',
   groundMission: 'gms',
+  objective: 'obj',
   war: 'war',
   treaty: 'try',
   crisis: 'crs',

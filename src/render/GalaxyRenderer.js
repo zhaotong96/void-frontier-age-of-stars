@@ -38,6 +38,7 @@ import {
   generateSupernovaSeeds,
   Galaxy3D,
 } from './gl/Galaxy3D.js';
+import { computeOffscreenArrow } from '../domain/events/objectives.js';
 
 /** 与 styles.css 同步的字面量色板（见文件头同步声明） */
 const C = {
@@ -931,6 +932,7 @@ export class GalaxyRenderer {
     if (L.fleets) this._drawFleets(ctx, snap, facColor, posFn);
     this._drawLabels(ctx, snap, facColor, posFn);
     if (L.fronts) this._drawFronts(ctx, snap, reduced, t, posFn);
+    this._drawObjectivesOverlay(ctx, snap, t, posFn);
   }
 
   // —— 2D 路径（原实现完整保留：webglcontextlost / Tier3 / 无 WebGL 退化保护） ——
@@ -966,6 +968,9 @@ export class GalaxyRenderer {
 
     // 7) 战争前线（战斗星系脉冲环，置于最上）
     if (L.fronts) this._drawFronts(ctx, snap, reduced, t, null);
+
+    // 8) 空间任务目标叠加层（Pin / 离屏箭头 / 威胁航路虚线，置于最上）
+    this._drawObjectivesOverlay(ctx, snap, t, null);
   }
 
   /** 背景深空渐变 + 世界锚定的静态星点（2D 路径） */
@@ -1362,6 +1367,89 @@ export class GalaxyRenderer {
       ctx.beginPath();
       ctx.arc(sx, sy, 19 + pulse, 0, Math.PI * 2);
       ctx.stroke();
+    }
+  }
+
+  /**
+   * 空间任务目标叠加层（doc5 §3.6 / P1-02；只读快照，不写世界状态）：
+   *  - 在屏：脉冲菱形 Pin（pulse = sin(t×5)×2.5，y = sy−18−pulse）+ 目标名；
+   *  - 离屏：θ = atan2(dy,dx)，padX = max(80, cx−84)、padY = max(60, cy−64)，
+   *    t = min(padX/|dx|, padY/|dy|)，在安全矩形交点画旋转实心箭头
+   *    多边形 (8,0)(−6,−5)(−3,0)(−6,5)；红 #e85f5f（high）/ 琥珀 #e8b04f；
+   *  - secondarySystemId 存在：目标航路警戒虚线 lineWidth 2.4、
+   *    setLineDash([8,6])、lineDashOffset = −t×28。
+   * 坐标一律来自 posFn（GL 投影缓存）或 worldToScreen（2D 路径）。
+   */
+  _drawObjectivesOverlay(ctx, snap, t, posFn) {
+    const objs = snap && Array.isArray(snap.objectives) ? snap.objectives : [];
+    if (!objs.length) return;
+    const byId = this._byId;
+    if (!byId) return;
+    const w = this._w || this._vw();
+    const h = this._h || this._vh();
+    const at = posFn || ((s) => this.worldToScreen(s.x, s.y));
+    for (const o of objs) {
+      const sys = byId.get(o.targetSystemId);
+      if (!sys) continue;
+      const color = o.priority === 'high' ? C.DANGER : C.WARN;
+
+      // 威胁航路动态虚线（目标 ↔ 航路另一端）
+      const sec = o.secondarySystemId ? byId.get(o.secondarySystemId) : null;
+      if (sec) {
+        const [ax, ay] = at(sys);
+        const [bx, by2] = at(sec);
+        ctx.save();
+        ctx.strokeStyle = rgba(color, 0.8);
+        ctx.lineWidth = 2.4;
+        ctx.setLineDash([8, 6]);
+        ctx.lineDashOffset = -t * 28;
+        ctx.beginPath();
+        ctx.moveTo(ax, ay);
+        ctx.lineTo(bx, by2);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      const p = at(sys);
+      const arrow = computeOffscreenArrow(p[0], p[1], w, h);
+      if (arrow.onScreen) {
+        // 脉冲菱形 Pin + 目标名
+        const pulse = Math.sin(t * 5) * 2.5;
+        const px = p[0];
+        const py = p[1] - 18 - pulse;
+        const r = 5;
+        ctx.fillStyle = rgba(color, 0.9);
+        ctx.strokeStyle = rgba(C.BG, 0.9);
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(px, py - r);
+        ctx.lineTo(px + r, py);
+        ctx.lineTo(px, py + r);
+        ctx.lineTo(px - r, py);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = rgba(C.LABEL, 0.95);
+        ctx.font = `9px ${FONT}`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(String(o.titleZh || o.kind || '任务目标'), px, py - r - 2);
+        ctx.textAlign = 'left';
+      } else {
+        // 离屏：旋转实心方向箭头
+        ctx.save();
+        ctx.translate(arrow.x, arrow.y);
+        ctx.rotate(arrow.angle);
+        ctx.fillStyle = rgba(color, 0.95);
+        ctx.beginPath();
+        ctx.moveTo(8, 0);
+        ctx.lineTo(-6, -5);
+        ctx.lineTo(-3, 0);
+        ctx.lineTo(-6, 5);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      }
     }
   }
 

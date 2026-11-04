@@ -17,6 +17,7 @@ import { clamp, dist, safeDivide } from '../../core/math.js';
 import { kNearest, UnionFind, connectedComponents } from '../../core/spatial.js';
 import { createEntity } from '../entities/registry.js';
 import { BAL } from '../../content/constants.js';
+import { generatePlanetPois } from '../ground/planetPOI.js';
 
 export const STAR_TYPES = [
   { id: 'yellowDwarf', name: '黄矮星', weight: 34, habitZone: 1.0, energy: 1.0, danger: 0, scanNoise: 0.1 },
@@ -196,6 +197,9 @@ export function generateGalaxy(world, config = {}) {
         colonyId: null,
         terraform: null,      // { stage, progress }
       });
+      // 持久 POI（doc5 §3.7）：行星子流确定性生成，随存档持久化；
+      // 只消费 derivePlanetSeeds 子流，不触碰 world.rng 主序列
+      planet.pois = generatePlanetPois(world, planet, star);
       sys.planetIds.push(planet.id);
     }
 

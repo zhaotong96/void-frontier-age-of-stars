@@ -33,9 +33,36 @@ export function buildSnapshot(world) {
     logLines: buildLogLines(world),
     resources: player ? resourceSummary(world, player) : null,
     pendingEvent: world.narrative.pendingChoices?.[0] || null,
+    objectives: buildObjectivesView(world),
     victory: world.victory,
   };
   return snap;
+}
+
+/** 活跃空间任务目标（GalaxyRenderer 目标叠加层 / EventsView 目标卡消费） */
+function buildObjectivesView(world) {
+  const out = [];
+  const bag = world.entities.objectives || {};
+  for (const id of sortedKeys(bag)) {
+    const o = bag[id];
+    if (o.status !== 'active') continue;
+    out.push({
+      id,
+      kind: o.kind,
+      titleZh: o.titleZh,
+      status: o.status,
+      priority: o.priority,
+      sourceEventId: o.sourceEventId,
+      targetSystemId: o.targetSystemId,
+      secondarySystemId: o.secondarySystemId,
+      targetPlanetId: o.targetPlanetId,
+      deadlineTick: o.deadlineTick,
+      assignedFleetId: o.assignedFleetId,
+      progress: o.progress,
+      goalProgress: o.goalProgress,
+    });
+  }
+  return out;
 }
 
 function factionSummary(world, f) {

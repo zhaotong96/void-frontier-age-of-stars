@@ -12,7 +12,8 @@ import { registerScheduled, schedule } from '../../core/scheduler.js';
 import { emit, chronicle } from '../../core/eventBus.js';
 import { credit, debit, balance } from '../economy/ledger.js';
 import { getRelation } from '../diplomacy/war.js';
-import { EVENT_DEFS } from '../../content/events.js';
+import { EVENT_DEFS, objectiveAnchorFor } from '../../content/events.js';
+import { createWorldObjective } from './objectives.js';
 import { DIFFICULTY } from '../../content/constants.js';
 
 /** 每日检查（DailySystems 注册）：条件 + 权重抽取 */
@@ -84,6 +85,24 @@ export function fireEvent(world, def) {
   } else {
     applyEffects(world, def.effects || [], { eventId: def.id });
     chronicle(world, 'event', def.titleZh, { eventId: def.id });
+  }
+
+  // B 类空间事件（doc5 §3.6 / EVT-01）：触发时绑定真实空间实体建立持久目标。
+  // 锚点解析器来自 content/events.js（def.objective 内联解析器优先）；
+  // 同源事件已有 active 目标时不重复建（防冷却期内堆积）。
+  try {
+    const resolver = typeof def.objective === 'function' ? def.objective : objectiveAnchorFor(def.id);
+    const anchor = resolver ? resolver(world) : null;
+    if (anchor) {
+      const bag = world.entities.objectives || {};
+      const dup = Object.keys(bag).some((id) => bag[id].status === 'active' && bag[id].sourceEventId === def.id);
+      if (!dup) {
+        const obj = createWorldObjective(world, { sourceEventId: def.id, ...anchor });
+        if (obj) chronicle(world, 'event', `空间目标建立：${obj.titleZh}`, { objectiveId: obj.id, eventId: def.id });
+      }
+    }
+  } catch (e) {
+    emit(world, 'ObjectiveAnchorError', { eventId: def.id, message: String(e && e.message) }, 'system');
   }
 }
 
