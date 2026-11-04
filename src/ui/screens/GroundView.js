@@ -44,12 +44,15 @@ import { showModal, toast } from '../components/index.js';
 import { L } from '../../core/i18n.js';
 import { CanvasManager } from '../../render/CanvasManager.js';
 import { PlanetSurface3D } from '../../render/gl/PlanetSurface3D.js';
+import { PlanetSurfaceScene } from '../../render/gl/PlanetSurfaceScene.js';
 import { mat4, mat4Perspective, mat4LookAt, mat4Multiply } from '../../render/gl/Mat4.js';
 import { buildBuildingMesh, buildUnitBox } from '../../render/meshes/GroundMeshes.js';
 import {
   createSurfaceWorld, digVoxel, placeVoxel, getVoxel, ddaRaycast, getSurfaceHeight,
   findSpawnPoint, SURFACE_SIZE, SURFACE_MAT,
 } from '../../domain/ground/SurfaceSandbox.js';
+import { buildTerrainField } from '../../domain/ground/terrainField.js';
+import { sampleTerrain, raycastTerrain } from '../../domain/ground/surfaceQueries.js';
 import { createGroundMission, stepMission, getMissionView } from '../../domain/ground/GroundMission.js';
 import { creditColony, debitColony } from '../../domain/economy/ledger.js';
 import { MISSION_TEMPLATES, findMissionTemplate } from '../../content/missions.js';
@@ -74,6 +77,21 @@ const CAM_DIST_MAX = 14;
 const DIG_INTERVAL = 0.2;
 const PLACE_INTERVAL = 0.25;
 const AIM_REACH = 7.0;
+
+/**
+ * 场域集成（doc7 TASK-1.2/1.4，Phase 1 垂直切片）：
+ * 连续三角网格场域 512m×512m（terrainField，origin −256，覆盖 [−256,+256]），
+ * 体素世界 64×64m 资源补丁居中场域中心 —— 体素单位 ≈ 米（1:1 人类尺度），
+ * 场域坐标 = 体素坐标 + FIELD_OFFSET（体素中心 32 → 场域中心 0）。
+ * 角色/单位/建筑等玩法坐标保持体素空间；查询场域高度/射线时 +FIELD_OFFSET。
+ */
+const FIELD_OFFSET = -32;
+/** 采掘凹陷每击深度（米）：场域地形雕刻（TERRAIN-06 增量重建演示） */
+const DIG_DENT_DEPTH = 1.2;
+/** 场域行走坡度阻断阈值（Δh/Δx > 此值的陡壁不可步行） */
+const WALK_SLOPE_BLOCK = 1.6;
+/** 场域可行走范围（体素坐标；对应场域 [−256,+256] 边界内收 2m） */
+const FIELD_WALK_MAX = 286;
 
 /** 喷气背包（本地燃料池；任务模式的耐力由 domain 权威，视图不回写） */
 const JET_DRAIN = 22;
@@ -728,6 +746,12 @@ export const GroundView = {
     const w = this.app.world;
     this.planet = planet;
     this.sw = createSurfaceWorld(w, planet.id);   // 种子 = world.seed ^ hash32(planetId)：同 seed 同地貌
+    // —— 连续三角网格场域（doc7 §3；体素补丁仅作矿脉/结构数据底层，不再承担视觉） ——
+    this.field = buildTerrainField(w, planet.id, {});
+    this._digDents = new Map();                   // 采掘凹陷（列键 → 次数），siteModifier 消费
+    this._placedVoxels = new Map();               // 已放置结构体素（列键 → {x,y,z}，占位盒渲染）
+    this._springDist = -1;                        // 场域弹簧臂臂长（首帧吸附）
+    this.field.siteModifier = (fx, fz, base) => this._fieldSiteModifier(fx, fz, base);
     this.colony = Object.values(w.entities.colonies || {})
       .find((c) => c.planetId === planet.id) || null;
     this.mission = mission || null;
@@ -735,16 +759,17 @@ export const GroundView = {
     this._layoutColony();
     this._conveyor = this._buildConveyorPaths();
 
-    // —— 初始角色位置：任务取出生小队首位，自由取体素世界出生点 ——
+    // —— 初始角色位置：任务取出生小队首位，自由取体素世界出生点（y 贴场域网格） ——
     const c = this.char3d;
     const spawn = this.sw.spawn;
     c.x = spawn.x;
     c.z = spawn.z;
-    c.y = getSurfaceHeight(this.sw, spawn.x, spawn.z) + 1;
+    c.y = this._groundAt(spawn.x, spawn.z);
     c.vy = 0;
     c.onGround = true;
     c.state = 'idle';
     c.fuel = 100;
+    if (!Number.isFinite(c.y)) c.y = 8;           // 场外兜底（理论不可达：出生列恒在场内）
     // 相机置于角色背后（面向 -Z 时 yaw=0）
     this.cam.yaw = 0;
     this.cam.pitch = 0.5;
@@ -777,18 +802,57 @@ export const GroundView = {
   /** 创建/重建 GL 资源（上下文恢复后同样走这里） */
   _initGL() {
     this._glOK = false;
+    this.scene = null;
     this.ps3d = null;
     this.bmesh = null;
     if (this.cm && this.cm.hasGL && this.cm.glc && this.cm.tier < 3) {
       try {
+        // —— 场景编排器：连续三角网格地形 + 大气 + 天气（doc7 TASK-1.3） ——
+        this.scene = new PlanetSurfaceScene(this.cm, {});
+        this.scene.mount(this.field, null);
+        // 场域中心 (256,256) → 体素空间 (32,32)：地形平移对齐玩法坐标
+        this.scene.setWorldOffset([-FIELD_OFFSET, 0, -FIELD_OFFSET]);
+        // —— 对象渲染器：箱体/actor/角色七部件/贴花/特效（外部相机，对象独占） ——
         this.ps3d = new PlanetSurface3D(this.cm.glc, this.cm.tier);
         this.ps3d.init(this.sw);
+        this.ps3d.setObjectOnly(true);            // 地形/天空权威移交 PlanetSurfaceScene
         this.bmesh = new BuildingMeshBatch(this.cm.glc);
+        // —— 环境一致化：对象/建筑/地形共用同一太阳/雾（以 ps3d 行星档案求值为准；
+        //     雾距按 512m 场域尺度放宽，近距离保留地貌可读性） ——
+        if (this.scene.terrainRenderer) {
+          this.scene.setTheme({
+            sun: { dir: this.ps3d._sunDir.slice(), color: this.ps3d._sunColor.slice() },
+            fog: { color: this.ps3d._fogColor.slice(), range: [90, 560] },
+            sky: {
+              zenith: this.ps3d._sky.zenith.slice(),
+              horizon: this.ps3d._sky.horizon.slice(),
+              ground: this.ps3d._sky.ground.slice(),
+              stars: this.ps3d._sky.stars,
+            },
+          });
+        }
+        // —— 诊断钩子接管：诊断模式路由到场景地形网格；GL 状态快照仍由 ps3d 供 ——
+        if (typeof window !== 'undefined') {
+          window.__vfSurfaceDebug = {
+            renderer: this.ps3d,
+            scene: this.scene,
+            view: this,
+            setDebugMode: (m) => (this.scene ? this.scene.setDebugMode(m) : 0),
+            cycleDebugMode: () => (this.scene ? this.scene.setDebugMode((this.scene.getDebugMode() + 1) % 4) : 0),
+            getSnapshot: () => ({
+              ...(this.ps3d ? this.ps3d.getGLStateSnapshot() : {}),
+              sceneStats: this.scene ? this.scene.getStats() : null,
+            }),
+          };
+        }
         this._glOK = true;
       } catch (e) {
         console.error('[GroundView] GL 初始化失败，保持 2D 兜底:', e);
+        this._glErr = String((e && e.message) || e);
+        try { if (this.scene) this.scene.destroy(); } catch (_) { /* 忽略 */ }
         try { if (this.ps3d) this.ps3d.destroy(); } catch (_) { /* 忽略 */ }
         try { if (this.bmesh) this.bmesh.destroy(); } catch (_) { /* 忽略 */ }
+        this.scene = null;
         this.ps3d = null;
         this.bmesh = null;
       }
@@ -799,8 +863,10 @@ export const GroundView = {
   _onGLState(degraded) {
     if (!this._mounted) return;
     if (degraded) {
+      try { if (this.scene) this.scene.destroy(); } catch (_) { /* 忽略 */ }
       try { if (this.ps3d) this.ps3d.destroy(); } catch (_) { /* 忽略 */ }
       try { if (this.bmesh) this.bmesh.destroy(); } catch (_) { /* 忽略 */ }
+      this.scene = null;
       this.ps3d = null;
       this.bmesh = null;
       this._glOK = false;
@@ -828,8 +894,10 @@ export const GroundView = {
       this._unsubGL();
       this._unsubGL = null;
     }
+    try { if (this.scene) this.scene.destroy(); } catch (_) { /* 忽略 */ }
     try { if (this.ps3d) this.ps3d.destroy(); } catch (_) { /* 忽略 */ }
     try { if (this.bmesh) this.bmesh.destroy(); } catch (_) { /* 忽略 */ }
+    this.scene = null;
     this.ps3d = null;
     this.bmesh = null;
     if (this.cm) {
@@ -838,6 +906,8 @@ export const GroundView = {
     }
     this._glOK = false;
     this.sw = null;
+    this.field = null;
+    this._digDents = null;
     this.mission = null;
     this.missionId = null;
     this._lastView = null;
@@ -1030,10 +1100,67 @@ export const GroundView = {
     return Math.max(0.2, g0) * 9.8;
   },
 
-  /** 列顶地面高度（体素上沿 y；空列返回 Infinity 表示无底） */
+  /**
+   * 地面高度（脚底）。场域优先：连续三角网格重心插值（doc7 TASK-1.2）；
+   * 体素列顶仅作场域缺失时的兜底（2D 降级/场外）。
+   * @returns {number} 高度（米/体素单位同刻度）；场外返回 Infinity
+   */
   _groundAt(x, z) {
+    if (this.field) {
+      const s = sampleTerrain(this.field, x + FIELD_OFFSET, z + FIELD_OFFSET);
+      if (s && Number.isFinite(s.y)) return s.y;
+      return Infinity;
+    }
     const h = getSurfaceHeight(this.sw, x, z);
     return h >= 0 ? h + 1 : Infinity;
+  },
+
+  /**
+   * 场域 siteModifier：采掘凹陷雕刻（TERRAIN-06 增量重建的域侧驱动）。
+   * MissionSiteBlueprint 的 SDF 挂点由后续波次在同一钩子内合成（Wave C）。
+   * @param {number} fx 场域 X（米） @param {number} fz 场域 Z（米）
+   * @param {object} base terrainField 预估点
+   */
+  _fieldSiteModifier(fx, fz, base) {
+    const dents = this._digDents;
+    if (!dents || dents.size === 0) return null;
+    const lx = fx - FIELD_OFFSET;
+    const lz = fz - FIELD_OFFSET;
+    const cx = Math.floor(lx);
+    const cz = Math.floor(lz);
+    let dy = 0;
+    let touched = false;
+    for (let dz = -2; dz <= 2; dz++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        const key = (cx + dx) * 4096 + (cz + dz);
+        const n = dents.get(key);
+        if (!n) continue;
+        const d = Math.hypot(lx - (cx + dx + 0.5), lz - (cz + dz + 0.5));
+        const fall = Math.max(0, 1 - d / 1.8);
+        if (fall > 0) {
+          dy -= n * DIG_DENT_DEPTH * fall * fall;
+          touched = true;
+        }
+      }
+    }
+    return touched && Number.isFinite(base.y + dy) ? { dy } : null;
+  },
+
+  /** 采掘后标记场域 Chunk 脏（下一帧 sync 增量重建；TERRAIN-06） */
+  _markFieldDirty(vx, vz) {
+    if (!this.field || !Array.isArray(this.field.chunks)) return;
+    const fx = vx + FIELD_OFFSET;
+    const fz = vz + FIELD_OFFSET;
+    const chSize = this.field.chunkMeters || 64;
+    const tcx = Math.floor(fx / chSize);
+    const tcz = Math.floor(fz / chSize);
+    for (const ch of this.field.chunks) {
+      if (!ch) continue;
+      const ddx = Math.abs(ch.cx - tcx);
+      const ddz = Math.abs(ch.cz - tcz);
+      // 凹陷半径跨列：相邻 Chunk 一并标脏（1.8m 半径只可能触及近邻）
+      if (ddx <= 1 && ddz <= 1) ch.dirty = true;
+    }
   },
 
   // —— 主循环 ————————————————
@@ -1195,8 +1322,8 @@ export const GroundView = {
         c.onGround = false;
       }
     }
-    if (c.y < -12) {
-      // 跌出悬浮平台：回出生点
+    if (c.y < (this.field ? -60 : -12)) {
+      // 跌出悬浮平台（体素兜底模式）：回出生点；场域地形最低 -40m 不会触发
       const sp = this.sw.spawn;
       c.x = sp.x;
       c.z = sp.z;
@@ -1301,8 +1428,9 @@ export const GroundView = {
       c.fuel = Math.min(100, c.fuel + JET_REGEN * dt);
     }
     c.y += c.vy * dt;
-    // 头顶体素检测：上升顶头即截停
-    if (c.vy > 0 && getVoxel(sw, Math.floor(c.x), Math.floor(c.y + PLAYER_HEIGHT), Math.floor(c.z)) !== SURFACE_MAT.AIR) {
+    // 头顶体素检测：上升顶头即截停（场域连续地形无洞穴顶盖，跳过）
+    if (!this.field && c.vy > 0
+      && getVoxel(sw, Math.floor(c.x), Math.floor(c.y + PLAYER_HEIGHT), Math.floor(c.z)) !== SURFACE_MAT.AIR) {
       c.vy = 0;
     }
     const ground = this._groundAt(c.x, c.z);
@@ -1313,7 +1441,7 @@ export const GroundView = {
     } else {
       c.onGround = false;
     }
-    if (c.y < -12) {
+    if (c.y < (this.field ? -60 : -12)) {
       const sp = findSpawnPoint(sw);
       c.x = sp.x;
       c.z = sp.z;
@@ -1332,11 +1460,25 @@ export const GroundView = {
   },
 
   /**
-   * 体素 AABB 碰撞移动：先 X 后 Z，撞实体素即轴分离滑行。
-   * 碰撞盒：脚底 c.y .. 头顶 c.y + PLAYER_HEIGHT，半宽 PLAYER_HALF。
+   * 碰撞移动：场域模式 = 坡度阻断行走（Δh/Δx 超阈值陡壁不可攀，连续三角网格
+   * 无离散墙体）；体素兜底模式 = AABB 轴分离滑行（撞实体素滑开）。
    */
   _moveAABB(dx, dz) {
     const c = this.char3d;
+    if (this.field) {
+      const h0 = this._groundAt(c.x, c.z);
+      if (dx) {
+        const nx = clamp(c.x + dx, 2, FIELD_WALK_MAX);
+        const h1 = this._groundAt(nx, c.z);
+        if (Number.isFinite(h1) && h1 - h0 < WALK_SLOPE_BLOCK) c.x = nx;
+      }
+      if (dz) {
+        const nz = clamp(c.z + dz, 2, FIELD_WALK_MAX);
+        const h1 = this._groundAt(c.x, nz);
+        if (Number.isFinite(h1) && h1 - h0 < WALK_SLOPE_BLOCK) c.z = nz;
+      }
+      return;
+    }
     const solidBox = (px, pz) => {
       const y0 = Math.floor(c.y + 0.05);
       const y1 = Math.floor(c.y + PLAYER_HEIGHT - 0.05);
@@ -1394,26 +1536,75 @@ export const GroundView = {
     this._eye[2] = c.z + cp * cy * d;
     const fwd = this._camForward();
 
-    // 第一段：相机 → 瞄准点（命中地形取命中点，否则取视距延伸点）
-    const camRay = ddaRaycast(this.sw, this._eye, fwd, d + AIM_REACH);
-    const camT = camRay.hit ? camRay.t : d + 4;
-    const aimPt = [
-      this._eye[0] + fwd[0] * camT,
-      this._eye[1] + fwd[1] * camT,
-      this._eye[2] + fwd[2] * camT,
-    ];
-    // 第二段：角色胸口 → 瞄准点（触及范围内才有效）
-    const chest = [c.x, c.y + 1.25, c.z];
-    const ddx = aimPt[0] - chest[0];
-    const ddy = aimPt[1] - chest[1];
-    const ddz = aimPt[2] - chest[2];
-    const len = Math.hypot(ddx, ddy, ddz) || 1;
-    this._aimFar = len > AIM_REACH + 0.6;
-    const hit = this._aimFar
-      ? { hit: false }
-      : ddaRaycast(this.sw, chest, [ddx / len, ddy / len, ddz / len], AIM_REACH);
-    this._aim = hit.hit ? hit : null;
-    if (this._aim) this._aim.dug = false;   // 本帧是否实际挖到（角色采掘姿态用）
+    if (this.field) {
+      // —— 场域模式：与连续三角网格求交（doc7 TASK-1.2，替代体素 DDA） ——
+      const eyeF = [this._eye[0] + FIELD_OFFSET, this._eye[1], this._eye[2] + FIELD_OFFSET];
+      const camRay = raycastTerrain(this.field, eyeF, fwd, d + AIM_REACH + 4);
+      const camT = camRay.hit ? camRay.t : d + 4;
+      const aimPt = [
+        this._eye[0] + fwd[0] * camT,
+        this._eye[1] + fwd[1] * camT,
+        this._eye[2] + fwd[2] * camT,
+      ];
+      const chest = [c.x, c.y + 1.25, c.z];
+      const ddx = aimPt[0] - chest[0];
+      const ddy = aimPt[1] - chest[1];
+      const ddz = aimPt[2] - chest[2];
+      const len = Math.hypot(ddx, ddy, ddz) || 1;
+      this._aimFar = len > AIM_REACH + 0.6;
+      let hit = null;
+      if (!this._aimFar) {
+        const r = raycastTerrain(this.field, [chest[0] + FIELD_OFFSET, chest[1], chest[2] + FIELD_OFFSET],
+          [ddx / len, ddy / len, ddz / len], AIM_REACH);
+        if (r.hit) {
+          // 场域命中 → 体素列语义（矿脉/结构数据底层仍在体素补丁内）
+          const vx = Math.floor(r.point[0] - FIELD_OFFSET);
+          const vz = Math.floor(r.point[2] - FIELD_OFFSET);
+          const colTop = getSurfaceHeight(this.sw, vx, vz);
+          // 主导轴法线 → 体素邻面语义（建造放置沿用）
+          const n = r.normal || [0, 1, 0];
+          const ax = Math.abs(n[0]);
+          const ay = Math.abs(n[1]);
+          const az = Math.abs(n[2]);
+          const nx = ax > ay && ax > az ? Math.sign(n[0]) : 0;
+          const ny = ay >= ax && ay >= az ? Math.sign(n[1]) : 0;
+          const nz = az > ax && az > ay ? Math.sign(n[2]) : 0;
+          hit = {
+            hit: true,
+            vx, vz,
+            vy: colTop >= 0 ? colTop : Math.floor(r.point[1]),
+            nx, ny, nz,
+            matId: colTop >= 0 ? getVoxel(this.sw, vx, colTop, vz) : 0,
+            t: r.t,
+            px: r.point[0] - FIELD_OFFSET,
+            py: r.point[1],
+            pz: r.point[2] - FIELD_OFFSET,
+          };
+        }
+      }
+      this._aim = hit;
+      if (this._aim) this._aim.dug = false;
+    } else {
+      // —— 体素兜底（2D 降级/场域缺失）：两段 DDA（原逻辑） ——
+      const camRay = ddaRaycast(this.sw, this._eye, fwd, d + AIM_REACH);
+      const camT = camRay.hit ? camRay.t : d + 4;
+      const aimPt = [
+        this._eye[0] + fwd[0] * camT,
+        this._eye[1] + fwd[1] * camT,
+        this._eye[2] + fwd[2] * camT,
+      ];
+      const chest = [c.x, c.y + 1.25, c.z];
+      const ddx = aimPt[0] - chest[0];
+      const ddy = aimPt[1] - chest[1];
+      const ddz = aimPt[2] - chest[2];
+      const len = Math.hypot(ddx, ddy, ddz) || 1;
+      this._aimFar = len > AIM_REACH + 0.6;
+      const hit = this._aimFar
+        ? { hit: false }
+        : ddaRaycast(this.sw, chest, [ddx / len, ddy / len, ddz / len], AIM_REACH);
+      this._aim = hit.hit ? hit : null;
+      if (this._aim) this._aim.dug = false;
+    }
 
     // —— 采掘（建造模式按住左键，节流 DIG_INTERVAL） ——
     if (this._buildMode && this._mouse.lDown && this._digCd <= 0 && this._aim) {
@@ -1436,7 +1627,12 @@ export const GroundView = {
     if (!r || r.matId === SURFACE_MAT.AIR) return;   // domain 判定不可挖（含并发保护）
     if (this._aim) this._aim.dug = true;
     this._fx.dig.push({ x: hit.vx, y: hit.vy, z: hit.vz, matId: r.matId });
-    if (this.ps3d) {
+    if (this.field) {
+      // 场域模式：地形凹陷雕刻 + Chunk 标脏（TERRAIN-06 增量重建由场景 sync 执行）
+      const key = hit.vx * 4096 + hit.vz;
+      this._digDents.set(key, (this._digDents.get(key) || 0) + 1);
+      this._markFieldDirty(hit.vx, hit.vz);
+    } else if (this.ps3d) {
       this.ps3d.digChunk(Math.floor(hit.vx / SURFACE_SIZE.CHUNK), Math.floor(hit.vz / SURFACE_SIZE.CHUNK));
     }
     if (r.resourceDrop) {
@@ -1469,7 +1665,11 @@ export const GroundView = {
       debitColony(this.app.world, this.colony, 'alloy', 1, 'surfaceBuild', this.colony.id);
       this._tally.alloy = (this._tally.alloy || 0) - 1;
     }
-    if (this.ps3d) {
+    if (this.field) {
+      // 场域模式：结构体素经建筑批处理渲染（占位盒，Wave F 建筑系统替换为
+      // 坡度地基/模块化结构网格）；不再依赖体素贪心网格重建。
+      this._placedVoxels.set(tx * 4096 + tz, { x: tx, y: ty, z: tz });
+    } else if (this.ps3d) {
       this.ps3d.digChunk(Math.floor(tx / SURFACE_SIZE.CHUNK), Math.floor(tz / SURFACE_SIZE.CHUNK));
     }
   },
@@ -1596,11 +1796,11 @@ export const GroundView = {
       const a = i * GOLDEN;
       const x = clamp(sw.spawn.x + Math.cos(a) * r, 3, SURFACE_SIZE.X - 3);
       const z = clamp(sw.spawn.z + Math.sin(a) * r, 3, SURFACE_SIZE.Z - 3);
-      const h = getSurfaceHeight(sw, x, z);
-      if (h < 0) continue;             // 虚空列（悬浮平台边缘）跳过
+      const h = this._groundAt(x, z);
+      if (!Number.isFinite(h)) continue;   // 场外/虚空列跳过
       this._buildingLayout.push({
         x,
-        y: h + 1,
+        y: h,
         z,
         rotY: (i * 0.618) % 1 * Math.PI * 2,
         scale: building ? 1 : 0.55,
@@ -1609,7 +1809,7 @@ export const GroundView = {
       });
       this._buildingColonists.push({
         x: x + 1.6,
-        y: h + 1,
+        y: h,
         z: z + 1.2,
         rotY: (i * 0.37) % 1 * Math.PI * 2,
         walk: false,
@@ -1645,8 +1845,8 @@ export const GroundView = {
         const f = k / n;
         const x = mn.x + (best.x - mn.x) * f;
         const z = mn.z + (best.z - mn.z) * f;
-        const h = getSurfaceHeight(this.sw, x, z);
-        const y = h >= 0 ? h + 1 : mn.y + (best.y - mn.y) * f;
+        const h = this._groundAt(x, z);
+        const y = Number.isFinite(h) ? h : mn.y + (best.y - mn.y) * f;
         pts.push([x, y, z]);
       }
       paths.push({ pts, speed: 1.6, spacing: 1.1 });
@@ -1657,7 +1857,9 @@ export const GroundView = {
   // —— 渲染 ————————————————
 
   /**
-   * 渲染一帧：GL 场景（地形/天空/角色/敌人/特效）→ 建筑批处理 → HUD 2D。
+   * 渲染一帧：GL 场景（连续地形/天空/天气 → 对象 pass → 建筑批处理）→ HUD 2D。
+   * 场景化集成（doc7 TASK-1.2/1.4）：地形/天空权威在 PlanetSurfaceScene；
+   * 相机弹簧臂以场域射线收臂（raycastTerrain），同一 VP 供对象 pass 与建筑批处理。
    * @param {object|null} view getMissionView 快照（自由模式为 null）
    */
   _renderFrame(view, dt) {
@@ -1666,20 +1868,54 @@ export const GroundView = {
     cm.beginFrame();
 
     const rd = this._assembleRenderData(view);
-    if (this._glOK && this.ps3d) {
+    if (this._glOK && this.scene && this.ps3d) {
       const target = cm.beginGLFrame();
       if (target) {
         const gl = this.cm.gl;
         const pw = this.cm.glCanvas.width;
         const ph = this.cm.glCanvas.height;
+
+        // —— 弹簧臂相机（场域射线收臂；指数平滑与 PlanetSurface3D 同参） ——
+        const c = this.char3d;
+        const cp = Math.cos(this.cam.pitch);
+        const sp = Math.sin(this.cam.pitch);
+        const sy = Math.sin(this.cam.yaw);
+        const cy = Math.cos(this.cam.yaw);
+        const tgt = [c.x, c.y + 1.55, c.z];
+        const dir = [cp * sy, sp, cp * cy];
+        let want = clamp(this.cam.dist, 2.5, 26);
+        if (this.field) {
+          const hit = raycastTerrain(this.field,
+            [tgt[0] + FIELD_OFFSET, tgt[1], tgt[2] + FIELD_OFFSET], dir, want + 0.6);
+          if (hit.hit) want = Math.max(1.4, hit.t - 0.45);
+        }
+        if (this._springDist < 0) this._springDist = want;
+        this._springDist += (want - this._springDist) * (1 - Math.exp(-dt * 6));
+        const eye = [
+          tgt[0] + dir[0] * this._springDist,
+          tgt[1] + dir[1] * this._springDist,
+          tgt[2] + dir[2] * this._springDist,
+        ];
+        const mm = this._m;
+        mat4Perspective(mm.proj, 1.05, pw / Math.max(1, ph), 0.1, 1600);
+        mat4LookAt(mm.view, eye, tgt, [0, 1, 0]);
+        mat4Multiply(mm.vp, mm.proj, mm.view);
+
+        // —— 1. 场景：连续地形 + 天空 + 天气（清屏唯一所有者仍是 PostProcessor） ——
+        this.scene.draw(gl, pw, ph, {
+          time: this._clock,
+          dt,
+          camera: { eye, target: tgt },
+          actors: rd,
+        }, {});
+
+        // —— 2. 对象 pass：敌人/殖民者/传送带/角色七部件/贴花/特效（外部相机） ——
+        this.ps3d.setExternalCamera(eye, tgt, mm.vp);
         this.ps3d.draw(gl, pw, ph, rd, { time: this._clock, dt });
-        // 建筑网格批处理：与渲染器同帧相机（弹簧平滑后的 eye/target）+ 同源光照
+
+        // —— 3. 建筑网格批处理：与场景同帧相机 + 同源光照 ——
         const bList = this.bmesh ? this._bmeshList() : null;
         if (this.bmesh && bList.length) {
-          const mm = this._m;
-          mat4Perspective(mm.proj, 1.05, pw / Math.max(1, ph), 0.1, 220);
-          mat4LookAt(mm.view, this.ps3d.camera.eye, this.ps3d.camera.target, [0, 1, 0]);
-          mat4Multiply(mm.vp, mm.proj, mm.view);
           this.bmesh.draw(gl, mm.vp, this._envOf(), bList);
         }
         cm.endGLFrame({ time: this._clock });
@@ -1769,7 +2005,7 @@ export const GroundView = {
     return rd;
   },
 
-  /** 建筑批处理实例表：殖民地建筑 + 任务目标物 + 数据核心 + 体素选择框 */
+  /** 建筑批处理实例表：殖民地建筑 + 任务目标物 + 数据核心 + 体素选择框 + 已放置结构体素 */
   _bmeshList() {
     const list = this._buildingLayout.slice();
     const fallY = this.char3d.y || 0;
@@ -1800,6 +2036,17 @@ export const GroundView = {
           x: ix, y: (gy === Infinity ? fallY : gy) + 0.5, z: iz,
           rotY: this._clock * 0.8, scale: 0.38, meshId: MESH_OF_CATEGORY('selector'),
           emit: 0.9,
+        });
+      }
+    }
+    // 已放置结构体素（场域模式占位盒；Wave F 建筑系统替换为模块化结构网格）
+    if (this._placedVoxels && this._placedVoxels.size) {
+      for (const pv of this._placedVoxels.values()) {
+        const gy = this._groundAt(pv.x + 0.5, pv.z + 0.5);
+        list.push({
+          x: pv.x + 0.5, y: Number.isFinite(gy) ? gy + 0.45 : pv.y + 0.5, z: pv.z + 0.5,
+          rotY: 0, scale: 0.92, meshId: MESH_OF_CATEGORY('default'),
+          emit: 0.08,
         });
       }
     }
@@ -1847,6 +2094,11 @@ export const GroundView = {
       ctx.font = '14px "Segoe UI", system-ui, sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText('当前环境不支持 WebGL2，3D 地表不可用（模拟与 HUD 继续运行）', W / 2, H / 2);
+      if (this._glErr) {
+        ctx.font = '11px monospace';
+        ctx.fillStyle = '#e8b04f';
+        ctx.fillText(`GL init: ${this._glErr.slice(0, 90)}`, W / 2, H / 2 + 22);
+      }
       ctx.textAlign = 'left';
     }
     // 准星（采掘/建造模式为方框 + 目标信息）

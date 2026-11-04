@@ -57,6 +57,7 @@ layout(location = 3) in vec2 aAux;     // (temp, moisture)
 layout(location = 4) in float aMorph;  // geomorph 高度差（已烘焙 16m 边缘带）
 uniform mat4 uVP;
 uniform vec3 uCamPos;
+uniform vec3 uWorldOffset;       // 场域 → 世界平移（GroundView 集成：(-224,0,-224) 对齐体素空间）
 uniform float uPlanetCurveInv2R; // 1.0 / (2.0 * R)，默认 1.0/(2.0*1800.0)
 uniform int uHeatZoneCount;
 uniform vec4 uHeatZones[8];      // (x, z, radius, intensity)
@@ -67,7 +68,7 @@ out vec4 vWeights;
 out vec2 vAux;
 out float vHeatField;
 void main() {
-  vec3 worldPos = aPos;
+  vec3 worldPos = aPos + uWorldOffset;
   /* Frostpunk 热区累积：核心（<=0.6r）全额，0.6r→r 平滑衰减 */
   float heat = 0.0;
   for (int i = 0; i < 8; i++) {
@@ -292,7 +293,7 @@ export class PlanetTerrainMesh {
       attributes: { aPos: 0, aNormal: 1, aWeights: 2, aAux: 3, aMorph: 4 },
     });
     this._u = locMap(gl, this.progTerrain, [
-      'uVP', 'uCamPos', 'uPlanetCurveInv2R', 'uHeatZoneCount', 'uHeatZones', 'uMorphT',
+      'uVP', 'uCamPos', 'uWorldOffset', 'uPlanetCurveInv2R', 'uHeatZoneCount', 'uHeatZones', 'uMorphT',
       'uSunDir', 'uSunColor', 'uFogColor', 'uFogRange', 'uTime', 'uHdr',
       'uMatCol0', 'uMatCol1', 'uMatCol2', 'uMatCol3', 'uThemeFx', 'uFootsteps',
     ]);
@@ -303,6 +304,20 @@ export class PlanetTerrainMesh {
 
     // —— 视锥 6 平面草稿（零分配；相机与 VP 由场景层每帧下发） ——
     this._frustum = new Float32Array(24);
+    // —— 世界平移（场域 → 视图空间；GroundView 集成用 (-224,0,-224) 对齐体素空间） ——
+    this._worldOffset = [0, 0, 0];
+  }
+
+  /**
+   * 世界平移：顶点着色器 worldPos = aPos + uWorldOffset，视锥 AABB 与热区/
+   * 脚步 uniform 同步平移（热区/脚步仍以场域坐标下发）。
+   * GroundView 集成：offset (-224,0,-224) → 场域中心 (256,256) 对齐体素 (32,32)。
+   * @param {Array<number>} o [x,y,z]
+   */
+  setWorldOffset(o) {
+    if (Array.isArray(o) && o.length >= 3 && o.every(Number.isFinite)) {
+      this._worldOffset = [o[0], o[1], o[2]];
+    }
   }
 
   // —— 主题 / 配置 API ————————————————
@@ -431,8 +446,10 @@ export class PlanetTerrainMesh {
     if (this._destroyed || this.tier >= 3 || !field || !Array.isArray(field.chunks)) return;
     const time = opts.time || 0;
     this._time = time;
-    const cx0 = camPos ? camPos[0] : 0;
-    const cz0 = camPos ? camPos[2] : 0;
+    const wo = this._worldOffset;
+    // 相机给到的是视图（平移后）空间坐标；LOD 距离按场域坐标求值（field = view - wo）
+    const cx0 = camPos ? camPos[0] - wo[0] : 0;
+    const cz0 = camPos ? camPos[2] - wo[2] : 0;
 
     let rebuilds = 0;
     // —— pass 1：字段网格增量重建 + LOD 决策 + GPU 缓冲按需重建（本帧 LOD 快照） ——
@@ -735,7 +752,11 @@ export class PlanetTerrainMesh {
     const vboMain = glc.createBuffer(main);
     const vboW = glc.createBuffer(wb);
     const vboMor = glc.createBuffer(mor);
-    const ibo = glc.createBuffer(indices);
+    // 索引缓冲必须直接经 ELEMENT_ARRAY_BUFFER 目标上传：本机 ANGLE 实现中，
+    // 经 ARRAY_BUFFER 上传过的 buffer 再绑 ELEMENT_ARRAY_BUFFER 会被静默丢弃
+    // （bindBuffer 不报错但 VAO 记录为空 → drawElements INVALID_OPERATION 零输出）。
+    const ibo = gl.createBuffer();
+    this.glc._tracked.buffers.push(ibo);
     const vao = glc.createVAO((g) => {
       g.bindBuffer(g.ARRAY_BUFFER, vboMain);
       g.enableVertexAttribArray(0);
@@ -750,7 +771,11 @@ export class PlanetTerrainMesh {
       g.bindBuffer(g.ARRAY_BUFFER, vboMor);
       g.enableVertexAttribArray(4);
       g.vertexAttribPointer(4, 1, g.FLOAT, false, 4, 0);
+      // 先脱离 ARRAY 绑定点再挂 ELEMENT，并直接经 ELEMENT 目标上传索引数据
+      // （本机 ANGLE：经 ARRAY 上传过的 buffer 绑 ELEMENT 会被静默丢弃）
+      g.bindBuffer(g.ARRAY_BUFFER, null);
       g.bindBuffer(g.ELEMENT_ARRAY_BUFFER, ibo);
+      g.bufferData(g.ELEMENT_ARRAY_BUFFER, indices, g.STATIC_DRAW);
     });
     gl.bindVertexArray(null);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
@@ -819,11 +844,36 @@ export class PlanetTerrainMesh {
 
     gl.useProgram(this.progTerrain);
     const u = this._u;
+    const wo = this._worldOffset;
     gl.uniformMatrix4fv(u.uVP, false, vp);
     gl.uniform3f(u.uCamPos, eye[0], eye[1], eye[2]);
+    gl.uniform3f(u.uWorldOffset, wo[0], wo[1], wo[2]);
     gl.uniform1f(u.uPlanetCurveInv2R, this._curveInv2R);
     gl.uniform1i(u.uHeatZoneCount, this._heatZoneCount);
-    gl.uniform4fv(u.uHeatZones, this._heatZones);
+    if (wo[0] || wo[2]) {
+      // 主题热区/脚步涟漪以场域坐标定义（doc7 §8.2）；世界平移后同步平移上传
+      const hz = this._heatZones;
+      const hzShift = new Float32Array(hz.length);
+      for (let i = 0; i < hz.length; i += 4) {
+        hzShift[i] = hz[i] + wo[0];
+        hzShift[i + 1] = hz[i + 1] + wo[2];
+        hzShift[i + 2] = hz[i + 2];
+        hzShift[i + 3] = hz[i + 3];
+      }
+      gl.uniform4fv(u.uHeatZones, hzShift);
+      const fs = this._footsteps;
+      const fsShift = new Float32Array(fs.length);
+      for (let i = 0; i < fs.length; i += 4) {
+        fsShift[i] = fs[i] + wo[0];
+        fsShift[i + 1] = fs[i + 1] + wo[2];
+        fsShift[i + 2] = fs[i + 2];
+        fsShift[i + 3] = fs[i + 3];
+      }
+      gl.uniform4fv(u.uFootsteps, fsShift);
+    } else {
+      gl.uniform4fv(u.uHeatZones, this._heatZones);
+      gl.uniform4fv(u.uFootsteps, this._footsteps);
+    }
     gl.uniform3fv(u.uSunDir, this._sunDir);
     gl.uniform3fv(u.uSunColor, this._sunColor);
     gl.uniform3fv(u.uFogColor, this._fogColor);
@@ -837,7 +887,7 @@ export class PlanetTerrainMesh {
     gl.uniform3f(u.uMatCol3, mc[3][0], mc[3][1], mc[3][2]);
     const fx = this._themeFx;
     gl.uniform4f(u.uThemeFx, fx[0], fx[1], fx[2], this._debugMode);
-    gl.uniform4fv(u.uFootsteps, this._footsteps);
+    // uFootsteps 已在上方随 uHeatZones 一并上传（含世界平移同步）
 
     // —— 不透明基线（TERRAIN-02：CCW + BACK 剔除；诊断 1/3 渲染器侧临时关闭） ——
     gl.enable(gl.DEPTH_TEST);
@@ -853,12 +903,27 @@ export class PlanetTerrainMesh {
     }
 
     const frustum = this._computeFrustum(vp);
+    const woff = this._worldOffset;
+    const offAabb = (woff[0] || woff[1] || woff[2])
+      ? [0, 0, 0, 0, 0, 0]
+      : null;
     let dc = 0;
     let visible = 0;
     let tris = 0;
     for (const ent of this._entries.values()) {
       if (!ent || !ent.vao) continue;
-      if (this._aabbOutside(frustum, ent.aabb)) continue;
+      if (offAabb) {
+        // 场域坐标 AABB → 视图（平移后）空间再做剔除：worldPos = aPos + wo
+        offAabb[0] = ent.aabb[0] + woff[0];
+        offAabb[1] = ent.aabb[1] + woff[1];
+        offAabb[2] = ent.aabb[2] + woff[2];
+        offAabb[3] = ent.aabb[3] + woff[0];
+        offAabb[4] = ent.aabb[4] + woff[1];
+        offAabb[5] = ent.aabb[5] + woff[2];
+        if (this._aabbOutside(frustum, offAabb)) continue;
+      } else if (this._aabbOutside(frustum, ent.aabb)) {
+        continue;
+      }
       gl.bindVertexArray(ent.vao);
       gl.uniform1f(u.uMorphT, ent.morphT);
       gl.drawElements(gl.TRIANGLES, ent.indexCount, gl.UNSIGNED_INT, 0);
