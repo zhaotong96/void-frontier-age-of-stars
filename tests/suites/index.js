@@ -29,6 +29,7 @@ import { suite as diplomacyTreaty } from './diplomacy-treaty.suite.js';
 import { suite as aiStability, suiteWar as aiWar } from './ai-stability.suite.js';
 import { suite as saveRoundtrip } from './save-roundtrip.suite.js';
 import { suite01 as ground01, suite02 as ground02, suite03 as ground03 } from './ground-mission.suite.js';
+import { suite01 as terr01, suite02 as terr02, suite03 as terr03 } from './terrain-field.suite.js';
 
 export function collectSuites() {
   return [
@@ -58,5 +59,8 @@ export function collectSuites() {
     ground01,
     ground02,
     ground03,
+    terr01,
+    terr02,
+    terr03,
   ].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
