@@ -464,6 +464,7 @@ export const GroundView = {
       this.body.appendChild(el('div', { class: 'pad vf-dim', text: '当前无进行中的战役。' }));
       this._setHead('简报', []);
       this.mode = 'briefing';
+      this._bindBriefingEscape();
       return;
     }
 
@@ -526,10 +527,28 @@ export const GroundView = {
    * （surveyedBy≥3）星系下的无主行星（未殖民 · 可勘探，doc5 §3.5 NAV-02）。
    * @param {object|null} resumeMission 已存在的进行中任务（显示恢复入口）
    */
+  /**
+   * 简报页专属 Escape 逃逸监听（NAV-03）。
+   * 任务/自由模式的键位在 _setupScene → _bindInput 中绑定，简报模式不进入该路径，
+   * 故此处独立挂 window 级监听；_teardownScene / unmount 统一移除。
+   */
+  _bindBriefingEscape() {
+    if (this._briefingEsc) return;
+    this._briefingEsc = (e) => {
+      if (!this._mounted || this.mode !== 'briefing') return;
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        this._returnToOrbit();
+      }
+    };
+    window.addEventListener('keydown', this._briefingEsc);
+  },
+
   _buildBriefing(resumeMission) {
     this.mode = 'briefing';
     const app = this.app;
     const w = app.world;
+    this._bindBriefingEscape();
 
     // —— 简报主语行星与所属星系（标题 + 返回按钮文案） ——
     const targetPlanet = (resumeMission && w.entities.planets[resumeMission.planetId])
@@ -800,6 +819,11 @@ export const GroundView = {
       h.target.removeEventListener(h.type, h.fn);
     }
     this._handlers = [];
+    // 简报页 Escape 逃逸监听（随场景/视图拆卸一并移除）
+    if (this._briefingEsc) {
+      window.removeEventListener('keydown', this._briefingEsc);
+      this._briefingEsc = null;
+    }
     if (this._unsubGL) {
       this._unsubGL();
       this._unsubGL = null;
