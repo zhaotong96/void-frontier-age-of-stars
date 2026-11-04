@@ -49,6 +49,11 @@
  * 另导出 gateTestProgress（{ gate, iteration, note }）：门禁耗时较长（门禁 1 为
  * 同步密集循环，会周期性让出主线程），诊断面板可轮询它展示当前进度。
  *
+ * 地表渲染诊断（doc7 §2.2 / doc6 §3.3）导出：
+ *   surfaceSetDebugMode(mode) / surfaceCycleDebugMode() / surfaceGLSnapshot() ——
+ *   经 window.__vfSurfaceDebug 钩子（PlanetSurface3D.init 注册、destroy 注销）操作
+ *   【当前挂载】的地表渲染器；未挂载时返回 { ok:false, reason }，不抛错。
+ *
  * 约束：顶层不触碰 document/window（全部 DOM/全局访问发生在函数体内）；禁用
  * Math.random，全部离散分布由确定性 hash01 生成；本模块只调用渲染层公开 API，
  * 不写任何世界/快照状态。
@@ -785,4 +790,57 @@ export async function runGateTests(container, opts = {}) {
   };
   setProgress(null, 0, results.allPass ? '全部通过' : '存在未通过项');
   return { results };
+}
+
+// —— 地表渲染诊断（doc7 §2.2 三档诊断模式 / doc6 §3.3 状态快照） ——————————————————
+
+/**
+ * 地表渲染器操作钩子的存活探测（钩子由 PlanetSurface3D.init() 注册到
+ * window.__vfSurfaceDebug，destroy() 注销 —— 仅当地表视图已挂载且持有 GL 时存在）。
+ */
+function surfaceHook() {
+  if (typeof window === 'undefined' || !window.__vfSurfaceDebug) return null;
+  return window.__vfSurfaceDebug;
+}
+
+/**
+ * 设置当前挂载地表渲染器的诊断模式（0=off 1=unlit_nocull 2=wireframe_normal
+ * 3=winding_audit）。未挂载地表视图时返回 { ok:false }，不抛错。
+ * @param {number} mode
+ * @returns {{ok:boolean, debugMode?:number, reason?:string}}
+ */
+export function surfaceSetDebugMode(mode) {
+  const hook = surfaceHook();
+  if (!hook) return { ok: false, reason: '地表渲染器未挂载（window.__vfSurfaceDebug 不存在；需先进入地表视图）' };
+  try {
+    return { ok: true, debugMode: hook.setDebugMode(mode) };
+  } catch (e) {
+    return { ok: false, reason: errMsg(e) };
+  }
+}
+
+/** 循环诊断模式 0→1→2→3→0（契约同 surfaceSetDebugMode）。 */
+export function surfaceCycleDebugMode() {
+  const hook = surfaceHook();
+  if (!hook) return { ok: false, reason: '地表渲染器未挂载（window.__vfSurfaceDebug 不存在；需先进入地表视图）' };
+  try {
+    return { ok: true, debugMode: hook.cycleDebugMode() };
+  } catch (e) {
+    return { ok: false, reason: errMsg(e) };
+  }
+}
+
+/**
+ * 采集 GL 状态快照（JSON-able：浏览器/GPU/viewport/FBO 附件/剔除与深度状态/
+ * getError/地形顶点与三角形数/区块数/drawCalls）。未挂载时 snapshot 为 null。
+ * @returns {{ok:boolean, snapshot:object|null, reason?:string}}
+ */
+export function surfaceGLSnapshot() {
+  const hook = surfaceHook();
+  if (!hook) return { ok: false, snapshot: null, reason: '地表渲染器未挂载（window.__vfSurfaceDebug 不存在；需先进入地表视图）' };
+  try {
+    return { ok: true, snapshot: hook.getSnapshot() };
+  } catch (e) {
+    return { ok: false, snapshot: null, reason: errMsg(e) };
+  }
 }
