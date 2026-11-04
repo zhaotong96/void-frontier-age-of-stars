@@ -478,6 +478,10 @@ export class PlanetSurface3D {
     this._vh = 1;
     this._springDist = -1;          // 弹簧臂当前臂长（首帧吸附）
     this._spawnSeq = 0;             // 挖掘粒子批次序号（确定性初速源）
+    // 场景化集成（doc7 TASK-1.2/1.4）：地形/天空/天气改由 PlanetSurfaceScene 绘制，
+    // 本渲染器经 setExternalCamera() 进入「对象独占」模式 —— 仅绘制
+    // 箱体/actor/角色七部件/贴花/特效/挖掘粒子，相机与 VP 由调用方直供。
+    this._extCam = null;
 
     // —— GL 资源（init 建立程序；其余缓冲随 init/destroy 管理） ——
     const glc2 = this.glc;
@@ -874,6 +878,37 @@ export class PlanetSurface3D {
   // —— 相机 ————————————————
 
   /**
+   * 外部相机直供（对象独占模式）：GroundView 场景化集成中，地形/天空由
+   * PlanetSurfaceScene 绘制并权威持有弹簧臂相机；本渲染器仅承担对象 pass，
+   * eye/target/vp 逐帧由调用方下发（与场景同源同空间，均为米制单位）。
+   * 传 null eye 恢复内置弹簧臂相机。
+   * @param {Array<number>|null} eye 眼位 [x,y,z]
+   * @param {Array<number>} [target] 视点 [x,y,z]（无 vp 时用于重建 view）
+   * @param {Float32Array|Array<number>} [vp] 外部 VP 矩阵（16）
+   */
+  setExternalCamera(eye, target, vp) {
+    if (!eye) {
+      this._extCam = null;
+      return;
+    }
+    this._extCam = {
+      eye: [eye[0], eye[1], eye[2]],
+      target: target ? [target[0], target[1], target[2]] : null,
+      vp: vp || null,
+    };
+  }
+
+  /**
+   * 对象独占开关（无外部相机时的场景化模式）：跳过内置相机/清屏/天空/地形，
+   * 仅绘制对象 pass；VP 由每帧 setExternalCamera 下发（GroundView 集成约定：
+   * _initGL 先开 objectOnly，_renderFrame 逐帧先 setExternalCamera 再 draw）。
+   * @param {boolean} on
+   */
+  setObjectOnly(on) {
+    this._objectOnly = !!on;
+  }
+
+  /**
    * 第三人称弹簧臂相机：目标 = 角色胸口，轨道 (yaw/pitch/dist)，
    * 从目标向眼位做 DDA，命中地形即收臂防穿模。
    */
@@ -1085,41 +1120,85 @@ export class PlanetSurface3D {
     const tier = this.tier;
     let dc = 0;
 
-    this._updateCamera(w, h, rd, opts);
     const m = this._m;
-    const eye = this.camera.eye;
+    let eye;
 
-    // —— 0. 双保险清屏（主题地平线色 + 深度） ——
-    // 场景 FBO 清屏唯一所有者是 PostProcessor.beginScene()（8 步契约）；此处为
-    // doc7 §2.2 允许的冗余防御：地表视图自带正确主题色，任何前序状态偏差
-    // （colorMask/scissor/blend 残留）也不至于依赖"天空恰好覆盖所有像素"。
-    // 场景 FBO 已挂 DEPTH_COMPONENT24（TASK-0.1），gl.clear(DEPTH) 自此真实生效。
-    const horizon = this._sky.horizon;
-    gl.clearColor(horizon[0], horizon[1], horizon[2], 1.0);
-    gl.clearDepth(1.0);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    if (this._objectOnly || this._extCam) {
+      // —— 对象独占模式（场景化集成 TASK-1.2/1.4）：外部相机/VP；不清屏、
+      //    不绘天空与地形 —— 清屏唯一所有者仍是 PostProcessor 8 步契约，
+      //    场景绘制权威在 PlanetSurfaceScene。 ——
+      eye = this.camera.eye;
+      if (this._extCam) {
+        eye[0] = this._extCam.eye[0];
+        eye[1] = this._extCam.eye[1];
+        eye[2] = this._extCam.eye[2];
+        if (this._extCam.target) {
+          this.camera.target[0] = this._extCam.target[0];
+          this.camera.target[1] = this._extCam.target[1];
+          this.camera.target[2] = this._extCam.target[2];
+        }
+        if (this._extCam.vp) {
+          m.vp.set(this._extCam.vp);
+        } else if (this._extCam.target) {
+          mat4Perspective(m.proj, 1.05, w / Math.max(1, h), 0.1, 1600);
+          mat4LookAt(m.view, eye, this._extCam.target, [0, 1, 0]);
+          mat4Multiply(m.vp, m.proj, m.view);
+        }
+      }
+      this._vw = w;
+      this._vh = h;
+    } else {
+      this._updateCamera(w, h, rd, opts);
+      eye = this.camera.eye;
 
-    // —— 1. 天空（pass 状态隔离：关深度/不写深度/关混合/关剔除） ——
-    gl.disable(gl.DEPTH_TEST);
-    gl.depthMask(false);
-    gl.disable(gl.BLEND);
-    gl.disable(gl.CULL_FACE);
-    gl.useProgram(this.progSky);
-    const uSky = this._u.sky;
-    gl.uniformMatrix4fv(uSky.uInvVP, false, mat4Invert(m.invVp, m.vp));
-    gl.uniform3f(uSky.uCamPos, eye[0], eye[1], eye[2]);
-    gl.uniform3fv(uSky.uZenith, this._sky.zenith);
-    gl.uniform3fv(uSky.uHorizon, this._sky.horizon);
-    gl.uniform3fv(uSky.uGround, this._sky.ground);
-    gl.uniform3fv(uSky.uSunDir, this._sunDir);
-    gl.uniform3fv(uSky.uSunColor, this._sunColor);
-    gl.uniform1f(uSky.uStars, this._sky.stars);
-    gl.uniform1f(uSky.uTime, time);
-    gl.bindVertexArray(this._skyVao);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-    dc++;
+      // —— 0. 双保险清屏（主题地平线色 + 深度） ——
+      // 场景 FBO 清屏唯一所有者是 PostProcessor.beginScene()（8 步契约）；此处为
+      // doc7 §2.2 允许的冗余防御：地表视图自带正确主题色，任何前序状态偏差
+      // （colorMask/scissor/blend 残留）也不至于依赖"天空恰好覆盖所有像素"。
+      // 场景 FBO 已挂 DEPTH_COMPONENT24（TASK-0.1），gl.clear(DEPTH) 自此真实生效。
+      const horizon = this._sky.horizon;
+      gl.clearColor(horizon[0], horizon[1], horizon[2], 1.0);
+      gl.clearDepth(1.0);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-    // —— 不透明状态基线（地形/建筑/actor/角色共用；进入 pass 前显式声明） ——
+      // —— 1. 天空（pass 状态隔离：关深度/不写深度/关混合/关剔除） ——
+      gl.disable(gl.DEPTH_TEST);
+      gl.depthMask(false);
+      gl.disable(gl.BLEND);
+      gl.disable(gl.CULL_FACE);
+      gl.useProgram(this.progSky);
+      const uSky = this._u.sky;
+      gl.uniformMatrix4fv(uSky.uInvVP, false, mat4Invert(m.invVp, m.vp));
+      gl.uniform3f(uSky.uCamPos, eye[0], eye[1], eye[2]);
+      gl.uniform3fv(uSky.uZenith, this._sky.zenith);
+      gl.uniform3fv(uSky.uHorizon, this._sky.horizon);
+      gl.uniform3fv(uSky.uGround, this._sky.ground);
+      gl.uniform3fv(uSky.uSunDir, this._sunDir);
+      gl.uniform3fv(uSky.uSunColor, this._sunColor);
+      gl.uniform1f(uSky.uStars, this._sky.stars);
+      gl.uniform1f(uSky.uTime, time);
+      gl.bindVertexArray(this._skyVao);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      dc++;
+
+      // —— 2. 地形（单缓冲单 draw call） ——
+      if (this._terr.vertCount > 0) {
+        gl.useProgram(this.progTerrain);
+        const u = this._u.terrain;
+        gl.uniformMatrix4fv(u.uVP, false, m.vp);
+        gl.uniform3fv(u.uSunDir, this._sunDir);
+        gl.uniform3fv(u.uSunColor, this._sunColor);
+        gl.uniform3f(u.uCamPos, eye[0], eye[1], eye[2]);
+        gl.uniform3fv(u.uFogColor, this._fogColor);
+        gl.uniform2f(u.uFogRange, this._fogRange[0], this._fogRange[1]);
+        gl.uniform1f(u.uDebugMode, this._debugMode);
+        gl.bindVertexArray(this._terr.vao);
+        gl.drawArrays(gl.TRIANGLES, 0, this._terr.vertCount);
+        dc++;
+      }
+    }
+
+    // —— 不透明状态基线（对象 pass 共用；进入 pass 前显式声明） ——
     gl.enable(gl.DEPTH_TEST);
     gl.depthFunc(gl.LEQUAL);
     gl.depthMask(true);
@@ -1133,22 +1212,6 @@ export class PlanetSurface3D {
       gl.cullFace(gl.BACK);
     } else {
       gl.disable(gl.CULL_FACE);
-    }
-
-    // —— 2. 地形（单缓冲单 draw call） ——
-    if (this._terr.vertCount > 0) {
-      gl.useProgram(this.progTerrain);
-      const u = this._u.terrain;
-      gl.uniformMatrix4fv(u.uVP, false, m.vp);
-      gl.uniform3fv(u.uSunDir, this._sunDir);
-      gl.uniform3fv(u.uSunColor, this._sunColor);
-      gl.uniform3f(u.uCamPos, eye[0], eye[1], eye[2]);
-      gl.uniform3fv(u.uFogColor, this._fogColor);
-      gl.uniform2f(u.uFogRange, this._fogRange[0], this._fogRange[1]);
-      gl.uniform1f(u.uDebugMode, this._debugMode);
-      gl.bindVertexArray(this._terr.vao);
-      gl.drawArrays(gl.TRIANGLES, 0, this._terr.vertCount);
-      dc++;
     }
 
     // —— 2. 建筑货箱实例（单位盒） ——

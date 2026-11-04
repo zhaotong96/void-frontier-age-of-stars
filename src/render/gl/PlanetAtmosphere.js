@@ -217,9 +217,12 @@ export class PlanetAtmosphere {
     ]);
 
     // —— 天空全屏三角（与 PlanetSurface3D 同式） ——
+    // 注意：raw gl.createBuffer 不接受数据参数（GLCore.createBuffer 才会同时
+    // bufferData），此处必须显式 bindBuffer + bufferData，否则三角顶点为空。
     this._skyVao = glc.createVAO((g) => {
-      const buf = g.createBuffer(new Float32Array([-1, -1, 0, 3, -1, 0, -1, 3, 0]));
+      const buf = g.createBuffer();
       g.bindBuffer(g.ARRAY_BUFFER, buf);
+      g.bufferData(g.ARRAY_BUFFER, new Float32Array([-1, -1, 0, 3, -1, 0, -1, 3, 0]), g.STATIC_DRAW);
       g.enableVertexAttribArray(0);
       g.vertexAttribPointer(0, 3, g.FLOAT, false, 0, 0);
     });

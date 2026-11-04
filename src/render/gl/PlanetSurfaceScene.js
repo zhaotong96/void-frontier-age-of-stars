@@ -163,6 +163,18 @@ export class PlanetSurfaceScene {
     if (this._terrain) this._terrain.setPlanetRadius(r);
   }
 
+  /**
+   * 世界平移透传（场域 → 视图空间）：GroundView 集成中地形场域 512m 中心
+   * (256,256) 需对齐体素空间 (32,32) → offset (-224,0,-224)。相机/对象 pass
+   * 全部留在视图空间；热区/脚步主题载荷仍按场域坐标下发（渲染器内部平移）。
+   * @param {Array<number>} o [x,y,z]
+   * @returns {PlanetSurfaceScene} this
+   */
+  setWorldOffset(o) {
+    if (this._terrain) this._terrain.setWorldOffset(o);
+    return this;
+  }
+
   /** 地形背面剔除开关透传（默认 true；诊断对照视图用） */
   setCullEnabled(enabled) {
     if (this._terrain) this._terrain.setCullEnabled(enabled);
