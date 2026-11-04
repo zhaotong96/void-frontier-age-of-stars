@@ -532,6 +532,7 @@ export const SystemView = {
         deposits: { ...(p.deposits || {}) },
         colonyId: p.colonyId || null,
         orbitIndex: p.orbitIndex ?? 0,
+        moons: Array.isArray(p.moons) ? p.moons : null, // doc7 TASK-4.3：3D 伴生卫星 feed
       }));
 
     const snap = this.app.snapshot;
@@ -548,6 +549,7 @@ export const SystemView = {
         surveyedLevel: lvl,
         dangerRating: sys.dangerRating,
         resourceRating: sys.resourceRating,
+        belts: Array.isArray(sys.belts) ? sys.belts : null, // doc7 TASK-4.3：3D 小行星带 feed
       },
       planets,
       fleets,

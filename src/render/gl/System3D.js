@@ -13,6 +13,9 @@
  *  - 行星：8 类程序化 3D 球面（同一着色器 uCategory 分支）+ GLOW 大气辉光壳层
  *    （背面剔除 + 正面加性菲涅尔）+ gasGiant 冰晶行星环（倾角 20°，带行星本影遮挡）
  *    + 已殖民行星夜半球金色城市灯火与赤道低轨道发光轨道站环；
+ *  - 伴生卫星（doc7 TASK-4.3）：planet.moons（≤3 颗）复用行星本体程序按 kind 类别
+ *    着色，绕行星公转（orbitPhase + time×orbitSpeed）；小行星带（sys.belts）为
+ *    ≤400 实例的 billboard 碎石环（半透明暗岩色，参数由 belt.id 哈希确定性派生）；
  *  - 轨道：3D 圆环线段（倾角 20° 统一），选中提亮；行星按 orbitIndex 均分角 +
  *    tick/opts.time 缓慢公转（纯视觉）；舰队小三角 billboard（阵营色）停靠环；
  *    未解决异常画淡紫虚线信号弧（外缘）；
@@ -96,6 +99,13 @@ const PLANET_R = {
 /** 轨道线颜色（accent #4fd8e8）/ 异常信号弧颜色（淡紫） */
 const ORBIT_RGB = [0.31, 0.847, 0.91];
 const ANOMALY_RGB = [0.494, 0.659, 1.0];
+
+/** 卫星 kind → PLANET_FS uCategory（doc7 TASK-4.3：复用行星本体程序着色） */
+const MOON_CAT = { barren_moon: 0, ice_moon: 2, volcanic_moon: 5, captured_asteroid: 3 };
+/** 小行星带实例容量上限（doc7 TASK-4.3：≤400 实例）与粒子尺寸（世界单位） */
+const BELT_MAX_INSTANCES = 400;
+const BELT_SIZE_BASE = 0.007;
+const BELT_SIZE_SPAN = 0.011;
 
 /** 类别 → 大气壳（GLOW）参数：[shellScale 半径倍数, 强度, tint rgb]
  *  （doc5 §3.1 处方 4：壳层缩放收敛于 1.045–1.09，贴体薄壳由片元菲涅尔塑形） */
@@ -501,6 +511,48 @@ void main() {
     vec3 col = vec3(0.55, 0.85, 1.0) * core * beacon * 1.6;
     fragColor = vec4(col * uHdr, core);
   }
+}
+`;
+
+/**
+ * 小行星带顶点着色器（doc7 TASK-4.3）：实例化 billboard 碎石。
+ * aCorner 为基础四边形角点（divisor 0）；aOrbit/aJitter 为每实例轨道参数
+ * （divisor 1，JS 侧由 belt.id 哈希确定性填充）。轨道倾角与行星轨道一致（20°）。
+ */
+const BELT_VERT = `
+uniform mat4 uMVP;
+uniform vec3 uCamRight;
+uniform vec3 uCamUp;
+uniform float uTime;
+uniform float uIncSin;
+uniform float uIncCos;
+in vec2 aCorner;
+in vec4 aOrbit;   // x=轨道世界半径 y=初始相位 z=角速度(rad/s) w=粒子尺寸
+in vec3 aJitter;  // x=径向偏移 y=竖向偏移 z=色调混合 0..1
+out vec2 vUV;
+out float vTone;
+void main() {
+  float ang = aOrbit.y + uTime * aOrbit.z;
+  float r = aOrbit.x + aJitter.x;
+  vec3 c = vec3(cos(ang) * r, aJitter.y - sin(ang) * r * uIncSin, sin(ang) * r * uIncCos);
+  vec3 w = c + uCamRight * (aCorner.x * aOrbit.w) + uCamUp * (aCorner.y * aOrbit.w);
+  vUV = aCorner;
+  vTone = aJitter.z;
+  gl_Position = uMVP * vec4(w, 1.0);
+}
+`;
+
+/** 小行星带片元：软圆斑暗岩色（径向 alpha 衰减，半透明；HDR 预除） */
+const BELT_FRAG = `precision highp float;
+uniform float uHdr;
+in vec2 vUV;
+in float vTone;
+out vec4 fragColor;
+void main() {
+  float d = dot(vUV, vUV);
+  float a = 1.0 - smoothstep(0.18, 1.0, d);
+  vec3 rock = mix(vec3(0.26, 0.22, 0.19), vec3(0.46, 0.40, 0.34), vTone);
+  fragColor = vec4(rock * a * uHdr, a * 0.85);
 }
 `;
 
@@ -1008,6 +1060,9 @@ export class System3D {
     gl.blendFunc(gl.ONE, gl.ONE);
     this._drawRings(gl, 1, sTime);
 
+    // —— 6b. 小行星带（实例化 billboard 碎石环，半透明暗岩色；≤400 实例） ——
+    this._drawBelts(gl, data, sTime);
+
     // —— 7. 舰队三角 billboard（阵营色，α 缩放加性） ——
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
     this._drawFleets(gl, data, tick, time);
@@ -1043,7 +1098,7 @@ export class System3D {
       this._pl.push({
         id: null, world: new Float32Array(3), radius: 0.1, cat: 0,
         colony: false, selected: false, orbitR: 1, seed: 0, category: 'rocky',
-        unknown: false, ouKey: null, ou: null,
+        unknown: false, ouKey: null, ou: null, moons: [], moonCount: 0,
       });
     }
     for (let i = 0; i < planets.length; i++) {
@@ -1051,7 +1106,10 @@ export class System3D {
       const e = this._pl[i];
       const orbit = Math.max(0, Number(p.orbitIndex) || 0);
       const R = ORBIT_BASE + orbit * ORBIT_STEP;
-      const ang = (orbit / n) * TAU + tick * 0.0004 + time * 0.008;
+      // 黄金角轨道相位（doc5 §3.2 处方 1）：galaxyGen 注入的 p.orbitPhase 优先，
+      // 旧档/缺省回退均分角；tick/time 漂移项不变
+      const baseAng = Number.isFinite(p.orbitPhase) ? p.orbitPhase : (orbit / n) * TAU;
+      const ang = baseAng + tick * 0.0004 + time * 0.008;
       const x = Math.cos(ang) * R;
       const z = Math.sin(ang) * R;
       e.id = p.id;
@@ -1071,6 +1129,29 @@ export class System3D {
       if (e.ouKey !== ouKey || !e.ou) {
         e.ouKey = ouKey;
         e.ou = orbitalUniformsFor(p);
+      }
+      // —— 伴生卫星布局（doc7 TASK-4.3）：≤3 颗，绕行星公转
+      //    （orbitPhase + time×orbitSpeed；orbitRadius 为行星半径倍数） ——
+      const mArr = Array.isArray(p.moons) ? p.moons : null;
+      const mCount = mArr ? Math.min(mArr.length, 4) : 0;
+      while (e.moons.length < mCount) {
+        e.moons.push({ world: new Float32Array(3), radius: 0.02, cat: 0, seed: 0 });
+      }
+      e.moonCount = mCount;
+      for (let m = 0; m < mCount; m++) {
+        const mo = mArr[m] || {};
+        const slot = e.moons[m];
+        const orbR = (Number(mo.orbitRadius) || 1.65) * e.radius;
+        const ma = (Number(mo.orbitPhase) || 0) + time * (Number(mo.orbitSpeed) || 0.5);
+        const mx = Math.cos(ma) * orbR;
+        const mz = Math.sin(ma) * orbR;
+        slot.world[0] = e.world[0] + mx;
+        slot.world[1] = e.world[1] - mz * this._incSin;
+        slot.world[2] = e.world[2] + mz * this._incCos;
+        const rr = Number(mo.radiusRatio);
+        slot.radius = e.radius * (Number.isFinite(rr) ? clamp01(rr) : 0.28);
+        slot.cat = MOON_CAT[mo.kind] != null ? MOON_CAT[mo.kind] : 0;
+        slot.seed = hashSeed(String(mo.id || `${e.id}_m${m}`));
       }
     }
   }
@@ -1153,6 +1234,8 @@ export class System3D {
         'uSeed', 'uTime', 'uMode', 'uHdr', 'uRingLo', 'uRingHi']);
     reg('line', LINE_VERT, LINE_FRAG, { aPos: 0, aT: 1 },
       ['uMVP', 'uColor', 'uDashFreq', 'uTime', 'uHdr']);
+    reg('belt', BELT_VERT, BELT_FRAG, { aCorner: 0, aOrbit: 1, aJitter: 2 },
+      ['uMVP', 'uCamRight', 'uCamUp', 'uTime', 'uIncSin', 'uIncCos', 'uHdr']);
 
     // —— 单位四边形（CORONA/BH/BG/BLIT 共用：aPos vec2，TRIANGLE_STRIP 4 顶点） ——
     this._vaoQuad = glc.createFullscreenVAO();
@@ -1235,6 +1318,26 @@ export class System3D {
       g.enableVertexAttribArray(1);
       g.vertexAttribPointer(1, 1, g.FLOAT, false, 16, 12);
     });
+
+    // —— 小行星带（doc7 TASK-4.3）：基础四边形（TRIANGLE_STRIP）+ 每实例轨道参数
+    //    （动态缓冲，belt 签名变化时重填；aOrbit/aJitter 实例步进 divisor 1） ——
+    this._beltData = new Float32Array(BELT_MAX_INSTANCES * 7);
+    this._beltBuf = glc.createBuffer(this._beltData, gl.DYNAMIC_DRAW);
+    const beltCorner = glc.createBuffer(new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]));
+    this._vaoBelt = glc.createVAO((g) => {
+      g.bindBuffer(g.ARRAY_BUFFER, beltCorner);
+      g.enableVertexAttribArray(0);
+      g.vertexAttribPointer(0, 2, g.FLOAT, false, 0, 0);
+      g.bindBuffer(g.ARRAY_BUFFER, this._beltBuf);
+      g.enableVertexAttribArray(1);
+      g.vertexAttribPointer(1, 4, g.FLOAT, false, 28, 0);
+      g.vertexAttribDivisor(1, 1);
+      g.enableVertexAttribArray(2);
+      g.vertexAttribPointer(2, 3, g.FLOAT, false, 28, 16);
+      g.vertexAttribDivisor(2, 1);
+    });
+    this._beltKey = null;
+    this._beltCount = 0;
 
     // —— 日冕离屏目标 ——
     this._rebuildCoronaTarget(this._coronaRes);
@@ -1557,6 +1660,27 @@ export class System3D {
         gl.uniform1f(P.u.uNightLights, ou.nightLights);
       }
       gl.drawElements(gl.TRIANGLES, this._icoCount, gl.UNSIGNED_SHORT, 0);
+      // —— 伴生卫星（doc7 TASK-4.3）：复用行星本体程序，kind → uCategory 着色；
+      //    独立重置主题/殖民/夜光 uniforms（uThemeOn=0 走类别分支原样） ——
+      for (let m = 0; m < e.moonCount; m++) {
+        const mo = e.moons[m];
+        mat4TRS(s.model, mo.world[0], mo.world[1], mo.world[2],
+          0, time * 0.3 + mo.seed * 9.0, 0, mo.radius);
+        mat4Multiply(s.vm, s.view, s.model);
+        mat4Multiply(s.vp, s.proj, s.vm);
+        s.nm[0] = s.vm[0]; s.nm[1] = s.vm[1]; s.nm[2] = s.vm[2];
+        s.nm[3] = s.vm[4]; s.nm[4] = s.vm[5]; s.nm[5] = s.vm[6];
+        s.nm[6] = s.vm[8]; s.nm[7] = s.vm[9]; s.nm[8] = s.vm[10];
+        gl.uniformMatrix4fv(P.u.uMVP, false, s.vp);
+        gl.uniformMatrix4fv(P.u.uModel, false, s.model);
+        gl.uniformMatrix3fv(P.u.uNormalMatrix, false, s.nm);
+        gl.uniform1i(P.u.uCategory, mo.cat);
+        gl.uniform1f(P.u.uSeed, mo.seed);
+        gl.uniform1f(P.u.uColony, 0.0);
+        gl.uniform1f(P.u.uThemeOn, 0.0);
+        gl.uniform1f(P.u.uNightLights, 0.0);
+        gl.drawElements(gl.TRIANGLES, this._icoCount, gl.UNSIGNED_SHORT, 0);
+      }
     }
   }
 
@@ -1643,6 +1767,81 @@ export class System3D {
       gl.uniform1f(P.u.uSeed, e.seed);
       gl.uniform1i(P.u.uMode, mode);
       gl.drawArrays(gl.TRIANGLES, 0, mode === 0 ? 96 * 6 : 64 * 6);
+    }
+  }
+
+  /**
+   * 小行星带：实例化 billboard 碎石环（doc7 TASK-4.3；≤400 实例，半透明暗岩色）。
+   * sys.belts 的 orbitRadius 为轨道槽位单位 → 世界半径 = ORBIT_BASE + slot×ORBIT_STEP；
+   * 实例参数由 belt.id 哈希确定性派生（无任何随机源），仅 belt 签名变化时重填缓冲。
+   */
+  _drawBelts(gl, data, time) {
+    const belts = (data && data.system && Array.isArray(data.system.belts))
+      ? data.system.belts : [];
+    if (belts.length === 0) {
+      this._beltCount = 0;
+      return;
+    }
+    let sig = '';
+    for (const b of belts) {
+      sig += `${b && b.id}|${b && b.orbitRadius}|${b && b.density}|${b && b.spread};`;
+    }
+    if (sig !== this._beltKey) {
+      this._beltKey = sig;
+      this._fillBeltInstances(belts);
+    }
+    if (this._beltCount === 0) return;
+    const s = this._s;
+    const P = this._p.belt;
+    mat4Multiply(s.vp, s.proj, s.view);
+    gl.useProgram(P.prog);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); // 前序轨道站环残留加性混合，此处恢复 α 混合
+    gl.bindVertexArray(this._vaoBelt);
+    gl.uniformMatrix4fv(P.u.uMVP, false, s.vp);
+    gl.uniform3fv(P.u.uCamRight, s.right);
+    gl.uniform3fv(P.u.uCamUp, s.up);
+    gl.uniform1f(P.u.uTime, time);
+    gl.uniform1f(P.u.uIncSin, this._incSin);
+    gl.uniform1f(P.u.uIncCos, this._incCos);
+    gl.uniform1f(P.u.uHdr, this._hdr);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this._beltCount);
+  }
+
+  /**
+   * 填充带实例缓冲（确定性）：每带 count = round(60 + density×120)，
+   * 总量钳制 BELT_MAX_INSTANCES；径向/竖向散布由 belt.spread（槽位单位）换算。
+   */
+  _fillBeltInstances(belts) {
+    const fd = this._beltData;
+    let n = 0;
+    for (const b of belts) {
+      if (!b || !Number.isFinite(Number(b.orbitRadius))) continue;
+      const R = ORBIT_BASE + Math.max(0, Number(b.orbitRadius)) * ORBIT_STEP;
+      const spread = Math.max(0.01, Number(b.spread) || 0.12) * ORBIT_STEP;
+      const dens = clamp01(Number(b.density) || 1);
+      const budget = Math.min(BELT_MAX_INSTANCES - n, Math.round(60 + dens * 120));
+      for (let i = 0; i < budget; i++) {
+        const h1 = hashSeed(`${b.id}#r${i}`);
+        const h2 = hashSeed(`${b.id}#p${i}`);
+        const h3 = hashSeed(`${b.id}#y${i}`);
+        const h4 = hashSeed(`${b.id}#s${i}`);
+        const o = n * 7;
+        fd[o] = R;                                          // 轨道世界半径
+        fd[o + 1] = h2 * TAU;                               // 初始相位
+        fd[o + 2] = 0.055 / Math.pow(Math.max(0.4, R), 0.65); // Kepler 近似角速度（内快外慢）
+        fd[o + 3] = BELT_SIZE_BASE + h4 * BELT_SIZE_SPAN;   // 粒子尺寸
+        fd[o + 4] = (h1 - 0.5) * 2.0 * spread;              // 径向偏移
+        fd[o + 5] = (h3 - 0.5) * 2.0 * spread * 0.32;       // 竖向厚度
+        fd[o + 6] = h4;                                     // 色调混合
+        n++;
+      }
+      if (n >= BELT_MAX_INSTANCES) break;
+    }
+    this._beltCount = n;
+    if (n > 0) {
+      const gl = this.gl;
+      gl.bindBuffer(gl.ARRAY_BUFFER, this._beltBuf);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, fd, 0, n * 7);
     }
   }
 
