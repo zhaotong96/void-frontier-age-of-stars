@@ -10,6 +10,12 @@
  *  - 场景切换 / 停止均为 1.5s 线性交叉淡化；
  *  - ground 场景的偶发鸟鸣/机械短音由确定性整数哈希触发（绝不使用 Math.random）；
  *  - 本模块顶层不触碰 document/window：AudioContext 与定时器均延迟到方法调用中创建。
+ *
+ * TASK-4.3 主题环境音层（setAmbientTheme / stopAmbientTheme）：
+ *  - 单一合成声库（2-3 振荡器 + 滤波噪声床 + 慢速 LFO）按 18 主题预设参数化，
+ *    未知主题回退 generic；与场景层并行、独立 1.5s 交叉淡化；
+ *  - 复用 musicVolume 总线（master×music 静音即时生效，可关闭）与首次交互解锁
+ *    （挂起期间暂存主题，解锁后补启）；纯表现层，零 gameplay 影响。
  */
 
 const LS_KEY = 'vf-audio-v1';
@@ -25,6 +31,35 @@ const SCENE_LEVEL = {
   combat: 0.3,
   ground: 0.5,
   menu: 0.5,
+};
+
+/**
+ * 主题环境音预设（doc7 TASK-4.3：18 主题 Web Audio 合成环境音）。
+ * 单一声库（2-3 振荡器 + 滤波噪声床 + 慢速 LFO）按主题参数化：
+ *  o: 振荡器组 [type, freq, gain]（≤3）；n: 噪声床 [filterType, freq, Q, gain]；
+ *  l: 慢速 LFO [rateHz, 主振荡器音高深度Hz]；lvl: 层电平（经 music 总线二次缩放）。
+ * 未知主题 → generic。全部实时合成，零外部资产。
+ */
+const THEME_AMBIENT_PRESETS = {
+  abyssal_ocean: { o: [['sine', 48, 0.5], ['sine', 72.4, 0.22]], n: ['lowpass', 150, 0.7, 0.14], l: [0.05, 3.5], lvl: 0.5 },
+  permafrost_furnace: { o: [['sine', 110, 0.3], ['sine', 164.8, 0.12]], n: ['bandpass', 520, 0.8, 0.2], l: [0.11, 5], lvl: 0.44 },
+  red_regolith_frontier: { o: [['sine', 69.3, 0.34]], n: ['bandpass', 310, 0.7, 0.24], l: [0.07, 4], lvl: 0.46 },
+  dry_night_polar: { o: [['sine', 58.3, 0.3], ['sine', 58.9, 0.3]], n: ['lowpass', 120, 0.7, 0.07], l: [0.03, 1.2], lvl: 0.4 },
+  sulfur_marsh: { o: [['sine', 92, 0.3], ['sine', 138.6, 0.12]], n: ['lowpass', 360, 0.8, 0.2], l: [1.9, 9], lvl: 0.46 },
+  biolume_canopy: { o: [['sine', 196, 0.2], ['sine', 294, 0.14], ['sine', 392, 0.09]], n: ['lowpass', 420, 0.7, 0.12], l: [0.09, 3], lvl: 0.42 },
+  obsidian_lava: { o: [['sawtooth', 55, 0.22], ['sine', 41.2, 0.3]], n: ['lowpass', 110, 0.7, 0.2], l: [0.13, 4.5], lvl: 0.5 },
+  prism_crystal: { o: [['sine', 880, 0.08], ['sine', 1318.5, 0.05], ['sine', 220, 0.16]], n: ['bandpass', 2400, 3, 0.05], l: [0.6, 2.2], lvl: 0.36 },
+  salt_mirror_desert: { o: [['sine', 98, 0.26]], n: ['bandpass', 740, 0.8, 0.2], l: [0.06, 9], lvl: 0.44 },
+  cryomethane_sea: { o: [['sine', 52, 0.36], ['sine', 78, 0.18]], n: ['lowpass', 190, 0.7, 0.2], l: [0.08, 2.8], lvl: 0.5 },
+  tidal_lock_dusk: { o: [['sine', 65.4, 0.3], ['sine', 130.8, 0.14]], n: ['bandpass', 260, 0.8, 0.16], l: [0.05, 3], lvl: 0.44 },
+  cloud_giant_atolls: { o: [['sawtooth', 61.7, 0.2], ['sine', 46.2, 0.3]], n: ['lowpass', 330, 0.7, 0.26], l: [0.16, 6], lvl: 0.5 },
+  fungal_catacombs: { o: [['sine', 110, 0.24], ['sine', 220.5, 0.1]], n: ['lowpass', 210, 0.8, 0.18], l: [0.8, 6], lvl: 0.44 },
+  ancient_megastructure: { o: [['square', 82.4, 0.09], ['sawtooth', 41.2, 0.2]], n: ['bandpass', 950, 2.2, 0.07], l: [0.12, 3.5], lvl: 0.44 },
+  glassstorm_barrens: { o: [['sine', 87.3, 0.24]], n: ['bandpass', 1450, 1.1, 0.2], l: [0.22, 8], lvl: 0.48 },
+  magnetar_aurora: { o: [['sine', 43.7, 0.34], ['sine', 65.4, 0.16]], n: ['bandpass', 3200, 4, 0.045], l: [0.13, 2.5], lvl: 0.46 },
+  canopy_colossus: { o: [['sine', 146.8, 0.2], ['sine', 220, 0.12]], n: ['lowpass', 520, 0.7, 0.2], l: [0.18, 4], lvl: 0.44 },
+  fractured_moon: { o: [['sine', 52, 0.26], ['sine', 52.35, 0.2]], n: ['bandpass', 180, 1, 0.06], l: [0.04, 1.1], lvl: 0.38 },
+  generic: { o: [['sine', 62, 0.3], ['sine', 93, 0.14]], n: ['lowpass', 240, 0.7, 0.16], l: [0.08, 3], lvl: 0.44 },
 };
 
 /** 确定性整数哈希 → [0,1)（ground 偶发事件触发源；绝不使用 Math.random） */
@@ -252,13 +287,21 @@ export class AudioManager {
     this._currentScene = null;  // 已应用场景名
     this._desiredScene = null;  // AudioContext 挂起态下暂存的目标场景
     this._noiseBuf = null;      // 共享白噪声缓冲（懒建，全场景复用）
+    // —— 主题环境音层状态（doc7 TASK-4.3：setAmbientTheme） ——
+    this._themeAmbient = null;  // 当前主题层句柄（与场景层并行、独立交叉淡化）
+    this._currentTheme = null;  // 已应用主题 id
+    this._desiredTheme = null;  // 挂起态下暂存的主题 id
     // 首次交互解锁
     const unlock = () => {
       this._ensureCtx();
       if (this.ctx && this.ctx.state === 'suspended') {
-        this.ctx.resume().then(() => this._applyDesiredScene()).catch(() => { /* 保持挂起 */ });
+        this.ctx.resume().then(() => {
+          this._applyDesiredScene();
+          this._applyDesiredTheme();
+        }).catch(() => { /* 保持挂起 */ });
       } else {
         this._applyDesiredScene();
+        this._applyDesiredTheme();
       }
       window.removeEventListener('pointerdown', unlock);
       window.removeEventListener('keydown', unlock);
@@ -331,6 +374,113 @@ export class AudioManager {
   /** 独立音乐音量总线（0..1；持久化与实时增益一并生效） */
   setMusicVolume(v) {
     this.setVolume('music', v);
+  }
+
+  // ———— 主题环境音层（doc7 TASK-4.3：18 主题合成环境音） ————
+
+  /**
+   * 应用 / 切换行星主题环境音层（单一合成声库按主题预设参数化）。
+   * 与场景层（startAmbient）并行、独立 1.5s 交叉淡化；经 _musicBus 出总输出，
+   * 既有静音/音量设置即时生效；AudioContext 未解锁时暂存，首次交互后自动补启。
+   * 纯表现层，零 gameplay 影响。未知主题回退 generic 预设。
+   * @param {string|null} themeId planet.primaryThemeId（null/空 = 停止主题层）
+   */
+  setAmbientTheme(themeId) {
+    const id = themeId ? String(themeId) : null;
+    this._desiredTheme = id;
+    if (!id) {
+      this.stopAmbientTheme();
+      return;
+    }
+    this._ensureCtx();
+    if (!this.ctx) return;
+    if (this.ctx.state !== 'running') {
+      if (this.ctx.state === 'suspended') {
+        this.ctx.resume().then(() => this._applyDesiredTheme()).catch(() => { /* 保持挂起 */ });
+      }
+      return;
+    }
+    this._applyThemeLayer(id);
+  }
+
+  /** 停止主题环境音层（1.5s 淡出后释放全部节点） */
+  stopAmbientTheme() {
+    this._desiredTheme = null;
+    if (!this.ctx || !this._themeAmbient) return;
+    this._fadeOutDispose(this._themeAmbient);
+    this._themeAmbient = null;
+    this._currentTheme = null;
+  }
+
+  /** AudioContext 就绪后补启挂起期间请求的主题层 */
+  _applyDesiredTheme() {
+    if (this._desiredTheme && this.ctx && this.ctx.state === 'running') {
+      this._applyThemeLayer(this._desiredTheme);
+    }
+  }
+
+  /** 构建/切换主题层：声库 = 振荡器组（首振荡器受慢速 LFO 音高调制）+ 滤波噪声床 */
+  _applyThemeLayer(themeId) {
+    if (!this.ctx || !this._musicBus || this.ctx.state !== 'running') return;
+    if (this._currentTheme === themeId && this._themeAmbient) return;
+    if (this._themeAmbient) {
+      this._fadeOutDispose(this._themeAmbient);
+      this._themeAmbient = null;
+    }
+    const preset = THEME_AMBIENT_PRESETS[themeId] || THEME_AMBIENT_PRESETS.generic;
+    const ctx = this.ctx;
+    const out = ctx.createGain();
+    out.gain.value = 0.0001; // 交叉淡化起点
+    out.connect(this._musicBus);
+    const kit = { stops: [], noise: this._noiseBuffer(ctx) };
+    for (let i = 0; i < preset.o.length && i < 3; i++) {
+      const [type, freq, gain] = preset.o[i];
+      const osc = ctx.createOscillator();
+      osc.type = type;
+      osc.frequency.value = freq;
+      const g = ctx.createGain();
+      g.gain.value = gain;
+      osc.connect(g).connect(out);
+      if (i === 0 && preset.l) {
+        const lfo = ctx.createOscillator();
+        lfo.type = 'sine';
+        lfo.frequency.value = preset.l[0];
+        const depth = ctx.createGain();
+        depth.gain.value = preset.l[1];
+        lfo.connect(depth).connect(osc.frequency);
+        lfo.start();
+        kit.stops.push(lfo);
+      }
+      osc.start();
+      kit.stops.push(osc);
+    }
+    const noise = ctx.createBufferSource();
+    noise.buffer = kit.noise;
+    noise.loop = true;
+    const nf = ctx.createBiquadFilter();
+    nf.type = preset.n[0];
+    nf.frequency.value = preset.n[1];
+    nf.Q.value = preset.n[2];
+    const ng = ctx.createGain();
+    ng.gain.value = preset.n[3];
+    noise.connect(nf).connect(ng).connect(out);
+    noise.start();
+    kit.stops.push(noise);
+    const handle = {
+      out,
+      level: preset.lvl,
+      dispose: () => {
+        for (const snode of kit.stops) {
+          try { snode.stop(); } catch { /* 已停止的源重复 stop 会抛错，忽略 */ }
+        }
+        try { out.disconnect(); } catch { /* 已断开 */ }
+      },
+    };
+    this._themeAmbient = handle;
+    this._currentTheme = themeId;
+    const t = ctx.currentTime;
+    handle.out.gain.setValueAtTime(0.0001, t);
+    handle.out.gain.linearRampToValueAtTime(handle.level, t + AMBIENT_XFADE_SEC);
   }
 
   // ———— 环境音内部实现 ————

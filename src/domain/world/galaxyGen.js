@@ -6,19 +6,24 @@
  *  2. k 近邻候选航路 + 长边剪除 + 连通性修复（UnionFind）
  *  3. 按空间区块分配恒星类型 / 资源带 / 危险度
  *  4. 生成行星槽位、环境与矿藏
- *  5. 异常点布置
- *  6. 文明出生点分配（贪心最远点 + 公平性验证，含扩张路径检查）
+ *  5. 伴生卫星 / 小行星带 / 黄金角轨道相位（doc5 §3.2 处方 1，行星与星系子流）
+ *  6. 异常点布置
+ *  7. 文明出生点分配（贪心最远点 + 公平性验证，含扩张路径检查）
  *
  * 全程使用 world.rng（xoshiro128**），同种子同配置结果完全一致。
  */
 
-import { RNG } from '../../core/rng.js';
+import {
+  RNG, seedFromNumber, float as subFloat, int as subInt, chance as subChance,
+} from '../../core/rng.js';
 import { clamp, dist, safeDivide } from '../../core/math.js';
 import { kNearest, UnionFind, connectedComponents } from '../../core/spatial.js';
 import { createEntity } from '../entities/registry.js';
 import { BAL } from '../../content/constants.js';
 import { generatePlanetPois } from '../ground/planetPOI.js';
 import { assignTheme, THEME_ASSIGNMENT_VERSION } from '../../content/planetThemes.js';
+import { derivePlanetSeeds } from '../ground/planetSeeds.js';
+import { hash32 } from '../ground/SurfaceSandbox.js';
 
 export const STAR_TYPES = [
   { id: 'yellowDwarf', name: '黄矮星', weight: 34, habitZone: 1.0, energy: 1.0, danger: 0, scanNoise: 0.1 },
@@ -45,6 +50,116 @@ export const PLANET_CATEGORIES = [
 const NAME_A = ['泽', '维', '诺', '卡', '塞', '苍', '冥', '翎', '孤', '川', '岚', '珀', '烬', '泓', '曜', '桉', '湮', '缔', '穹', '犁'];
 const NAME_B = ['尔', '拉', '昆', '瑟', '纳', '托', '菲', '隆', '伽', '希', '德', '穆', '叶', '瑞', '翁', '珞'];
 const NUMERALS = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI', 'XII'];
+
+/* ========================= 伴生卫星与小行星带（doc5 §3.2 处方 1 / P3-01） ========================= */
+
+/** 黄金角（行星轨道初始相位散布，doc5 §3.2） */
+const GOLDEN_ANGLE = 2.399963229728653;
+const TAU = Math.PI * 2;
+/** 卫星类别池（doc5 §3.2 处方 1） */
+export const MOON_KINDS = ['barren_moon', 'ice_moon', 'volcanic_moon', 'captured_asteroid'];
+/** 卫星概率/数量参数（doc5 §3.2 处方 1） */
+export const MOON_SPEC = {
+  chanceGasGiant: 0.85,
+  chanceOther: 0.35,
+  maxGasGiant: 3,
+  maxLarge: 2,    // radiusClass >= 3
+  maxSmall: 1,
+  radiusRatioBase: 0.22,
+  radiusRatioSpan: 0.14,
+  orbitBase: 1.65,
+  orbitStep: 0.55,
+};
+/** 小行星带出现概率按恒星光谱（doc5 §3.2 处方 1；中子星/脉冲星同档 0.90） */
+export const BELT_CHANCE = {
+  yellowDwarf: 0.65, redDwarf: 0.35, blueGiant: 0.80, whiteDwarf: 0.75,
+  neutronStar: 0.90, pulsar: 0.90, blackHole: 0.85,
+};
+const BELT_CHANCE_DEFAULT = 0.55;
+/** 天体子流盐（planetSeed 派生；与 planetSeeds.js 各 salt 互异） */
+const CELESTIAL_SALT = 0x27d4eb2f;
+
+function round4(v) {
+  return Math.round(v * 10000) / 10000;
+}
+
+/**
+ * 行星伴生天体生成（纯函数：只读 world.seed 与行星字段，绝不读写 world.rng）。
+ * 子流 = seedFromNumber(derivePlanetSeeds(world, planet.id).planetSeed ^ CELESTIAL_SALT)。
+ * 产出：
+ *  - orbitPhase：黄金角初始轨道相位（doc5 §3.2 处方 1），渲染侧 _layout 优先消费；
+ *  - moons：0..3 颗卫星（gasGiant ≤3 / radiusClass≥3 ≤2 / 其余 ≤1；出现率 0.85/0.35），
+ *    kind ∈ MOON_KINDS，radiusRatio ∈ [0.22, 0.36]，orbitRadius = 1.65 + m×0.55
+ *    （行星半径倍数），orbitSpeed/orbitPhase 由子流派生。JSON-safe，随存档持久化。
+ * @param {{seed:number}} world 世界实体（只读 world.seed）
+ * @param {{id:string, category:string, radiusClass?:number, orbitIndex?:number}} planet 行星档案
+ * @returns {{orbitPhase:number, moons:Array<{id:string,kind:string,radiusRatio:number,orbitRadius:number,orbitSpeed:number,orbitPhase:number}>}}
+ */
+export function generatePlanetCelestials(world, planet) {
+  const seeds = derivePlanetSeeds(world, planet.id);
+  const sub = seedFromNumber(((seeds.planetSeed >>> 0) ^ CELESTIAL_SALT) >>> 0);
+  const orbit = Math.max(0, Number(planet.orbitIndex) || 0);
+  const orbitPhase = (((orbit * GOLDEN_ANGLE) + subFloat(sub) * 0.85) % TAU + TAU) % TAU;
+
+  const gasGiant = planet.category === 'gasGiant';
+  const maxMoons = gasGiant
+    ? MOON_SPEC.maxGasGiant
+    : ((Number(planet.radiusClass) || 1) >= 3 ? MOON_SPEC.maxLarge : MOON_SPEC.maxSmall);
+  const moonChance = gasGiant ? MOON_SPEC.chanceGasGiant : MOON_SPEC.chanceOther;
+  const moons = [];
+  if (subChance(sub, moonChance)) {
+    const count = 1 + subInt(sub, maxMoons);
+    for (let m = 0; m < count; m++) {
+      const radiusRatio = round4(MOON_SPEC.radiusRatioBase + subFloat(sub) * MOON_SPEC.radiusRatioSpan);
+      const speed = (0.85 - m * 0.18) + subFloat(sub) * 0.12;
+      moons.push({
+        id: `${planet.id}_moon_${m + 1}`,
+        kind: MOON_KINDS[subInt(sub, MOON_KINDS.length)],
+        radiusRatio,
+        orbitRadius: round4(MOON_SPEC.orbitBase + m * MOON_SPEC.orbitStep),
+        orbitSpeed: round4(Math.max(0.12, speed)),
+        orbitPhase: round4(subFloat(sub) * TAU) % TAU,
+      });
+    }
+  }
+  return { orbitPhase: round4(orbitPhase) % TAU, moons };
+}
+
+/**
+ * 星系小行星带生成（纯函数：只读 world.seed / sys.id / star.typeId，绝不读写 world.rng）。
+ * 出现率按恒星光谱（BELT_CHANCE）；blueGiant 为「双层富金属碎石带」（同率双带）。
+ * orbitRadius 为轨道槽位单位（渲染侧世界半径 = ORBIT_BASE + slot×ORBIT_STEP），
+ * midOrbit = max(1.5, floor(行星数×0.55)+0.5)（doc5 §3.2 处方 1）。
+ * richRes：blueGiant/neutronStar/pulsar → heavyMetal，否则 ferro；
+ * density = round((0.5 + rich×0.6)×100)/100；spread ∈ [0.10, 0.18] 槽位单位。
+ * @param {{seed:number}} world 世界实体（只读 world.seed）
+ * @param {{id:string, star?:{typeId?:string}}} sys 星系实体（只需 id 与 star.typeId）
+ * @param {number} richness 星系资源富集度（galaxyGen 的 gaussField 原值 0..1.6）
+ * @param {number} planetCount 该星系行星数
+ * @returns {Array<{id:string,orbitRadius:number,richRes:string,density:number,spread:number}>}
+ */
+export function generateSystemBelts(world, sys, richness, planetCount) {
+  const typeId = (sys && sys.star && sys.star.typeId) || null;
+  const prob = BELT_CHANCE[typeId] != null ? BELT_CHANCE[typeId] : BELT_CHANCE_DEFAULT;
+  const sub = seedFromNumber((((world && world.seed) >>> 0) ^ hash32(`belts:${sys.id}`)) >>> 0);
+  if (!subChance(sub, prob)) return [];
+  const midOrbit = Math.max(1.5, Math.floor(Math.max(0, planetCount) * 0.55) + 0.5);
+  const richRes = (typeId === 'blueGiant' || typeId === 'neutronStar' || typeId === 'pulsar')
+    ? 'heavyMetal' : 'ferro';
+  const density = Math.round((0.5 + Math.max(0, richness) * 0.6) * 100) / 100;
+  const layers = typeId === 'blueGiant' ? 2 : 1;
+  const belts = [];
+  for (let k = 0; k < layers; k++) {
+    belts.push({
+      id: `${sys.id}_belt_${k + 1}`,
+      orbitRadius: Math.round((midOrbit + k * 0.85) * 100) / 100,
+      richRes,
+      density,
+      spread: round4(0.10 + subFloat(sub) * 0.08),
+    });
+  }
+  return belts;
+}
 
 function weightedPick(world, table) {
   let total = 0;
@@ -210,8 +325,16 @@ export function generateGalaxy(world, config = {}) {
       // 只消费 derivePlanetSeeds 子流，不触碰 world.rng 主序列
       // （POI 池在 primaryThemeId 就绪后取主题池，缺省回退类别池）
       planet.pois = generatePlanetPois(world, planet, star);
+      // 伴生卫星 + 黄金角轨道相位（doc5 §3.2 处方 1 / P3-01 / doc7 TASK-4.3）：
+      // 行星子流确定性派生，绝不触碰 world.rng（JSON-safe，随存档持久化）
+      const cel = generatePlanetCelestials(world, planet);
+      planet.orbitPhase = cel.orbitPhase;
+      planet.moons = cel.moons;
       sys.planetIds.push(planet.id);
     }
+
+    // 小行星带（doc5 §3.2 处方 1）：按恒星光谱概率；同样只消费独立子流
+    sys.belts = generateSystemBelts(world, sys, rich, nPlanets);
 
     // 异常点槽位（异常实体由 exploration 阶段在扫描时揭示）
     if (RNG.chance(world, BAL.galaxy.anomalyBaseChance + rich * 0.06)) {
