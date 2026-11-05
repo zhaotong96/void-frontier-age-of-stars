@@ -57,6 +57,8 @@ import { ensurePlanetPois, unexploredPoiCount } from '../../domain/ground/planet
 import { createTerrainEdits, applyEdit, attachTerrainEdits, deserializeEdits, rebuildDirtyChunks } from '../../domain/ground/terrainEdits.js';
 import { sampleTerrain, raycastTerrain } from '../../domain/ground/surfaceQueries.js';
 import { createGroundMission, stepMission, getMissionView } from '../../domain/ground/GroundMission.js';
+import { getSiteInstance } from '../../domain/ground/missionSiteFactory.js';
+import { blueprintsForPlanet } from '../../content/missionSites.js';
 import { creditColony, debitColony } from '../../domain/economy/ledger.js';
 import { MISSION_TEMPLATES, findMissionTemplate } from '../../content/missions.js';
 import { BUILDINGS } from '../../content/buildings.js';
@@ -749,12 +751,34 @@ export const GroundView = {
     const w = this.app.world;
     this.planet = planet;
     this.sw = createSurfaceWorld(w, planet.id);   // 种子 = world.seed ^ hash32(planetId)：同 seed 同地貌
+    // —— 人工任务核心蓝图实例化（doc7 TASK-2.2：SDF 三层关卡 + 首屏构图） ——
+    const bp = blueprintsForPlanet(planet, planet.primaryThemeId || null)[0] || null;
+    this._site = bp ? getSiteInstance(w, planet.id, bp.id) : null;
     // —— 连续三角网格场域（doc7 §3；体素补丁仅作矿脉/结构数据底层，不再承担视觉） ——
-    this.field = buildTerrainField(w, planet.id, {});
+    this.field = buildTerrainField(w, planet.id, {
+      profile: this._site ? this._site.blueprint.terrainProfile : undefined,
+      siteModifier: this._site ? this._site.siteModifier : undefined,
+    });
     this._digDents = new Map();                   // 采掘凹陷（列键 → 次数），siteModifier 消费
     this._placedVoxels = new Map();               // 已放置结构体素（列键 → {x,y,z}，占位盒渲染）
     this._springDist = -1;                        // 场域弹簧臂臂长（首帧吸附）
-    this.field.siteModifier = (fx, fz, base) => this._fieldSiteModifier(fx, fz, base);
+    const baseSiteMod = this._site ? this._site.siteModifier : null;
+    this.field.siteModifier = (fx, fz, base) => {
+      let siteDy = 0;
+      let eff = base;
+      if (baseSiteMod) {
+        const m = baseSiteMod(fx, fz, base);
+        if (m && Number.isFinite(m.dy)) {
+          siteDy = m.dy;
+          eff = { ...base, y: (Number.isFinite(base.y) ? base.y : 0) + siteDy };
+        }
+      }
+      const dent = this._fieldSiteModifier(fx, fz, eff);
+      // 总 dy = 站点 SDF dy + 采掘凹陷 dy（terrainField 仅应用单层 mod.dy）
+      const dentDy = dent && Number.isFinite(dent.dy) ? dent.dy : 0;
+      const total = siteDy + dentDy;
+      return total !== 0 ? { dy: total } : null;
+    };
     this.colony = Object.values(w.entities.colonies || {})
       .find((c) => c.planetId === planet.id) || null;
     this.mission = mission || null;
@@ -773,10 +797,23 @@ export const GroundView = {
     c.state = 'idle';
     c.fuel = 100;
     if (!Number.isFinite(c.y)) c.y = 8;           // 场外兜底（理论不可达：出生列恒在场内）
-    // 相机置于角色背后（面向 -Z 时 yaw=0）
+    // 相机置于角色背后；首屏构图（doc7 §5.2）：任务模式且存在站点蓝图时，
+    // yaw 自动对准 primaryObjective 主视觉地标（着陆 2 秒内可读局势）。
     this.cam.yaw = 0;
     this.cam.pitch = 0.5;
     this.cam.dist = 9;
+    if (this._site && this._site.site && this._site.site.anchors) {
+      const pri = this._site.site.anchors.primaryObjective;
+      if (pri) {
+        const wx = pri.x - FIELD_OFFSET;
+        const wz = pri.z - FIELD_OFFSET;
+        const dx = wx - c.x;
+        const dz = wz - c.z;
+        if (Math.hypot(dx, dz) > 4) {
+          this.cam.yaw = Math.atan2(-dx, -dz);
+        }
+      }
+    }
 
     // —— 画布与 GL ——
     const canvasWrap = el('div', { class: 'vf-view-canvas' });

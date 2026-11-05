@@ -25414,6 +25414,8 @@ const { ensurePlanetPois: ensurePlanetPois, unexploredPoiCount: unexploredPoiCou
 const { createTerrainEdits: createTerrainEdits, applyEdit: applyEdit, attachTerrainEdits: attachTerrainEdits, deserializeEdits: deserializeEdits, rebuildDirtyChunks: rebuildDirtyChunks } = __require("src/domain/ground/terrainEdits.js");
 const { sampleTerrain: sampleTerrain, raycastTerrain: raycastTerrain } = __require("src/domain/ground/surfaceQueries.js");
 const { createGroundMission: createGroundMission, stepMission: stepMission, getMissionView: getMissionView } = __require("src/domain/ground/GroundMission.js");
+const { getSiteInstance: getSiteInstance } = __require("src/domain/ground/missionSiteFactory.js");
+const { blueprintsForPlanet: blueprintsForPlanet } = __require("src/content/missionSites.js");
 const { creditColony: creditColony, debitColony: debitColony } = __require("src/domain/economy/ledger.js");
 const { MISSION_TEMPLATES: MISSION_TEMPLATES, findMissionTemplate: findMissionTemplate } = __require("src/content/missions.js");
 const { BUILDINGS: BUILDINGS } = __require("src/content/buildings.js");
@@ -26106,12 +26108,34 @@ const GroundView = {
     const w = this.app.world;
     this.planet = planet;
     this.sw = createSurfaceWorld(w, planet.id);   // 种子 = world.seed ^ hash32(planetId)：同 seed 同地貌
+    // —— 人工任务核心蓝图实例化（doc7 TASK-2.2：SDF 三层关卡 + 首屏构图） ——
+    const bp = blueprintsForPlanet(planet, planet.primaryThemeId || null)[0] || null;
+    this._site = bp ? getSiteInstance(w, planet.id, bp.id) : null;
     // —— 连续三角网格场域（doc7 §3；体素补丁仅作矿脉/结构数据底层，不再承担视觉） ——
-    this.field = buildTerrainField(w, planet.id, {});
+    this.field = buildTerrainField(w, planet.id, {
+      profile: this._site ? this._site.blueprint.terrainProfile : undefined,
+      siteModifier: this._site ? this._site.siteModifier : undefined,
+    });
     this._digDents = new Map();                   // 采掘凹陷（列键 → 次数），siteModifier 消费
     this._placedVoxels = new Map();               // 已放置结构体素（列键 → {x,y,z}，占位盒渲染）
     this._springDist = -1;                        // 场域弹簧臂臂长（首帧吸附）
-    this.field.siteModifier = (fx, fz, base) => this._fieldSiteModifier(fx, fz, base);
+    const baseSiteMod = this._site ? this._site.siteModifier : null;
+    this.field.siteModifier = (fx, fz, base) => {
+      let siteDy = 0;
+      let eff = base;
+      if (baseSiteMod) {
+        const m = baseSiteMod(fx, fz, base);
+        if (m && Number.isFinite(m.dy)) {
+          siteDy = m.dy;
+          eff = { ...base, y: (Number.isFinite(base.y) ? base.y : 0) + siteDy };
+        }
+      }
+      const dent = this._fieldSiteModifier(fx, fz, eff);
+      // 总 dy = 站点 SDF dy + 采掘凹陷 dy（terrainField 仅应用单层 mod.dy）
+      const dentDy = dent && Number.isFinite(dent.dy) ? dent.dy : 0;
+      const total = siteDy + dentDy;
+      return total !== 0 ? { dy: total } : null;
+    };
     this.colony = Object.values(w.entities.colonies || {})
       .find((c) => c.planetId === planet.id) || null;
     this.mission = mission || null;
@@ -26130,10 +26154,23 @@ const GroundView = {
     c.state = 'idle';
     c.fuel = 100;
     if (!Number.isFinite(c.y)) c.y = 8;           // 场外兜底（理论不可达：出生列恒在场内）
-    // 相机置于角色背后（面向 -Z 时 yaw=0）
+    // 相机置于角色背后；首屏构图（doc7 §5.2）：任务模式且存在站点蓝图时，
+    // yaw 自动对准 primaryObjective 主视觉地标（着陆 2 秒内可读局势）。
     this.cam.yaw = 0;
     this.cam.pitch = 0.5;
     this.cam.dist = 9;
+    if (this._site && this._site.site && this._site.site.anchors) {
+      const pri = this._site.site.anchors.primaryObjective;
+      if (pri) {
+        const wx = pri.x - FIELD_OFFSET;
+        const wz = pri.z - FIELD_OFFSET;
+        const dx = wx - c.x;
+        const dz = wz - c.z;
+        if (Math.hypot(dx, dz) > 4) {
+          this.cam.yaw = Math.atan2(-dx, -dz);
+        }
+      }
+    }
 
     // —— 画布与 GL ——
     const canvasWrap = el('div', { class: 'vf-view-canvas' });
@@ -27871,6 +27908,1381 @@ const GroundView = {
 };
 
 Object.assign(__exports, { GroundView });
+
+});
+__register("src/content/missionSites.js", function (__exports, __require) {
+/**
+ * content/missionSites.js — MissionSiteBlueprint 登陆点蓝图注册表（doc7 TASK-2.1，纯数据）
+ *
+ * 数据契约（序列 6 §5.4 / doc7 §5）：
+ *  - siteRadius 默认 160m；coreRadiusFactor 0.28 → 人工任务核心 0-45m；
+ *    transitionRadiusFactor 0.26 → 人工过渡带 45-86m；其余为确定性程序化外围。
+ *  - anchors 为 Site Local 坐标（原点 = 站点中心，米）；实例化时由
+ *    domain/ground/missionSiteFactory.js 仿射变换（平移 + 1 缩放）到 Planet Local。
+ *  - routes 至少含 route_main（wide_safe，宽 7m）与 route_flank（narrow_risky，宽 3.5m）
+ *    两条差异化战术路线；route_secondary / route_extraction 为锚点服务路（wide_safe）。
+ *    deckSegments: [起始, 结束]（全线弧长分数）标记桥梁甲板段（BRIDGE_DECK 旗）。
+ *  - 每份蓝图必须回答序列 6 §5.5 的八个关卡设计问题（purposeZh..worldWritebackZh），
+ *    并满足 SITE-01/02/08：主视觉地标在核心区内、撤离点开局即存在、首屏有焦点。
+ *
+ * 关卡设计八问：①为何来此 purposeZh ②首屏焦点 firstScreenZh ③建议方向 suggestedDirZh
+ * ④主目标何在及其逻辑 primaryWhyZh ⑤路线风险收益 routeTradeoffZh ⑥主题改变战术 themeEffectZh
+ * ⑦失败/撤离代价 failureCostZh ⑧世界回写 worldWritebackZh。
+ *
+ * 本文件零逻辑、零副作用、零依赖；查表请用 getSiteBlueprint / blueprintsForPlanet。
+ */
+
+const MISSION_SITE_BLUEPRINTS = {
+  /** 1. 赤砾边疆 — 平顶桌山遗迹发掘场 */
+  site_regolith_relic_01: {
+    id: 'site_regolith_relic_01',
+    version: 1,
+    themeTags: ['red_regolith_frontier'],
+    siteKind: 'mesa_relic_dig',
+    nameZh: '赤砾遗迹发掘场',
+    siteRadius: 160,
+    coreRadiusFactor: 0.28,
+    transitionRadiusFactor: 0.26,
+    terrainProfile: 'mesa_canyon_crater_steppe',
+    purposeZh: '先遣扫描在桌山背风面捕捉到非人类构筑物回波，派小队回收三段数据核心。',
+    firstScreenZh: '着陆即见沙金桌山崖脚的巨型风蚀砂岩拱门，拱影正中便是主发掘区。',
+    suggestedDirZh: '面向拱门沿主干道下坡推进，避开左侧陨坑环的活跃尘暴漏斗区。',
+    primaryWhyZh: '遗物封存在桌山崖脚的坍塌层里，砂岩拱门是唯一未被流沙掩埋的入口标靶。',
+    routeTradeoffZh: '主道宽阔有巨岩掩体但绕行陨坑；侧翼贴崖更近，却要横穿尘暴漏斗区。',
+    themeEffectZh: '沙尘暴期间能见度骤降、太阳能出力暴跌，户外未防护人员持续受风沙磨蚀。',
+    failureCostZh: '中止撤离将遗弃已就位的钻探平台，本区块扫描置信度下调并错失发掘窗口。',
+    worldWritebackZh: '成功后回写远古数据与硅酸盐储量，行星矿藏丰度获得永久勘探修正。',
+    primaryLandmarkPrefab: 'sandstone_arch',
+    anchors: {
+      landing: { x: 0, z: 0 },
+      primaryObjective: { x: 26, z: -30 },
+      secondaryObjective: { x: -32, z: 18 },
+      extraction: { x: -46, z: -18 },
+    },
+    landmarks: [
+      { prefabId: 'sandstone_arch', anchor: { x: 14, z: -38 }, rotation: 0.4 },
+      { prefabId: 'relic_dig_rig', anchor: { x: 26, z: -30 }, rotation: 1.2 },
+      { prefabId: 'old_mining_platform', anchor: { x: -32, z: 18 } },
+      { prefabId: 'deep_well_water_tower', anchor: { x: -46, z: -18 }, rotation: 2.6 },
+    ],
+    routes: [
+      { id: 'route_main', from: 'landing', to: 'primaryObjective', kind: 'wide_safe',
+        waypoints: [{ x: 12, z: -6 }, { x: 20, z: -18 }] },
+      { id: 'route_flank', from: 'landing', to: 'primaryObjective', kind: 'narrow_risky',
+        waypoints: [{ x: -14, z: -10 }, { x: -24, z: -28 }, { x: -2, z: -44 }] },
+      { id: 'route_secondary', from: 'landing', to: 'secondaryObjective', kind: 'wide_safe',
+        waypoints: [{ x: -14, z: 8 }, { x: -24, z: 14 }] },
+      { id: 'route_extraction', from: 'primaryObjective', to: 'extraction', kind: 'wide_safe',
+        waypoints: [{ x: 6, z: -44 }, { x: -24, z: -36 }] },
+    ],
+    objectiveGraph: 'objective_graph_relic_dig_01',
+    extraction: { kind: 'dropzone_rally', radius: 8 },
+    proceduralSeedSalt: 'regolith_relic_v1',
+    coverPoints: [
+      { x: 14, z: -8, kind: 'boulder' },
+      { x: 18, z: -20, kind: 'mesa_shelf' },
+      { x: 6, z: -28, kind: 'crater_rim' },
+      { x: -12, z: -14, kind: 'ridge' },
+      { x: -4, z: -40, kind: 'slab' },
+    ],
+    hazardZones: [
+      { x: -26, z: -34, radius: 10, type: 'dust_devil' },
+      { x: 36, z: -42, radius: 9, type: 'mesa_rockfall' },
+    ],
+    missionTemplateAffinity: ['gmt_relic_survey', 'gmt_escort_engineers'],
+  },
+
+  /** 2. 黑曜熔海 — 岩浆大河拱桥渡口争夺 */
+  site_obsidian_bridge_01: {
+    id: 'site_obsidian_bridge_01',
+    version: 1,
+    themeTags: ['obsidian_lava'],
+    siteKind: 'lava_river_bridge_crossing',
+    nameZh: '黑曜拱桥渡口',
+    siteRadius: 160,
+    coreRadiusFactor: 0.28,
+    transitionRadiusFactor: 0.26,
+    terrainProfile: 'obsidian_ridge_lava',
+    purposeZh: '岩浆大河是唯一未设防的渡口走廊，小队要夺取对岸的地热虹吸阵列。',
+    firstScreenZh: '黑曜山脊之间灼橙岩浆河横贯视野，抛物线黑曜拱桥正对着陆点。',
+    suggestedDirZh: '沿主干道直上拱桥桥面；或沿河岸向东寻断裂六棱柱渡口侧翼绕后。',
+    primaryWhyZh: '对岸台地扼守岩浆虹吸电站，是全区重金属与稀土钻机的动力心脏。',
+    routeTradeoffZh: '主桥稳固但重兵把守；侧翼断桥缺口更近，需工程枪架设临时跨接桥面。',
+    themeEffectZh: '临近岩浆河热辐射持续累积，护盾过载后必须退回黑曜石背阴面冷却。',
+    failureCostZh: '撤收时炸毁拱桥跨段，渡口重回封锁，下次行动须先消耗合金抢修桥面。',
+    worldWritebackZh: '占领后回写重金属与稀土库存，并在河岸解锁地热发电设施建造。',
+    primaryLandmarkPrefab: 'obsidian_arch_bridge',
+    anchors: {
+      landing: { x: 0, z: 0 },
+      primaryObjective: { x: 34, z: 26 },
+      secondaryObjective: { x: -30, z: 20 },
+      extraction: { x: -44, z: -26 },
+    },
+    landmarks: [
+      { prefabId: 'obsidian_arch_bridge', anchor: { x: 18, z: 11 }, rotation: 0.7 },
+      { prefabId: 'basalt_hex_pillars', anchor: { x: -30, z: 20 } },
+      { prefabId: 'lava_geothermal_siphon', anchor: { x: 34, z: 26 }, rotation: 1.9 },
+      { prefabId: 'scoria_ore_rig', anchor: { x: -44, z: -26 }, rotation: 0.2 },
+    ],
+    routes: [
+      { id: 'route_main', from: 'landing', to: 'primaryObjective', kind: 'wide_safe',
+        waypoints: [{ x: 10, z: 4 }, { x: 18, z: 11 }, { x: 26, z: 19 }],
+        deckSegments: [[0.3, 0.72]], deckLift: 3.5 },
+      { id: 'route_flank', from: 'landing', to: 'primaryObjective', kind: 'narrow_risky',
+        waypoints: [{ x: 12, z: -4 }, { x: 18, z: -14 }, { x: 4, z: -20 }, { x: -8, z: -8 }, { x: -4, z: 8 }, { x: 10, z: 14 }, { x: 24, z: 20 }] },
+      { id: 'route_secondary', from: 'landing', to: 'secondaryObjective', kind: 'wide_safe',
+        waypoints: [{ x: -10, z: 4 }, { x: -22, z: 12 }] },
+      { id: 'route_extraction', from: 'primaryObjective', to: 'extraction', kind: 'wide_safe',
+        waypoints: [{ x: 26, z: 19 }, { x: 18, z: 11 }, { x: 8, z: 2 }, { x: -8, z: -4 }, { x: -24, z: -12 }],
+        deckSegments: [[0.02, 0.26]], deckLift: 3.5 },
+    ],
+    objectiveGraph: 'objective_graph_bridge_assault_01',
+    extraction: { kind: 'skiff_rally', radius: 8 },
+    proceduralSeedSalt: 'obsidian_bridge_v1',
+    coverPoints: [
+      { x: 8, z: 2, kind: 'pillar' },
+      { x: 24, z: 17, kind: 'arch_stub' },
+      { x: -2, z: -10, kind: 'scoria_mound' },
+      { x: -18, z: 4, kind: 'hex_block' },
+      { x: 28, z: 24, kind: 'ridge' },
+    ],
+    hazardZones: [
+      { x: 14, z: -16, radius: 9, type: 'lava_crack' },
+      { x: -36, z: -6, radius: 10, type: 'heat_vent' },
+    ],
+    missionTemplateAffinity: ['gmt_destroy_aa', 'gmt_sabotage_reactor'],
+  },
+
+  /** 3. 永冬炉境 — 中央热源塔盆地重启 */
+  site_furnace_outpost_01: {
+    id: 'site_furnace_outpost_01',
+    version: 1,
+    themeTags: ['permafrost_furnace'],
+    siteKind: 'heat_tower_basin',
+    nameZh: '炉境热源盆地',
+    siteRadius: 160,
+    coreRadiusFactor: 0.28,
+    transitionRadiusFactor: 0.26,
+    terrainProfile: 'glacial_basin_crevasse',
+    purposeZh: '暴风雪季前必须重启中央热源塔，把避风冰川盆地变成前哨生存半径。',
+    firstScreenZh: '蓝白冰崖环抱的盆地中央，黑铁热源塔的琥珀暖光是唯一亮色。',
+    suggestedDirZh: '顺着加热钢桁架桥的暖光路径，直奔热源塔基座阀门站。',
+    primaryWhyZh: '热源塔是全盆地唯一热网枢纽，塔基阀门决定供暖半径能否重启。',
+    routeTradeoffZh: '主道沿加热管桥稳健但绕远；侧翼横穿冰裂隙带，快却要赌融雪窗口。',
+    themeEffectZh: '离开热源覆盖圈体温槽持续下降，白暴风雪期间所有热源半径收缩四成。',
+    failureCostZh: '任务失败则前哨暖眠舱弃用，工程队冻伤减员，盆地取暖配额减半。',
+    worldWritebackZh: '重启后回写富水冰储量与隔热超导科技点，前哨人口上限提升。',
+    primaryLandmarkPrefab: 'central_furnace_tower',
+    anchors: {
+      landing: { x: 0, z: 0 },
+      primaryObjective: { x: 0, z: -30 },
+      secondaryObjective: { x: -28, z: 10 },
+      extraction: { x: 34, z: 18 },
+    },
+    landmarks: [
+      { prefabId: 'central_furnace_tower', anchor: { x: 0, z: -30 }, rotation: 0 },
+      { prefabId: 'heated_span_bridge', anchor: { x: -14, z: -20 }, rotation: 1.1 },
+      { prefabId: 'thermal_storage_vault', anchor: { x: -28, z: 10 } },
+      { prefabId: 'snow_buried_outpost', anchor: { x: 34, z: 18 }, rotation: 2.2 },
+    ],
+    routes: [
+      { id: 'route_main', from: 'landing', to: 'primaryObjective', kind: 'wide_safe',
+        waypoints: [{ x: 8, z: -12 }, { x: 2, z: -22 }] },
+      { id: 'route_flank', from: 'landing', to: 'primaryObjective', kind: 'narrow_risky',
+        waypoints: [{ x: 16, z: -2 }, { x: 26, z: -10 }, { x: 14, z: -24 }] },
+      { id: 'route_secondary', from: 'landing', to: 'secondaryObjective', kind: 'wide_safe',
+        waypoints: [{ x: -12, z: 2 }, { x: -22, z: 6 }] },
+      { id: 'route_extraction', from: 'primaryObjective', to: 'extraction', kind: 'wide_safe',
+        waypoints: [{ x: -6, z: -18 }, { x: -14, z: -4 }, { x: 4, z: 6 }, { x: 20, z: 12 }] },
+    ],
+    objectiveGraph: 'objective_graph_heat_restart_01',
+    extraction: { kind: 'heated_airlock', radius: 7 },
+    proceduralSeedSalt: 'furnace_outpost_v1',
+    coverPoints: [
+      { x: 10, z: -6, kind: 'ice_block' },
+      { x: -8, z: -14, kind: 'pipe_berm' },
+      { x: -20, z: 2, kind: 'vault_wall' },
+      { x: 14, z: -20, kind: 'crevasse_lip' },
+      { x: 24, z: 6, kind: 'drift_ridge' },
+    ],
+    hazardZones: [
+      { x: 26, z: -14, radius: 10, type: 'crevasse_breach' },
+      { x: -16, z: -36, radius: 11, type: 'whiteout_pocket' },
+    ],
+    missionTemplateAffinity: ['gmt_rescue_crew', 'gmt_escort_engineers'],
+  },
+
+  /** 4. 永夜晶荒 — 盐晶盆地勘探布标 */
+  site_night_salt_01: {
+    id: 'site_night_salt_01',
+    version: 1,
+    themeTags: ['dry_night_polar'],
+    siteKind: 'salt_crystal_survey',
+    nameZh: '永夜盐晶盆地',
+    siteRadius: 160,
+    coreRadiusFactor: 0.28,
+    transitionRadiusFactor: 0.26,
+    terrainProfile: 'dry_salt_polar',
+    purposeZh: '极夜荒原的盐晶盆地析出高纯工业盐晶，小队标定晶脉并布设储能中继。',
+    firstScreenZh: '永夜天幕下月白多边形盐壳向四方铺开，紫色极光正映在主晶簇尖顶。',
+    suggestedDirZh: '朝极光最亮的东北晶簇推进，雷达信标会沿主道逐级点亮。',
+    primaryWhyZh: '主晶簇是盆地盐脉的露头节点，采样数据决定热储能电池塔的选址。',
+    routeTradeoffZh: '主道沿信标带安全但照明暴露行踪；侧翼借陨石散布区遮蔽，快而多险。',
+    themeEffectZh: '常规太阳能完全失效，黑暗视野受限，须依靠热成像与反光信标推进。',
+    failureCostZh: '撤离放弃即封存已布设的信标链，本区块扫描置信度回退一级。',
+    worldWritebackZh: '回写工业盐晶与光学晶体库存，解锁储能科技与夜战涂层改装。',
+    primaryLandmarkPrefab: 'moonwhite_salt_monolith',
+    anchors: {
+      landing: { x: 0, z: 0 },
+      primaryObjective: { x: 24, z: 18 },
+      secondaryObjective: { x: -26, z: 6 },
+      extraction: { x: -18, z: -36 },
+    },
+    landmarks: [
+      { prefabId: 'moonwhite_salt_monolith', anchor: { x: 24, z: 18 }, rotation: 0.9 },
+      { prefabId: 'radar_beacon_station', anchor: { x: -26, z: 6 } },
+      { prefabId: 'meteor_intercept_laser', anchor: { x: -18, z: -36 }, rotation: 2.8 },
+      { prefabId: 'salt_survey_drone_dock', anchor: { x: 10, z: 8 }, rotation: 1.5 },
+    ],
+    routes: [
+      { id: 'route_main', from: 'landing', to: 'primaryObjective', kind: 'wide_safe',
+        waypoints: [{ x: 12, z: 10 }] },
+      { id: 'route_flank', from: 'landing', to: 'primaryObjective', kind: 'narrow_risky',
+        waypoints: [{ x: 14, z: -2 }, { x: 30, z: -12 }, { x: 30, z: 4 }] },
+      { id: 'route_secondary', from: 'landing', to: 'secondaryObjective', kind: 'wide_safe',
+        waypoints: [{ x: -12, z: 2 }, { x: -20, z: 4 }] },
+      { id: 'route_extraction', from: 'primaryObjective', to: 'extraction', kind: 'wide_safe',
+        waypoints: [{ x: 6, z: 8 }, { x: -6, z: -12 }, { x: -14, z: -26 }] },
+    ],
+    objectiveGraph: 'objective_graph_salt_survey_01',
+    extraction: { kind: 'beacon_rally', radius: 8 },
+    proceduralSeedSalt: 'night_salt_v1',
+    coverPoints: [
+      { x: 10, z: 6, kind: 'salt_shard' },
+      { x: 18, z: 14, kind: 'crystal_spire' },
+      { x: 20, z: -8, kind: 'ejecta_block' },
+      { x: -12, z: -8, kind: 'ridge_shadow' },
+      { x: -4, z: -24, kind: 'slab' },
+    ],
+    hazardZones: [
+      { x: 36, z: -16, radius: 10, type: 'meteor_scatter' },
+      { x: -34, z: -14, radius: 9, type: 'frost_quake' },
+    ],
+    missionTemplateAffinity: ['gmt_relic_survey', 'gmt_sabotage_reactor'],
+  },
+
+  /** 5. 硫雾沼泽 — 喷气锥封堵作业 */
+  site_sulfur_vents_01: {
+    id: 'site_sulfur_vents_01',
+    version: 1,
+    themeTags: ['sulfur_marsh'],
+    siteKind: 'fumarole_capping',
+    nameZh: '硫雾喷气锥群',
+    siteRadius: 160,
+    coreRadiusFactor: 0.28,
+    transitionRadiusFactor: 0.26,
+    terrainProfile: 'fumarole_acid_terraces',
+    purposeZh: '喷气锥的沼气烟柱正逼近风向观测塔，小队要在低地毒雾涨潮前封堵锥口。',
+    firstScreenZh: '焦黑岩柱平台上黄绿气柱冲天，酸液阶地池在洼地里泛着毒荧绿光。',
+    suggestedDirZh: '沿高处黑色岩脊向东北推进，全程保持高地以免坠入毒气湖面。',
+    primaryWhyZh: '巨型喷气锥位于岩脊裂口，是沼气云的源头，冷凝封堵器只能就地安装。',
+    routeTradeoffZh: '主道走岩脊高线稳但慢；侧翼穿酸池栈管近而险，防腐滤芯消耗翻倍。',
+    themeEffectZh: '低洼毒雾持续腐蚀防腐层，浓沼气区使用明火武器会引发爆燃冲击波。',
+    failureCostZh: '封堵失败则风向塔停机，全星区化工链减产并弃置已部署滤芯。',
+    worldWritebackZh: '回写挥发性气体与硫化物库存，行星酸雾预警等级下调一级。',
+    primaryLandmarkPrefab: 'giant_fumarole_cone',
+    anchors: {
+      landing: { x: 0, z: 0 },
+      primaryObjective: { x: -8, z: 32 },
+      secondaryObjective: { x: 30, z: 14 },
+      extraction: { x: -40, z: -22 },
+    },
+    landmarks: [
+      { prefabId: 'giant_fumarole_cone', anchor: { x: -8, z: 32 }, rotation: 0 },
+      { prefabId: 'wind_observation_tower', anchor: { x: 30, z: 14 }, rotation: 1.7 },
+      { prefabId: 'acid_pipe_bridge', anchor: { x: -16, z: 12 }, rotation: 2.4 },
+      { prefabId: 'condenser_station', anchor: { x: -40, z: -22 } },
+    ],
+    routes: [
+      { id: 'route_main', from: 'landing', to: 'primaryObjective', kind: 'wide_safe',
+        waypoints: [{ x: -4, z: 14 }, { x: -10, z: 24 }] },
+      { id: 'route_flank', from: 'landing', to: 'secondaryObjective', kind: 'narrow_risky',
+        waypoints: [{ x: 10, z: -6 }, { x: 18, z: -14 }, { x: 26, z: 0 }, { x: 28, z: 8 }] },
+      { id: 'route_secondary', from: 'landing', to: 'secondaryObjective', kind: 'wide_safe',
+        waypoints: [{ x: 14, z: 4 }, { x: 24, z: 10 }] },
+      { id: 'route_extraction', from: 'primaryObjective', to: 'extraction', kind: 'wide_safe',
+        waypoints: [{ x: -22, z: 16 }, { x: -34, z: 0 }, { x: -40, z: -10 }] },
+    ],
+    objectiveGraph: 'objective_graph_vent_capping_01',
+    extraction: { kind: 'gas_mask_rally', radius: 8 },
+    proceduralSeedSalt: 'sulfur_vents_v1',
+    coverPoints: [
+      { x: -6, z: 10, kind: 'rock_spine' },
+      { x: -12, z: 22, kind: 'cone_rim' },
+      { x: 16, z: -2, kind: 'pipe_rack' },
+      { x: 24, z: 8, kind: 'etched_wall' },
+      { x: -28, z: -6, kind: 'charred_mound' },
+    ],
+    hazardZones: [
+      { x: 14, z: -20, radius: 12, type: 'acid_pool' },
+      { x: -24, z: 20, radius: 9, type: 'gas_plume' },
+    ],
+    missionTemplateAffinity: ['gmt_purge_bio', 'gmt_destroy_aa'],
+  },
+
+  /** 6. 星辉生物圈 — 灵魂母树共生采样 */
+  site_biolume_grove_01: {
+    id: 'site_biolume_grove_01',
+    version: 1,
+    themeTags: ['biolume_canopy'],
+    siteKind: 'glow_grove_sampling',
+    nameZh: '星辉灵魂母树林',
+    siteRadius: 160,
+    coreRadiusFactor: 0.28,
+    transitionRadiusFactor: 0.26,
+    terrainProfile: 'biolume_rainforest',
+    purposeZh: '灵魂母树的共生采样点进入昼夜窗口，小队要收集神经纤维药物前体。',
+    firstScreenZh: '深海青林冠下荧光脉络如神经网络铺开，青绿光流正汇向灵魂母树。',
+    suggestedDirZh: '跟着青色脉络的流向走，紫色螺旋植物会标出侧翼岔口。',
+    primaryWhyZh: '灵魂母树是共生网络的根节点，树冠阴影里的采样点只在夜间活性达标。',
+    routeTradeoffZh: '主道沿脉络光路平稳但足迹暴露；侧翼掠过掠食异虫巢穴边缘，快而凶险。',
+    themeEffectZh: '踏步压感荧光涟漪会惊动林冠掠食者，昼夜窗口之外采样活性减半。',
+    failureCostZh: '撤离弃采将触发群落应激休眠，本季度共生采样窗口关闭。',
+    worldWritebackZh: '回写再生生物质与药物前体库存，殖民地解锁荧光植被移植。',
+    primaryLandmarkPrefab: 'soul_willow_tree',
+    anchors: {
+      landing: { x: 0, z: 0 },
+      primaryObjective: { x: -14, z: 28 },
+      secondaryObjective: { x: 26, z: 12 },
+      extraction: { x: 36, z: -24 },
+    },
+    landmarks: [
+      { prefabId: 'soul_willow_tree', anchor: { x: -14, z: 28 }, rotation: 0.3 },
+      { prefabId: 'magnetic_stone_arch', anchor: { x: 34, z: -6 }, rotation: 1.4 },
+      { prefabId: 'glow_root_sampling_pod', anchor: { x: 26, z: 12 } },
+      { prefabId: 'spore_grove_marker', anchor: { x: 36, z: -24 }, rotation: 2.1 },
+    ],
+    routes: [
+      { id: 'route_main', from: 'landing', to: 'primaryObjective', kind: 'wide_safe',
+        waypoints: [{ x: -6, z: 14 }] },
+      { id: 'route_flank', from: 'landing', to: 'secondaryObjective', kind: 'narrow_risky',
+        waypoints: [{ x: 12, z: -4 }, { x: 20, z: -2 }, { x: 26, z: 4 }] },
+      { id: 'route_secondary', from: 'landing', to: 'secondaryObjective', kind: 'wide_safe',
+        waypoints: [{ x: 10, z: 4 }, { x: 20, z: 8 }] },
+      { id: 'route_extraction', from: 'primaryObjective', to: 'extraction', kind: 'wide_safe',
+        waypoints: [{ x: -2, z: 20 }, { x: 14, z: 6 }, { x: 28, z: -8 }] },
+    ],
+    objectiveGraph: 'objective_graph_grove_sampling_01',
+    extraction: { kind: 'canopy_rally', radius: 8 },
+    proceduralSeedSalt: 'biolume_grove_v1',
+    coverPoints: [
+      { x: -4, z: 10, kind: 'root_arch' },
+      { x: -10, z: 20, kind: 'willow_root' },
+      { x: 16, z: 0, kind: 'moss_mound' },
+      { x: 22, z: 8, kind: 'spore_clump' },
+      { x: 26, z: -12, kind: 'stone_shelf' },
+    ],
+    hazardZones: [
+      { x: 14, z: -12, radius: 9, type: 'predator_hollow' },
+      { x: -30, z: -10, radius: 10, type: 'spore_geyser' },
+    ],
+    missionTemplateAffinity: ['gmt_purge_bio', 'gmt_relic_survey'],
+  },
+
+  /** 7. 碧渊海洋 — 半埋海底穹顶 survey */
+  site_abyssal_dome_01: {
+    id: 'site_abyssal_dome_01',
+    version: 1,
+    themeTags: ['abyssal_ocean'],
+    siteKind: 'submerged_dome_survey',
+    nameZh: '碧渊珊瑚穹顶',
+    siteRadius: 160,
+    coreRadiusFactor: 0.28,
+    transitionRadiusFactor: 0.26,
+    terrainProfile: 'ocean_basin_reef_trench',
+    purposeZh: '半埋海底穹顶的碑文舱段随潮汐露出，小队要赶在潮位回升前完成采样。',
+    firstScreenZh: '青白焦散光斑扫过珍珠白穹顶肋拱，荧光藻沿古桥两侧明明灭灭。',
+    suggestedDirZh: '沿发光巨藻拱桥的青光向穹顶门厅推进，避开海沟断层一侧。',
+    primaryWhyZh: '穹顶门厅是唯一未坍塌的入口，潮汐开闭的闸槽就在门厅两侧。',
+    routeTradeoffZh: '主道沿珊瑚台地缓坡稳但绕行礁脊；侧翼贴海沟崖缘近而承受高压。',
+    themeEffectZh: '水深超过八米进入高压区持续消耗耐压护盾，潮汐每九十秒升降三点五米。',
+    failureCostZh: '潮位回升被迫弃潜，已暴露的碑文舱段重新淹没并错过潮汐窗口。',
+    worldWritebackZh: '回写深海生物质与重氢库存，远古水下碑文数据入档研究队列。',
+    primaryLandmarkPrefab: 'reef_dome_ruin',
+    anchors: {
+      landing: { x: 0, z: 0 },
+      primaryObjective: { x: 22, z: -26 },
+      secondaryObjective: { x: -28, z: -12 },
+      extraction: { x: 0, z: 44 },
+    },
+    landmarks: [
+      { prefabId: 'reef_dome_ruin', anchor: { x: 22, z: -26 }, rotation: 0.6 },
+      { prefabId: 'tide_spire', anchor: { x: -28, z: -12 }, rotation: 1.8 },
+      { prefabId: 'biolume_kelp_arch', anchor: { x: 10, z: -12 }, rotation: 2.9 },
+      { prefabId: 'submersible_bay_beacon', anchor: { x: 0, z: 44 } },
+    ],
+    routes: [
+      { id: 'route_main', from: 'landing', to: 'primaryObjective', kind: 'wide_safe',
+        waypoints: [{ x: 10, z: -12 }, { x: 16, z: -20 }] },
+      { id: 'route_flank', from: 'landing', to: 'primaryObjective', kind: 'narrow_risky',
+        waypoints: [{ x: -12, z: -6 }, { x: -16, z: -18 }, { x: -6, z: -28 }, { x: 6, z: -32 }] },
+      { id: 'route_secondary', from: 'landing', to: 'secondaryObjective', kind: 'wide_safe',
+        waypoints: [{ x: -14, z: -4 }, { x: -22, z: -8 }] },
+      { id: 'route_extraction', from: 'primaryObjective', to: 'extraction', kind: 'wide_safe',
+        waypoints: [{ x: 12, z: -8 }, { x: 4, z: 16 }, { x: 0, z: 30 }] },
+    ],
+    objectiveGraph: 'objective_graph_dome_survey_01',
+    extraction: { kind: 'submersible_bay', radius: 9 },
+    proceduralSeedSalt: 'abyssal_dome_v1',
+    coverPoints: [
+      { x: 8, z: -8, kind: 'kelp_arch_foot' },
+      { x: 16, z: -18, kind: 'reef_block' },
+      { x: -10, z: -16, kind: 'spire_base' },
+      { x: 2, z: -24, kind: 'coral_ridge' },
+      { x: 8, z: 22, kind: 'shelf_rock' },
+    ],
+    hazardZones: [
+      { x: -8, z: -36, radius: 11, type: 'trench_pressure' },
+      { x: 34, z: 6, radius: 9, type: 'current_shear' },
+    ],
+    missionTemplateAffinity: ['gmt_relic_survey', 'gmt_rescue_crew'],
+  },
+
+  /** 8. 通用岩质 — 坠毁货船调查（兜底站点，themeTags 为空匹配任何行星回退） */
+  site_rocky_crash_01: {
+    id: 'site_rocky_crash_01',
+    version: 1,
+    themeTags: [],
+    siteKind: 'crashed_ship_survey',
+    nameZh: '坠毁货船残骸场',
+    siteRadius: 160,
+    coreRadiusFactor: 0.28,
+    transitionRadiusFactor: 0.26,
+    terrainProfile: 'generic_rocky',
+    purposeZh: '一艘失联货船坠毁在岩质高地，小队要找回黑匣子与幸存补给。',
+    firstScreenZh: '锈色岩原尽头，断裂的船体斜插在陨坑边缘，求救信标仍在闪烁。',
+    suggestedDirZh: '沿信标主干道直奔船体主裂口，燃料泄漏区禁止携带明火靠近。',
+    primaryWhyZh: '黑匣子封在主裂口后的驾驶舱段，只有那里还没被大火焚毁。',
+    routeTradeoffZh: '主道绕开泄漏区稳妥；侧翼穿过燃料火区直取舱段，快但灼烧减员风险高。',
+    themeEffectZh: '泄漏燃料间歇爆燃，气浪会掀翻低掩体，夜间火光暴露全队位置。',
+    failureCostZh: '放弃搜索则黑匣子数据永久丢失，失联船员抚恤与保险理赔冻结。',
+    worldWritebackZh: '回写合金与模块物资，失联船档案结案并解锁残骸回收工单。',
+    primaryLandmarkPrefab: 'crashed_hull_freighter',
+    anchors: {
+      landing: { x: 0, z: 0 },
+      primaryObjective: { x: -26, z: -14 },
+      secondaryObjective: { x: 18, z: 24 },
+      extraction: { x: 30, z: -28 },
+    },
+    landmarks: [
+      { prefabId: 'crashed_hull_freighter', anchor: { x: -26, z: -14 }, rotation: 0.8 },
+      { prefabId: 'scattered_cargo_pods', anchor: { x: 18, z: 24 }, rotation: 2.0 },
+      { prefabId: 'escape_pod_beacon', anchor: { x: 30, z: -28 } },
+      { prefabId: 'impact_crater_rim', anchor: { x: 2, z: -30 }, rotation: 1.3 },
+    ],
+    routes: [
+      { id: 'route_main', from: 'landing', to: 'primaryObjective', kind: 'wide_safe',
+        waypoints: [{ x: -12, z: -6 }] },
+      { id: 'route_flank', from: 'landing', to: 'primaryObjective', kind: 'narrow_risky',
+        waypoints: [{ x: 8, z: -12 }, { x: 2, z: -24 }, { x: -12, z: -30 }] },
+      { id: 'route_secondary', from: 'landing', to: 'secondaryObjective', kind: 'wide_safe',
+        waypoints: [{ x: 8, z: 12 }, { x: 14, z: 18 }] },
+      { id: 'route_extraction', from: 'primaryObjective', to: 'extraction', kind: 'wide_safe',
+        waypoints: [{ x: -8, z: -22 }, { x: 10, z: -28 }, { x: 22, z: -30 }] },
+    ],
+    objectiveGraph: 'objective_graph_crash_survey_01',
+    extraction: { kind: 'skiff_beacon', radius: 8 },
+    proceduralSeedSalt: 'rocky_crash_v1',
+    coverPoints: [
+      { x: -10, z: -4, kind: 'hull_plate' },
+      { x: -20, z: -10, kind: 'cargo_stack' },
+      { x: 6, z: -16, kind: 'engine_cowl' },
+      { x: -4, z: -26, kind: 'blast_wall' },
+      { x: 14, z: -30, kind: 'rim_rock' },
+    ],
+    hazardZones: [
+      { x: 2, z: -30, radius: 10, type: 'fuel_fire' },
+      { x: -38, z: 8, radius: 9, type: 'unstable_debris' },
+    ],
+    missionTemplateAffinity: ['gmt_rescue_crew', 'gmt_sabotage_reactor'],
+  },
+};
+
+/** 通用兜底站点 id（themeTags 为空 = 匹配不到主题时使用） */
+const GENERIC_SITE_BLUEPRINT_ID = 'site_rocky_crash_01';
+
+/** 按 id 查找蓝图（未知 id 返回 null） */
+function getSiteBlueprint(id) {
+  if (!id) return null;
+  return MISSION_SITE_BLUEPRINTS[id] || null;
+}
+
+/**
+ * 行星 → 适配蓝图列表：themeTags 命中显式 themeId 或 planet.primaryThemeId 者优先，
+ * 全部落空时回退通用站点（doc6 §5.4：查表永不返回空集）。
+ * @param {{primaryThemeId?:string, secondaryThemeModifiers?:string[]}|null} planet 行星实体（可为 null）
+ * @param {string|null} [themeId] 显式主题 id（优先于行星档案）
+ * @returns {object[]} 蓝图数组（注册表声明序，确定性）
+ */
+function blueprintsForPlanet(planet, themeId) {
+  const tids = [];
+  if (themeId) tids.push(themeId);
+  if (planet && planet.primaryThemeId) tids.push(planet.primaryThemeId);
+  if (planet && Array.isArray(planet.secondaryThemeModifiers)) {
+    for (const t of planet.secondaryThemeModifiers) tids.push(t);
+  }
+  const hits = [];
+  for (const key of Object.keys(MISSION_SITE_BLUEPRINTS)) {
+    const bp = MISSION_SITE_BLUEPRINTS[key];
+    if (bp.themeTags.some((t) => tids.indexOf(t) >= 0)) hits.push(bp);
+  }
+  if (hits.length > 0) return hits;
+  const generic = getSiteBlueprint(GENERIC_SITE_BLUEPRINT_ID);
+  return generic ? [generic] : [];
+}
+
+Object.assign(__exports, { MISSION_SITE_BLUEPRINTS, GENERIC_SITE_BLUEPRINT_ID, getSiteBlueprint, blueprintsForPlanet });
+
+});
+__register("src/domain/ground/missionSiteFactory.js", function (__exports, __require) {
+/**
+ * domain/ground/missionSiteFactory.js — 登陆点蓝图实例化与 SDF 地形融合（doc7 TASK-2.1 / §5）
+ *
+ * 三层同心关卡架构（doc7 §5.1 / 序列 6 §5.2）：
+ *  1. 人工任务核心 Authored Mission Core（0 ~ coreRadius=44.8m）：锚点整平着陆区/目标坪、
+ *     主视觉地标地基、CORE_PROTECTED 保护区；
+ *  2. 人工控制过渡带 Transition Ring（45 ~ 86.4m）：道路样条 / SDF 权重经 smoothstep
+ *     （86.4m → 112.4m）平滑衰减为 0，消除「人工基地贴在随机高度图上」的断层台阶；
+ *  3. 确定性程序化外围 Procedural Frontier（86.4m+）：本模块不再施加任何高度修正，
+ *     仅撤离/外围锚点坪与道路走廊按其自身局部 falloff 延伸（POI 级人工结构）。
+ *
+ * 地形算子（经 terrainField evalPoint 的 siteModifier 挂点， Applied AFTER material/hazard，
+ * BEFORE 高度预算钳制 [-40,+80]）：
+ *  A. 锚点坪整平：目标高 H = 宏观地貌复刻采样（见 createMacroHeightReplica），dy=(H-y)*w，
+ *     w 为 smoothstep falloff；权限 |dy| ≤ 6+12w（坪心最多 18m，可填平陨坑/河道等局部特征，
+ *     使坪面严格平坦；裙边收敛回 ±6m 保持场整体连贯）。
+ *  B. 道路/河道样条：Catmull-Rom 过 route waypoints（Site Local → Planet Local），
+ *     走廊内（wide_safe 半宽 3.5m / narrow_risky 半宽 1.75m）写 ROAD 旗 + 材质通道 3
+ *     （装甲路面），高度向样条目标平滑；deckSegments 段写 BRIDGE_DECK 旗并按
+ *     「两端岸高 + 拱升」抛物线抬高桥面（岩浆河/裂隙跨越）。
+ *  C. 语义旗：CORE_PROTECTED（r ≤ coreRadius）、HAZARD（蓝图 hazardZones 圆域）、
+ *     FOUNDATION（地标/锚点坪心）。
+ *  D. 过渡带融合：走廊高度/材质影响乘 s(r)=1-smoothstep(86.4,112.4,r)，权重平滑归零，
+ *     无「人工/随机」突变边界（SITE-04）。
+ *
+ * 确定性（SITE-06 / doc7 红线 4）：全部变化经 derivePlanetSeeds().missionSiteSeed(id,version)
+ * ⊕ proceduralSeedSalt 派生子流（seedFromNumber / nextU32），零 Math.random，
+ * 绝不消费 world.rng；同 (world.seed, planetId, blueprintId, version) 逐字节可复现。
+ *
+ * 本模块为纯领域层：无 DOM / 无 WebGL；不 import terrainField（调用方把 siteModifier
+ * 传入 createTerrainField opts），surfaceQueries 仅只读消费（validateGeneratedSite）。
+ */
+
+const { hash32: hash32, createSimplexNoise: createSimplexNoise } = __require("src/domain/ground/SurfaceSandbox.js");
+const { seedFromNumber: seedFromNumber, nextU32: nextU32 } = __require("src/core/rng.js");
+const { derivePlanetSeeds: derivePlanetSeeds } = __require("src/domain/ground/planetSeeds.js");
+const { TERRAIN_PROFILES: TERRAIN_PROFILES } = __require("src/content/terrainProfiles.js");
+const { getSiteBlueprint: getSiteBlueprint } = __require("src/content/missionSites.js");
+const { findPathSurface: findPathSurface, slopeAt: slopeAt } = __require("src/domain/ground/surfaceQueries.js");
+
+// ———— 常量 ————
+
+/** 默认站点半径（米，doc7 §5.1） */
+const SITE_RADIUS_DEFAULT = 160;
+/** 人工任务核心半径系数（siteRadius × 0.28 = 44.8m） */
+const CORE_RADIUS_FACTOR_DEFAULT = 0.28;
+/** 人工过渡带半径系数（siteRadius × (0.28+0.26) = 86.4m 外缘） */
+const TRANSITION_RADIUS_FACTOR_DEFAULT = 0.26;
+/** 过渡带外缘 smoothstep 衰减宽度（86.4m → 112.4m） */
+const TRANSITION_FADE_WIDTH = 26;
+
+/** TERRAIN_FLAGS 位语义（与 terrainField.js 保持一致；不 import 以避免构建期耦合） */
+const FLAG_ROAD = 1;
+const FLAG_FOUNDATION = 2;
+const FLAG_CORE_PROTECTED = 4;
+const FLAG_HAZARD = 8;
+const FLAG_BRIDGE_DECK = 32;
+
+/** 高度预算（doc7 §3.1） */
+const MIN_HEIGHT = -40;
+const MAX_HEIGHT = 80;
+/** 坪目标高 / 样条目标高的安全内缩（保证 dy 后仍在预算内） */
+const TARGET_CLAMP_LO = -34;
+const TARGET_CLAMP_HI = 74;
+
+/** 路线种类 → 走廊半宽（米）：主道 7m 宽、侧翼 3.5m 宽（doc7 TASK-2.1） */
+const CORRIDOR_HALF = { wide_safe: 3.5, narrow_risky: 1.75 };
+/** Catmull-Rom 采样间距（米） */
+const SPLINE_SPACING = 3;
+/** 走廊空间桶格（米）；查询只看 3×3 邻桶 ≥ 半宽 + 采样距 */
+const BUCKET_CELL = 8;
+
+// ———— 小工具 ————
+
+function num(v, dflt) {
+  return Number.isFinite(v) ? v : dflt;
+}
+
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
+/** GLSL smoothstep 语义 */
+function smoothstep(e0, e1, x) {
+  const t = clamp((x - e0) / (e1 - e0 || 1e-12), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+/** 分形布朗运动（2D）——与 terrainField.js 内部实现逐位一致（复刻用途） */
+function fbm2(noise, x, y, octaves) {
+  let amp = 1;
+  let freq = 1;
+  let sum = 0;
+  let norm = 0;
+  for (let o = 0; o < octaves; o++) {
+    sum += amp * noise.noise2D(x * freq, y * freq);
+    norm += amp;
+    amp *= 0.5;
+    freq *= 2.0;
+  }
+  return sum / norm;
+}
+
+// ———— 宏观地貌高度复刻 ————
+
+/**
+ * 宏观地貌高度场「复刻采样器」：与 terrainField.js createMacroField().heightAt 的
+ * 高度数学逐位一致（同一 seeds.macroTerrainSeed → 同一 Simplex 置换表 → 同一 fBm；
+ * 陨坑散布同用 splitmix32 子种子）。terrainField 未导出该内部采样器，且 siteModifier
+ * 在 evalPoint 内被调用（再入 evalPoint 会递归），故在此以纯函数复刻：
+ *  - 用途 1：锚点坪目标高 H ≈ 周边自然高程，使坪面既严格平坦又与四周无缝衔接
+ *    （|dy| 通常 < 2m，仅填平局部特征时触及权限上限）；
+ *  - 用途 2：validateGeneratedSite 的过渡带无缝检查需要「未加 SDF 的自然高」作基准。
+ * 若 terrainField 宏观场后续演化，须同步更新本复刻（仅影响坪贴合度，不影响确定性）。
+ */
+function createMacroHeightReplica(profile, seeds) {
+  const noise = createSimplexNoise(seeds.macroTerrainSeed);
+  const detailNoise = createSimplexNoise((seeds.macroTerrainSeed ^ 0x51ed270b) >>> 0);
+
+  const base = num(profile.base, 8);
+  const amp = num(profile.amp, 10);
+  const ridgeW = num(profile.ridge, 0);
+  const basin = num(profile.basinDepth, 0);
+  const shelf = profile.shelf || null;
+  const trench = profile.trench || null;
+  const mesa = profile.mesa || null;
+  const terrace = num(profile.terrace, 0);
+  const dune = profile.dune || null;
+  const channel = profile.channel || null;
+
+  // 陨坑群：与 terrainField 相同的子种子与抽样顺序
+  const craters = [];
+  if (profile.crater && profile.crater.count > 0) {
+    const st = seedFromNumber((seeds.macroTerrainSeed ^ hash32('crater')) >>> 0);
+    const spread = 480;
+    for (let k = 0; k < profile.crater.count; k++) {
+      const r1 = nextU32(st) / 4294967296;
+      const r2 = nextU32(st) / 4294967296;
+      const r3 = nextU32(st) / 4294967296;
+      const r4 = nextU32(st) / 4294967296;
+      craters.push({
+        x: (r1 - 0.5) * spread,
+        z: (r2 - 0.5) * spread,
+        r: num(profile.crater.radius, 20) * (0.6 + 0.8 * r3),
+        d: num(profile.crater.depth, 5) * (0.6 + 0.7 * r4),
+      });
+    }
+  }
+
+  const duneCa = dune ? Math.cos(num(dune.angle, 0)) : 1;
+  const duneSa = dune ? Math.sin(num(dune.angle, 0)) : 0;
+  const duneAmp = dune ? num(dune.amp, 0.8) : 0;
+  const duneWave = dune ? num(dune.wavelength, 16) : 16;
+  const trenchW = trench ? num(trench.width, 0.05) : 0;
+  const trenchD = trench ? num(trench.depth, 10) : 0;
+  const mesaThr = mesa ? 1 - 2 * clamp(num(mesa.fraction, 0.3), 0, 0.9) : 0;
+  const mesaStep = mesa ? Math.max(0.5, num(mesa.step, 2)) : 1;
+  const chanEdge = channel ? 1 - clamp(num(channel.width, 0.1), 0.01, 0.9) : 1;
+  const chanLevel = channel ? num(channel.level, -4) : 0;
+  const shelfLevel = shelf ? num(shelf.level, 0) : 0;
+  const shelfThr = shelf ? num(shelf.threshold, 0.2) : 0;
+
+  /** 与 terrainField heightAt 逐项一致的高度叠加（返回标量 y，未做预算钳制） */
+  function heightAt(wx, wz) {
+    let y = base + fbm2(noise, wx * 0.0055, wz * 0.0055, 3) * amp;
+    if (ridgeW > 0) {
+      const r = 1 - Math.abs(noise.noise2D(wx * 0.0105 + 13.7, wz * 0.0105 - 7.3));
+      y += amp * ridgeW * (r * r * 1.6 - 0.35);
+    }
+    if (basin > 0) {
+      const b = fbm2(noise, wx * 0.0035 - 41.2, wz * 0.0035 + 17.8, 2);
+      if (b > 0) y -= basin * b * b;
+    }
+    if (shelf) {
+      const s = fbm2(noise, wx * 0.004 + 91.3, wz * 0.004 - 33.8, 2);
+      if (s > shelfThr) {
+        const k = smoothstep(shelfThr, shelfThr + 0.22, s);
+        y += (shelfLevel - y) * k * 0.9;
+      }
+    }
+    if (trench) {
+      const t = Math.abs(noise.noise2D(wx * 0.0062 + 101.3, wz * 0.0062 - 55.9));
+      if (t < trenchW) {
+        const k = 1 - t / trenchW;
+        const kk = k * k * (3 - 2 * k);
+        y -= trenchD * kk;
+      }
+    }
+    for (let c = 0; c < craters.length; c++) {
+      const cr = craters[c];
+      const ddx = wx - cr.x;
+      const ddz = wz - cr.z;
+      const dd = Math.sqrt(ddx * ddx + ddz * ddz) / cr.r;
+      if (dd < 1) {
+        y -= cr.d * (1 - dd * dd);
+      } else if (dd < 1.35) {
+        const rim = 1 - (dd - 1) / 0.35;
+        y += cr.d * 0.32 * rim * rim;
+      }
+    }
+    if (mesa) {
+      const m = fbm2(noise, wx * 0.0045 + 77.7, wz * 0.0045 - 21.4, 2);
+      if (m > mesaThr) {
+        const k = smoothstep(mesaThr, mesaThr + 0.10, m);
+        const q = Math.round(y / mesaStep) * mesaStep;
+        y += (q - y) * k;
+      }
+    }
+    if (terrace > 0) {
+      const q = Math.round(y / terrace) * terrace;
+      y += (q - y) * 0.85;
+    }
+    if (dune) {
+      const mask = 0.5 + 0.5 * detailNoise.noise2D(wx * 0.02, wz * 0.02);
+      y += duneAmp * Math.sin(((wx * duneCa + wz * duneSa) * 2 * Math.PI) / duneWave) * mask;
+    }
+    if (channel) {
+      const v = 1 - Math.abs(noise.noise2D(wx * 0.009 + 37.2, wz * 0.009 - 91.4));
+      if (v > chanEdge) {
+        const k = smoothstep(chanEdge, 1, v);
+        y += (chanLevel - y) * k;
+      }
+    }
+    return y;
+  }
+
+  return { heightAt };
+}
+
+// ———— Site 变换 ————
+
+/**
+ * SiteTransform（doc7 §3.1）：Site Local → Planet Local（仿射：平移 + 1 缩放）。
+ * @param {{siteCenter:number[]}} site 站点实例
+ * @param {number} x Site Local x（米）
+ * @param {number} z Site Local z（米）
+ * @returns {number[]} [px, pz] Planet Local
+ */
+function siteToPlanet(site, x, z) {
+  return [site.siteCenter[0] + x, site.siteCenter[1] + z];
+}
+
+/** SiteTransform 逆变换：Planet Local → Site Local */
+function planetToSite(site, x, z) {
+  return [x - site.siteCenter[0], z - site.siteCenter[1]];
+}
+
+// ———— Catmull-Rom 样条 ————
+
+/** Catmull-Rom 单段插值（均匀参数化，端点复制） */
+function crPoint(a, b, c, d, t) {
+  const t2 = t * t;
+  const t3 = t2 * t;
+  return 0.5 * ((2 * b) + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (-a + 3 * b - 3 * c + d) * t3);
+}
+
+/**
+ * Catmull-Rom 链采样：过全部控制点（首尾复制端点），按约 SPLINE_SPACING 间距输出。
+ * @param {{x:number,z:number}[]} pts 控制点（Planet Local）
+ * @returns {{x:number,z:number}[]} 采样点（含首末端点，确定性）
+ */
+function catmullRomChain(pts) {
+  if (pts.length < 2) return pts.slice();
+  const out = [];
+  const P = [pts[0], ...pts, pts[pts.length - 1]];
+  for (let s = 0; s < pts.length - 1; s++) {
+    const p0 = P[s];
+    const p1 = P[s + 1];
+    const p2 = P[s + 2];
+    const p3 = P[s + 3];
+    const segLen = Math.hypot(p2.x - p1.x, p2.z - p1.z);
+    const steps = Math.max(2, Math.ceil(segLen / SPLINE_SPACING));
+    for (let k = 0; k < steps; k++) {
+      const t = k / steps;
+      out.push({ x: crPoint(p0.x, p1.x, p2.x, p3.x, t), z: crPoint(p0.z, p1.z, p2.z, p3.z, t) });
+    }
+  }
+  out.push({ x: pts[pts.length - 1].x, z: pts[pts.length - 1].z });
+  return out;
+}
+
+/** 折线长度（采样点累计弦长） */
+function chainLength(chain) {
+  let len = 0;
+  for (let i = 1; i < chain.length; i++) {
+    len += Math.hypot(chain[i].x - chain[i - 1].x, chain[i].z - chain[i - 1].z);
+  }
+  return len;
+}
+
+// ———— 实例化 ————
+
+/**
+ * 实例化登陆点站点（纯函数、确定性；doc6 §5.4：锚点拓扑确定，细节摆放随子流有限变化）。
+ * @param {{seed:number}} world 世界实体（只读 world.seed）
+ * @param {string|number} planetId 行星实体 id
+ * @param {object} blueprint MissionSiteBlueprint
+ * @param {{center?:number[]}} [opts] siteCenter 覆盖（默认 Planet Local [0,0]）
+ * @returns {object} 站点实例（JSON 可序列化，键序稳定，同种子逐字节一致）
+ */
+function instantiateSite(world, planetId, blueprint, opts = {}) {
+  const seeds = derivePlanetSeeds(world, planetId);
+  const version = num(blueprint.version, 1);
+  const siteSeed = seeds.missionSiteSeed(blueprint.id, version);
+  const salt = blueprint.proceduralSeedSalt || blueprint.id;
+  const varStream = seedFromNumber((siteSeed ^ hash32(salt)) >>> 0);
+  const unit = () => nextU32(varStream) / 4294967296;
+
+  const siteRadius = num(blueprint.siteRadius, SITE_RADIUS_DEFAULT);
+  const coreFactor = num(blueprint.coreRadiusFactor, CORE_RADIUS_FACTOR_DEFAULT);
+  const transFactor = num(blueprint.transitionRadiusFactor, TRANSITION_RADIUS_FACTOR_DEFAULT);
+  const center = opts.center ? [opts.center[0], opts.center[1]] : [0, 0];
+  const toPlanet = (p) => ({ x: center[0] + p.x, z: center[1] + p.z });
+
+  const anchors = {
+    landing: toPlanet(blueprint.anchors.landing),
+    primaryObjective: toPlanet(blueprint.anchors.primaryObjective),
+    secondaryObjective: toPlanet(blueprint.anchors.secondaryObjective),
+    extraction: toPlanet(blueprint.anchors.extraction),
+  };
+
+  // 地标：授权 rotation 保留，另加子流微扰（±0.25rad）——纯摆放细节，不破坏拓扑
+  const landmarks = blueprint.landmarks.map((lm) => ({
+    prefabId: lm.prefabId,
+    anchor: toPlanet(lm.anchor),
+    rotation: num(lm.rotation, 0) + (unit() - 0.5) * 0.5,
+  }));
+
+  // 路线：端点解析 + Site Local → Planet Local + 设计折线长（供质量门禁比对）
+  const routes = blueprint.routes.map((rt) => {
+    const fromA = anchors[rt.from] || null;
+    const toA = anchors[rt.to] || null;
+    const waypoints = rt.waypoints.map(toPlanet);
+    const pts = fromA && toA ? [fromA, ...waypoints, toA] : waypoints;
+    return {
+      id: rt.id,
+      from: rt.from,
+      to: rt.to,
+      kind: rt.kind,
+      fromXY: fromA ? { x: fromA.x, z: fromA.z } : null,
+      toXY: toA ? { x: toA.x, z: toA.z } : null,
+      waypoints,
+      deckSegments: rt.deckSegments ? rt.deckSegments.map((d) => [d[0], d[1]]) : null,
+      deckLift: num(rt.deckLift, 3.5),
+      designLength: Math.round(chainLength(pts) * 100) / 100,
+    };
+  });
+
+  // 掩体点：子流微扰（±1.5m），语义 kind 保留
+  const coverPoints = blueprint.coverPoints.map((cp) => ({
+    x: center[0] + cp.x + (unit() - 0.5) * 3,
+    z: center[1] + cp.z + (unit() - 0.5) * 3,
+    kind: cp.kind || 'cover',
+  }));
+
+  const hazardZones = blueprint.hazardZones.map((hz) => ({
+    x: center[0] + hz.x,
+    z: center[1] + hz.z,
+    radius: hz.radius,
+    type: hz.type,
+  }));
+
+  return {
+    id: `${blueprint.id}@${planetId}`,
+    blueprintId: blueprint.id,
+    blueprintVersion: version,
+    generatorVersion: 1,
+    planetId,
+    seed: siteSeed,
+    proceduralSeedSalt: salt,
+    siteCenter: center,
+    siteRadius,
+    coreRadius: siteRadius * coreFactor,
+    transitionInnerRadius: siteRadius * coreFactor,
+    transitionOuterRadius: siteRadius * (coreFactor + transFactor),
+    anchors,
+    landmarks,
+    routes,
+    hazardZones,
+    coverPoints,
+    objectiveGraph: blueprint.objectiveGraph || null,
+    extraction: {
+      kind: blueprint.extraction.kind,
+      radius: blueprint.extraction.radius,
+      anchor: { x: anchors.extraction.x, z: anchors.extraction.z },
+    },
+    missionTemplateAffinity: blueprint.missionTemplateAffinity.slice(),
+  };
+}
+
+// ———— SDF siteModifier 构建 ————
+
+/** 坪面遮罩：inner 内全权 1，inner→outer smoothstep 衰减为 0 */
+function padMask(d, inner, outer) {
+  if (d <= inner) return 1;
+  if (d >= outer) return 0;
+  return 1 - smoothstep(inner, outer, d);
+}
+
+/**
+ * 构建 terrainField 的 siteModifier（(wx, wz, base) => {dy, flags, weights}|null）。
+ * 调用方将返回值传入 createTerrainField(world, planetId, { siteModifier, profile })；
+ * field 的 profile 必须与 blueprint.terrainProfile 一致（坪目标高/无缝基准取自同一剖面）。
+ *
+ * @param {{seed:number}} world 世界实体
+ * @param {string|number} planetId 行星实体 id
+ * @param {object} blueprint MissionSiteBlueprint
+ * @param {{center?:number[]}} [opts]
+ */
+function buildSiteModifier(world, planetId, blueprint, opts = {}) {
+  const site = instantiateSite(world, planetId, blueprint, opts);
+  const seeds = derivePlanetSeeds(world, planetId);
+  const profile = TERRAIN_PROFILES[blueprint.terrainProfile] || null;
+  const macro = profile ? createMacroHeightReplica(profile, seeds) : null;
+
+  /** 坪/样条目标高（宏观复刻 + 预算安全内缩） */
+  const targetY = (x, z) => clamp(macro ? macro.heightAt(x, z) : 0, TARGET_CLAMP_LO, TARGET_CLAMP_HI);
+  /** 精确自然高（含与 evalPoint 相同的预算钳制；无缝检查基准） */
+  const naturalYExact = (x, z) => clamp(macro ? macro.heightAt(x, z) : 0, MIN_HEIGHT, MAX_HEIGHT);
+
+  // A. 锚点坪：着陆坪（平地半径 ≥12m）、主/次目标坪、撤离坪 + 地标地基
+  const pads = [];
+  const padSpecs = [
+    ['landing', 12, 28],
+    ['primaryObjective', 8, 20],
+    ['secondaryObjective', 8, 20],
+  ];
+  for (let i = 0; i < padSpecs.length; i++) {
+    const a = site.anchors[padSpecs[i][0]];
+    pads.push({ x: a.x, z: a.z, inner: padSpecs[i][1], outer: padSpecs[i][2], H: targetY(a.x, a.z) });
+  }
+  const exInner = clamp(num(site.extraction.radius, 8) + 1, 8, 12);
+  pads.push({
+    x: site.anchors.extraction.x, z: site.anchors.extraction.z,
+    inner: exInner, outer: exInner + 12, H: targetY(site.anchors.extraction.x, site.anchors.extraction.z),
+  });
+  for (let i = 0; i < site.landmarks.length; i++) {
+    const lm = site.landmarks[i];
+    pads.push({ x: lm.anchor.x, z: lm.anchor.z, inner: 5, outer: 10, H: targetY(lm.anchor.x, lm.anchor.z) });
+  }
+  // 坪高一致性：内盘贴近的坪并接到同一水平面（声明序先到者优先）。
+  // 否则两个 w=1 的平台交叠处会按先到者切换，形成双平台间的垂直悬崖。
+  for (let i = 1; i < pads.length; i++) {
+    for (let j = 0; j < i; j++) {
+      const dxp = pads[i].x - pads[j].x;
+      const dzp = pads[i].z - pads[j].z;
+      if (Math.sqrt(dxp * dxp + dzp * dzp) < pads[i].inner + pads[j].inner + 6) {
+        pads[i].H = pads[j].H;
+        break;
+      }
+    }
+  }
+
+  // B. 道路样条：Catmull-Rom 采样 → 弧长 → 桥面段标记 → 空间桶索引
+  const samples = [];
+  const buckets = new Map();
+  const bucketKey = (gx, gz) => (gx + 2048) * 8192 + (gz + 2048);
+  for (let ri = 0; ri < site.routes.length; ri++) {
+    const route = site.routes[ri];
+    if (!route.fromXY || !route.toXY) continue;
+    const chain = catmullRomChain([route.fromXY, ...route.waypoints, route.toXY]);
+    const total = chainLength(chain);
+    const half = CORRIDOR_HALF[route.kind] || 3.5;
+    const decks = route.deckSegments || [];
+    const lift = num(route.deckLift, 3.5);
+    const cum = [0];
+    for (let i = 1; i < chain.length; i++) {
+      cum.push(cum[i - 1] + Math.hypot(chain[i].x - chain[i - 1].x, chain[i].z - chain[i - 1].z));
+    }
+    const isDeck = chain.map((_, i) => {
+      const f = total > 0 ? cum[i] / total : 0;
+      for (let d = 0; d < decks.length; d++) {
+        if (f >= decks[d][0] && f <= decks[d][1]) return true;
+      }
+      return false;
+    });
+    // 桥面目标高：两端岸高线性基准 + 抛物线拱升，且不低于自然高（桥不沉入河道）
+    const targets = new Array(chain.length);
+    let i = 0;
+    while (i < chain.length) {
+      if (!isDeck[i]) {
+        targets[i] = targetY(chain[i].x, chain[i].z);
+        i++;
+        continue;
+      }
+      let i1 = i;
+      while (i1 + 1 < chain.length && isDeck[i1 + 1]) i1++;
+      const yA = targetY(chain[i].x, chain[i].z);
+      const yB = targetY(chain[i1].x, chain[i1].z);
+      const runLen = cum[i1] - cum[i];
+      for (let k = i; k <= i1; k++) {
+        const u = runLen > 1e-9 ? (cum[k] - cum[i]) / runLen : 0;
+        const bank = yA + (yB - yA) * u;
+        const arch = bank + lift * Math.sin(Math.PI * u);
+        targets[k] = Math.max(targetY(chain[k].x, chain[k].z), arch);
+      }
+      i = i1 + 1;
+    }
+    for (let k = 0; k < chain.length; k++) {
+      const smp = {
+        x: chain[k].x, z: chain[k].z,
+        target: targets[k], half,
+        deck: isDeck[k],
+      };
+      const idx = samples.length;
+      samples.push(smp);
+      const key = bucketKey(Math.floor(smp.x / BUCKET_CELL), Math.floor(smp.z / BUCKET_CELL));
+      const arr = buckets.get(key);
+      if (arr) arr.push(idx);
+      else buckets.set(key, [idx]);
+    }
+  }
+
+  const hazards = site.hazardZones;
+  const coreRadius = site.coreRadius;
+  const transOuter = site.transitionOuterRadius;
+  const cx = site.siteCenter[0];
+  const cz = site.siteCenter[1];
+
+  // 生效半径：坪 / 走廊 / 危险域 / 核心的最大延伸 + 余量
+  let reach = coreRadius + 2;
+  for (let i = 0; i < pads.length; i++) {
+    reach = Math.max(reach, Math.hypot(pads[i].x - cx, pads[i].z - cz) + pads[i].outer);
+  }
+  for (let i = 0; i < samples.length; i++) {
+    reach = Math.max(reach, Math.hypot(samples[i].x - cx, samples[i].z - cz) + samples[i].half);
+  }
+  for (let i = 0; i < hazards.length; i++) {
+    reach = Math.max(reach, Math.hypot(hazards[i].x - cx, hazards[i].z - cz) + hazards[i].radius);
+  }
+  reach += 2;
+
+  /**
+   * 逐点 SDF 评估。base = evalPoint 传入的 { y, weights, biomeId, flags, temp, moisture }
+   * （y 为未钳制的宏观高度）；返回 null 表示本点无人工修型（程序化外围原样透传）。
+   */
+  return function siteModifier(wx, wz, base) {
+    const dx = wx - cx;
+    const dz = wz - cz;
+    const r2 = dx * dx + dz * dz;
+    if (r2 > reach * reach) return null;
+    const r = Math.sqrt(r2);
+    let dy = 0;
+    let flags = 0;
+    let roadTake = 0;
+
+    // A. 锚点坪 / 地标地基：取权重最高者的整平贡献（互叠时优先坪面）
+    let bestW = 0;
+    let bestDy = 0;
+    for (let i = 0; i < pads.length; i++) {
+      const p = pads[i];
+      const ddx = wx - p.x;
+      const ddz = wz - p.z;
+      const d2 = ddx * ddx + ddz * ddz;
+      if (d2 > p.outer * p.outer) continue;
+      const w = padMask(Math.sqrt(d2), p.inner, p.outer);
+      if (w > bestW) {
+        bestW = w;
+        const auth = 6 + 34 * w; // 坪心权限 40m（填平陨坑/河道/裂隙等局部特征），裙边收敛回 ±6m
+        bestDy = clamp((p.H - base.y) * w, -auth, auth);
+        if (w >= 0.999) flags |= FLAG_FOUNDATION;
+      }
+    }
+    if (bestW > 0.0001) dy = bestDy;
+
+    // B. 道路走廊：最近样条样本（3×3 桶邻域）
+    let bd = Infinity;
+    let bs = null;
+    const gx0 = Math.floor(wx / BUCKET_CELL);
+    const gz0 = Math.floor(wz / BUCKET_CELL);
+    for (let gz = gz0 - 1; gz <= gz0 + 1; gz++) {
+      for (let gx = gx0 - 1; gx <= gx0 + 1; gx++) {
+        const arr = buckets.get(bucketKey(gx, gz));
+        if (!arr) continue;
+        for (let k = 0; k < arr.length; k++) {
+          const smp = samples[arr[k]];
+          const ddx = wx - smp.x;
+          const ddz = wz - smp.z;
+          const d2 = ddx * ddx + ddz * ddz;
+          if (d2 < bd) {
+            bd = d2;
+            bs = smp;
+          }
+        }
+      }
+    }
+    let corrW = 0;
+    if (bs && bd < bs.half * bs.half) {
+      const d = Math.sqrt(bd);
+      corrW = 1 - smoothstep(bs.half * 0.45, bs.half, d);
+      flags |= FLAG_ROAD;
+      if (bs.deck) flags |= FLAG_BRIDGE_DECK;
+      // D. 过渡带融合：走廊高度/材质影响随 r 平滑衰减（86.4m → 112.4m → 0）
+      const sFade = 1 - smoothstep(transOuter, transOuter + TRANSITION_FADE_WIDTH, r);
+      const auth = bs.deck ? 18 : 6; // 桥面为人工结构，允许跨越河道的拱升
+      const dyC = clamp(bs.target - base.y, -auth, auth) * corrW * sFade;
+      // 坪面优先：坪裙边内（w ≥ 0.5）道路必须并入坪面高程，严禁以自然高目标
+      // 在坪缘开挖路堑；裙边外道路才接管高度并自然衔接地形
+      if (corrW > bestW && bestW < 0.5) dy = dyC;
+      roadTake = Math.max(roadTake, Math.round(200 * corrW * sFade));
+    }
+
+    // C. 语义旗：任务核心保护区 / 蓝图危险域
+    if (r <= coreRadius) flags |= FLAG_CORE_PROTECTED;
+    for (let i = 0; i < hazards.length; i++) {
+      const hz = hazards[i];
+      const ddx = wx - hz.x;
+      const ddz = wz - hz.z;
+      if (ddx * ddx + ddz * ddz <= hz.radius * hz.radius) {
+        flags |= FLAG_HAZARD;
+        break;
+      }
+    }
+
+    const hasDy = dy !== 0;
+    const w0 = base.weights ? base.weights[0] : 255;
+    const take = Math.min(roadTake, w0);
+    if (!hasDy && flags === 0 && take <= 0) return null;
+
+    const mod = {};
+    if (hasDy) mod.dy = dy;
+    if (flags !== 0) mod.flags = flags;
+    if (take > 0 && base.weights) {
+      const w = [base.weights[0], base.weights[1], base.weights[2], base.weights[3]];
+      w[0] -= take;
+      w[3] += take; // 四通道和恒 255（TERRAIN-01），道路材质走通道 3
+      mod.weights = w;
+    }
+    return mod;
+  };
+}
+
+// ———— 生成质量门禁自检（doc7 TASK-2.1：6 项；SITE-01/03/04/06） ————
+
+/** 门禁阈值 */
+const GATE_PAD_MAX_SLOPE_DEG = 6;      // (2) 着陆坪坡度
+const GATE_RING_SEAM_M = 3;            // (3) 86m 环 SDF 诱导高差 ≤ 3m / 8m
+const GATE_ANCHOR_MIN_DIST_M = 12;     // (5) 锚点两两间距
+const GATE_ROUTE_LEN_RATIO = 1.15;     // (4) 主/侧翼路线长差 ≥ 15%
+const GATE_ROUTE_HAZARD_DIFF = 0.02;   // (4) 或危险暴露差 ≥ 2% 采样
+const RING_ANGLES = 64;                // 86m 环采样角数（弧距 ≈ 8.5m）
+const RING_RADIAL_STEP = 8;            // 径向配对间距（m）
+
+/**
+ * 6 项生成质量自检（纯读 field；确定性违规字符串，全部通过返回 { ok:true, violations:[] }）。
+ *  (1) 锚点可达：landing → primary/secondary/extraction 的 findPathSurface 均非空；
+ *  (2) 着陆坪坡度 ≤ 6°（坪心 + r=6/11m 两圈 16 向采样）；
+ *  (3) 核心/过渡带边界无缝：86m 环（及 +8m 径向配对）上「SDF 诱导高差 = 场高 − 自然高」
+ *      的相邻采样差 ≤ 3m（天然沟壑属程序化外围地貌，不计入人工拼缝）；
+ *  (4) 路线连通且差异化：每条路线端点路径存在，且设计折线长差 ≥ 15% 或危险暴露差 ≥ 2%
+ *      （或实测路径危险暴露不同）；
+ *  (5) 锚点/POI 无重叠：两两间距 ≥ 12m；
+ *  (6) 撤离点可自主目标抵达。
+ *
+ * @param {{seed:number}} world 世界实体
+ * @param {string|number} planetId 行星实体 id
+ * @param {object} blueprint MissionSiteBlueprint
+ * @param {object} field createTerrainField 产出的地形场（profile 应与蓝图一致）
+ * @returns {{ok:boolean, violations:string[], stats:object}}
+ */
+function validateGeneratedSite(world, planetId, blueprint, field) {
+  const site = instantiateSite(world, planetId, blueprint);
+  const violations = [];
+  const stats = {};
+  const A = site.anchors;
+
+  // (1)(6) 路径连通
+  const reachPairs = [
+    ['landing', 'primaryObjective'],
+    ['landing', 'secondaryObjective'],
+    ['landing', 'extraction'],
+    ['primaryObjective', 'extraction'],
+  ];
+  for (let i = 0; i < reachPairs.length; i++) {
+    const [f, t] = reachPairs[i];
+    const path = findPathSurface(field, A[f].x, A[f].z, A[t].x, A[t].z);
+    const key = `${f}->${t}`;
+    if (!path) {
+      violations.push(`anchors:${key} unreachable (no surface path)`);
+      stats[`path_${key}`] = -1;
+    } else {
+      let len = 0;
+      for (let k = 1; k < path.path.length; k++) {
+        len += Math.hypot(path.path[k].x - path.path[k - 1].x, path.path[k].z - path.path[k - 1].z);
+      }
+      stats[`path_${key}`] = Math.round(len * 10) / 10;
+    }
+  }
+
+  // (2) 着陆坪坡度（坪心 + r=6 / r=11 各 8 向）
+  let padMaxSlope = 0;
+  const padRings = [0, 6, 11];
+  for (let ri = 0; ri < padRings.length; ri++) {
+    const rr = padRings[ri];
+    const count = rr === 0 ? 1 : 8;
+    for (let k = 0; k < count; k++) {
+      const ang = (k / count) * Math.PI * 2;
+      const px = A.landing.x + Math.cos(ang) * rr;
+      const pz = A.landing.z + Math.sin(ang) * rr;
+      const deg = slopeAt(field, px, pz);
+      if (!Number.isFinite(deg)) {
+        violations.push('landing_pad: slope sample outside field');
+        padMaxSlope = NaN;
+        break;
+      }
+      if (deg > padMaxSlope) padMaxSlope = deg;
+    }
+  }
+  stats.padMaxSlopeDeg = Number.isFinite(padMaxSlope) ? Math.round(padMaxSlope * 100) / 100 : NaN;
+  if (Number.isFinite(padMaxSlope) && padMaxSlope > GATE_PAD_MAX_SLOPE_DEG) {
+    violations.push(`landing_pad: slope ${stats.padMaxSlopeDeg}deg > ${GATE_PAD_MAX_SLOPE_DEG}deg`);
+  }
+
+  // (3) 86m 环无缝：SDF 诱导高差（场高 − 自然高）的相邻/径向变化 ≤ 3m / 8m
+  const profile = TERRAIN_PROFILES[blueprint.terrainProfile] || null;
+  const macro = profile ? createMacroHeightReplica(profile, derivePlanetSeeds(world, planetId)) : null;
+  const seamBase = site.transitionOuterRadius;
+  let seamAngular = 0;
+  let seamRadial = 0;
+  const seam = new Array(RING_ANGLES);
+  for (let i = 0; i < RING_ANGLES; i++) {
+    const ang = (i / RING_ANGLES) * Math.PI * 2;
+    const cosA = Math.cos(ang);
+    const sinA = Math.sin(ang);
+    const px = site.siteCenter[0] + cosA * seamBase;
+    const pz = site.siteCenter[1] + sinA * seamBase;
+    const h = field.evalPoint(px, pz).y;
+    const n = macro ? clamp(macro.heightAt(px, pz), MIN_HEIGHT, MAX_HEIGHT) : h;
+    seam[i] = h - n;
+    const px2 = site.siteCenter[0] + cosA * (seamBase + RING_RADIAL_STEP);
+    const pz2 = site.siteCenter[1] + sinA * (seamBase + RING_RADIAL_STEP);
+    const h2 = field.evalPoint(px2, pz2).y;
+    const n2 = macro ? clamp(macro.heightAt(px2, pz2), MIN_HEIGHT, MAX_HEIGHT) : h2;
+    seamRadial = Math.max(seamRadial, Math.abs(h2 - n2 - seam[i]));
+  }
+  for (let i = 0; i < RING_ANGLES; i++) {
+    const j = (i + 1) % RING_ANGLES;
+    seamAngular = Math.max(seamAngular, Math.abs(seam[j] - seam[i]));
+  }
+  stats.ringSeamAngularM = Math.round(seamAngular * 100) / 100;
+  stats.ringSeamRadialM = Math.round(seamRadial * 100) / 100;
+  if (seamAngular > GATE_RING_SEAM_M) {
+    violations.push(`ring: sdf seam angular ${stats.ringSeamAngularM}m > ${GATE_RING_SEAM_M}m per 8m`);
+  }
+  if (seamRadial > GATE_RING_SEAM_M) {
+    violations.push(`ring: sdf seam radial ${stats.ringSeamRadialM}m > ${GATE_RING_SEAM_M}m per 8m`);
+  }
+
+  // (5) 锚点两两间距 ≥ 12m
+  const anchorKeys = ['landing', 'primaryObjective', 'secondaryObjective', 'extraction'];
+  let minPair = Infinity;
+  for (let i = 0; i < anchorKeys.length; i++) {
+    for (let j = i + 1; j < anchorKeys.length; j++) {
+      const d = Math.hypot(
+        A[anchorKeys[i]].x - A[anchorKeys[j]].x,
+        A[anchorKeys[i]].z - A[anchorKeys[j]].z,
+      );
+      if (d < minPair) minPair = d;
+    }
+  }
+  stats.anchorMinPairDistM = Math.round(minPair * 100) / 100;
+  if (minPair < GATE_ANCHOR_MIN_DIST_M) {
+    violations.push(`anchors: min pair distance ${stats.anchorMinPairDistM}m < ${GATE_ANCHOR_MIN_DIST_M}m`);
+  }
+
+  // (4) 路线连通且差异化
+  const main = site.routes.find((rt) => rt.id === 'route_main') || site.routes[0] || null;
+  const flank = site.routes.find((rt) => rt.id === 'route_flank') || null;
+  for (let i = 0; i < site.routes.length; i++) {
+    const rt = site.routes[i];
+    if (!rt.fromXY || !rt.toXY) {
+      violations.push(`routes:${rt.id} endpoints unresolved`);
+      continue;
+    }
+    const path = findPathSurface(field, rt.fromXY.x, rt.fromXY.z, rt.toXY.x, rt.toXY.z);
+    if (!path) violations.push(`routes:${rt.id} not connected on surface`);
+  }
+  if (main && flank) {
+    const lenMain = Math.max(1e-6, main.designLength);
+    const lenFlank = Math.max(1e-6, flank.designLength);
+    const ratio = Math.max(lenMain, lenFlank) / Math.min(lenMain, lenFlank);
+    stats.routeLenRatio = Math.round(ratio * 100) / 100;
+    const hazMain = routeHazardFraction(site, main);
+    const hazFlank = routeHazardFraction(site, flank);
+    stats.routeHazardMain = hazMain;
+    stats.routeHazardFlank = hazFlank;
+    const distinct = ratio >= GATE_ROUTE_LEN_RATIO
+      || Math.abs(hazMain - hazFlank) >= GATE_ROUTE_HAZARD_DIFF;
+    if (!distinct) {
+      violations.push(
+        `routes: main/flank not distinct (lenRatio ${stats.routeLenRatio} < ${GATE_ROUTE_LEN_RATIO}`
+        + `, hazardDiff ${Math.abs(hazMain - hazFlank).toFixed(3)})`,
+      );
+    }
+  } else {
+    violations.push('routes: route_main/route_flank pair missing');
+  }
+
+  return { ok: violations.length === 0, violations, stats };
+}
+
+/** 路线危险暴露：Catmull-Rom 采样点落入任一 hazardZones 的比例（设计层面差异化度量） */
+function routeHazardFraction(site, route) {
+  if (!route.fromXY || !route.toXY) return 0;
+  const chain = catmullRomChain([route.fromXY, ...route.waypoints, route.toXY]);
+  let hits = 0;
+  for (let i = 0; i < chain.length; i++) {
+    for (let h = 0; h < site.hazardZones.length; h++) {
+      const hz = site.hazardZones[h];
+      const dx = chain[i].x - hz.x;
+      const dz = chain[i].z - hz.z;
+      if (dx * dx + dz * dz <= hz.radius * hz.radius) {
+        hits++;
+        break;
+      }
+    }
+  }
+  return chain.length > 0 ? hits / chain.length : 0;
+}
+
+// ———— 便捷入口 ————
+
+/**
+ * getSiteInstance：查表 → 实例化 → 构建 siteModifier，返回即可直接传入
+ * createTerrainField(world, planetId, { profile: blueprint.terrainProfile, siteModifier })。
+ * @returns {null|{blueprint:object, site:object, siteModifier:Function}}
+ */
+function getSiteInstance(world, planetId, blueprintId, opts = {}) {
+  const blueprint = getSiteBlueprint(blueprintId);
+  if (!blueprint) return null;
+  return {
+    blueprint,
+    site: instantiateSite(world, planetId, blueprint, opts),
+    siteModifier: buildSiteModifier(world, planetId, blueprint, opts),
+  };
+}
+
+Object.assign(__exports, { SITE_RADIUS_DEFAULT, CORE_RADIUS_FACTOR_DEFAULT, TRANSITION_RADIUS_FACTOR_DEFAULT, TRANSITION_FADE_WIDTH, createMacroHeightReplica, siteToPlanet, planetToSite, instantiateSite, buildSiteModifier, validateGeneratedSite, getSiteInstance });
 
 });
 __register("src/render/meshes/GroundMeshes.js", function (__exports, __require) {
