@@ -308,3 +308,19 @@
 5. **遗留**：E2E 门禁页 6 项在门禁容器内因 rAF 停摆误报（UI-01/02/04/05/06/07），
    产品行为以实机操作 + 截图独立验证（见 docs/reports/report-planets.md）；
    地质钻探器/地面扫描仪工具 UI（doc6 §6.5 表其余两行）为后续增量。
+
+## 返工轮（docs 8/9，2026-11-06）— 实机审计驳回后的闭环整改
+
+- **背景**：交付 f634828 被项目负责人实机审计（7.4/10）与领域专家二次验收（5.2/10）
+  双重驳回：3,648 场任务仿真 112 场坠渊（Y 轴脱节 + 重力逃逸 + 橡皮筋）、2D/3D 维度
+  撕裂、四处孤岛死代码（V-05 _pois/_edits 初始化在执行工程师自己的提交链中丢失——
+  教训：多轮 python 补丁必须跑全量行为探针而非只看套件绿）。
+- **整改**：doc9 十项 VERIFY 全量修复（见 `docs/reports/report-rework-planets.md`
+  逐项对映表）；GroundMission 升维 site_meters 米制 3D（蓝图锚点部署 + 3D LOS/掩体）；
+  stepCharacterVertical / computeSpringArm / planColonyLayout 三个纯函数抽取
+  （实机与无头门禁同源口径）。
+- **门禁**：新增 PLAYTEST-GATE-01..04（3648 场零穿地 0.00% / 接线断言 / 相机 360°
+  零压溃 / 三主题布局裙边）——42 套件 **84/84 全绿（2 轮）**。
+- **提交**：`a956336` `0d38fb9` + 本报告 `docs/reports/report-rework-planets.md`。
+- **实机复测**：任务模式 site_abyssal_dome_01 着陆 4.5s + 移动 soak——y === ground、
+  vy=0、零穿地（原数秒坠渊场景不复现）。
