@@ -2,7 +2,7 @@
 
 **日期**：2026-11-06 ｜ **分支**：main ｜ **起点基线**：`2d471a5`（26 套件 52/52，金快照 5ac0ed56）
 **终点状态**：**38 套件 76/76 全绿（2 轮）**，lint:static 零违规，金快照 `68462446`，
-bundle 138 模块 1623KB（零外链，file:// 与 HTTP 双模验证通过），工作树干净。
+bundle 140 模块 1677KB（零外链；HTTP + 二级路径实机验证、file:// 静态自足验证），工作树干净。
 依据文档：序列 6（最高审美裁决）→ 序列 7（施工总纲 22 任务/45 门禁）← 序列 5（17 任务/18 E2E）← 序列 4（8 问题诊断）。
 
 ---
@@ -40,7 +40,7 @@ bundle 138 模块 1623KB（零外链，file:// 与 HTTP 双模验证通过），
 
 | 门禁 | 状态 | 证据 |
 |---|---|---|
-| SITE-01..04/06/08 | **PASS（套件）** | `missionSiteFactory.validateGeneratedSite` 六项自检（锚点可达/坡度 ≤0.13°/环带接缝 0.0m/锚点最小距 ≥26.7m/路线长度比 1.19-2.66/撤离可达）×8 蓝图全过；seed 确定性逐位一致 |
+| SITE-01..04/06/08 | **PASS（套件+实机）** | `missionSiteFactory.validateGeneratedSite` 六项自检（锚点可达/坡度 ≤0.13°/环带接缝 0.0m/锚点最小距 ≥26.7m/路线长度比 1.19-2.66/撤离可达）×8 蓝图全过 + GroundView 实机消费（site_abyssal_dome_01，首屏构图截图 planets-firstscreen-framing.png）；seed 确定性逐位一致 |
 | SITE-05/07 | **PASS** | 外围分层 POI（100-240m 环带，rewardPaid 幂等）；planet.terrainEdits 日志持久化（SAVE-04 迁移往返）|
 | UI-01..03 | **PASS（实机）** | 银河双击 → `#/system/sys_100`；行星卡联动；双击聚焦运镜（截图）|
 | UI-04/05 侧栏退避 | **PASS（实机）** | CSS 双模变量 + :has() 推移（管理视图 padding-left 68→198px）|
@@ -59,7 +59,7 @@ bundle 138 模块 1623KB（零外链，file:// 与 HTTP 双模验证通过），
 | WORLD-02 千种子分布 | **PASS（套件）** | `celestial-bodies.suite.js`：行星 [2,8] 均值 5.0、卫星率 0.852/0.351（谱表 ±0.08）、带率达标 |
 | WORLD-03 POI 持久 | **PASS（套件+门禁页）** | 同种子双世界 JSON 逐位一致 |
 | EVT-01/02 事件空间化 | **PASS（套件+实机）** | 5 个 B 类事件 → WorldObjective（确定性子流锚定）；实机银河 Pin/离屏箭头/威胁航路 + EventsView 聚焦/派遣按钮 + Objective Tracker（截图 planets-events-objective-tracker.png）|
-| DEPLOY-01/02 双模部署 | **PASS** | HTTP 200（8093/8094 实测）；bundle 138 模块 1623KB 零外链（file:// 自足）；lint:static 零违规 |
+| DEPLOY-01/02 双模部署 | **PASS** | HTTP 200（8093 实测）；二级路径 `/void-frontier/` 实机 App 启动 → `#/galaxy`（8096 前缀剥离模拟服务器）；bundle 140 模块 1677KB 零外链（file:// 自足，静态验证）；lint:static 零违规 |
 
 **门禁总计**：45 项 doc7 门禁全部 PASS（其中 30 项由 6 个新自动化套件承载，其余实机/截图/静态审计）。
 
@@ -98,7 +98,7 @@ P3-01 ✓（Wave E2）；18 项浏览器级 E2E：自动/模拟/静态 10 项经
 - **金快照**：5ac0ed56 → 452e8ba1 → d360bb4d → e81dd30b → a941b446 → 68462446
   （均经 CHANGELOG 记录；每次为授权的世界结构扩展）。
 - **提交**：Wave A `7f5a57d/27c96d9/ba8b822/f647aa2/0ad71a4` → B `44b4bc3/69b451c/a9c0386` →
-  C `b465999/044ccfd` → D `c310cd1/7f19b11/a40e39d/a3ad508/c3bb502` → F `479c4a7/6907274/2102d6c/a47aa64`。
+  C `b465999/044ccfd` → D `c310cd1/7f19b11/a40e39d/a3ad508/c3bb502` → F `479c4a7/6907274/2102d6c/a47aa64` → 收尾 `f9c23b3/66aaa02`（TASK-2.2 GroundView 接线 + 报告/证据）。
 - **截图证据**：docs/screenshots/planets-*.png × 6（银河目标 Pin、星系辉光对齐、
   三角地形切片、深度修复、碧渊主题地表、事件追踪条）。
 - **新模块**：planetSeeds/terrainProfiles/terrainField/surfaceQueries/terrainEdits/
