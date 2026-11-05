@@ -470,6 +470,8 @@ export const LANDMARK_MESH_BUILDERS = new Map([
   ['central_furnace_tower', buildCentralFurnaceTower],
   ['sandstone_arch', buildSandstoneArch],
   ['salt_crystal_spire', buildSaltCrystalSpire],
+  // doc9 P0-3 兼容别名：missionSites 旧稿拼写（月白盐柱）→ 同一盐晶簇构建器
+  ['moonwhite_salt_monolith', buildSaltCrystalSpire],
   ['giant_fumarole_cone', buildGiantFumaroleCone],
   ['soul_willow_tree', buildSoulWillowTree],
   ['obsidian_arch_bridge', buildObsidianArchBridge],

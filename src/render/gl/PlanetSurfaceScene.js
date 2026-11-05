@@ -5,6 +5,8 @@
  *   post.beginScene（防御性冗余清屏；清屏唯一所有者仍是 PostProcessor 8 步契约）
  *     → PlanetAtmosphere.drawSky（关深度天空，1 dc）
  *     → PlanetTerrainMesh.sync + draw（不透明地形，逐可见 Chunk 1 dc，≤64）
+ *     → PlanetWater.draw（doc9 P0-3：五层水下光学海面层，潮汐实时水位同步下发
+ *       地形 uThemeFx.x；无水主题 0 dc）
  *     → 对象占位 pass（actors.boxes/chars/decals —— Phase 1 为 null 安全空操作，
  *       后续对象 pass 波次在此接入真实实例化绘制）
  *     → PlanetAtmosphere.drawWeather（加性粒子，≤1 dc）
@@ -42,6 +44,7 @@ import {
 } from './Mat4.js';
 import { PlanetTerrainMesh } from './PlanetTerrainMesh.js';
 import { PlanetAtmosphere } from './PlanetAtmosphere.js';
+import { PlanetWater, tideWaterLevel, WATERLEVEL_NONE } from './PlanetWater.js';
 import { buildTerrainField } from '../../domain/ground/terrainField.js';
 
 function clamp(v, lo, hi) {
@@ -67,14 +70,18 @@ export class PlanetSurfaceScene {
     this._field = null;
     this._lastThemeRef = null;
     this._planetInfo = null;
+    this._worldOffset = null;
     this._fogColor = [0.62, 0.65, 0.70];
     this._fogRange = [60.0, 420.0];
 
     this._terrain = null;
     this._atmosphere = null;
+    this._water = null;
     if (canGL) {
       this._terrain = new PlanetTerrainMesh(glc, this.tier);
       this._atmosphere = new PlanetAtmosphere(glc, this.tier);
+      // —— doc9 P0-3：五层水下光学海面层挂载（地形之后、天气之前绘制） ——
+      this._water = new PlanetWater(glc, this.tier);
       if (opts.planetRadiusMeters) this._terrain.setPlanetRadius(opts.planetRadiusMeters);
     }
 
@@ -171,7 +178,9 @@ export class PlanetSurfaceScene {
    * @returns {PlanetSurfaceScene} this
    */
   setWorldOffset(o) {
+    this._worldOffset = (Array.isArray(o) && o.length >= 3) ? [o[0], o[1], o[2]] : null;
     if (this._terrain) this._terrain.setWorldOffset(o);
+    if (this._water) this._water.setWorldOffset(o);
     return this;
   }
 
@@ -193,6 +202,18 @@ export class PlanetSurfaceScene {
   }
 
   getDebugMode() { return this._terrain ? this._terrain.getDebugMode() : 0; }
+
+  /**
+   * 实时潮汐水位（doc9 P0-3/P2-1）：基准取地形主题 uThemeFx.x（setTheme 下发），
+   * 经 tideWaterLevel 叠加 90s 潮汐。无水主题（基准 ≤ -90）返回 null。
+   * @param {number} [time] 场景时间（秒）；缺省 0
+   * @returns {number|null} 当前海平面高程（米）或 null（无水）
+   */
+  getWaterLevel(time) {
+    const base = this._terrain && this._terrain._themeFx ? this._terrain._themeFx[0] : WATERLEVEL_NONE;
+    if (!(base > -90.0)) return null;
+    return tideWaterLevel(base, Number.isFinite(time) ? time : 0);
+  }
 
   /** 内部渲染器访问（诊断/测试用；勿在渲染循环外持有） */
   get terrainRenderer() { return this._terrain; }
@@ -247,6 +268,26 @@ export class PlanetSurfaceScene {
     this._terrain.sync(this._field, cam.eye, { time });
     const tr = this._terrain.draw(gl, { vp: cam.vp, eye: cam.eye, time, hdr });
     dc += tr.drawCalls;
+
+    // —— 2.5 水面（doc9 P0-3：五层水下光学海面层；不透明地形之后、天气之前） ——
+    //   潮汐：tideWaterLevel(base, time) 实时海平面 → 同时下发地形 uThemeFx.x
+    //   （水下吸收/焦散随潮汐涨落）与 PlanetWater 海面 uniform。无水主题（≤-90）0 dc。
+    const baseWl = this._terrain._themeFx ? this._terrain._themeFx[0] : WATERLEVEL_NONE;
+    if (this._water && baseWl > -90.0) {
+      const liveLv = tideWaterLevel(baseWl, time);
+      this._terrain._themeFx[0] = liveLv;
+      this._water.sync({ field: this._field, waterLevel: baseWl, fogRange: this._fogRange });
+      dc += this._water.draw(gl, {
+        vp: cam.vp,
+        eye: cam.eye,
+        time,
+        hdr,
+        waterLevel: liveLv,
+        sun: { dir: this._terrain._sunDir, color: this._terrain._sunColor },
+        fogColor: this._fogColor,
+        fogRange: this._fogRange,
+      }).drawCalls;
+    }
 
     // —— 3. 对象占位 pass（Phase 1 切片：空数组/未提供时安全跳过，0 dc；
     //      实例化绘制由后续对象 pass 波次在此接入） ——
@@ -371,8 +412,11 @@ export class PlanetSurfaceScene {
     if (!glc || !glc.gl || (cm.hasGL === false) || this.tier >= 3) return false;
     if (this._terrain) { try { this._terrain.destroy(); } catch (_) { /* 失效句柄安全 */ } }
     if (this._atmosphere) { try { this._atmosphere.destroy(); } catch (_) { /* 同上 */ } }
+    if (this._water) { try { this._water.destroy(); } catch (_) { /* 同上 */ } }
     this._terrain = new PlanetTerrainMesh(glc, this.tier);
     this._atmosphere = new PlanetAtmosphere(glc, this.tier);
+    this._water = new PlanetWater(glc, this.tier);
+    if (this._worldOffset) this._water.setWorldOffset(this._worldOffset);
     if (this._planetInfo && this._planetInfo.visualRadiusMeters) {
       this._terrain.setPlanetRadius(this._planetInfo.visualRadiusMeters);
     }
@@ -403,8 +447,10 @@ export class PlanetSurfaceScene {
     this._destroyed = true;
     if (this._terrain) { try { this._terrain.destroy(); } catch (_) { /* 失效句柄安全 */ } }
     if (this._atmosphere) { try { this._atmosphere.destroy(); } catch (_) { /* 同上 */ } }
+    if (this._water) { try { this._water.destroy(); } catch (_) { /* 同上 */ } }
     this._terrain = null;
     this._atmosphere = null;
+    this._water = null;
     this._field = null;
     this._inited = false;
   }

@@ -12,8 +12,20 @@
  *  - GROUND-03 结算幂等：finishMission / abortMission 以 rewardPaid 为结算锁，
  *    重复调用不会重复发奖、计经验或发事件。
  *
- * 地图 tile 编码：0 地板 / 1 墙 / 2 掩体 / 3 门 / 5 撤离区 / 6 危险区
- * （4 保留，不用）。坐标为像素，每格 TS=24px；格坐标 = floor(px / TS)。
+ * 地图（旧版 grid_px 回退路径）tile 编码：0 地板 / 1 墙 / 2 掩体 / 3 门 / 5 撤离区 /
+ * 6 危险区（4 保留，不用）。坐标为像素，每格 TS=24px；格坐标 = floor(px / TS)。
+ *
+ * P0-2 站点米制模式（doc9 §3.1 P0-2 / doc8 §四 P0-2）：当存在有效 planetId 且未强制
+ * legacyGrid 时，任务升维合龙至 3D 连续地形场（MissionSiteBlueprint 站点实例）：
+ *  - mission.coordSpace = 'site_meters'，mission.siteId = 蓝图 id，无 2D 瓦片网格；
+ *  - 单位 x/y 为 Planet-Local 场域米（1m = 1 unit），u.zElev = sampleTerrain 高程；
+ *  - 玩家生成在 site.anchors.landing 着陆坪（1.2m 环形展开），撤离区绑定
+ *    site.anchors.extraction（半径取蓝图 extraction.radius）；
+ *  - 移动：坡度 ≤35° 或 ROAD/BRIDGE_DECK 旗即可通行，彻底废除 2D T_WALL 阻挡；
+ *    碰撞柱 = site.coverPoints 0.85m / site.landmarks 2.2m / 其他单位 0.5m；
+ *  - LOS：raycastTerrain 三维射线（眼位 +1.25m → 目标 +1.10m），掩体防护
+ *    （连线距 coverPoint <1.5m 且高差 <1.6m → cover:true，远程伤害 ×0.5）；
+ *  - 米制刻度：玩家 5.2 m/s、近战 2.2m、远程 22m、交互 3.0m（MISSION_UNIT_SCALE）。
  */
 
 import { createEntity } from '../entities/registry.js';
@@ -22,6 +34,10 @@ import { credit, FLOW } from '../economy/ledger.js';
 import { clamp, dist, angleDelta } from '../../core/math.js';
 import { int, intRange, float, chance, pick, shuffle } from '../../core/rng.js';
 import { findMissionTemplate } from '../../content/missions.js';
+import { blueprintsForPlanet } from '../../content/missionSites.js';
+import { TERRAIN_FLAGS, buildTerrainField } from './terrainField.js';
+import { sampleTerrain, raycastTerrain } from './surfaceQueries.js';
+import { getSiteInstance } from './missionSiteFactory.js';
 
 // ———— 常量 ————
 
@@ -86,6 +102,51 @@ const NPC_SPEED = 80;          // NPC 移速
 const PICKUP_R = 26;           // 拾取半径
 const TARGET_HP = 120;         // destroy 目标物结构值
 
+// ———— P0-2 site_meters 米制刻度（doc8 §四 P0-2：1m = 1 unit） ————
+
+/** 供 GroundView / 门禁套件引用的米制单位刻度（doc8 P0-2 指定值） */
+export const MISSION_UNIT_SCALE = Object.freeze({
+  playerSpeed: 5.2,    // 玩家基础移速 m/s（旧 110 px/s）
+  meleeReach: 2.2,     // 近战触及 m（旧 44 px）
+  rangedRange: 22,     // 远程射程 m（旧 190 px）
+  interactRadius: 3.0, // 交互 / 拾取 / 救援半径 m（旧 52 px）
+});
+
+/** 速度等比换算：保持既有敌我速度比（110 px/s → 5.2 m/s） */
+const PX2M_V = MISSION_UNIT_SCALE.playerSpeed / 110;
+/** 交战距离等比换算：保持攻击 / 警戒距离比（190 px → 22 m） */
+const PX2M_R = MISSION_UNIT_SCALE.rangedRange / 190;
+
+/** 敌人米制参数表（显式换算：速度比 PX2M_V、交战距离比 PX2M_R 与像素版一致） */
+const ENEMY_TYPES_M = {
+  grunt:  { hp: 45,  dmg: 8,  attackR: 150 * PX2M_R, windupS: 0.5, speed: 70 * PX2M_V, aggroR: 220 * PX2M_R, poiseMax: 30 },
+  heavy:  { hp: 110, dmg: 16, attackR: 120 * PX2M_R, windupS: 0.9, speed: 45 * PX2M_V, aggroR: 220 * PX2M_R, poiseMax: 60 },
+  turret: { hp: 60,  dmg: 10, attackR: 260 * PX2M_R, windupS: 0.7, speed: 0,  aggroR: 260 * PX2M_R, poiseMax: 50 },
+  boss:   { hp: 900, dmg: 24, attackR: 150 * PX2M_R, windupS: 0.6, speed: 60 * PX2M_V, aggroR: 260 * PX2M_R, poiseMax: 200, phases: 3 },
+};
+const MELEE_REACH_M = MISSION_UNIT_SCALE.meleeReach;
+const MELEE_BONUS_M = 0.3;         // 重击触及加长（旧 +6px 等比）
+const MELEE_TARGET_EXTRA_M = 0.5;  // 目标物近战判定加长（旧 +10px 等比）
+const SOFT_LOCK_M = 4.5;           // 近战软锁定半径（旧 90px 等比）
+const INTERACT_R_M = MISSION_UNIT_SCALE.interactRadius;
+const PICKUP_R_M = MISSION_UNIT_SCALE.interactRadius;
+const RESCUE_CONTACT_M = MISSION_UNIT_SCALE.interactRadius;
+const FOLLOW_DIST_M = 3.0;         // NPC 跟随保持距离（m）
+const NPC_SPEED_M = 80 * PX2M_V;   // NPC 移速（保持与玩家速度比）
+const PATROL_ARRIVE_M = 0.6;       // 巡逻到位半径（旧 10px 等比）
+const SLOPE_WALK_MAX_DEG = 35;     // P0-2：坡度通行阈值（度）
+const COVER_RADIUS_M = 0.85;       // 掩体碰撞柱半径（doc8 P0-2）
+const LANDMARK_RADIUS_M = 2.2;     // 地标碰撞柱半径（doc8 P0-2）
+const UNIT_RADIUS_M = 0.5;         // 单位间碰撞半径
+const LOS_EYE_M = 1.25;            // LOS 射线眼位离地（doc9 P0-2）
+const LOS_TGT_M = 1.10;            // LOS 射线目标眼位离地
+const LOS_EPS_M = 0.3;             // LOS 命中容差（t < dist - 0.3 视为受阻）
+const COVER_PROXIMITY_M = 1.5;     // 掩体防护：连线距掩体点阈值
+const COVER_ELEV_M = 1.6;          // 掩体防护：高差阈值
+const LANDING_RING_M = 1.2;        // 着陆坪小队展开环半径
+const SITE_ENEMY_FACTOR = 26;      // 敌人密度系数（≈ 旧图可行走格数 / 15）
+const FIELD_CACHE_MAX = 8;         // 任务场缓存容量（LRU）
+
 // ———— 基础工具 ————
 
 /** 任务内确定性自增 id（不占用世界 seq，保持任务状态自包含） */
@@ -119,17 +180,56 @@ function tileIndexOf(mission, px) {
   return Math.floor(px.y / TS) * mission.w + Math.floor(px.x / TS);
 }
 
-/** 是否处于撤离区矩形内 */
+/** 是否处于撤离区内：site_meters 为圆形撤离区，旧版为矩形 */
 function inExtraction(mission, x, y) {
+  if (mission.coordSpace === 'site_meters') {
+    const e = mission.extraction;
+    return !!e && Math.hypot(x - e.x, y - e.z) <= e.r;
+  }
   const r = mission.extractionRect;
   return x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1;
 }
 
 /**
- * 视线检测：沿连线采样。墙/门阻断视线；掩体不阻断但记为“受掩体遮蔽”
- * （远程伤害 ×0.5）。返回 { clear, cover }。
+ * 视线检测（site_meters 分支）：从 [x0, 地面+1.25, z0] 向 [x1, 地面+1.10, z1] 发射
+ * raycastTerrain 三维射线；命中山脊（hit.t < dist - 0.3）判受阻；连线紧贴掩体点
+ * （<1.5m 且高差 <1.6m）赋予 cover 防护（远程伤害 ×0.5）。返回 { clear, cover }。
+ */
+function lineOfSightSite(mission, x0, y0, x1, y1) {
+  const field = mission.field;
+  if (!field) return { clear: true, cover: false };
+  const s0 = sampleTerrain(field, x0, y0);
+  const s1 = sampleTerrain(field, x1, y1);
+  const gy0 = s0 ? s0.y : 0;
+  const gy1 = s1 ? s1.y : 0;
+  const dx = x1 - x0, dz = y1 - y0;
+  const d = Math.hypot(dx, dz);
+  if (!(d > 1e-6)) return { clear: true, cover: false };
+  let cover = false;
+  const site = mission.site;
+  if (site) {
+    for (let i = 0; i < site.coverPoints.length; i++) {
+      const cp = site.coverPoints[i];
+      const t = Math.max(0, Math.min(1, ((cp.x - x0) * dx + (cp.z - y0) * dz) / (d * d)));
+      const px = x0 + dx * t, pz = y0 + dz * t;
+      if (Math.hypot(cp.x - px, cp.z - pz) < COVER_PROXIMITY_M) {
+        const cs = sampleTerrain(field, cp.x, cp.z);
+        const cy = cs ? cs.y : gy0;
+        if (Math.abs(cy - (gy0 + (gy1 - gy0) * t)) < COVER_ELEV_M) { cover = true; break; }
+      }
+    }
+  }
+  const hit = raycastTerrain(field, [x0, gy0 + LOS_EYE_M, y0], [dx, (gy1 + LOS_TGT_M) - (gy0 + LOS_EYE_M), dz], d);
+  if (hit.hit && hit.t < d - LOS_EPS_M) return { clear: false, cover };
+  return { clear: true, cover };
+}
+
+/**
+ * 视线检测：site_meters 走 3D 射线；旧版沿连线采样，墙/门阻断视线，掩体不阻断
+ * 但记为“受掩体遮蔽”（远程伤害 ×0.5）。返回 { clear, cover }。
  */
 function lineOfSight(mission, x0, y0, x1, y1) {
+  if (mission.coordSpace === 'site_meters') return lineOfSightSite(mission, x0, y0, x1, y1);
   const d = Math.hypot(x1 - x0, y1 - y0);
   const steps = Math.max(1, Math.ceil(d / (TS * 0.4)));
   let cover = false;
@@ -142,8 +242,12 @@ function lineOfSight(mission, x0, y0, x1, y1) {
   return { clear: true, cover };
 }
 
-/** 轴分离碰撞移动：先 x 后 y，撞墙滑行 */
+/**
+ * 轴分离碰撞移动：site_meters 走 3D 连续地形（坡度/旗通行 + 碰撞柱 + 轴滑行，
+ * 彻底废除 2D T_WALL）；旧版按瓦片可通行判定，先 x 后 y 撞墙滑行。
+ */
 function moveWithCollision(mission, u, nx, ny, speed, dt) {
+  if (mission.coordSpace === 'site_meters') return moveSite(mission, u, nx, ny, speed, dt);
   const step = speed * dt;
   if (!(step > 0)) return;
   if (walkableAt(mission, u.x + nx * step, u.y)) u.x += nx * step;
@@ -363,15 +467,368 @@ function bfsConnected(grid, w, h, sx, sy, targetTile) {
   return false;
 }
 
+// ———— P0-2 站点米制任务场（3D 连续地形合龙，doc9 §3.1 P0-2） ————
+
+/**
+ * 站点上下文解析：行星 → blueprintsForPlanet(planet, planet.primaryThemeId)[0]
+ * → getSiteInstance（锚点/掩体/路线实例化 + SDF siteModifier）。无效返回 null。
+ */
+function resolveSiteContext(world, planetId) {
+  const planet = (world.entities && world.entities.planets && world.entities.planets[planetId]) || null;
+  if (!planet) return null;
+  const bp = blueprintsForPlanet(planet, planet.primaryThemeId)[0];
+  if (!bp) return null;
+  const inst = getSiteInstance(world, planetId, bp.id);
+  if (!inst || !inst.site) return null;
+  return { blueprint: bp, site: inst.site, siteModifier: inst.siteModifier };
+}
+
+/** 任务场缓存（LRU，容量 FIELD_CACHE_MAX）：key = `${world.seed}|${planetId}`，GATE-01 复用 */
+const missionFieldCache = new Map();
+
+/**
+ * 取（或构建）行星任务地形场：buildTerrainField + 蓝图 siteModifier。
+ * 同 (world.seed, planetId) 逐位可复现（terrainField 红线 4）→ 缓存安全。
+ * @returns {object|null} 地形场（planetId 无法解析或无适配蓝图时为 null）
+ */
+export function getMissionField(world, planetId, siteCtx = null) {
+  const key = `${(world && world.seed) || 0}|${planetId}`;
+  const hit = missionFieldCache.get(key);
+  if (hit) {
+    missionFieldCache.delete(key);
+    missionFieldCache.set(key, hit); // LRU 刷新
+    return hit;
+  }
+  const ctx = siteCtx || resolveSiteContext(world, planetId);
+  if (!ctx) return null;
+  const field = buildTerrainField(world, planetId, {
+    profile: ctx.blueprint.terrainProfile,
+    siteModifier: ctx.siteModifier,
+  });
+  missionFieldCache.set(key, field);
+  if (missionFieldCache.size > FIELD_CACHE_MAX) {
+    missionFieldCache.delete(missionFieldCache.keys().next().value);
+  }
+  return field;
+}
+
+/** 场内高程采样（场外回退 0） */
+function spawnElev(field, x, z) {
+  const s = sampleTerrain(field, x, z);
+  return s ? s.y : 0;
+}
+
+/** 采样点通行判定：坡度 ≤35° 或 脚下 ROAD/BRIDGE_DECK 旗（doc9 P0-2）；返回采样或 null */
+function sitePassable(field, x, z) {
+  const s = sampleTerrain(field, x, z);
+  if (!s) return null;
+  const ny = Math.max(-1, Math.min(1, s.ny));
+  const deg = Math.acos(ny) * (180 / Math.PI);
+  if (deg <= SLOPE_WALK_MAX_DEG || (s.flags & (TERRAIN_FLAGS.ROAD | TERRAIN_FLAGS.BRIDGE_DECK)) !== 0) return s;
+  return null;
+}
+
+/** 是否距掩体/地标碰撞柱过近（布置点避让；地标额外 +1.2m 视觉余量） */
+function nearColumn(site, x, z, pad) {
+  for (let i = 0; i < site.coverPoints.length; i++) {
+    const cp = site.coverPoints[i];
+    if (Math.hypot(cp.x - x, cp.z - z) < pad) return true;
+  }
+  for (let i = 0; i < site.landmarks.length; i++) {
+    const lm = site.landmarks[i];
+    if (Math.hypot(lm.anchor.x - x, lm.anchor.z - z) < pad + 1.2) return true;
+  }
+  return false;
+}
+
+/** 实体碰撞柱：site.coverPoints 0.85m / site.landmarks 2.2m / 其他单位 0.5m（除自身）。
+ *  自身已处于某碰撞柱内时该柱对其放行（允许走出，防逐帧滑移无法越过半径的死锁）。 */
+function columnBlocked(mission, self, x, z) {
+  const site = mission.site;
+  const sx = self ? self.x : null, sz = self ? self.y : null;
+  for (let i = 0; i < site.coverPoints.length; i++) {
+    const cp = site.coverPoints[i];
+    const dx = cp.x - x, dz = cp.z - z;
+    if (dx * dx + dz * dz >= COVER_RADIUS_M * COVER_RADIUS_M) continue;
+    if (sx !== null) {
+      const ex = cp.x - sx, ez = cp.z - sz;
+      if (ex * ex + ez * ez < COVER_RADIUS_M * COVER_RADIUS_M) continue; // 自身已在柱内：放行逃离
+    }
+    return true;
+  }
+  for (let i = 0; i < site.landmarks.length; i++) {
+    const lm = site.landmarks[i];
+    const dx = lm.anchor.x - x, dz = lm.anchor.z - z;
+    if (dx * dx + dz * dz >= LANDMARK_RADIUS_M * LANDMARK_RADIUS_M) continue;
+    if (sx !== null) {
+      const ex = lm.anchor.x - sx, ez = lm.anchor.z - sz;
+      if (ex * ex + ez * ez < LANDMARK_RADIUS_M * LANDMARK_RADIUS_M) continue; // 自身已在柱内：放行逃离
+    }
+    return true;
+  }
+  const r2 = UNIT_RADIUS_M * UNIT_RADIUS_M;
+  const bags = [mission.playerUnits, mission.enemies, mission.npcs];
+  for (let b = 0; b < bags.length; b++) {
+    const bag = bags[b];
+    for (let i = 0; i < bag.length; i++) {
+      const o = bag[i];
+      if (o === self || o.state === 'dead' || o.state === 'safe') continue;
+      const dx = o.x - x, dz = o.y - z;
+      if (dx * dx + dz * dz < r2) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * site_meters 移动：目标点整点判定（坡度/旗 + 碰撞柱）→ 失败按 x/z 轴滑行；
+ * 通行后实时更新单位高程 u.zElev = sampleTerrain().y（doc8 P0-2 指令 3）。
+ */
+function moveSite(mission, u, nx, ny, speed, dt) {
+  const step = speed * dt;
+  if (!(step > 0)) return;
+  const field = mission.field;
+  if (!field) return;
+  const tryTo = (tx, tz) => {
+    const s = sitePassable(field, tx, tz);
+    if (!s || columnBlocked(mission, u, tx, tz)) return null;
+    return s;
+  };
+  const tx = u.x + nx * step, tz = u.y + ny * step;
+  const s = tryTo(tx, tz);
+  if (s) {
+    u.x = tx;
+    u.y = tz;
+    u.zElev = s.y;
+  } else {
+    // 轴分离滑行（先 x 后 z）
+    if (nx !== 0) {
+      const sx = tryTo(u.x + nx * step, u.y);
+      if (sx) { u.x += nx * step; u.zElev = sx.y; }
+    }
+    if (ny !== 0) {
+      const sz = tryTo(u.x, u.y + ny * step);
+      if (sz) { u.y += ny * step; u.zElev = sz.y; }
+    }
+  }
+  u.x = clamp(u.x, field.originX + 1, field.originX + field.sizeMeters - 1);
+  u.y = clamp(u.y, field.originZ + 1, field.originZ + field.sizeMeters - 1);
+}
+
+/** Catmull-Rom 链采样（与 missionSiteFactory 同式：端点复制，约 3m 间距，确定性） */
+const SITE_SPLINE_SPACING = 3;
+function catmullRomPts(pts) {
+  if (pts.length < 2) return pts.slice();
+  const out = [];
+  const P = [pts[0], ...pts, pts[pts.length - 1]];
+  for (let s = 0; s < pts.length - 1; s++) {
+    const p0 = P[s], p1 = P[s + 1], p2 = P[s + 2], p3 = P[s + 3];
+    const segLen = Math.hypot(p2.x - p1.x, p2.z - p1.z);
+    const steps = Math.max(2, Math.ceil(segLen / SITE_SPLINE_SPACING));
+    for (let k = 0; k < steps; k++) {
+      const t = k / steps;
+      const t2 = t * t, t3 = t2 * t;
+      out.push({
+        x: 0.5 * ((2 * p1.x) + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3),
+        z: 0.5 * ((2 * p1.z) + (-p0.z + p2.z) * t + (2 * p0.z - 5 * p1.z + 4 * p2.z - p3.z) * t2 + (-p0.z + 3 * p1.z - 3 * p2.z + p3.z) * t3),
+      });
+    }
+  }
+  out.push({ x: pts[pts.length - 1].x, z: pts[pts.length - 1].z });
+  return out;
+}
+
+/**
+ * 站点米制布置（doc8 P0-2 指令 2，全确定性、零随机、零 Math.random）：
+ *  - destroy 目标物 → primaryObjective 坪心 + 周边掩体偏移位；
+ *  - rescue NPC → secondaryObjective 坪环形；
+ *  - collect 拾取物 → route_main Catmull-Rom 链等弧长分布；
+ *  - escort 工程队 → route_main 中点；
+ *  - boss → primaryObjective 坪（朝着陆坪让出 3m 避开地标碰撞柱）；
+ *  - 其余敌军 → route_main / route_flank 链等距巡逻（距着陆坪 ≥ 警戒距离逐级放宽）。
+ */
+function populateSiteMission(mission, template) {
+  const field = mission.field;
+  const site = mission.site;
+  const A = site.anchors;
+
+  const chains = new Map();
+  const chainOf = (routeId) => {
+    if (chains.has(routeId)) return chains.get(routeId);
+    const rt = site.routes.find((r) => r.id === routeId) || site.routes[0] || null;
+    const pts = rt ? [rt.fromXY, ...rt.waypoints, rt.toXY].filter(Boolean) : [];
+    const chain = pts.length ? catmullRomPts(pts) : [];
+    chains.set(routeId, chain);
+    return chain;
+  };
+  const main = chainOf('route_main');
+  const flank = chainOf('route_flank');
+
+  /** 布置点：让出掩体/地标碰撞柱（径向外推）+ 高程采样 */
+  const at = (x, z) => {
+    for (let i = 0; i < site.coverPoints.length; i++) {
+      const cp = site.coverPoints[i];
+      const dx = x - cp.x, dz = z - cp.z;
+      const d = Math.hypot(dx, dz);
+      if (d < COVER_RADIUS_M + 0.25 && d > 1e-6) {
+        x = cp.x + (dx / d) * (COVER_RADIUS_M + 0.25);
+        z = cp.z + (dz / d) * (COVER_RADIUS_M + 0.25);
+      }
+    }
+    for (let i = 0; i < site.landmarks.length; i++) {
+      const lm = site.landmarks[i];
+      const dx = x - lm.anchor.x, dz = z - lm.anchor.z;
+      const d = Math.hypot(dx, dz);
+      if (d < LANDMARK_RADIUS_M + 0.4 && d > 1e-6) {
+        x = lm.anchor.x + (dx / d) * (LANDMARK_RADIUS_M + 0.4);
+        z = lm.anchor.z + (dz / d) * (LANDMARK_RADIUS_M + 0.4);
+      }
+    }
+    return { x, y: z, zElev: spawnElev(field, x, z) };
+  };
+  const clearOf = (p, others, minD) => !others.some((q) => Math.hypot(q.x - p.x, q.z - p.z) < minD);
+
+  // —— destroy 目标物：primaryObjective 坪 + 掩体偏移位 ——
+  const destroyCount = mission.objectives
+    .filter((o) => o.type === 'destroy')
+    .reduce((s, o) => s + o.count, 0);
+  const coversByMain = site.coverPoints
+    .map((cp, i) => ({ cp, i, d: Math.hypot(cp.x - A.primaryObjective.x, cp.z - A.primaryObjective.z) }))
+    .sort((a, b) => a.d - b.d || a.i - b.i);
+  const targetPts = [];
+  for (let k = 0; k < destroyCount; k++) {
+    let pos = k === 0 ? { x: A.primaryObjective.x, z: A.primaryObjective.z } : null;
+    for (let ci = 0; ci < coversByMain.length && !pos; ci++) {
+      if (coversByMain[ci].d > 32) break;
+      const cp = coversByMain[ci].cp;
+      const dx = A.primaryObjective.x - cp.x, dz = A.primaryObjective.z - cp.z;
+      const l = Math.hypot(dx, dz) || 1;
+      const cand = { x: cp.x + (dx / l) * 1.5, z: cp.z + (dz / l) * 1.5 };
+      if (clearOf(cand, targetPts, 3)) pos = cand;
+    }
+    // 兜底：主目标坪内环金色角序列（r=4m，坪内盘 8m 恒平坦可通行）
+    for (let j = 0; j < 8 && !pos; j++) {
+      const ang = k * 2.39996 + j * (Math.PI / 4);
+      const cand = { x: A.primaryObjective.x + Math.cos(ang) * 4, z: A.primaryObjective.z + Math.sin(ang) * 4 };
+      if (clearOf(cand, targetPts, 2.5)) pos = cand;
+    }
+    if (!pos) continue;
+    targetPts.push(pos);
+    const p = at(pos.x, pos.z);
+    mission.targets.push({
+      targetId: nid(mission, 'gt'),
+      x: p.x, y: p.y, zElev: p.zElev,
+      hp: TARGET_HP, hpMax: TARGET_HP,
+      progress: 0, done: false,
+    });
+  }
+
+  // —— NPC：救援对象（secondaryObjective 环形） / 工程队（route_main 中点） ——
+  const rescueCount = (mission.objectives.find((o) => o.type === 'rescue') || {}).count || 0;
+  for (let k = 0; k < rescueCount; k++) {
+    const ang = -Math.PI / 2 + (k * Math.PI * 2) / Math.max(1, rescueCount);
+    const p = at(A.secondaryObjective.x + Math.cos(ang) * 2.5, A.secondaryObjective.z + Math.sin(ang) * 2.5);
+    mission.npcs.push({ npcId: nid(mission, 'gn'), kind: 'rescuee', x: p.x, y: p.y, zElev: p.zElev, state: 'wait', progress: 0, done: false });
+  }
+  if (mission.objectives.some((o) => o.type === 'escort')) {
+    const mid = main.length ? main[Math.floor(main.length / 2)] : A.secondaryObjective;
+    const p = at(mid.x, mid.z);
+    mission.npcs.push({ npcId: nid(mission, 'gn'), kind: 'engineer', x: p.x, y: p.y, zElev: p.zElev, state: 'follow', progress: 0, done: false });
+  }
+
+  // —— collect 拾取物：route_main 等弧长分布 ——
+  const collectCount = (mission.objectives.find((o) => o.type === 'collect') || {}).count || 0;
+  for (let k = 0; k < collectCount; k++) {
+    const f = (k + 1) / (collectCount + 1);
+    const q = main.length ? main[Math.min(main.length - 1, Math.round(f * (main.length - 1)))] : A.landing;
+    const p = at(q.x, q.z);
+    mission.items.push({ itemId: nid(mission, 'gi'), x: p.x, y: p.y, zElev: p.zElev, done: false });
+  }
+
+  // —— 敌人（数量 = 密度系数 × SITE_ENEMY_FACTOR，受 UNIT_CAP 约束） ——
+  const cap = Math.max(0, UNIT_CAP - 1 - mission.playerUnits.length - mission.npcs.length);
+  const n = Math.min(cap, Math.max(2, Math.round(template.enemyDensity * SITE_ENEMY_FACTOR)));
+  const wantBoss = template.enemyTypes.includes('boss') && mission.objectives.some((o) => o.type === 'boss');
+  const pool = template.enemyTypes.filter((t) => t !== 'boss');
+  if (!pool.length) pool.push('grunt');
+
+  let escorts = n;
+  if (wantBoss) {
+    const dxl = A.landing.x - A.primaryObjective.x, dzl = A.landing.z - A.primaryObjective.z;
+    const ll = Math.hypot(dxl, dzl) || 1;
+    const p = at(A.primaryObjective.x + (dxl / ll) * 3, A.primaryObjective.z + (dzl / ll) * 3);
+    const mid = main.length ? main[Math.floor(main.length / 2)] : null;
+    const boss = makeEnemy('boss', p, {
+      facing: Math.atan2(dzl, dxl),
+      patrolTargets: mid ? [{ x: p.x, y: p.y }, { x: mid.x, y: mid.z }] : undefined,
+    }, ENEMY_TYPES_M);
+    boss.unitId = nid(mission, 'ge');
+    mission.enemies.push(boss);
+    escorts = Math.max(0, n - 1);
+  }
+
+  // 巡逻候选：主/侧翼链每 6m 取样（距着陆坪由远到近确定性挑选，逐级放宽）
+  const cands = [];
+  const addChain = (chain, tag) => {
+    for (let i = 0; i < chain.length; i += 2) {
+      const q = chain[i];
+      if (nearColumn(site, q.x, q.z, 1.3)) continue;
+      cands.push({ x: q.x, z: q.z, tag, i, chain });
+    }
+  };
+  addChain(main, 'main');
+  addChain(flank, 'flank');
+  const dl = (c) => Math.hypot(c.x - A.landing.x, c.z - A.landing.z);
+  const chosen = [];
+  for (const minD of [18, 12, 6, 0]) {
+    const avail = cands
+      .filter((c) => dl(c) >= minD)
+      .sort((a, b) => dl(b) - dl(a) || (a.tag === b.tag ? a.i - b.i : a.tag === 'main' ? -1 : 1));
+    for (const c of avail) {
+      if (chosen.length >= escorts) break;
+      if (chosen.some((q) => Math.hypot(q.x - c.x, q.z - c.z) < 5)) continue;
+      chosen.push(c);
+    }
+    if (chosen.length >= escorts) break;
+  }
+  for (let k = 0; k < chosen.length; k++) {
+    const c = chosen[k];
+    const type = pool[k % pool.length];
+    const p = at(c.x, c.z);
+    // 巡更点：本点 + 链上后续采样（≤10m）；turret 定点
+    const patrol = [{ x: p.x, y: p.y }];
+    if (ENEMY_TYPES_M[type].speed > 0) {
+      const chain = c.chain;
+      for (let q = c.i + 2; q < chain.length && patrol.length < 3; q += 2) {
+        const qq = chain[q];
+        if (Math.hypot(qq.x - c.x, qq.z - c.z) > 10) break;
+        if (nearColumn(site, qq.x, qq.z, 1.3)) continue;
+        patrol.push({ x: qq.x, y: qq.z });
+      }
+    }
+    const e = makeEnemy(type, p, {
+      facing: Math.atan2(A.landing.z - p.y, A.landing.x - p.x),
+      patrolTargets: patrol,
+    }, ENEMY_TYPES_M);
+    e.unitId = nid(mission, 'ge');
+    mission.enemies.push(e);
+  }
+}
+
 // ———— 创建任务 ————
 
 /**
  * 创建地面任务实体。
  * @param world 世界
- * @param opts  { templateId, planetId?, squadCharacterIds: [1..3 个已存在角色 id] }
+ * @param opts  { templateId, planetId?, squadCharacterIds: [1..3 个已存在角色 id],
+ *                field?: 预构建地形场（站点模式直用，跳过缓存构建）,
+ *                legacyGrid?: true 强制旧版 2D 瓦片网格（回退路径） }
  */
 export function createGroundMission(world, opts = {}) {
-  const { templateId, planetId = null, squadCharacterIds = [] } = opts;
+  const {
+    templateId, planetId = null, squadCharacterIds = [],
+    field: fieldOpt = null, legacyGrid = false,
+  } = opts;
   const template = findMissionTemplate(templateId);
   if (!template) throw new Error(`ground: 未知任务模板 ${templateId}`);
   let ids = (squadCharacterIds || []).slice(0, 3);
@@ -384,10 +841,12 @@ export function createGroundMission(world, opts = {}) {
     // 未命名陆战队员不需要角色实体
   }
 
-  // GROUND-01：独立地图 RNG——由世界种子与当前序号派生，不消耗世界主 RNG；
+  // GROUND-01：独立 RNG——由世界种子与当前序号派生，不消耗世界主 RNG；
   // 同一 world.seed + world.seq 快照下，地图与单位布局完全一致。
   const rngState = [(world.seed ^ 0x9e3779b9) >>> 0, world.seq >>> 0, 0xdeadbeef, 1];
-  const map = genMap(rngState, template.mapSize[0], template.mapSize[1]);
+
+  // P0-2：有效 planetId 且未强制旧版网格 → 站点米制模式（3D 连续地形合龙）
+  const siteCtx = (!legacyGrid && planetId != null) ? resolveSiteContext(world, planetId) : null;
 
   const mission = createEntity(world, 'groundMissions', {
     templateId,
@@ -396,16 +855,11 @@ export function createGroundMission(world, opts = {}) {
     riskLevel: template.riskLevel,
     storyTag: template.storyTag || null,
     status: 'active',
+    coordSpace: siteCtx ? 'site_meters' : 'grid_px',
+    siteId: siteCtx ? siteCtx.blueprint.id : null,
     time: 0,
     timeLimitSeconds: template.timeLimitSeconds || 0,
     failReason: null,
-
-    w: map.w,
-    h: map.h,
-    grid: map.grid,
-    spawn: map.spawn,
-    extraction: map.extraction,
-    extractionRect: map.extractionRect,
     rngState,
 
     playerUnits: [],
@@ -428,7 +882,67 @@ export function createGroundMission(world, opts = {}) {
     stats: { kills: 0 },
   });
 
-  // —— 玩家小队（出生点附近就位，1-3 人） ——
+  if (siteCtx) {
+    const field = fieldOpt || getMissionField(world, planetId, siteCtx);
+    if (!field) throw new Error('ground: 站点地形场构建失败');
+    mission.field = field;
+    const site = siteCtx.site;
+    // 站点几何（锚点为 Planet-Local 场域米制坐标；doc8 P0-2 指令 1/2）
+    mission.site = {
+      anchors: site.anchors,
+      coverPoints: site.coverPoints,
+      landmarks: site.landmarks,
+      routes: site.routes,
+      extractionRadius: site.extraction.radius,
+    };
+    const A = site.anchors;
+    mission.spawn = { x: A.landing.x, y: A.landing.z };
+    mission.extraction = { x: A.extraction.x, z: A.extraction.z, r: site.extraction.radius };
+
+    // —— 玩家小队：着陆坪 1.2m 环形展开，面朝主目标坪（1-3 人） ——
+    const face = Math.atan2(A.primaryObjective.z - A.landing.z, A.primaryObjective.x - A.landing.x);
+    const ring = [
+      [0, 0],
+      [LANDING_RING_M, 0],
+      [-LANDING_RING_M / 2, LANDING_RING_M * 0.866],
+    ];
+    ids.forEach((cid, i) => {
+      const [ox, oz] = ring[i % ring.length];
+      const x = A.landing.x + ox, y = A.landing.z + oz;
+      mission.playerUnits.push({
+        unitId: nid(mission, 'gp'),
+        characterId: cid,
+        x, y,
+        zElev: spawnElev(field, x, y),
+        hp: 100, hpMax: 100,
+        shield: 30, shieldMax: 30,
+        stamina: 100, staminaMax: 100,
+        facing: face,
+        state: 'idle', stateTime: 0,
+        invulnUntil: 0,
+        cooldowns: { attack: 0, dodge: 0 },
+        speed: MISSION_UNIT_SCALE.playerSpeed, meleeDmg: 22, rangedDmg: 14, range: MISSION_UNIT_SCALE.rangedRange,
+        controlled: true,
+        // 动作机内部字段（全部可序列化）
+        attackKind: null, struck: false, dodgeVx: 0, dodgeVy: 0, lastHitAt: -999,
+      });
+    });
+    mission.activeIdx = 0;
+
+    populateSiteMission(mission, template);
+    mlog(mission, `地面行动开始：${template.nameZh}（风险等级 ${template.riskLevel}）`);
+    return mission;
+  }
+
+  // —— 旧版 2D 瓦片网格路径（legacyGrid 强制 / 无 planetId 回退） ——
+  const map = genMap(rngState, template.mapSize[0], template.mapSize[1]);
+  mission.w = map.w;
+  mission.h = map.h;
+  mission.grid = map.grid;
+  mission.spawn = map.spawn;
+  mission.extraction = map.extraction;
+  mission.extractionRect = map.extractionRect;
+
   const offsets = [[0, 0], [-14, 10], [14, 10]];
   ids.forEach((cid, i) => {
     const [ox, oy] = offsets[i % offsets.length];
@@ -589,12 +1103,13 @@ function populateMission(rng, mission, template) {
   }
 }
 
-function makeEnemy(type, p, opts = {}) {
-  const def = ENEMY_TYPES[type];
+function makeEnemy(type, p, opts = {}, table = ENEMY_TYPES) {
+  const def = table[type];
   return {
     unitId: opts.unitId || null, // 由调用方补齐（nid）
     type,
     x: p.x, y: p.y,
+    zElev: p.zElev || 0, // site_meters：地表高程（旧版网格恒 0）
     hp: def.hp, hpMax: def.hp,
     state: opts.state || 'patrol',
     stateTime: 0,
@@ -767,9 +1282,9 @@ function startAttack(mission, u, kind) {
   u.stateTime = 0;
   const a = PLAYER_ATTACKS[k];
   u.cooldowns.attack = a.windup + a.recover;
-  // 软锁定：起手时面向 90px 内最近敌人
+  // 软锁定：起手时面向锁定半径内最近敌人（site_meters 4.5m / 旧版 90px）
   if (k !== 'ranged') {
-    const e = nearestEnemyWithin(mission, u, 90);
+    const e = nearestEnemyWithin(mission, u, mission.coordSpace === 'site_meters' ? SOFT_LOCK_M : 90);
     if (e) u.facing = Math.atan2(e.y - u.y, e.x - u.x);
   }
 }
@@ -777,6 +1292,8 @@ function startAttack(mission, u, kind) {
 /** 攻击判定拍：近战 90° 扇形（含目标物），远程需射程内 + 视线无墙 */
 function playerStrike(mission, u) {
   const k = u.attackKind;
+  const site = mission.coordSpace === 'site_meters';
+  const meleeReach = site ? MELEE_REACH_M : MELEE_REACH;
   if (k === 'ranged') {
     let best = null, bestD = Infinity, bestCover = false;
     for (const e of mission.enemies) {
@@ -806,7 +1323,7 @@ function playerStrike(mission, u) {
   // 近战
   const dmg = k === 'heavy' ? u.meleeDmg * PLAYER_ATTACKS.heavy.dmgMult : u.meleeDmg;
   const poise = k === 'heavy' ? HEAVY_POISE : LIGHT_POISE;
-  const reach = k === 'heavy' ? MELEE_REACH + 6 : MELEE_REACH;
+  const reach = k === 'heavy' ? meleeReach + (site ? MELEE_BONUS_M : 6) : meleeReach;
   for (const e of mission.enemies) {
     if (e.state === 'dead') continue;
     const d = dist(u.x, u.y, e.x, e.y);
@@ -817,7 +1334,7 @@ function playerStrike(mission, u) {
   for (const t of mission.targets) {
     if (t.done) continue;
     const d = dist(u.x, u.y, t.x, t.y);
-    if (d > reach + 10) continue;
+    if (d > reach + (site ? MELEE_TARGET_EXTRA_M : 10)) continue;
     if (Math.abs(angleDelta(u.facing, Math.atan2(t.y - u.y, t.x - u.x))) > MELEE_ARC) continue;
     damageTarget(mission, t, dmg);
   }
@@ -880,6 +1397,7 @@ function updateEnemies(mission, dt) {
       }
       case 'patrol':
       default: {
+        const site = mission.coordSpace === 'site_meters';
         const tgt = nearestAlivePlayer(mission, e.x, e.y);
         if (tgt) {
           const d = dist(e.x, e.y, tgt.x, tgt.y);
@@ -892,7 +1410,7 @@ function updateEnemies(mission, dt) {
         if (e.speed > 0 && e.patrolTargets.length > 1) {
           const p = e.patrolTargets[e.patrolIdx];
           const d = dist(e.x, e.y, p.x, p.y);
-          if (d < 10) {
+          if (d < (site ? PATROL_ARRIVE_M : 10)) {
             e.waitT += dt;
             if (e.waitT >= PATROL_PAUSE) {
               e.waitT = 0;
@@ -1008,8 +1526,28 @@ function bossPhaseCheck(mission, e) {
   }
 }
 
-/** boss 召唤护卫：boss 周身逐环扫描可通行格，受 UNIT_CAP 约束（确定性顺序） */
+/** boss 召唤护卫：boss 周身逐环扫描可通行位，受 UNIT_CAP 约束（确定性顺序） */
 function summonAdds(mission, e, count) {
+  if (mission.coordSpace === 'site_meters') {
+    const field = mission.field;
+    if (!field) return;
+    let spawned = 0;
+    for (let r = 1; r <= 3 && spawned < count; r++) {
+      for (let k = 0; k < 12 && spawned < count; k++) {
+        const ang = (k / 12) * Math.PI * 2;
+        const tx = e.x + Math.cos(ang) * r, tz = e.y + Math.sin(ang) * r;
+        const s = sitePassable(field, tx, tz);
+        if (!s || columnBlocked(mission, e, tx, tz)) continue;
+        if (mission.enemies.some((o) => o.state !== 'dead' && dist(o.x, o.y, tx, tz) < 0.8)) continue;
+        if (mission.playerUnits.length + mission.enemies.length + mission.npcs.length >= UNIT_CAP) continue;
+        const add = makeEnemy('grunt', { x: tx, y: tz, zElev: s.y }, { state: 'alert' }, ENEMY_TYPES_M);
+        add.unitId = nid(mission, 'ge');
+        mission.enemies.push(add);
+        spawned++;
+      }
+    }
+    return;
+  }
   const baseX = Math.floor(e.x / TS), baseY = Math.floor(e.y / TS);
   let spawned = 0;
   for (let r = 1; r <= 3 && spawned < count; r++) {
@@ -1035,13 +1573,17 @@ function summonAdds(mission, e, count) {
 // ———— NPC / 目标 / 拾取 ————
 
 function updateNpcs(mission, dt) {
+  const site = mission.coordSpace === 'site_meters';
+  const rescueR = site ? RESCUE_CONTACT_M : RESCUE_CONTACT;
+  const followD = site ? FOLLOW_DIST_M : FOLLOW_DIST;
+  const speed = site ? NPC_SPEED_M : NPC_SPEED;
   for (const n of mission.npcs) {
     if (n.state === 'safe') continue;
     const p = nearestAlivePlayer(mission, n.x, n.y);
 
     // 救援：接触 2s 接应成功（中断缓慢回落）
     if (n.kind === 'rescuee' && !n.done) {
-      if (p && dist(n.x, n.y, p.x, p.y) < RESCUE_CONTACT) {
+      if (p && dist(n.x, n.y, p.x, p.y) < rescueR) {
         n.progress += dt;
         if (n.progress >= RESCUE_TIME) {
           n.done = true;
@@ -1057,8 +1599,8 @@ function updateNpcs(mission, dt) {
     if (n.done || n.kind === 'engineer') {
       if (p) {
         const d = dist(n.x, n.y, p.x, p.y);
-        if (d > FOLLOW_DIST) {
-          moveWithCollision(mission, n, (p.x - n.x) / (d || 1), (p.y - n.y) / (d || 1), NPC_SPEED, dt);
+        if (d > followD) {
+          moveWithCollision(mission, n, (p.x - n.x) / (d || 1), (p.y - n.y) / (d || 1), speed, dt);
           n.state = 'follow';
         }
       }
@@ -1086,12 +1628,15 @@ function damageTarget(mission, t, amount) {
 
 function updateObjectives(mission, dt) {
   const alive = alivePlayers(mission);
+  const site = mission.coordSpace === 'site_meters';
+  const pickupR = site ? PICKUP_R_M : PICKUP_R;
+  const interactR = site ? INTERACT_R_M : INTERACT_R;
 
   // —— collect：接触拾取 ——
   for (const it of mission.items) {
     if (it.done) continue;
     for (const p of alive) {
-      if (dist(p.x, p.y, it.x, it.y) < PICKUP_R) {
+      if (dist(p.x, p.y, it.x, it.y) < pickupR) {
         it.done = true;
         mlog(mission, '回收数据核心');
         break;
@@ -1106,7 +1651,7 @@ function updateObjectives(mission, dt) {
   let interactId = rawInteract;
   if (rawInteract === 'nearest' && actor) {
     let nearestT = null;
-    let minD = INTERACT_R;
+    let minD = interactR;
     for (const t of mission.targets) {
       if (t.done) continue;
       const d = Math.hypot(actor.x - t.x, actor.y - t.y);
@@ -1118,7 +1663,7 @@ function updateObjectives(mission, dt) {
     if (t.done) continue;
     const channeling = interactId && t.targetId === interactId && actor
       && actor.state !== 'dodge' && actor.state !== 'attack' && actor.state !== 'hurt'
-      && dist(actor.x, actor.y, t.x, t.y) < INTERACT_R;
+      && dist(actor.x, actor.y, t.x, t.y) < interactR;
     if (channeling) {
       t.progress += dt;
       if (t.progress >= DETONATE_S) {
@@ -1168,18 +1713,27 @@ function updateObjectives(mission, dt) {
   }
 }
 
+/** 危险区判定：site_meters 按地表 HAZARD 旗采样，旧版按瓦片值 */
+function isHazardAt(mission, x, y) {
+  if (mission.coordSpace === 'site_meters') {
+    const s = sampleTerrain(mission.field, x, y);
+    return !!(s && (s.flags & TERRAIN_FLAGS.HAZARD));
+  }
+  return tileAtPx(mission, x, y) === T_HAZARD;
+}
+
 /** 危险区伤害 + 玩家护盾回充（3s 未受击 5/s） */
 function updateVitals(mission, dt) {
   for (const u of mission.playerUnits) {
     if (u.state === 'dead') continue;
-    if (tileAtPx(mission, u.x, u.y) === T_HAZARD) applyRawDamage(mission, u, HAZARD_DPS * dt);
+    if (isHazardAt(mission, u.x, u.y)) applyRawDamage(mission, u, HAZARD_DPS * dt);
     if (mission.time - u.lastHitAt >= SHIELD_DELAY) {
       u.shield = Math.min(u.shieldMax, u.shield + SHIELD_REGEN * dt);
     }
   }
   for (const e of mission.enemies) {
     if (e.state === 'dead') continue;
-    if (tileAtPx(mission, e.x, e.y) === T_HAZARD) {
+    if (isHazardAt(mission, e.x, e.y)) {
       e.hp -= HAZARD_DPS * dt;
       e.lastHitAt = mission.time;
       if (e.hp <= 0) {
@@ -1307,11 +1861,14 @@ export function getMissionView(mission) {
     templateId: mission.templateId,
     kind: mission.kind,
     state: mission.status,
+    coordSpace: mission.coordSpace || 'grid_px',
+    siteId: mission.siteId || null,
     time: Math.round(mission.time * 100) / 100,
     timeLimitSeconds: mission.timeLimitSeconds,
-    w: mission.w,
-    h: mission.h,
-    grid: mission.grid,
+    w: mission.w ?? 0,
+    h: mission.h ?? 0,
+    grid: mission.grid || null,
+    spawn: mission.spawn ? { ...mission.spawn } : null,
     playerUnits: mission.playerUnits.map((u) => ({ ...u, cooldowns: { ...u.cooldowns } })),
     enemies: mission.enemies.map((e) => ({ ...e })),
     npcs: mission.npcs.map((n) => ({ ...n })),
@@ -1320,7 +1877,15 @@ export function getMissionView(mission) {
     objectives: mission.objectives.map((o) => ({ ...o })),
     activeUnitId: activeUnitIdOf(mission),
     input: { ...mission.input, moveDir: { ...mission.input.moveDir } },
-    extraction: mission.extraction,
+    extraction: mission.extraction ? { ...mission.extraction } : null,
+    extractionRect: mission.extractionRect ? { ...mission.extractionRect } : null,
+    site: mission.site ? {
+      anchors: mission.site.anchors,
+      coverPoints: mission.site.coverPoints,
+      landmarks: mission.site.landmarks,
+      routes: mission.site.routes,
+      extractionRadius: mission.site.extractionRadius,
+    } : null,
     stats: { ...mission.stats },
     log: mission.log.slice(-30),
     results: mission.results ? { ...mission.results } : null,

@@ -218,7 +218,7 @@ export const MISSION_SITE_BLUEPRINTS = {
     themeEffectZh: '常规太阳能完全失效，黑暗视野受限，须依靠热成像与反光信标推进。',
     failureCostZh: '撤离放弃即封存已布设的信标链，本区块扫描置信度回退一级。',
     worldWritebackZh: '回写工业盐晶与光学晶体库存，解锁储能科技与夜战涂层改装。',
-    primaryLandmarkPrefab: 'moonwhite_salt_monolith',
+    primaryLandmarkPrefab: 'salt_crystal_spire',
     anchors: {
       landing: { x: 0, z: 0 },
       primaryObjective: { x: 24, z: 18 },
@@ -226,7 +226,7 @@ export const MISSION_SITE_BLUEPRINTS = {
       extraction: { x: -18, z: -36 },
     },
     landmarks: [
-      { prefabId: 'moonwhite_salt_monolith', anchor: { x: 24, z: 18 }, rotation: 0.9 },
+      { prefabId: 'salt_crystal_spire', anchor: { x: 24, z: 18 }, rotation: 0.9 },
       { prefabId: 'radar_beacon_station', anchor: { x: -26, z: 6 } },
       { prefabId: 'meteor_intercept_laser', anchor: { x: -18, z: -36 }, rotation: 2.8 },
       { prefabId: 'salt_survey_drone_dock', anchor: { x: 10, z: 8 }, rotation: 1.5 },

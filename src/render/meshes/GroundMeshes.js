@@ -79,6 +79,65 @@ class PartMeshBuilder {
     return this;
   }
 
+  /**
+   * 斜切倒角盒子（doc8 §4.2 P1-3 原语）：顶面四周边缘 45° 斜切（切宽=切高=ch，
+   * 倒角环四块梯形面在角部自然合拢成棱），底部接触 AO 暗化 ×0.72 烘焙进顶点色
+   * （底面整面暗化 + 侧面底部 ch 高度暗化带），消除积木悬浮感。
+   * ch ≤ 0 时退化为普通 box（仍带底部 AO 带）。
+   */
+  chamferBox(cx, cy, cz, hx, hy, hz, ch, col) {
+    const c = Math.max(0, Math.min(ch, hx, hy, hz));
+    const ao = 0.72;
+    const colAO = [col[0] * ao, col[1] * ao, col[2] * ao];
+    const x0 = cx - hx;
+    const x1 = cx + hx;
+    const y0 = cy - hy;
+    const y1 = cy + hy;
+    const z0 = cz - hz;
+    const z1 = cz + hz;
+    const xb0 = x0 + c;
+    const xb1 = x1 - c;
+    const zb0 = z0 + c;
+    const zb1 = z1 - c;
+    const yb = y1 - c;                       // 倒角环下沿高
+    // —— 顶面（收窄矩形，+Y 外向） ——
+    this.tri(xb0, y1, zb1, xb1, y1, zb1, xb1, y1, zb0, col);
+    this.tri(xb0, y1, zb1, xb1, y1, zb0, xb0, y1, zb0, col);
+    // —— 45° 倒角环（四梯形；角部共享斜棱水密） ——
+    // +X
+    this.tri(xb1, y1, zb0, xb1, y1, zb1, x1, yb, z1, col);
+    this.tri(xb1, y1, zb0, x1, yb, z1, x1, yb, z0, col);
+    // -X
+    this.tri(xb0, y1, zb1, xb0, y1, zb0, x0, yb, z0, col);
+    this.tri(xb0, y1, zb1, x0, yb, z0, x0, yb, z1, col);
+    // +Z
+    this.tri(xb1, y1, zb1, xb0, y1, zb1, x0, yb, z1, col);
+    this.tri(xb1, y1, zb1, x0, yb, z1, x1, yb, z1, col);
+    // -Z
+    this.tri(xb0, y1, zb0, xb1, y1, zb0, x1, yb, z0, col);
+    this.tri(xb0, y1, zb0, x1, yb, z0, x0, yb, z0, col);
+    // —— 侧面（y0..yb；底部 c 高 AO 暗化带拆分） ——
+    const band = Math.min(c, yb - y0);
+    const ym = y0 + band;
+    const bands = [[false, ym, yb]];
+    if (band > 1e-6) bands.push([true, y0, ym]);
+    for (const [dark, ya, yb2] of bands) {
+      const cc = dark ? colAO : col;
+      this.tri(x1, ya, z1, x1, ya, z0, x1, yb2, z0, cc);
+      this.tri(x1, ya, z1, x1, yb2, z0, x1, yb2, z1, cc);
+      this.tri(x0, ya, z0, x0, ya, z1, x0, yb2, z1, cc);
+      this.tri(x0, ya, z0, x0, yb2, z1, x0, yb2, z0, cc);
+      this.tri(x0, ya, z1, x1, ya, z1, x1, yb2, z1, cc);
+      this.tri(x0, ya, z1, x1, yb2, z1, x0, yb2, z1, cc);
+      this.tri(x1, ya, z0, x0, ya, z0, x0, yb2, z0, cc);
+      this.tri(x1, ya, z0, x0, yb2, z0, x1, yb2, z0, cc);
+    }
+    // —— 底面（-Y 外向，全 AO 暗化） ——
+    this.tri(x0, y0, z0, x1, y0, z0, x1, y0, z1, colAO);
+    this.tri(x0, y0, z0, x1, y0, z1, x0, y0, z1, colAO);
+    return this;
+  }
+
   /** 四棱锥（炮塔/钻头/冠饰），dir=1 尖朝上 / -1 尖朝下 */
   pyramid(cx, baseY, cz, w, h, col, dir = 1) {
     const h2 = w / 2;
@@ -222,6 +281,7 @@ const COL = {
   colonistDark: [0.50, 0.38, 0.22],
   metal: [0.52, 0.54, 0.58],
   metalDark: [0.30, 0.31, 0.34],
+  concrete: [0.47, 0.46, 0.44],  // 基座裙边混凝土
   belt: [0.16, 0.16, 0.18],
   glass: [0.55, 0.85, 0.85],
   panel: [0.24, 0.42, 0.72],    // 太阳能板
@@ -236,13 +296,13 @@ export function buildExosuitMesh() {
   m.box(0.02, 1.50, 0, 0.095, 0.115, 0.105, COL.armor);       // 头盔
   m.box(0.115, 1.51, 0, 0.015, 0.05, 0.065, COL.visor);       // 观察窗
   m.beginPart('torso');
-  m.box(0, 1.06, 0, 0.20, 0.27, 0.24, COL.armor);             // 胸甲
+  m.chamferBox(0, 1.06, 0, 0.20, 0.27, 0.24, 0.05, COL.armor); // 胸甲（45° 倒角）
   m.box(0.06, 1.06, 0, 0.145, 0.20, 0.185, COL.armorDark);    // 胸口内衬
   m.beginPart('armL');
-  m.box(0, 1.04, -0.295, 0.075, 0.185, 0.075, COL.armor);     // 左臂
+  m.chamferBox(0, 1.04, -0.295, 0.075, 0.185, 0.075, 0.03, COL.armor); // 左臂/肩甲
   m.box(-0.02, 0.80, -0.295, 0.06, 0.055, 0.065, COL.joint);  // 左手套
   m.beginPart('armR');
-  m.box(0, 1.04, 0.295, 0.075, 0.185, 0.075, COL.armor);      // 右臂
+  m.chamferBox(0, 1.04, 0.295, 0.075, 0.185, 0.075, 0.03, COL.armor);  // 右臂/肩甲
   m.box(0.02, 0.80, 0.295, 0.06, 0.055, 0.065, COL.joint);    // 右手套
   m.beginPart('legL');
   m.box(0, 0.38, -0.145, 0.085, 0.38, 0.095, COL.joint);      // 左腿
@@ -285,7 +345,7 @@ export function buildGruntMesh() {
 export function buildHeavyMesh() {
   const m = new PartMeshBuilder();
   m.beginPart('torso');
-  m.box(0, 1.02, 0, 0.30, 0.30, 0.34, COL.heavy);             // 主装甲箱
+  m.chamferBox(0, 1.02, 0, 0.30, 0.30, 0.34, 0.07, COL.heavy); // 主装甲箱（45° 倒角）
   m.box(0, 0.70, 0, 0.20, 0.10, 0.24, COL.heavyDark);         // 骨盆驱动
   m.beginPart('cockpit');
   m.box(0.16, 1.26, 0, 0.14, 0.11, 0.16, COL.heavyDark);      // 座舱
@@ -303,9 +363,9 @@ export function buildHeavyMesh() {
   m.box(0.10, 1.06, 0.46, 0.30, 0.10, 0.10, COL.metal);
   m.cylinderX(0.44, 1.06, 0.46, 0.065, 0.14, 6, COL.heavyDark);
   m.beginPart('shoulderL');
-  m.box(0, 1.32, -0.40, 0.16, 0.10, 0.12, COL.heavy);         // 左肩甲
+  m.chamferBox(0, 1.32, -0.40, 0.16, 0.10, 0.12, 0.04, COL.heavy); // 左肩甲（倒角）
   m.beginPart('shoulderR');
-  m.box(0, 1.32, 0.40, 0.16, 0.10, 0.12, COL.heavy);
+  m.chamferBox(0, 1.32, 0.40, 0.16, 0.10, 0.12, 0.04, COL.heavy);
   m.beginPart('antenna');
   m.box(-0.20, 1.55, 0.10, 0.015, 0.22, 0.015, COL.metalDark); // 通讯天线
   return m.build();
@@ -375,11 +435,19 @@ export function buildColonistMesh() {
 
 // —— 建筑网格（按 building.category，9 类 + 兜底） ————————————————
 
+/** 各类别建筑基底半宽（米/体素；与各 case 主体占地对齐，供基座裙边取值） */
+const FOOTPRINT_HALF = {
+  mining: 2.0, refining: 2.0, industry: 1.9, agri: 1.85, science: 1.6,
+  service: 1.5, military: 1.6, admin: 1.0, energy: 1.9, default: 1.4,
+};
+
 /**
  * 24 种建筑按 9 个 category 差异化造型（mining/refining/industry/agri/
  * science/service/military/admin/energy）。底面约 4×4 体素，高度 2..6。
  * 实例化渲染时按类别整体着色（实例色与顶点色混合），部件区间保留给
  * 需要分件动画的场景（雷达旋转、钻头升降等）。
+ * 基座裙边（doc9 P1-2 几何项）：所有建筑附加向下延伸 1.8m 的混凝土防塌护坡
+ * （略微外扩 0.08m）；斜坡上悬空侧由裙边包络支撑，平地上裙边没入地下。
  * @param {string} buildingCategory buildings.js 的 category 字段
  */
 export function buildBuildingMesh(buildingCategory) {
@@ -413,9 +481,9 @@ export function buildBuildingMesh(buildingCategory) {
       break;
     }
     case 'industry': {
-      // 工业：主厂房 + 烟囱
+      // 工业：主厂房 + 烟囱（主厂房 45° 倒角，P1-3）
       m.beginPart('hall');
-      m.box(0, 0.75, 0, 1.9, 0.75, 1.3, COL.metal);
+      m.chamferBox(0, 0.75, 0, 1.9, 0.75, 1.3, 0.18, COL.metal);
       m.box(0, 1.55, 0, 1.9, 0.06, 1.3, COL.metalDark);        // 屋沿
       m.beginPart('chimney');
       m.cylinderY(1.25, 2.0, 0.7, 0.24, 2.3, 6, COL.turretDark);
@@ -457,9 +525,9 @@ export function buildBuildingMesh(buildingCategory) {
       break;
     }
     case 'military': {
-      // 军事：掩体碉堡 + 双联炮
+      // 军事：掩体碉堡（45° 倒角掩体箱，P1-3） + 双联炮
       m.beginPart('bunker');
-      m.box(0, 0.42, 0, 1.6, 0.42, 1.6, COL.turretDark);
+      m.chamferBox(0, 0.42, 0, 1.6, 0.42, 1.6, 0.12, COL.turretDark);
       m.beginPart('turrets');
       m.cylinderY(-0.55, 1.05, 0, 0.28, 0.42, 6, COL.turret);
       m.cylinderY(0.55, 1.05, 0, 0.28, 0.42, 6, COL.turret);
@@ -500,6 +568,10 @@ export function buildBuildingMesh(buildingCategory) {
       break;
     }
   }
+  // —— 混凝土基座裙边（向下 1.8m，微外扩；平地没入地下，坡地包络悬空侧） ——
+  const fp = FOOTPRINT_HALF[cat] != null ? FOOTPRINT_HALF[cat] : FOOTPRINT_HALF.default;
+  m.beginPart('skirt');
+  m.box(0, -0.8, 0, fp + 0.08, 1.0, fp + 0.08, COL.concrete);
   return m.build();
 }
 

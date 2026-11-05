@@ -99,7 +99,7 @@ registerHourly('diplomacy', (world) => {
 registerHourly('ground', (world) => {
   const dt = 1 / 30;
   let seconds = BAL.combat.tickBattleSeconds;
-  const missions = Object.values(world.entities.groundMissions).filter((m) => m.state === 'active');
+  const missions = Object.values(world.entities.groundMissions).filter((m) => (m.status === 'active' || m.state === 'active'));
   while (seconds > 0) {
     const step = Math.min(1 / 30, seconds);
     for (const m of missions) {
