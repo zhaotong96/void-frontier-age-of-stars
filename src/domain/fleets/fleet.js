@@ -7,6 +7,24 @@ import { emit } from '../../core/eventBus.js';
 import { createShip, computeShipStats } from '../ships/ship.js';
 import { hullDef } from '../ships/ship.js';
 import { beginPlannedTransit, planRoute, fleetFuelTotal } from './navigation.js';
+import { getMod } from '../factions/modifiers.js';
+
+/**
+ * 文明修正表（TD3：combat特质断链清偿）—— computeShipStats 消费的全部乘数键。
+ * 统一经 getMod 聚合（特质 × 科技 × 政策），开局投放与船坞生产共用同一口径。
+ */
+export function factionShipMods(world, factionId) {
+  return {
+    strategicSpeed: getMod(world, factionId, 'strategicSpeed', 'mult'),
+    fuelEfficiency: getMod(world, factionId, 'fuelEfficiency', 'mult'),
+    sensorStrength: getMod(world, factionId, 'sensorStrength', 'mult'),
+    ewarStrength: getMod(world, factionId, 'ewarStrength', 'mult'),
+    weaponDamage: getMod(world, factionId, 'weaponDamage', 'mult'),
+    maxShield: getMod(world, factionId, 'maxShield', 'mult'),
+    shieldRegen: getMod(world, factionId, 'shieldRegen', 'mult'),
+    armor: getMod(world, factionId, 'armor', 'mult'),
+  };
+}
 
 /** 创建舰队（ships: [{hullId, moduleIds, name?}] 或直接给 shipIds） */
 export function createFleet(world, opts) {
@@ -34,6 +52,7 @@ export function createFleet(world, opts) {
       systemId: opts.systemId,
       cargo: spec.cargo,
       fuel: spec.fuel,
+      factionMods: factionShipMods(world, opts.factionId), // TD3：文明战斗特质汇入 computeShipStats
     });
     fleet.shipIds.push(ship.id);
   }

@@ -54,6 +54,7 @@ import {
 } from '../../domain/ground/SurfaceSandbox.js';
 import { buildTerrainField } from '../../domain/ground/terrainField.js';
 import { ensurePlanetPois, unexploredPoiCount } from '../../domain/ground/planetPOI.js';
+import { createTerrainEdits, applyEdit, attachTerrainEdits, deserializeEdits, rebuildDirtyChunks } from '../../domain/ground/terrainEdits.js';
 import { sampleTerrain, raycastTerrain } from '../../domain/ground/surfaceQueries.js';
 import { createGroundMission, stepMission, getMissionView } from '../../domain/ground/GroundMission.js';
 import { creditColony, debitColony } from '../../domain/economy/ledger.js';
@@ -1021,6 +1022,9 @@ export const GroundView = {
       case 'KeyE':
         this._oneShot.interact = true;
         break;
+      case 'KeyR':
+        this._tryRestoreTerrain();
+        break;
       case 'Tab':
         e.preventDefault();
         this._oneShot.switchUnit = true;
@@ -1153,6 +1157,27 @@ export const GroundView = {
       }
     }
     return touched && Number.isFinite(base.y + dy) ? { dy } : null;
+  },
+
+  /**
+   * R 键一键恢复自然地貌（doc7 §6 DSP 式）：以角色为中心 RestoreTerrain 命令
+   * （领域写回行星 terrainEdits 日志）+ 本地同 op 应用（即时增量重建）。
+   */
+  _tryRestoreTerrain() {
+    if (!this.field || !this._edits || !this.planet) return;
+    const c = this.char3d;
+    const x = c.x - FIELD_OFFSET;               // 世界 → 场域坐标（命令口径）
+    const z = c.z - FIELD_OFFSET;
+    const res = this.app.dispatch('RestoreTerrain', {
+      planetId: this.planet.id, x, z, radius: 6, strength: 1,
+    });
+    if (!res.ok) {
+      toast(res.reason || '恢复失败', { kind: 'warn' });
+      return;
+    }
+    applyEdit(this.field, this._edits, { kind: 'restore', x, z, radius: 6, strength: 1 });
+    rebuildDirtyChunks(this.field);
+    toast('地形已恢复自然状态（DSP 式）', { kind: 'ok' });
   },
 
   /** 采掘后标记场域 Chunk 脏（下一帧 sync 增量重建；TERRAIN-06） */
