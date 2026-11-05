@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<!--
+  tests/tools/e2e-gate-test.html — doc5 §5 浏览器级端到端验收矩阵（18 刚性场景）执行页
+  ─────────────────────────────────────────────────────────────────────────────────
+  运行方式（仅支持 dev-server HTTP 模块加载，file:// 直开无法解析相对 ES 模块）：
+
+      node tests/tools/dev-server.mjs          # PORT 默认 8090（可用 PORT=8093 覆盖）
+      # 浏览器打开：
+      http://127.0.0.1:8093/tests/tools/e2e-gate-test.html
+
+  页面行为：
+    1. 在 #vf-e2e-app 容器内 boot 真实 App（main.js 同路径：App.boot → startNewGame，
+       种子 24601，speed 0 暂停模拟以防运行期事件弹窗干扰）；
+    2. 依序执行 src/devtools/e2eGateTest.js 的可自动化用例子集（UI-01..07、GL-01、
+       NAV-01..04、EVT-01、WORLD-03），doc5 §5 其余场景与 TERRAIN-07/09 以
+       MANUAL 行列出（含手动验证指引）；
+    3. 结果面板逐行输出 id / PASS|FAIL|MANUAL / detail；完成时设置
+       window.__vfE2E = { run, results, allPass, summary, meta } 并同步 document.title
+       （自动化可直接读 window.__vfE2E.results，无需解析 DOM）；
+    4. 「下载 JSON」按钮导出完整机器可读报告；「重跑」整页刷新后重新执行。
+
+  零外部依赖：纯静态页面 + 相对路径 ES 模块；无 CDN / 外链 / 构建步骤。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>E2E Gate · doc5 §5</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #070b12; }
+  #vf-e2e-app { position: fixed; inset: 0; }
+  #e2e-panel {
+    position: fixed; top: 10px; right: 10px; width: min(620px, 92vw);
+    max-height: 82vh; overflow: auto; z-index: 99999;
+    background: rgba(7, 11, 18, 0.94); color: #cfd8e3;
+    border: 1px solid #1d2a3a; border-radius: 10px;
+    font: 12px/1.55 Consolas, "Cascadia Mono", Menlo, monospace;
+    padding: 10px 14px 14px; box-shadow: 0 10px 36px rgba(0, 0, 0, 0.55);
+  }
+  #e2e-panel h1 {
+    font-size: 13px; margin: 0 0 6px; letter-spacing: 1px; color: #7fdce8;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  #e2e-panel .badge {
+    font-size: 11px; padding: 1px 8px; border-radius: 999px;
+    border: 1px solid #3a4a5e; color: #9fb0c0; font-weight: 400;
+  }
+  #e2e-panel .badge.run  { color: #e8b04f; border-color: #e8b04f; }
+  #e2e-panel .badge.pass { color: #6fe89a; border-color: #6fe89a; }
+  #e2e-panel .badge.fail { color: #e85f5f; border-color: #e85f5f; }
+  #e2e-panel .bar { display: flex; gap: 8px; margin: 6px 0 8px; }
+  #e2e-panel button {
+    font: 11px Consolas, monospace; color: #cfd8e3; background: #101a28;
+    border: 1px solid #2c3d52; border-radius: 6px; padding: 3px 10px; cursor: pointer;
+  }
+  #e2e-panel button:hover { border-color: #4fd8e8; color: #4fd8e8; }
+  #e2e-summary { color: #9fb0c0; margin: 2px 0 8px; }
+  .e2e-row { padding: 3px 0; border-top: 1px solid rgba(29, 42, 58, 0.6); white-space: pre-wrap; }
+  .e2e-row .rid { display: inline-block; min-width: 86px; font-weight: bold; }
+  .e2e-row .rst { display: inline-block; min-width: 62px; font-weight: bold; }
+  .e2e-row.pass .rst { color: #6fe89a; }
+  .e2e-row.fail .rst { color: #e85f5f; }
+  .e2e-row.manual .rst { color: #e8b04f; }
+  .e2e-row .rdt { color: #8fa2b5; }
+  .e2e-row.fail .rdt { color: #d99a9a; }
+  #e2e-meta { color: #5f7288; margin-top: 8px; font-size: 11px; }
+</style>
+</head>
+<body>
+<div id="vf-e2e-app"></div>
+<div id="e2e-panel">
+  <h1>VOID FRONTIER · E2E Gate（doc5 §5 · 18 刚性场景 + 2 地形项）
+    <span class="badge run" id="e2e-status">RUNNING…</span></h1>
+  <div class="bar">
+    <button id="e2e-download" type="button">下载 JSON 报告</button>
+    <button id="e2e-rerun" type="button">重跑（整页刷新）</button>
+  </div>
+  <div id="e2e-summary">正在 boot App（seed 24601）并执行用例…</div>
+  <div id="e2e-rows"></div>
+  <div id="e2e-meta">dev-server only：node tests/tools/dev-server.mjs →
+    http://127.0.0.1:8093/tests/tools/e2e-gate-test.html</div>
+</div>
+
+<script type="module">
+import { runE2E } from '../../src/devtools/e2eGateTest.js';
+
+// —— 窗口钩子（自动化契约）：run() 可重入执行，results 在完成后回填 ——
+window.__vfE2E = { run: runE2E, results: null, allPass: null, summary: null, meta: null };
+
+const $status = document.getElementById('e2e-status');
+const $summary = document.getElementById('e2e-summary');
+const $rows = document.getElementById('e2e-rows');
+
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function render(out) {
+  const { results, allPass, summary, meta } = out;
+  window.__vfE2E.results = results;
+  window.__vfE2E.app = out.app || null;
+  window.__vfE2E.allPass = allPass;
+  window.__vfE2E.summary = summary;
+  window.__vfE2E.meta = meta;
+  const auto = results.filter((r) => r.kind !== 'manual');
+  const passed = auto.filter((r) => r.pass === true).length;
+  const failed = auto.filter((r) => r.pass === false).length;
+  $status.textContent = allPass ? 'PASS ' + passed + '/' + auto.length : 'FAIL ' + failed + ' 项';
+  $status.className = 'badge ' + (allPass ? 'pass' : 'fail');
+  $summary.textContent = (meta && meta.booted ? 'boot ok · seed ' + meta.seed + ' · ' : 'boot 失败 · ')
+    + summary;
+  document.title = (allPass ? 'E2E-PASS ' + passed + '/' + auto.length : 'E2E-FAIL ' + failed) + ' · doc5 §5';
+  $rows.replaceChildren();
+  for (const r of results) {
+    const cls = r.kind === 'manual' ? 'manual' : (r.pass ? 'pass' : 'fail');
+    const label = r.kind === 'manual' ? 'MANUAL' : (r.pass ? 'PASS' : 'FAIL');
+    const row = document.createElement('div');
+    row.className = 'e2e-row ' + cls;
+    const ms = r.ms ? ' (' + r.ms + 'ms)' : '';
+    row.innerHTML = '<span class="rid">' + esc(r.id) + '</span>'
+      + '<span class="rst">' + label + '</span>'
+      + '<span class="rdt">' + esc('[' + r.kind + '] ' + r.title + ms) + '\n'
+      + esc(r.detail || '') + '</span>';
+    $rows.appendChild(row);
+  }
+}
+
+async function autoRun() {
+  try {
+    render(await runE2E({ container: document.getElementById('vf-e2e-app'), seed: 24601 }));
+  } catch (e) {
+    $status.textContent = 'BOOT ERROR';
+    $status.className = 'badge fail';
+    $summary.textContent = 'runE2E 崩溃: ' + (e && e.message ? e.message : String(e));
+    document.title = 'E2E-ERROR';
+  }
+}
+autoRun();
+
+// —— 下载 JSON 报告（纯前端 Blob，无外部依赖） ——
+document.getElementById('e2e-download').addEventListener('click', () => {
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    doc: 'VOID FRONTIER doc5 §5 浏览器级端到端验收矩阵',
+    allPass: window.__vfE2E.allPass,
+    summary: window.__vfE2E.summary,
+    meta: window.__vfE2E.meta,
+    results: window.__vfE2E.results,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'e2e-gate-results.json';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+});
+
+// —— 重跑：整页刷新（避免同页二次 boot 造成的路由/监听重复注册） ——
+document.getElementById('e2e-rerun').addEventListener('click', () => location.reload());
+</script>
+
+<!-- 模块加载失败诊断（file:// 直开 / 路径错误时给出可读提示） -->
+<script>
+setTimeout(function () {
+  if (!window.__vfE2E) {
+    var s = document.getElementById('e2e-status');
+    var m = document.getElementById('e2e-summary');
+    if (s) { s.textContent = 'MODULE LOAD FAILED'; s.className = 'badge fail'; }
+    if (m) {
+      m.textContent = 'src/devtools/e2eGateTest.js 未加载成功：请经 dev-server 访问'
+        + '（file:// 直开无法解析相对 ES 模块路径），或检查 src/ 目录完整性。';
+    }
+  }
+}, 6000);
+</script>
+</body>
+</html>
