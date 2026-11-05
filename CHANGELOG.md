@@ -10,6 +10,21 @@
 
 ### Added
 
+- **地形编辑层与殖民地岗位看板（doc7 TASK-5.1/5.2）**：terrainEdits 编辑刷
+  （raise/lower/smooth/flatten/restore + 植被移植回收，flatten 平芯裙边、restore
+  DSP 式一键恢复、flatten/restore 可覆写采掘凹陷；TERRAIN-06 单次编辑 ≤4 区块标脏、
+  SITE-07 紧凑命令序列存档重放）；ShapeTerrain/RestoreTerrain/PlaceBuilding 命令
+  （9 点三角网格投影坡度校验：坡度 >16° 拒 SLOPE_TOO_STEEP、高差 >2.2m 拒
+  HEIGHT_DELTA，放行派生地基承台与主题桩基，GAME-06..07）；殖民地 jobsFilled 岗位
+  分配（按 jobPriority 权重，understaffed 按 η 降产）与五态 runtimeStatus 诊断
+  （running/understaffed/starved_input/low_power/storage_full，COL-01..04、ECON-02）；
+  ColonyView 四级物流流向看板（矿脉采掘 → 仓储物流 → 精炼制造 → 船坞/轨道输出）；
+  审计技术债 TD1–TD4 清偿（stationIds 回填、ProposePeace/AnnexOccupied 战争终局
+  命令、战斗投射物/事件 256 容量环形对象池 + createShip factionMods 战斗特质接入、
+  events/anomalies 中文词条抽取脚本）。**经济规则修正**：powerBalance 用电侧按负值
+  累加（旧实现 `gen-use` 把缺口翻正成盈余，缺电降产/low_power 永不可达）；世界哈希
+  随上述规则变更整体更新，金快照基线更新为 `68462446`。
+
 - **行星主题与连续地形（docs 4-7 施工，Phase 0-2）**：场景 FBO 24 位深度附件与
   beginScene 8 步清屏契约（TERRAIN-07/08）；F3 三档地表诊断渲染 + GL 状态 JSON
   快照；GLOW/RING 顶点着色器双重模型变换修复（辉光 2× 轨道半径漂移根治，GL-01）
@@ -26,7 +41,6 @@
 - **伴生天体扩充（doc5 P3-01）**：星系生成新增每行星持久化 POI 与 objectives
   实体容器（详见上）；世界哈希随之变化，金快照基线更新为 `452e8ba1`；主题系统接入后为 `e81dd30b`；卫星/小行星带/轨道相位后为 `a941b446`。
 
-### Added
 
 - **确定性模拟内核**：xoshiro128\*\* PRNG（拒绝采样）、战略时钟（8640 tick/游戏年）、
   确定性调度器、命令总线（事务回滚）、事件总线、不变量校验、稳定序列化与世界哈希、
