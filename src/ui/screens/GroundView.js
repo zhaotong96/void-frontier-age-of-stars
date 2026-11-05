@@ -48,13 +48,14 @@ import { PlanetSurfaceScene } from '../../render/gl/PlanetSurfaceScene.js';
 import { buildThemePayload } from '../../render/gl/themePayload.js';
 import { mat4, mat4Perspective, mat4LookAt, mat4Multiply } from '../../render/gl/Mat4.js';
 import { buildBuildingMesh, buildUnitBox } from '../../render/meshes/GroundMeshes.js';
+import { buildLandmarkMesh, LANDMARK_PREFAB_IDS } from '../../render/meshes/landmarkMeshes.js';
 import {
   createSurfaceWorld, digVoxel, placeVoxel, getVoxel, ddaRaycast, getSurfaceHeight,
-  findSpawnPoint, SURFACE_SIZE, SURFACE_MAT,
+  SURFACE_SIZE, SURFACE_MAT,
 } from '../../domain/ground/SurfaceSandbox.js';
 import { buildTerrainField } from '../../domain/ground/terrainField.js';
 import { ensurePlanetPois, unexploredPoiCount } from '../../domain/ground/planetPOI.js';
-import { createTerrainEdits, applyEdit, attachTerrainEdits, deserializeEdits, rebuildDirtyChunks } from '../../domain/ground/terrainEdits.js';
+import { createTerrainEdits, applyEdit, attachTerrainEdits, deserializeEdits, rebuildDirtyChunks, planColonyLayout } from '../../domain/ground/terrainEdits.js';
 import { sampleTerrain, raycastTerrain } from '../../domain/ground/surfaceQueries.js';
 import { createGroundMission, stepMission, getMissionView } from '../../domain/ground/GroundMission.js';
 import { getSiteInstance } from '../../domain/ground/missionSiteFactory.js';
@@ -91,6 +92,114 @@ const AIM_REACH = 7.0;
  * 角色/单位/建筑等玩法坐标保持体素空间；查询场域高度/射线时 +FIELD_OFFSET。
  */
 const FIELD_OFFSET = -32;
+/**
+ * P0-1 竖直动力学纯函数（doc9 §3.1 蓝本；GATE-01 全银河 3648 场无头仿真与实机同源）：
+ * 接触冲量铁律（deficit ≥ 0 → vy < 0 无条件清零）、大落差硬吸附（>1.5m）、
+ * 有限爬坡（14 m/s）、下坡微吸附（0.08m）、终端速度截断（-28 / 潜水 -2.2）、
+ * 越界就地挽救（y < -45 就地回地表，杜绝橡皮筋）。
+ * @param {object} st { y, vy, onGround, ground, g, dt, jump, hovering, diving, thruster,
+ *                       fuel, jetDrain, jetRegen, diveGrav, diveTerminal, thrusterVY }
+ * @returns {{y:number, vy:number, onGround:boolean, fuel:number}}
+ */
+export function stepCharacterVertical(st) {
+  let y = st.y;
+  let vy = st.vy;
+  let onGround = st.onGround;
+  let fuel = st.fuel;
+  const ground = Number.isFinite(st.ground) ? st.ground : 0.0;
+  const dt = st.dt;
+  const jetDrain = st.jetDrain != null ? st.jetDrain : JET_DRAIN;
+  const jetRegen = st.jetRegen != null ? st.jetRegen : JET_REGEN;
+  const diveGrav = st.diveGrav != null ? st.diveGrav : FLUID_DIVE_GRAV;
+  const diveTerminal = st.diveTerminal != null ? st.diveTerminal : FLUID_DIVE_TERMINAL;
+  const thrusterVY = st.thrusterVY != null ? st.thrusterVY : FLUID_THRUSTER_VY;
+  if (st.jump && onGround) {
+    vy = Math.sqrt(2 * st.g * 1.35);
+    onGround = false;
+  }
+  if (st.diving) {
+    if (st.thruster && fuel > 0) {
+      fuel = Math.max(0, fuel - jetDrain * dt);
+      vy = Math.min(vy + thrusterVY * dt * 6, thrusterVY);
+    } else {
+      vy = Math.max(vy - st.g * diveGrav * dt, diveTerminal);
+      fuel = Math.min(100, fuel + jetRegen * dt);
+    }
+  } else if (st.hovering) {
+    fuel = Math.max(0, fuel - jetDrain * dt);
+    vy = Math.max(vy - st.g * dt * 0.12, -0.7);
+  } else if (!onGround) {
+    vy = Math.max(vy - st.g * dt, -28.0);
+    fuel = Math.min(100, fuel + jetRegen * dt);
+  } else {
+    vy = 0;
+    fuel = Math.min(100, fuel + jetRegen * dt);
+  }
+  y += vy * dt;
+  const deficit = ground - y;
+  if (deficit >= 0) {
+    if (vy < 0) vy = 0;               // 接触冲量铁律：切断重力发散逃逸闭环
+    onGround = true;
+    if (deficit > 1.5) {
+      y = ground;                     // 大落差直接吸附
+    } else {
+      y = Math.min(ground, y + 14.0 * dt);
+      if (ground - y < 0.02) y = ground;
+    }
+  } else if (y > ground + 0.08) {
+    onGround = false;
+  } else if (vy <= 0) {
+    y = ground;                       // 下坡微吸附
+    vy = 0;
+    onGround = true;
+  }
+  if (!Number.isFinite(y) || y < -45) {
+    y = ground;                       // 越界就地挽救（杜绝橡皮筋）
+    vy = 0;
+    onGround = true;
+  }
+  return { y, vy, onGround, fuel };
+}
+
+/**
+ * P1-1 弹簧臂相机纯函数（doc9 §3.2 蓝本；GATE-03 无头 360° 扫描与实机同源）：
+ * 第一层 注视锚点地表托底；第二层 射线起点外推 0.35m + hit.t>0.08 守卫 + 最小臂长 2.1m；
+ * 非对称阻尼（快收 18 / 慢放 5.5）；第三层 眼位离地净空 ≥0.65m。
+ * @returns {{tgt:number[], eye:number[], springDist:number}}
+ */
+export function computeSpringArm(o) {
+  const cp = Math.cos(o.pitch);
+  const sp = Math.sin(o.pitch);
+  const sy = Math.sin(o.yaw);
+  const cy = Math.cos(o.yaw);
+  const charGround = o.groundAt(o.charX, o.charZ);
+  const safeBaseY = Number.isFinite(charGround) ? Math.max(o.charY, charGround) : o.charY;
+  const tgt = [o.charX, safeBaseY + 1.55, o.charZ];
+  const dir = [cp * sy, sp, cp * cy];
+  let want = clamp(o.dist, 2.5, 26);
+  if (o.field) {
+    const rayStart = [
+      tgt[0] + dir[0] * 0.35 + FIELD_OFFSET,
+      tgt[1] + dir[1] * 0.35,
+      tgt[2] + dir[2] * 0.35 + FIELD_OFFSET,
+    ];
+    const hit = raycastTerrain(o.field, rayStart, dir, want + 0.4);
+    if (hit.hit && hit.t > 0.08) {
+      want = Math.max(2.1, hit.t + 0.35 - 0.55);
+    }
+  }
+  let sd = o.springDist;
+  if (sd < 0) sd = want;
+  const dampRate = want < sd ? 18.0 : 5.5;
+  sd += (want - sd) * (1 - Math.exp(-o.dt * dampRate));
+  const eye = [tgt[0] + dir[0] * sd, tgt[1] + dir[1] * sd, tgt[2] + dir[2] * sd];
+  const eyeGround = o.groundAt(eye[0], eye[2]);
+  if (Number.isFinite(eyeGround) && eye[1] < eyeGround + 0.65) {
+    eye[1] = eyeGround + 0.65;
+  }
+  return { tgt, eye, springDist: sd };
+}
+
 /** 采掘凹陷每击深度（米）：场域地形雕刻（TERRAIN-06 增量重建演示） */
 const DIG_DENT_DEPTH = 1.2;
 /** 场域行走坡度阻断阈值（Δh/Δx > 此值的陡壁不可步行） */
@@ -147,17 +256,46 @@ const MOVE_CODES = new Set([
 ]);
 
 /**
- * 建筑网格图集槽位：buildings.js 九大类 + 兜底 + 选择框（buildUnitBox 体素高亮）。
+ * 建筑网格图集槽位：buildings.js 九大类 + 兜底 + 选择框（buildUnitBox 体素高亮）
+ * + doc9 P0-3 七大旗舰地标预制（landmarkMeshes.js，槽位 11..17）。
  * 类别索引即实例 iParam.y（着色器按逐顶点 aMesh 失配退化，单 draw call 多网格）。
+ * 追加槽位保证 0..10 既有索引稳定（MESH_OF_CATEGORY 兜底 9 不受影响）。
  */
 const BUILD_CATEGORY_IDS = [
   'mining', 'refining', 'industry', 'agri', 'science',
   'service', 'military', 'admin', 'energy', 'default', 'selector',
+  ...LANDMARK_PREFAB_IDS,
 ];
 const MESH_OF_CATEGORY = (cat) => {
   const i = BUILD_CATEGORY_IDS.indexOf(String(cat || 'default'));
   return i >= 0 ? i : 9; // 兜底槽 'default'
 };
+/** 地标 prefabId → 图集槽位（未注册网格的辅助地标返回 -1，跳过渲染） */
+const LANDMARK_MESH_OF = (prefabId) => {
+  const i = BUILD_CATEGORY_IDS.indexOf(String(prefabId || ''));
+  return i >= 11 ? i : -1;
+};
+/** doc9 P0-3：地标逐 prefab 渲染缩放（拱/桥 1.6，塔 2.2，穹顶 1.4，晶簇 1.2，锥 1.0，树 1.8） */
+const LANDMARK_SCALE = {
+  reef_dome_ruin: 1.4,
+  central_furnace_tower: 2.2,
+  sandstone_arch: 1.6,
+  salt_crystal_spire: 1.2,
+  giant_fumarole_cone: 1.0,
+  soul_willow_tree: 1.8,
+  obsidian_arch_bridge: 1.6,
+};
+
+/** P2-1 流体规则阈值（doc8 §4.3）：涉水阻尼上限深 / 潜水态 / 深渊护盾排放 */
+const FLUID_WADE_MAX = 1.2;      // 0 < d ≤ 1.2m 涉水（×0.65 阻尼 + 水花）
+const FLUID_DIVE_GRAV = 0.22;    // 潜水有效重力系数
+const FLUID_DIVE_TERMINAL = -2.2; // 潜水终端下沉速度
+const FLUID_THRUSTER_VY = 2.8;   // 水下推进器上浮速度
+const FLUID_DEEP_DRAIN = 3.5;    // 水深 >8m 护盾排放 /s
+const FLUID_DEEP_DEPTH = 8.0;
+/** 水花/采样喷发粒子事件色（HDR 线性；matId=255 自定义色通道） */
+const SPLASH_COLOR = [0.75, 1.08, 1.18];      // 青白水花
+const POI_BURST_COLOR = [1.5, 1.1, 0.45];     // 地质能量琥珀喷发
 
 /** 兜底环境光照（PlanetSurface3D 私有环境字段缺失时使用，取值与其默认一致） */
 const FALLBACK_ENV = {
@@ -244,6 +382,11 @@ void main() {
   gl_Position = uVP * vec4(w, 1.0);
 }`;
 
+/**
+ * 建筑实例片元 —— doc8 §4.2【P1-3】标准升级版（与 PlanetSurface3D.LIT_FS 同一蓝本）：
+ * 世界空间微面板接缝（panelSeam 1.6 频）+ hash31 微晶粒 + Blinn-Phong 金属高光
+ * + 边缘菲涅尔。契约不变：vN/vC/vW/vF/vE + 既有五组 uniform。
+ */
 const BM_FS = `
 precision highp float;
 in vec3 vN;
@@ -257,33 +400,55 @@ uniform vec3 uCamPos;
 uniform vec3 uFogColor;
 uniform vec2 uFogRange;
 out vec4 fragColor;
+float hash31(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.yzx + 31.32);
+  return fract((p.x + p.y) * p.z);
+}
 void main() {
   vec3 N = normalize(vN);
-  float diff = max(dot(N, uSunDir), 0.0);
-  float hemi = 0.46 + 0.16 * (N.y * 0.5 + 0.5);
-  vec3 col = vC * uSunColor * (hemi + diff * 0.66) + vC * vE;
+  vec3 V = normalize(uCamPos - vW);
+  vec3 L = normalize(uSunDir);
+  vec3 H = normalize(L + V);
+  /* 硬表面工业装甲板微纹理与接缝调制（消除纯色塑料方盒感） */
+  vec3 gridP = abs(fract(vW * 1.6) - 0.5);
+  float panelSeam = smoothstep(0.44, 0.49, max(gridP.x, max(gridP.y, gridP.z)));
+  float microGrain = 0.94 + 0.12 * hash31(floor(vW * 12.0));
+  vec3 baseAlbedo = vC * microGrain * (1.0 - panelSeam * 0.22);
+  /* 半球环境光 + 漫反射 + Blinn-Phong 金属高光 + 边缘菲涅尔 */
+  float ndl = max(dot(N, L), 0.0);
+  float hemi = 0.38 + 0.24 * (N.y * 0.5 + 0.5);
+  float spec = pow(max(dot(N, H), 0.0), 36.0) * 0.42 * ndl;
+  float fresnel = pow(1.0 - max(dot(N, V), 0.0), 4.0) * 0.18;
+  vec3 col = baseAlbedo * (uSunColor * ndl * 0.78 + hemi)
+           + uSunColor * spec
+           + uFogColor * fresnel
+           + baseAlbedo * vE * 1.35;
   col = mix(col, vec3(2.0, 2.0, 2.1), vF);
   float fog = smoothstep(uFogRange.x, uFogRange.y, distance(vW, uCamPos));
   fragColor = vec4(mix(col, uFogColor, fog), 1.0);
 }`;
 
 /**
- * 建筑网格批处理：buildBuildingMesh(category) 十槽实例图集（九大类 + 兜底 + 选择框），
- * 单 draw call 绘制全部建筑 / 目标物 / 拾取物 / 体素选择框。
- * 光照 uniform 由调用方从 PlanetSurface3D 已求值的环境读取（保持与地形一致）。
+ * 建筑网格批处理：buildBuildingMesh(category) 实例图集（九大类 + 兜底 + 选择框
+ * + doc9 P0-3 七大旗舰地标槽），单 draw call 绘制全部建筑 / 目标物 / 拾取物 /
+ * 地标 / 体素选择框。光照 uniform 由调用方从 PlanetSurface3D 已求值的环境读取
+ * （保持与地形一致）。
  */
 class BuildingMeshBatch {
   constructor(glc) {
     this.glc = glc;
     this.gl = glc.gl;
-    this.cap = 160;                       // 实例容量（建筑 + 目标物 + 拾取物 + 选择框）
+    this.cap = 192;                       // 实例容量（建筑 + 目标物 + 拾取物 + 地标 + 选择框）
     this._count = 0;
 
-    // —— 十槽网格图集（逐顶点 aMesh） ——
+    // —— 网格图集（逐顶点 aMesh）：九大类 + 兜底 + 选择框 + 七大旗舰地标 ——
     let total = 0;
-    const meshes = BUILD_CATEGORY_IDS.map((cat) => (
-      cat === 'selector' ? buildUnitBox() : buildBuildingMesh(cat)
-    ));
+    const meshes = BUILD_CATEGORY_IDS.map((cat) => {
+      if (cat === 'selector') return buildUnitBox();
+      if (LANDMARK_MESH_OF(cat) >= 0) return buildLandmarkMesh(cat); // doc9 P0-3 地标槽
+      return buildBuildingMesh(cat);
+    });
     for (const m of meshes) total += m.positions.length;
     const pos = new Float32Array(total);
     const nor = new Float32Array(total);
@@ -447,6 +612,15 @@ export const GroundView = {
     this._buildingColonists = [];      // 建筑旁作业殖民者
     this._conveyor = [];               // 采掘 → 精炼传送带路径
     this._mouse = { lDown: false, rDown: false, lastX: 0, lastY: 0, dragged: false };
+    // —— doc9 P0-1/P0-3/P2-1 视图侧状态 ——
+    this._missionGroundSynced = false; // 任务首帧/切换单位地表吸附标记
+    this._lastActiveUnitId = null;     // 受控单位切换检测（传送吸附判定）
+    this._pois = null;                 // POI 账本（_setupScene 激活）
+    this._edits = null;                // 持久化地形编辑仓库（_setupScene 激活）
+    this._splashCd = 0;                // 涉水水花节流（0.18s）
+    this._poiBurst = null;             // POI 采样喷发 { x, y, z, t }（0.8s）
+    this._underwater = false;          // 相机眼位水下（雾效切换沿）
+    this._hazardVignette = null;       // HUD 边缘告警光晕 'red'|'purple'|null（每帧重算）
 
     root.innerHTML = '';
     const wrap = el('div', { class: 'vf-view vf-view-immersive' });
@@ -779,6 +953,13 @@ export const GroundView = {
       const total = siteDy + dentDy;
       return total !== 0 ? { dy: total } : null;
     };
+    // —— P0-3 修复（doc9 §3.1）：激活 POI 账本与持久化地形编辑仓库 ——
+    //     attachTerrainEdits 自动组合在既有 siteModifier 链之上（内部保存
+    //     __baseSiteModifier），此处之后不得再对 field.siteModifier 赋值。
+    this._pois = ensurePlanetPois(w, planet);
+    this._edits = deserializeEdits(planet.terrainEdits || null, this.field);
+    attachTerrainEdits(this.field, this._edits);
+    rebuildDirtyChunks(this.field);
     this.colony = Object.values(w.entities.colonies || {})
       .find((c) => c.planetId === planet.id) || null;
     this.mission = mission || null;
@@ -786,17 +967,34 @@ export const GroundView = {
     this._layoutColony();
     this._conveyor = this._buildConveyorPaths();
 
-    // —— 初始角色位置：任务取出生小队首位，自由取体素世界出生点（y 贴场域网格） ——
+    // —— P0-1 修复（doc9 §3.1）：首帧初始位置对齐真实地表 ——
+    //     任务模式按 coordSpace 映射（site_meters = 场域米制直读，体素 = 线性映射）；
+    //     R-A 改造前的 GroundMission 无 coordSpace 字段 → 防御性回退体素映射。
     const c = this.char3d;
     const spawn = this.sw.spawn;
-    c.x = spawn.x;
-    c.z = spawn.z;
-    c.y = this._groundAt(spawn.x, spawn.z);
+    if (this.mission && this.mission.playerUnits && this.mission.playerUnits.length) {
+      const m = this.mission;
+      const au = m.playerUnits[m.activeIdx || 0];
+      if (m.coordSpace === 'site_meters') {
+        // 站点米制坐标已是场域米：世界 = 场域 - FIELD_OFFSET（场域 (0,0) → 世界 (32,32)）
+        c.x = au.x - FIELD_OFFSET;
+        c.z = au.y - FIELD_OFFSET;
+      } else {
+        c.x = au.x * (SURFACE_SIZE.X / (m.w * TS));
+        c.z = au.y * (SURFACE_SIZE.Z / (m.h * TS));
+      }
+    } else {
+      c.x = spawn.x;
+      c.z = spawn.z;
+    }
+    c.y = this._groundAt(c.x, c.z);
+    if (!Number.isFinite(c.y)) c.y = 8.0;         // 场外兜底
     c.vy = 0;
     c.onGround = true;
     c.state = 'idle';
     c.fuel = 100;
-    if (!Number.isFinite(c.y)) c.y = 8;           // 场外兜底（理论不可达：出生列恒在场内）
+    this._missionGroundSynced = true;
+    this._lastActiveUnitId = null;
     // 相机置于角色背后；首屏构图（doc7 §5.2）：任务模式且存在站点蓝图时，
     // yaw 自动对准 primaryObjective 主视觉地标（着陆 2 秒内可读局势）。
     this.cam.yaw = 0;
@@ -958,6 +1156,13 @@ export const GroundView = {
     this.mission = null;
     this.missionId = null;
     this._lastView = null;
+    this._pois = null;
+    this._edits = null;
+    this._poiBurst = null;
+    this._underwater = false;
+    this._hazardVignette = null;
+    this._missionGroundSynced = false;
+    this._lastActiveUnitId = null;
     this._strikeSeen.clear();
     this._fx.slashes.length = 0;
     this._fx.beams.length = 0;
@@ -1196,6 +1401,103 @@ export const GroundView = {
     return touched && Number.isFinite(base.y + dy) ? { dy } : null;
   },
 
+  // —— P2-1 流体物理 / 危险区反馈（doc8 §4.3） ————————————————
+
+  /**
+   * 实时水位（米）：优先场景潮汐实时值（PlanetSurfaceScene.getWaterLevel），
+   * 回退主题载荷静态 themeFx.waterLevel；无水主题返回 null。
+   */
+  _liveWaterLevel() {
+    if (this.scene && typeof this.scene.getWaterLevel === 'function') {
+      const lv = this.scene.getWaterLevel(this._clock);
+      if (lv != null && Number.isFinite(lv)) return lv;
+    }
+    const fx = this._themePayload && this._themePayload.terrain
+      && this._themePayload.terrain.themeFx;
+    if (fx && Number.isFinite(fx.waterLevel) && fx.waterLevel > -90) return fx.waterLevel;
+    return null;
+  },
+
+  /**
+   * 角色浸没深度 d = waterLevel - c.y（无水返回 0）。
+   * 规则分档：0 < d ≤ 1.2 涉水；d > 1.2 潜水；d > 8 深渊高压。
+   */
+  _fluidDepth(c) {
+    const lv = this._liveWaterLevel();
+    if (lv == null) return 0;
+    const d = lv - c.y;
+    return d > 0 ? d : 0;
+  },
+
+  /** 涉水水花：移动时 0.18s 节流注入青白水花粒子事件（角色脚底） */
+  _emitSplash(c, dt, moving) {
+    this._splashCd = Math.max(0, this._splashCd - dt);
+    if (!moving || this._splashCd > 0) return;
+    this._splashCd = 0.18;
+    this._fx.dig.push({
+      x: c.x - 0.5, y: c.y - 0.3, z: c.z - 0.5, matId: 255, color: SPLASH_COLOR,
+    });
+  },
+
+  /**
+   * 危险区持续排放（护盾优先，护盾耗尽转结构 HP）+ HUD 告警光晕标记：
+   *  - 深潜 d > 8m：护盾 3.5/s；
+   *  - sulfur_marsh 海拔 < 4.5m 毒气湖：护盾 2.5/s + 紫晕；
+   *  - obsidian_lava 海拔 < -1.5m 熔岩河：护盾 4/s + 红晕；
+   *  - permafrost_furnace 离开热源圈：体温流失（护盾 1.0/s）。
+   * @returns {void} 副作用写 c.shield/c.hp 与 this._hazardVignette
+   */
+  _hazardDrain(c, dt, depth) {
+    let rate = 0;
+    let vignette = null;
+    if (depth > FLUID_DEEP_DEPTH) {
+      rate = Math.max(rate, FLUID_DEEP_DRAIN);
+      vignette = 'red';                        // 深渊过压红晕
+    }
+    const themeId = this._themePayload ? this._themePayload.themeId : null;
+    if (themeId === 'sulfur_marsh' && c.y < 4.5) {
+      rate = Math.max(rate, 2.5);
+      vignette = 'purple';
+    }
+    if (themeId === 'obsidian_lava' && c.y < -1.5) {
+      rate = Math.max(rate, 4.0);
+      vignette = 'red';
+    }
+    if (themeId === 'permafrost_furnace' && this.field) {
+      // 离开全部热源圈（场域坐标）→ 体温流失
+      const zones = (this._themePayload.terrain.heatZones || []);
+      const fx = c.x + FIELD_OFFSET;
+      const fz = c.z + FIELD_OFFSET;
+      let warm = false;
+      for (const hz of zones) {
+        if (Math.hypot(fx - hz.x, fz - hz.z) <= (hz.radius || 0)) { warm = true; break; }
+      }
+      if (!warm && zones.length) rate = Math.max(rate, 1.0);
+    }
+    this._hazardVignette = vignette;
+    if (rate <= 0) return;
+    if (c.shield > 0) c.shield = Math.max(0, c.shield - rate * dt);
+    else c.hp = Math.max(0, c.hp - rate * 0.5 * dt);
+  },
+
+  /** POI 采样能量喷发（0.8s）：持续注入琥珀色粒子事件（_updateFx 步进计时） */
+  _updatePoiBurst(dt) {
+    const b = this._poiBurst;
+    if (!b) return;
+    b.t -= dt;
+    if (b.t <= 0) {
+      this._poiBurst = null;
+      return;
+    }
+    this._fx.dig.push({
+      x: b.x - 0.5 + (this._clock * 7.3 % 1 - 0.5) * 0.6,
+      y: b.y - 0.4,
+      z: b.z - 0.5 + (this._clock * 5.1 % 1 - 0.5) * 0.6,
+      matId: 255,
+      color: POI_BURST_COLOR,
+    });
+  },
+
   /**
    * R 键一键恢复自然地貌（doc7 §6 DSP 式）：以角色为中心 RestoreTerrain 命令
    * （领域写回行星 terrainEdits 日志）+ 本地同 op 应用（即时增量重建）。
@@ -1329,6 +1631,16 @@ export const GroundView = {
     if (res.ok) {
       toast(`已采样：${best.id}（奖励入账）`, { kind: 'ok' });
       this._tally.poiSampled = (this._tally.poiSampled || 0) + 1;
+      // —— P2-2：采样瞬间 0.8s 地质能量粒子喷发（信标蜕变为已发掘基座残骸） ——
+      const bx = best.position.x - FIELD_OFFSET;
+      const bz = best.position.z - FIELD_OFFSET;
+      const gy = this._groundAt(bx, bz);
+      this._poiBurst = {
+        x: bx,
+        y: Number.isFinite(gy) ? gy + 0.4 : this.char3d.y,
+        z: bz,
+        t: 0.8,
+      };
     } else {
       toast(res.reason || '采样失败', { kind: 'warn' });
     }
@@ -1382,61 +1694,96 @@ export const GroundView = {
   },
 
   /**
-   * 任务模式竖直物理：XZ 由任务模拟权威（像素坐标线性映射到体素世界），
-   * Y 由视图本地物理（重力 / 跳跃 / 喷气 / 爬坡平滑）驱动。
+   * 任务模式竖直物理（doc9 §3.1 P0-1 版）：XZ 由任务模拟权威按 coordSpace 映射
+   * （site_meters = 场域米制直读；缺省回退体素线性映射 —— 兼容 R-A 改造前后），
+   * Y 由视图本地刚体法向冲量闭环驱动（接触清零 / 双重防坠渊 / 越界就地挽救）。
    */
   _followMissionCharacter(view, dt) {
     const m = this.mission;
     const au = view.playerUnits.find((u) => u.unitId === view.activeUnitId)
       || view.playerUnits[0];
-    if (!au) return;
-    const kx = SURFACE_SIZE.X / (m.w * TS);
-    const kz = SURFACE_SIZE.Z / (m.h * TS);
+    if (!au || !m) return;
+
     const c = this.char3d;
-    c.x = au.x * kx;
-    c.z = au.y * kz;
+    // coordSpace 感知映射（R-A 改造前 mission 无 coordSpace → 体素线性映射兜底）
+    const wx = (m.coordSpace === 'site_meters')
+      ? (au.x - FIELD_OFFSET)
+      : (au.x * (SURFACE_SIZE.X / (m.w * TS)));
+    const wz = (m.coordSpace === 'site_meters')
+      ? (au.y - FIELD_OFFSET)
+      : (au.y * (SURFACE_SIZE.Z / (m.h * TS)));
+
+    const jumpDist = Math.hypot(wx - c.x, wz - c.z);
+    const unitChanged = (this._lastActiveUnitId !== au.unitId) || !this._missionGroundSynced;
+    c.x = wx;
+    c.z = wz;
     c.yaw = -au.facing;               // 任务朝向（像素系 atan2）→ 网格 rotY 约定
     c.animT += dt;
+    this._lastActiveUnitId = au.unitId;
 
-    const g = this._gravity();
-    if (this._oneShot.jump) {
-      this._oneShot.jump = false;
-      if (c.onGround) {
-        c.vy = Math.sqrt(2 * g * 1.2);  // 跳跃初速 √(2g·1.2)：越障 1.2 体素
-        c.onGround = false;
-      }
-    }
-    const ground = this._groundAt(c.x, c.z);
-    const hovering = !!this.keys.Space && !c.onGround && c.fuel > 0;
-    if (hovering) {
-      c.fuel = Math.max(0, c.fuel - JET_DRAIN * dt);
-      c.vy = Math.max(c.vy - g * dt * 0.12, -0.7);   // 喷气悬停：抵消大部分重力
-    } else {
-      c.vy -= g * dt;
-      c.fuel = Math.min(100, c.fuel + JET_REGEN * dt);
-    }
-    c.y += c.vy * dt;
-    if (ground !== Infinity) {
-      if (c.y < ground) {
-        // 爬坡平滑：以有限速率贴上新地面（陡壁视觉爬升，任务层碰撞仍由 domain 权威）
-        c.y = Math.min(ground, c.y + 9 * dt);
-        if (ground - c.y < 0.02) {
-          c.y = ground;
-          c.vy = 0;
-          c.onGround = true;
-        }
-      } else if (c.y > ground + 0.05) {
-        c.onGround = false;
-      }
-    }
-    if (c.y < (this.field ? -60 : -12)) {
-      // 跌出悬浮平台（体素兜底模式）：回出生点；场域地形最低 -40m 不会触发
-      const sp = this.sw.spawn;
-      c.x = sp.x;
-      c.z = sp.z;
-      c.y = this._groundAt(sp.x, sp.z);
+    const rawGround = this._groundAt(c.x, c.z);
+    const ground = Number.isFinite(rawGround) ? rawGround : 0.0;
+
+    // 1. 首帧、切换受控单位或远距离传送：瞬时硬吸附到真实地表
+    if (unitChanged || jumpDist > 2.5) {
+      c.y = ground;
       c.vy = 0;
+      c.onGround = true;
+      this._missionGroundSynced = true;
     }
+
+    // 2+3. 竖直动力学（doc9 P0-1 纯函数 stepCharacterVertical —— GATE-01 同源口径）
+    const g = this._gravity();
+    const depth = this._fluidDepth(c);          // P2-1 浸没深度
+    const diving = depth > FLUID_WADE_MAX;
+    const jump = this._oneShot.jump === true;
+    this._oneShot.jump = false;
+    const st = stepCharacterVertical({
+      y: c.y, vy: c.vy, onGround: c.onGround, ground, g, dt,
+      jump,
+      hovering: !!this.keys.Space && !c.onGround && c.fuel > 0,
+      diving,
+      thruster: diving && !!this.keys.Space && c.fuel > 0,
+      fuel: c.fuel,
+    });
+    c.y = st.y;
+    c.vy = st.vy;
+    c.onGround = st.onGround;
+    c.fuel = st.fuel;
+
+    // 3. 接触冲量速度清零铁律：只要踩地或深陷地面，法向冲量无条件截断 vy < 0
+    const deficit = ground - c.y;
+    if (deficit >= 0) {
+      if (c.vy < 0) c.vy = 0; // 彻底切断重力发散逃逸闭环
+      c.onGround = true;
+      if (deficit > 1.5) {
+        c.y = ground; // 大落差直接吸附，杜绝穿模入地
+      } else {
+        c.y = Math.min(ground, c.y + 14.0 * dt);
+        if (ground - c.y < 0.02) c.y = ground;
+      }
+    } else if (c.y > ground + 0.08) {
+      c.onGround = false;
+    } else {
+      // 下坡微吸附（0.08m 内且无向上初速度时保持贴地）
+      if (c.vy <= 0) {
+        c.y = ground;
+        c.vy = 0;
+        c.onGround = true;
+      }
+    }
+
+    // 4. 越界就地挽救：杜绝重置到 spawn 引起的橡皮筋死循环
+    if (!Number.isFinite(c.y) || c.y < -45) {
+      c.y = Number.isFinite(ground) ? ground : 8.0;
+      c.vy = 0;
+      c.onGround = true;
+    }
+
+    // —— P2-1 流体反馈：涉水水花 + 危险区排放（任务 XZ 由 domain 权威，不阻尼） ——
+    this._emitSplash(c, dt, depth > 0 && au.state === 'move');
+    this._hazardDrain(c, dt, depth);
+
     // 状态映射：run / attack / hurt / dig（采掘中）/ idle
     if (this._buildMode && this._mouse.lDown && this._aim && this._aim.dug) {
       c.state = 'dig';
@@ -1503,15 +1850,21 @@ export const GroundView = {
     this._oneShot.attack = null;
     c.atkCd = Math.max(0, c.atkCd - dt);
 
-    // —— XZ 位移（闪避爆发 + 常速移动，体素 AABB 轴分离碰撞） ——
+    // —— P2-1 流体：浸没深度分档（涉水阻尼 / 潜水态） ——
+    const depth = this._fluidDepth(c);
+    const wading = depth > 0 && depth <= FLUID_WADE_MAX;
+    const diving = depth > FLUID_WADE_MAX;
+    const fluidDamp = wading ? 0.65 : 1;   // 涉水水平移速 ×0.65 阻尼
+
+    // —— XZ 位移（闪避爆发 + 常速移动，体素 AABB 轴分离碰撞 / 场域坡度阻断） ——
     if (c.dodgeT > 0) {
       c.dodgeT -= dt;
-      this._moveAABB(c.dodgeX * 8.0 * dt, c.dodgeZ * 8.0 * dt);
+      this._moveAABB(c.dodgeX * 8.0 * fluidDamp * dt, c.dodgeZ * 8.0 * fluidDamp * dt);
     } else if (mv) {
-      this._moveAABB(mv.x * speed * dt, mv.z * speed * dt);
+      this._moveAABB(mv.x * speed * fluidDamp * dt, mv.z * speed * fluidDamp * dt);
     }
 
-    // —— 竖直物理 ——
+    // —— 竖直物理（P0-1 接触冲量闭环 + P2-1 潜水动力学） ——
     const g = this._gravity();
     if (this._oneShot.dodge) {
       this._oneShot.dodge = false;
@@ -1526,13 +1879,24 @@ export const GroundView = {
         c.stamina = Math.max(0, c.stamina - 25);
       }
     }
-    const hovering = !!this.keys.Space && !c.onGround && c.fuel > 0;
-    if (hovering) {
-      c.fuel = Math.max(0, c.fuel - JET_DRAIN * dt);
-      c.vy = Math.max(c.vy - g * dt * 0.12, -0.7);
+    if (diving) {
+      // 潜水态：有效重力 ×0.22、终端 -2.2；空格 = 水下推进器平稳上浮（同喷气燃料口径）
+      if (this.keys.Space && c.fuel > 0) {
+        c.fuel = Math.max(0, c.fuel - JET_DRAIN * dt);
+        c.vy = Math.min(c.vy + FLUID_THRUSTER_VY * dt * 6, FLUID_THRUSTER_VY);
+      } else {
+        c.vy = Math.max(c.vy - g * FLUID_DIVE_GRAV * dt, FLUID_DIVE_TERMINAL);
+        c.fuel = Math.min(100, c.fuel + JET_REGEN * dt);
+      }
     } else {
-      c.vy -= g * dt;
-      c.fuel = Math.min(100, c.fuel + JET_REGEN * dt);
+      const hovering = !!this.keys.Space && !c.onGround && c.fuel > 0;
+      if (hovering) {
+        c.fuel = Math.max(0, c.fuel - JET_DRAIN * dt);
+        c.vy = Math.max(c.vy - g * dt * 0.12, -0.7);
+      } else {
+        c.vy = Math.max(c.vy - g * dt, -28.0);  // 终端速度截断（与任务模式同参）
+        c.fuel = Math.min(100, c.fuel + JET_REGEN * dt);
+      }
     }
     c.y += c.vy * dt;
     // 头顶体素检测：上升顶头即截停（场域连续地形无洞穴顶盖，跳过）
@@ -1540,21 +1904,39 @@ export const GroundView = {
       && getVoxel(sw, Math.floor(c.x), Math.floor(c.y + PLAYER_HEIGHT), Math.floor(c.z)) !== SURFACE_MAT.AIR) {
       c.vy = 0;
     }
+    // 接触冲量速度清零铁律：踩地/深陷地面时无条件截断 vy < 0（含场下），有限爬升贴地
     const ground = this._groundAt(c.x, c.z);
-    if (c.y <= ground) {
-      c.y = ground;
-      c.vy = 0;
-      c.onGround = true;
+    if (Number.isFinite(ground)) {
+      const deficit = ground - c.y;
+      if (deficit >= 0) {
+        if (c.vy < 0) c.vy = 0;
+        c.onGround = true;
+        if (deficit > 1.5) {
+          c.y = ground;                          // 大落差直接吸附
+        } else {
+          c.y = Math.min(ground, c.y + 14.0 * dt);
+          if (ground - c.y < 0.02) c.y = ground;
+        }
+      } else if (c.y > ground + 0.08) {
+        c.onGround = false;
+      } else if (c.vy <= 0) {
+        // 下坡微吸附
+        c.y = ground;
+        c.vy = 0;
+        c.onGround = true;
+      }
     } else {
       c.onGround = false;
     }
-    if (c.y < (this.field ? -60 : -12)) {
-      const sp = findSpawnPoint(sw);
-      c.x = sp.x;
-      c.z = sp.z;
-      c.y = this._groundAt(sp.x, sp.z);
+    // 越界就地挽救（P0-1）：吸附到当地地表，杜绝回出生点的橡皮筋死循环
+    if (!Number.isFinite(c.y) || c.y < (this.field ? -45 : -12)) {
+      c.y = Number.isFinite(ground) ? ground : 8.0;
       c.vy = 0;
+      c.onGround = true;
     }
+    // —— P2-1 流体反馈：涉水水花 + 危险区排放 ——
+    this._emitSplash(c, dt, depth > 0 && !!mv);
+    this._hazardDrain(c, dt, depth);
     // 采掘姿态：建造模式按住左键且本帧实际挖到（覆盖待机/奔跑姿态）
     if (this._buildMode && this._mouse.lDown && this._aim && this._aim.dug
       && (c.state === 'idle' || c.state === 'dig' || c.state === 'run')) {
@@ -1874,6 +2256,7 @@ export const GroundView = {
       b.age += dt;
       if (b.age >= b.life) fx.beams.splice(i, 1);
     }
+    this._updatePoiBurst(dt);          // P2-2 POI 采样能量喷发（0.8s）
   },
 
   // —— 殖民地 3D 布局 / 传送带 ————————————————
@@ -1888,35 +2271,45 @@ export const GroundView = {
     this._buildingColonists = [];
     const colony = this.colony;
     if (!colony) return;
-    const sw = this.sw;
-    const GOLDEN = 2.39996323;
-    const entries = [
-      ...(colony.buildings || []),
-      ...(colony.constructionQueue || []).map((j) => ({ defId: j.defId, state: 'construction' })),
-    ];
-    for (let i = 0; i < entries.length && i < 24; i++) {
-      const b = entries[i];
-      const def = BUILDINGS.find((x) => x.id === b.defId);
-      const cat = def ? def.category : 'default';
-      const building = b.state !== 'construction';
-      const r = 5.5 + 2.4 * Math.sqrt(i);
-      const a = i * GOLDEN;
-      const x = clamp(sw.spawn.x + Math.cos(a) * r, 3, SURFACE_SIZE.X - 3);
-      const z = clamp(sw.spawn.z + Math.sin(a) * r, 3, SURFACE_SIZE.Z - 3);
+    // —— P1-2（doc8 §3.2 议题 B2 裁决）：废除黄金角盲盒螺旋，等高线感知选址 ——
+    // groundBuildings（PlaceBuilding 双轨）原样合并；未定坐标建筑由
+    // planColonyLayout 在过渡环带 22-75m 内按 9 点坡度校验确定性寻址。
+    const w = this.app.world;
+    const planetEntity = w ? w.entities.planets[this.planet.id] : null;
+    const centerFx = 32.5 - FIELD_OFFSET;   // 体素出生点 → 场域坐标
+    const centerFz = 32.5 - FIELD_OFFSET;
+    const plan = planColonyLayout(this.field, {
+      entries: [
+        ...(colony.buildings || []),
+        ...(colony.constructionQueue || []).map((j) => ({ defId: j.defId, state: 'construction' })),
+      ],
+      groundBuildings: (planetEntity && planetEntity.groundBuildings) || [],
+      center: [centerFx, centerFz],
+      categoryOf: (defId) => {
+        const def = BUILDINGS.find((x) => x.id === defId);
+        return def ? def.category : 'default';
+      },
+      themeId: this.planet.primaryThemeId || null,
+    });
+    for (let i = 0; i < plan.length; i++) {
+      const b = plan[i];
+      const x = b.fx - FIELD_OFFSET;
+      const z = b.fz - FIELD_OFFSET;
       const h = this._groundAt(x, z);
-      if (!Number.isFinite(h)) continue;   // 场外/虚空列跳过
+      if (!Number.isFinite(h)) continue;
+      const building = b.state !== 'construction';
       this._buildingLayout.push({
         x,
-        y: h,
+        y: Number.isFinite(b.y) ? b.y : h,
         z,
-        rotY: (i * 0.618) % 1 * Math.PI * 2,
+        rotY: b.rotY,
         scale: building ? 1 : 0.55,
-        meshId: MESH_OF_CATEGORY(cat),
+        meshId: MESH_OF_CATEGORY(b.category),
         emit: building ? 0 : 0.25,
       });
       this._buildingColonists.push({
         x: x + 1.6,
-        y: h,
+        y: Number.isFinite(b.y) ? b.y : h,
         z: z + 1.2,
         rotY: (i * 0.37) % 1 * Math.PI * 2,
         walk: false,
@@ -1946,14 +2339,25 @@ export const GroundView = {
         }
       }
       if (!best || bd < 2) continue;
-      const n = Math.max(2, Math.ceil(bd));
+      // P1-2：Catmull-Rom 样条平滑 + 每段高度 max(groundY + 0.15, splineY)
+      const p0 = [mn.x, mn.y, mn.z];
+      const p3 = [best.x, best.y, best.z];
+      const p1 = [mn.x + (best.x - mn.x) * 0.3, mn.y, mn.z + (best.z - mn.z) * 0.3];
+      const p2 = [mn.x + (best.x - mn.x) * 0.7, best.y, mn.z + (best.z - mn.z) * 0.7];
+      const cr = (a, b, c, d, t) => {
+        const t2 = t * t;
+        const t3 = t2 * t;
+        return 0.5 * ((2 * b) + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (-a + 3 * b - 3 * c + d) * t3);
+      };
+      const n = Math.max(6, Math.ceil(bd * 2));
       const pts = [];
       for (let k = 0; k <= n; k++) {
-        const f = k / n;
-        const x = mn.x + (best.x - mn.x) * f;
-        const z = mn.z + (best.z - mn.z) * f;
+        const t = k / n;
+        const x = cr(p0[0], p1[0], p2[0], p3[0], t);
+        const z = cr(p0[2], p1[2], p2[2], p3[2], t);
+        const sy = cr(p0[1], p1[1], p2[1], p3[1], t);
         const h = this._groundAt(x, z);
-        const y = Number.isFinite(h) ? h : mn.y + (best.y - mn.y) * f;
+        const y = Math.max(Number.isFinite(h) ? h + 0.15 : sy, sy);
         pts.push([x, y, z]);
       }
       paths.push({ pts, speed: 1.6, spacing: 1.1 });
@@ -1982,31 +2386,54 @@ export const GroundView = {
         const pw = this.cm.glCanvas.width;
         const ph = this.cm.glCanvas.height;
 
-        // —— 弹簧臂相机（场域射线收臂；指数平滑与 PlanetSurface3D 同参） ——
+        // —— P1-1 弹簧臂相机（doc9 §3.2）：三层防穿透与眼位离地净空守护 ——
+        // 纯函数实现在模块级 computeSpringArm（GATE-03 无头 360° 扫描同源口径）
         const c = this.char3d;
-        const cp = Math.cos(this.cam.pitch);
-        const sp = Math.sin(this.cam.pitch);
-        const sy = Math.sin(this.cam.yaw);
-        const cy = Math.cos(this.cam.yaw);
-        const tgt = [c.x, c.y + 1.55, c.z];
-        const dir = [cp * sy, sp, cp * cy];
-        let want = clamp(this.cam.dist, 2.5, 26);
-        if (this.field) {
-          const hit = raycastTerrain(this.field,
-            [tgt[0] + FIELD_OFFSET, tgt[1], tgt[2] + FIELD_OFFSET], dir, want + 0.6);
-          if (hit.hit) want = Math.max(1.4, hit.t - 0.45);
+        const arm = computeSpringArm({
+          field: this.field,
+          groundAt: (x, z) => this._groundAt(x, z),
+          charX: c.x, charY: c.y, charZ: c.z,
+          yaw: this.cam.yaw, pitch: this.cam.pitch, dist: this.cam.dist,
+          springDist: this._springDist, dt,
+        });
+        this._springDist = arm.springDist;
+        const tgt = arm.tgt;
+        const eye = arm.eye;
+
+        // 第三层保护：相机眼位离地净空绝对钳制（永远离地 ≥0.65m，杜绝钻入山体）
+        const eyeGround = this._groundAt(eye[0], eye[2]);
+        if (Number.isFinite(eyeGround) && eye[1] < eyeGround + 0.65) {
+          eye[1] = eyeGround + 0.65;
         }
-        if (this._springDist < 0) this._springDist = want;
-        this._springDist += (want - this._springDist) * (1 - Math.exp(-dt * 6));
-        const eye = [
-          tgt[0] + dir[0] * this._springDist,
-          tgt[1] + dir[1] * this._springDist,
-          tgt[2] + dir[2] * this._springDist,
-        ];
         const mm = this._m;
         mat4Perspective(mm.proj, 1.05, pw / Math.max(1, ph), 0.1, 1600);
         mat4LookAt(mm.view, eye, tgt, [0, 1, 0]);
         mat4Multiply(mm.vp, mm.proj, mm.view);
+
+        // —— P2-1 水下视锥：眼位没入水面 → 雾距收窄 [6,68] + 深海蓝青雾色（沿触发） ——
+        const liveLv = this._liveWaterLevel();
+        const under = liveLv != null && eye[1] < liveLv;
+        if (under !== this._underwater) {
+          this._underwater = under;
+          if (this.scene) {
+            if (under) {
+              this.scene.setFogOnly({ color: [0.02, 0.23, 0.34], range: [6.0, 68.0] });
+            } else {
+              const fog = (this._themePayload && this._themePayload.terrain.fog) || {};
+              this.scene.setFogOnly({ color: fog.color, range: fog.range });
+            }
+          }
+        }
+        // 对象 pass 与建筑批处理共用同一水下雾（THEME-02 一致性）
+        if (this.ps3d) {
+          if (under) {
+            this.ps3d._fogColor = [0.02, 0.23, 0.34];
+            this.ps3d._fogRange = [6.0, 68.0];
+          } else if (this._themePayload) {
+            this.ps3d._fogColor = this._themePayload.terrain.fog.color.slice();
+            this.ps3d._fogRange = this._themePayload.terrain.fog.range.slice();
+          }
+        }
 
         // —— 1. 场景：连续地形 + 天空 + 天气（清屏唯一所有者仍是 PostProcessor） ——
         this.scene.draw(gl, pw, ph, {
@@ -2146,19 +2573,47 @@ export const GroundView = {
         });
       }
     }
-    // 未勘探 POI 全息信标（doc5 P1-04：field 坐标 → 世界 = +FIELD_OFFSET）
+    // —— doc9 P0-3：站点旗舰地标（site.landmarks 场域坐标 → 世界 = -FIELD_OFFSET） ——
+    //   仅渲染 landmarkMeshes 注册表内已建模的预制；未建模辅助地标（雷达站等）
+    //   无网格资产，诚实跳过（LANDMARK_MESH_OF 返回 -1）。
+    if (this._site && this._site.site && Array.isArray(this._site.site.landmarks)) {
+      for (const lm of this._site.site.landmarks) {
+        const meshId = LANDMARK_MESH_OF(lm.prefabId);
+        if (meshId < 0) continue;
+        const wx = lm.anchor.x - FIELD_OFFSET;
+        const wz = lm.anchor.z - FIELD_OFFSET;
+        const gy = this._groundAt(wx, wz);
+        if (!Number.isFinite(gy)) continue;
+        list.push({
+          x: wx, y: gy, z: wz,
+          rotY: lm.rotation || 0,
+          scale: LANDMARK_SCALE[lm.prefabId] != null ? LANDMARK_SCALE[lm.prefabId] : 1.0,
+          meshId,
+          emit: 0,
+        });
+      }
+    }
+    // 未勘探 POI 全息信标（doc5 P1-04）+ 已采样「已发掘基座残骸」（doc9 P2-2）：
+    // rewardPaid 后不隐藏 —— 蜕变为低矮暗灰基座（scale 0.55, emit 0.05）。
     if (this._pois) {
       for (const poi of Object.values(this._pois)) {
-        if (poi.rewardPaid || poi.state === 'explored') continue;
         const bx = poi.position.x - FIELD_OFFSET;
         const bz = poi.position.z - FIELD_OFFSET;
         const gy = this._groundAt(bx, bz);
         if (!Number.isFinite(gy)) continue;
-        list.push({
-          x: bx, y: gy + 0.7 + Math.sin(this._clock * 2.2) * 0.12, z: bz,
-          rotY: this._clock * 0.6, scale: 0.9, meshId: MESH_OF_CATEGORY('selector'),
-          emit: 1.2,
-        });
+        if (poi.rewardPaid || poi.state === 'explored') {
+          list.push({
+            x: bx, y: gy + 0.2, z: bz,
+            rotY: 0, scale: 0.55, meshId: MESH_OF_CATEGORY('default'),
+            emit: 0.05,
+          });
+        } else {
+          list.push({
+            x: bx, y: gy + 0.7 + Math.sin(this._clock * 2.2) * 0.12, z: bz,
+            rotY: this._clock * 0.6, scale: 0.9, meshId: MESH_OF_CATEGORY('selector'),
+            emit: 1.4,
+          });
+        }
       }
     }
     // 已放置结构体素（场域模式占位盒；Wave F 建筑系统替换为模块化结构网格）
@@ -2228,6 +2683,25 @@ export const GroundView = {
     if (this.mode === 'mission' && view) this._drawHudMission(ctx, W, H, view);
     else this._drawHudFree(ctx, W, H);
     this._drawSkillbar(ctx, W, H);
+    this._drawHazardVignette(ctx, W, H);
+  },
+
+  /**
+   * HUD 边缘告警光晕（doc9 P2-1 危险区反馈）：_hazardDrain 每帧置位
+   * 'red'（熔岩/深潜过压）| 'purple'（硫雾酸蚀）| null；径向渐变描边。
+   */
+  _drawHazardVignette(ctx, W, H) {
+    const kind = this._hazardVignette;
+    if (!kind) return;
+    const col = kind === 'purple' ? '138,60,200' : '224,64,42';
+    const grad = ctx.createRadialGradient(
+      W / 2, H / 2, Math.min(W, H) * 0.38,
+      W / 2, H / 2, Math.max(W, H) * 0.72,
+    );
+    grad.addColorStop(0, 'rgba(0,0,0,0)');
+    grad.addColorStop(1, `rgba(${col},0.38)`);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
   },
 
   /** 屏幕中央准星：战斗为十字，采掘/建造为方框 + 材质信息 */
@@ -2423,6 +2897,20 @@ export const GroundView = {
         ctx.fillStyle = '#7ee2a8';
         ctx.fillText('本行星兴趣点已全部采样', 22, 116);
       }
+    }
+
+    // —— P2-1 深潜压力读数 + 潮汐相位（潜水态显示，doc8 §4.3 规则 3） ——
+    const depth = this._fluidDepth(c);
+    if (depth > FLUID_WADE_MAX) {
+      const mpa = 0.101 + depth * 0.0098;          // 每米水柱 ≈ 9.8 kPa
+      const tidePhase = ((this._clock % 90) / 90); // doc7：90s 潮汐周期
+      ctx.fillStyle = 'rgba(8,20,34,0.78)';
+      ctx.fillRect(12, 124, 250, 22);
+      ctx.strokeStyle = 'rgba(90,184,224,0.45)';
+      ctx.strokeRect(12.5, 124.5, 249, 21);
+      ctx.fillStyle = '#8fd8f0';
+      ctx.font = 'bold 11px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText(`深潜压力 ${mpa.toFixed(1)} MPa · 潮汐相位 ${Math.round(tidePhase * 100)}%`, 22, 139);
     }
 
     // 本次采掘台账

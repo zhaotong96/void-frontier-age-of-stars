@@ -482,3 +482,87 @@ export function checkBuildingPlacement(field, x, z, opts = {}) {
     },
   };
 }
+
+// ———— P1-2 殖民地等高线感知布局规划器（doc8 §3.2 议题 B2 仲裁落地） ————
+
+/** 黄金角（与 doc8 B2 一致）与过渡环带半径（22m–75m） */
+export const COLONY_LAYOUT = { goldenAngle: 2.399963229728653, ringMinM: 22, ringMaxM: 75, footprintHalfM: 2.2, maxSlopeDeg: 16, maxHeightDeltaM: 2.2, minSpacingM: 6, skirtDepthM: 1.8 };
+
+/**
+ * 等高线感知的殖民地布局规划（纯函数、确定性、无 DOM）：
+ *  - groundBuildings（PlaceBuilding 已定三维坐标）原样保留；
+ *  - 未定坐标建筑在过渡环带（22–75m）内按黄金角候选序列搜索
+ *    checkBuildingPlacement（9 点坡度 ≤16°、高差 ≤2.2m）的平坦台地；
+ *  - mining 类优先吸附 TERRAIN_FLAGS.ORE 标记点；
+ *  - 基准高程 = 9 点最高点 × 0.35 + 均高 × 0.65（防止任何一角插入山体）；
+ *  - 朝向对齐等高线切线（梯度垂线）。
+ * @param {object} field terrainField 场域
+ * @param {{entries:Array<{defId:string,state?:string}>, groundBuildings?:Array, center:[number,number], categoryOf:(defId:string)=>string, themeId?:string}} opts
+ * @returns {Array<{defId:string,state:string,fx:number,fz:number,y:number,rotY:number,category:string,placement:Object|null}>}
+ */
+export function planColonyLayout(field, opts = {}) {
+  const L = COLONY_LAYOUT;
+  const entries = opts.entries || [];
+  const ground = opts.groundBuildings || [];
+  const center = opts.center || [0, 0];
+  const categoryOf = opts.categoryOf || (() => 'default');
+  const out = [];
+  const placed = [];
+  for (const gb of ground) {
+    if (!gb || !Number.isFinite(gb.x) || !Number.isFinite(gb.z)) continue;
+    placed.push({ x: gb.x, z: gb.z });
+    const chk = checkBuildingPlacement(field, gb.x, gb.z, { footprintHalfM: L.footprintHalfM, maxSlopeDeg: L.maxSlopeDeg, maxHeightDeltaM: L.maxHeightDeltaM });
+    out.push({ defId: gb.defId || 'default', state: gb.state || 'built', fx: gb.x, fz: gb.z, y: gb.y != null ? gb.y : (Number.isFinite(chk.baseY) ? chk.baseY : 0), rotY: gb.rotY || 0, category: categoryOf(gb.defId || 'default'), placement: chk });
+  }
+  for (let i = 0; i < entries.length && out.length < 24; i++) {
+    const e = entries[i];
+    const cat = categoryOf(e.defId);
+    let chosen = null;
+    let lastChk = null;
+    let chosenMaxY = 0;
+    let chosenAvgY = 0;
+    // 黄金角候选序列：过渡环带内的确定性平地寻址（最多 1200 候选；崎岖主题如熔岩/黑曜平坦台地稀疏，需大搜索量）
+    for (let k = 0; k < 1200 && !chosen; k++) {
+      const a = k * L.goldenAngle;
+      const r = L.ringMinM + (L.ringMaxM - L.ringMinM) * ((k * 0.6180339887) % 1);
+      const fx = center[0] + Math.cos(a) * r;
+      const fz = center[1] + Math.sin(a) * r;
+      const chk = checkBuildingPlacement(field, fx, fz, { footprintHalfM: L.footprintHalfM, maxSlopeDeg: L.maxSlopeDeg, maxHeightDeltaM: L.maxHeightDeltaM });
+      lastChk = chk;
+      if (!chk.ok) continue;
+      // 自采样 9 点：chk 不外露 maxY/avgY/flags，布局器自行求基准高程与 ORE 判定
+      const offs = [[0, 0], [2.2, 2.2], [-2.2, 2.2], [2.2, -2.2], [-2.2, -2.2], [2.2, 0], [-2.2, 0], [0, 2.2], [0, -2.2]];
+      let maxY = -Infinity; let sum = 0; let flagsAny = 0; let n = 0;
+      for (const [ox, oz] of offs) {
+        const sp = sampleTerrain(field, fx + ox, fz + oz);
+        if (!sp) continue;
+        maxY = Math.max(maxY, sp.y); sum += sp.y; flagsAny |= sp.flags; n++;
+      }
+      if (!n) continue;
+      const avgY = sum / n;
+      chosenMaxY = maxY;
+      chosenAvgY = avgY;
+      // 间距：距已落位建筑 ≥ minSpacingM
+      let spaced = true;
+      for (const q of placed) {
+        if (Math.hypot(q.x - fx, q.z - fz) < L.minSpacingM) { spaced = false; break; }
+      }
+      if (!spaced) continue;
+      // mining 优先 ORE 标记点（前 60 个候选内未命中 ORE 则放宽，保证必然落位）
+      if (cat === 'mining' && k < 200 && !(flagsAny & 16)) continue;
+      chosen = { fx, fz, chk };
+    }
+    if (!chosen && lastChk && lastChk.ok) chosen = { fx: center[0], fz: center[1], chk: lastChk };
+    if (!chosen) continue; // 生成质量门禁未过 → 该建筑本轮不落位（绝不盲盒撒点）
+    placed.push({ x: chosen.fx, z: chosen.fz });
+    const chk = chosen.chk;
+    // 基准高程：最高点 0.35 + 均高 0.65 加权（doc8 B2 公式）
+    const y = chosenMaxY * 0.35 + chosenAvgY * 0.65;
+    // 朝向：等高线切线 = 梯度垂线
+    const gx = (sampleTerrain(field, chosen.fx + 2, chosen.fz).y - sampleTerrain(field, chosen.fx - 2, chosen.fz).y) || 0;
+    const gz = (sampleTerrain(field, chosen.fx, chosen.fz + 2).y - sampleTerrain(field, chosen.fx, chosen.fz - 2).y) || 0;
+    const rotY = Math.abs(gx) + Math.abs(gz) > 1e-6 ? Math.atan2(gz, gx) + Math.PI / 2 : (i * 0.618) % 1 * Math.PI * 2;
+    out.push({ defId: e.defId, state: e.state || 'built', fx: chosen.fx, fz: chosen.fz, y, rotY, category: cat, placement: chk });
+  }
+  return out;
+}

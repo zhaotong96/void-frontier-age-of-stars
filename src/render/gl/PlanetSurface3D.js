@@ -47,7 +47,7 @@
  *   effects   : { slashes: [{ x, y, z, yaw, arc, t, color? }],
  *                 beams:   [{ a:[x,y,z], b:[x,y,z], color?, width? }],
  *                 aoe:     [{ x, z, r, t }],
- *                 digEvents: [{ x, y, z, matId }] }
+ *                 digEvents: [{ x, y, z, matId, color?:[r,g,b] }] }（color 提供时覆盖材质色）
  * opts 契约：{ time(秒), dt(秒), bloom/exposure 由 PostProcessor 处理，本类不读 }
  *
  * 约束：顶层不触碰 document/window；全程确定性（无 Math.random）；
@@ -286,7 +286,12 @@ void main() {
   gl_Position = uVP * vec4(w, 1.0);
 }`;
 
-/** 共享 lit 片元（盒体 / actor / 角色）：漫反射 + 半球 + 雾 + 闪白 + 自发光 */
+/**
+ * 共享 lit 片元（盒体 / actor / 角色）—— doc8 §4.2【P1-3】标准升级版：
+ * 世界空间微面板接缝（panelSeam）+ 微晶粒（hash31/microGrain）+ Blinn-Phong
+ * 金属高光 + 边缘菲涅尔 + 半球环境光 + 雾 + 闪白 + 自发光。
+ * 契约不变：vN/vC/vW/vF/vE + uSunDir/uSunColor/uCamPos/uFogColor/uFogRange。
+ */
 const LIT_FS = `
 precision highp float;
 in vec3 vN;
@@ -300,11 +305,30 @@ uniform vec3 uCamPos;
 uniform vec3 uFogColor;
 uniform vec2 uFogRange;
 out vec4 fragColor;
+float hash31(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.yzx + 31.32);
+  return fract((p.x + p.y) * p.z);
+}
 void main() {
   vec3 N = normalize(vN);
-  float diff = max(dot(N, uSunDir), 0.0);
-  float hemi = 0.46 + 0.16 * (N.y * 0.5 + 0.5);
-  vec3 col = vC * uSunColor * (hemi + diff * 0.66) + vC * vE;
+  vec3 V = normalize(uCamPos - vW);
+  vec3 L = normalize(uSunDir);
+  vec3 H = normalize(L + V);
+  /* 硬表面工业装甲板微纹理与接缝调制（消除纯色塑料方盒感） */
+  vec3 gridP = abs(fract(vW * 1.6) - 0.5);
+  float panelSeam = smoothstep(0.44, 0.49, max(gridP.x, max(gridP.y, gridP.z)));
+  float microGrain = 0.94 + 0.12 * hash31(floor(vW * 12.0));
+  vec3 baseAlbedo = vC * microGrain * (1.0 - panelSeam * 0.22);
+  /* 半球环境光 + 漫反射 + Blinn-Phong 金属高光 + 边缘菲涅尔 */
+  float ndl = max(dot(N, L), 0.0);
+  float hemi = 0.38 + 0.24 * (N.y * 0.5 + 0.5);
+  float spec = pow(max(dot(N, H), 0.0), 36.0) * 0.42 * ndl;
+  float fresnel = pow(1.0 - max(dot(N, V), 0.0), 4.0) * 0.18;
+  vec3 col = baseAlbedo * (uSunColor * ndl * 0.78 + hemi)
+           + uSunColor * spec
+           + uFogColor * fresnel
+           + baseAlbedo * vE * 1.35;
   col = mix(col, vec3(2.0, 2.0, 2.1), vF);
   float fog = smoothstep(uFogRange.x, uFogRange.y, distance(vW, uCamPos));
   fragColor = vec4(mix(col, uFogColor, fog), 1.0);
@@ -542,6 +566,8 @@ export class PlanetSurface3D {
       vx: new Float32Array(PCAP), vy: new Float32Array(PCAP), vz: new Float32Array(PCAP),
       life: new Float32Array(PCAP), life0: new Float32Array(PCAP),
       size: new Float32Array(PCAP), matId: new Uint8Array(PCAP),
+      // 自定义颜色事件（ev.color，如水体水花/POI 采样喷发；matId=255 哨兵）
+      colR: new Float32Array(PCAP), colG: new Float32Array(PCAP), colB: new Float32Array(PCAP),
     };
   }
 
@@ -1683,7 +1709,15 @@ export class PlanetSurface3D {
         pool.life[p] = 0.5 + f4 * 0.3;
         pool.life0[p] = pool.life[p];
         pool.size[p] = 0.09 + f2 * 0.07;
-        pool.matId[p] = ev.matId != null ? ev.matId : SURFACE_MAT.ROCK;
+        if (Array.isArray(ev.color) && ev.color.length >= 3) {
+          // 自定义颜色事件（水花/能量喷发）：matId 走 255 哨兵 + 逐粒 RGB
+          pool.matId[p] = 255;
+          pool.colR[p] = ev.color[0];
+          pool.colG[p] = ev.color[1];
+          pool.colB[p] = ev.color[2];
+        } else {
+          pool.matId[p] = ev.matId != null ? ev.matId : SURFACE_MAT.ROCK;
+        }
       }
     }
     // —— 步进（倒序交换删除） ——
@@ -1716,7 +1750,9 @@ export class PlanetSurface3D {
     let n = 0;
     for (let p = 0; p < pool.n && n < maxN; p++) {
       const o = n * 8;
-      const c = MATERIAL_COLORS[pool.matId[p]] || MATERIAL_COLORS[2];
+      const c = pool.matId[p] === 255
+        ? [pool.colR[p], pool.colG[p], pool.colB[p]]
+        : (MATERIAL_COLORS[pool.matId[p]] || MATERIAL_COLORS[2]);
       arr[o] = pool.x[p];
       arr[o + 1] = pool.y[p];
       arr[o + 2] = pool.z[p];

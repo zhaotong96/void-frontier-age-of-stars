@@ -463,6 +463,37 @@ function norm3(v) {
   return [v[0] / l, v[1] / l, v[2] / l];
 }
 
+/**
+ * 恒星固有色温表（doc8 §4.3 P2-2；与 PlanetSurface3D.js 私有 SUN_BY_STAR 同值。
+ * 本地副本：PlanetSurface3D 未导出该表，且主题载荷不应反向依赖大型渲染器模块）。
+ */
+const SUN_BY_STAR = {
+  yellowDwarf: [1.00, 0.96, 0.84],
+  redDwarf: [1.00, 0.60, 0.42],
+  blueGiant: [0.70, 0.84, 1.05],
+  whiteDwarf: [0.95, 0.97, 1.05],
+  neutronStar: [0.85, 0.85, 1.10],
+  pulsar: [1.00, 0.72, 0.95],
+  blackHole: [0.45, 0.42, 0.55],
+};
+
+/**
+ * 解析行星宿主恒星 typeId → 色温（doc9 P2-2：world.entities.systems[planet.systemId].star.typeId）。
+ * 任何环节缺失/异常 → null（调用方保留纯主题阳光色）。
+ */
+function resolveStarColor(world, planetId) {
+  try {
+    const ents = world && world.entities;
+    const planet = ents && ents.planets ? ents.planets[planetId] : null;
+    const sys = planet && planet.systemId && ents.systems ? ents.systems[planet.systemId] : null;
+    const typeId = sys && sys.star ? sys.star.typeId : null;
+    const c = typeId ? SUN_BY_STAR[typeId] : null;
+    return Array.isArray(c) ? c : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 // ———— 色板解析 ————————————————
 
 /** 外部色板源槽位（D1 planetThemes.js 落地后由主代理注入；fn(themeId) → palette|null） */
@@ -509,7 +540,9 @@ function resolveCategory(world, planetId, opts) {
 /**
  * 构建 PlanetSurfaceScene.setTheme 主题载荷（详见文件头形态注释）。
  * @param {string|null} themeId 主题 id（doc6 §4.4；null/未知 → category/generic 兜底）
- * @param {{seed:number}|null} world 世界实体（只读取 seed；null 视为 seed 0）
+ * @param {{seed:number, entities?:{planets?:object, systems?:object}}|null} world
+ *        世界实体（读 seed + entities.planets/systems 的宿主恒星 typeId 做 P2-2 光谱融合；
+ *        缺 entities 时视为 seed-only 世界，保留纯主题阳光色）
  * @param {string|number|null} planetId 行星 id（参与子流派生）
  * @param {{
  *   palette?:object,                    // 色板覆盖（{base,shadow,highlight,danger,emissive,atmosphere}）
@@ -534,7 +567,9 @@ export function buildThemePayload(themeId, world, planetId, opts = {}) {
   const el = Math.max(0.08, cfg.sun.el + (rng() - 0.5) * 0.2);
   const dir = o.sunDir ? norm3(o.sunDir)
     : norm3([Math.cos(el) * Math.sin(az), Math.sin(el), Math.cos(el) * Math.cos(az)]);
-  const sun = { dir, color: cfg.sun.color.slice() };
+  // —— P2-2 恒星光谱色温融合：主题阳光 45% : 宿主恒星固有色 55%（doc8 §4.3） ——
+  const starColor = resolveStarColor(world, planetId);
+  const sun = { dir, color: starColor ? mix3(cfg.sun.color, starColor, 0.55) : cfg.sun.color.slice() };
 
   // —— 线性色板 → 4 通道材质色 + 天空三段 + 雾 ——
   const base = srgbToLinear(palette.base);

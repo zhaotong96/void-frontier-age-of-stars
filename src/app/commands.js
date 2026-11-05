@@ -505,7 +505,7 @@ registerCommand('HarvestPlanetPOI', {
 
 // —— 地面行动 ————————————————————————————————————————
 
-import { createGroundMission, stepMission, finishMission } from '../domain/ground/GroundMission.js';
+import { createGroundMission, stepMission, abortMission } from '../domain/ground/GroundMission.js';
 import { MISSION_TEMPLATES, findMissionTemplate } from '../content/missions.js';
 
 registerCommand('BeginGroundMission', {
@@ -517,7 +517,7 @@ registerCommand('BeginGroundMission', {
     if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
     if ((ctx.world.entities.groundMissions[cmd.params.planetId] || null) && false) return { ok: true };
     const active = Object.values(ctx.world.entities.groundMissions)
-      .some((m) => m.state === 'active' && m.planetId === planet.id);
+      .some((m) => (m.status === 'active' || m.state === 'active') && m.planetId === planet.id); // VERIFY-07：实体状态字段为 status
     if (active) return { ok: false, code: 'ACTIVE', reason: '该行星已有进行中的行动' };
     return { ok: true };
   },
@@ -534,7 +534,7 @@ registerCommand('SetGroundInput', {
   desc: '写入地面行动玩家输入帧（UI 每帧）',
   validate(ctx, cmd) {
     const m = ctx.world.entities.groundMissions[cmd.params.missionId];
-    if (!m || m.state !== 'active') return { ok: false, code: 'NO_MISSION', reason: '无进行中的任务' };
+    if (!m || (m.status || m.state) !== 'active') return { ok: false, code: 'NO_MISSION', reason: '无进行中的任务' }; // VERIFY-07
     return { ok: true };
   },
   execute(ctx, cmd) {
@@ -556,12 +556,12 @@ registerCommand('AbortGroundMission', {
   desc: '中止地面行动（无奖励）',
   validate(ctx, cmd) {
     const m = ctx.world.entities.groundMissions[cmd.params.missionId];
-    if (!m || m.state !== 'active') return { ok: false, code: 'NO_MISSION', reason: '无进行中的任务' };
+    if (!m || (m.status || m.state) !== 'active') return { ok: false, code: 'NO_MISSION', reason: '无进行中的任务' }; // VERIFY-07
     return { ok: true };
   },
   execute(ctx, cmd) {
     const m = ctx.world.entities.groundMissions[cmd.params.missionId];
-    finishMission(ctx.world, m, 'aborted');
+    abortMission(ctx.world, m); // VERIFY-07：finishMission(w, m, 'aborted') 抛非法参数，必须走 abortMission
   },
 });
 
