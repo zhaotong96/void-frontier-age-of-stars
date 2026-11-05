@@ -211,3 +211,100 @@
 2. _scratch 缺少 proj/view 矩阵槽位 → 首帧即抛
 
 **Node 侧 CPU 模拟压测**：100 额外战舰 + 100 tick = 455ms → 220 ticks/s（预算 500ms → PASS）
+
+---
+
+# 行星美学与行星 GamePlay 全线施工（docs 4-7，2026-11-05 起）
+
+> 依据：`docs/specs/4..7`（序列 6 为最高审美裁决，序列 7 为施工总纲）；
+> 波次计划与文件所有权见 `docs/digest/master-plan.md`，doc5/7 摘要见 `docs/digest/`。
+> 执行顺序：Phase 0 → 三角网格垂直切片 → 人工任务点/POI → 主题系统 → 扩展主题 → 工业/存档硬化。
+
+## Phase 0 — P0 渲染止血与导航软锁解除（TASK-0.1..0.4）
+
+1. **目标与范围**：修复背景残影与地形消失（场景 FBO 无深度附件、无显式清屏）、
+   辉光 2× 轨道半径漂移、UIStateStore 缺失、RouteStack 缺失、GroundView 简报软锁。
+2. **代码变更**：GLCore（createFloatTarget depth24）、PostProcessor（beginScene 8 步契约，
+   唯一清屏所有者）、PlanetSurface3D（pass 状态隔离 + F3 三档诊断 + GL 状态 JSON）、
+   System3D（GLOW/RING 双乘修复 + 晨昏线散射 + 轨道 lerp 聚焦）、SystemView（双击聚焦/
+   右键径向菜单/回波标签）、UIStateStore（新）、panels.js（稳定 ID）、styles.css（双模退避）、
+   App.js（RouteStack/closeInspector）、GroundView（参数化路由 + 返回按钮 + Escape + survey 准入）。
+3. **Schema/接口**：无世界结构变更；GLCore.createFloatTarget 签名 `{linear, depth}`。
+4. **固定种子/复现**：seed 24601；`#/galaxy` 双击母星 → `#/system/sys_100`。
+5. **自动化测试**：26 套件 52/52（改动全程未破坏）。
+6. **浏览器 E2E**：UI-01/02/03（结构）/06/07 ✓，NAV-01/02/03/04 ✓，GL-01 目测 ✓
+   （8093 dev server + IAB 实机操作）。
+7. **截图**：docs/digest/master-plan.md 引用的 artifacts 快照（辉光对齐、地表无残影）。
+8. **性能**：地表 drawCalls 8（体素时代基线）。
+9. **遗留风险**：Space 双绑定（App 全局暂停 vs SystemView 推进）→ Enter 为主路径。
+10. **提交**：`7f5a57d` `27c96d9` `ba8b822` `f647aa2` + `0ad71a4`（简报 keydown 从未绑定
+    的回归修复——`_bindInput` 仅任务/自由模式调用，简报级 Escape 独立监听）。
+
+## Phase 1 — 连续三角网格垂直切片（TASK-1.1..1.4）
+
+1. **目标与范围**：planetSeeds 子流树、512m 三角网格场域、surfaceQueries、
+   LOD 渲染器（skirt+geomorph+三平面）、GroundView 场域化集成。
+2. **代码变更**：planetSeeds/terrainProfiles/terrainField/surfaceQueries（新）、
+   PlanetTerrainMesh/PlanetAtmosphere/PlanetSurfaceScene（新）、GroundView（场域化）、
+   PlanetSurface3D（对象独占模式）。
+3. **Schema**：terrainField chunk（65×65 顶点/块 × 8×8，CCW 索引，materialWeights 4ch，
+   TERRAIN_FLAGS 位掩码）；世界结构未变。
+4. **固定种子**：24601，`plt_101`（岚托 I）自由探索。
+5. **自动化**：TERRAIN-01/02、SITE-06 套件（29→31 套件体系内）。
+6. **浏览器 E2E**：连续地形渲染 ✓、角色贴合 ✓、地基垫 ✓、弹簧臂场域射线收臂 ✓。
+7. **截图**：三角地形 + 穹顶 + 外骨骼（IAB artifacts）。
+8. **性能**：64 chunks，≈120-190k tris，场景帧 0.7-0.9ms（IAB 软件渲染）。
+9. **遗留风险**：三处 ANGLE/WebGL 严格性缺陷已修（raw createBuffer 空顶点、
+   ARRAY 上传的 buffer 绑 ELEMENT 被静默丢弃 → ELEMENT 目标直传、场域平移符号）；
+   材质全白问题归 Wave D 主题调色板。
+10. **提交**：`44b4bc3` `69b451c` `a9c0386`。
+
+## Phase 2 — 人工任务点 + POI + WorldObjective（TASK-2.1/2.3）
+
+1. **范围**：MissionSiteBlueprint ×8 + SDF 三层关卡工厂（SITE-01..08 自检）；
+   planetPOI 持久化（8 类，rewardPaid 幂等）；WorldObjective 空间实体（5 个 B 类事件
+   空间化）；HarvestPlanetPOI/DispatchObjectiveFleet 命令；银河图离屏箭头；EventsView 目标卡。
+2. **提交**：`b465999` `044ccfd`；OBJ-01/02 套件入库（31 套件 62/62）。
+3. **金快照**：5ac0ed56 → 452e8ba1（pois/objectives 字段）→ d360bb4d（objectives 到期
+   罚则接线 DailySystems 后的经济扰动）；CHANGELOG 已记录。
+4. **E2E 适配**：e2e-campaign「下单建造」改为补筹重试（罚则合法扰动战役经济）。
+5. **GroundView POI 交互**：未勘探 POI 信标渲染 + E 键采样 + HUD 罗盘（field 坐标 →
+   世界 = field + 32 映射）。
+
+## Phase 3/4 — 行星主题系统与 18 主题（TASK-3.1..4.3）
+
+1. **范围**：planetThemes 18 主题九维注册表（doc6 §4.4 色板/约束/轨道参数）；
+   天体物理约束抽选 + 同星系去重（themeSeed 子流）；System3D 轨道主题着色；
+   themePayload 场景载荷（7 旗舰专属太阳/雾/天气/热区/水位/荧光/岩浆/极光/毒雾）；
+   PlanetWater 海面层 + 90s 潮汐；7 旗舰地标网格；11 扩展主题配置 + 10 新地貌剖面；
+   cloud_giant_atolls atmospheric 登陆模式；伴生卫星（4 类）+ 小行星带（光谱概率表）
+   + 黄金角轨道相位 + 18 主题 Web Audio 环境音。
+2. **提交**：`c310cd1` `7f19b11` `a40e39d` `a3ad508` `c3bb502`。
+3. **套件**：THEME-01（注册表/分配/去重）、THEME-02（载荷健康 + 55 对区分）、
+   THEME-04（扩展 11 主题）、WORLD-02（千种子分布：均值 5.0、卫星率 0.852/0.351、
+   带率 ±0.08）——34→34 套件体系内 68/68。
+4. **实机验收**：abyssal_ocean 主题地表（深海蓝 + 双向焦散光网 + RGB 吸收雾 +
+   水位 -4 + 基础设施垫）截图 docs/screenshots/planets-abyssal-themed-surface.png；
+   轨道主题身份（海洋行星蓝辉光）+ 卫星入轨截图 planets-system-glow-aligned.png。
+5. **金快照**：e81dd30b（主题字段）→ a941b446（卫星/带/相位）。
+6. **遗留**：碎环月母星背景环（ringChance 0.85 已由既有环渲染覆盖）；磁暴脉冲
+   由 aurora skyMode 载荷承担。
+
+## Phase 5 — 工业/存档硬化/部署（TASK-5.1..5.4）
+
+1. **范围**：terrainEdits 编辑层（五算子刷子 + 植被移植 + 组合 siteModifier 链 +
+   planet.terrainEdits 日志持久化重放）；ShapeTerrain/RestoreTerrain/PlaceBuilding
+   命令（9 点坡度校验 + 主题地基承台）；GroundView R 键 DSP 恢复；colony
+   jobsFilled/η 开动率/五态 runtimeStatus + ColonyView 四级流向看板；
+   TD1 stationIds 回填 / TD2 ProposePeace+AnnexOccupied / TD3 投射物 256 环形池 +
+   factionMods 汇入 / TD4 i18n 抽取脚本；SCHEMA_VERSION 1→2 迁移（POI/主题/天体/
+   编辑日志补齐 + 体素兼容日志零静默丢弃 + 幂等）；100 种子 × 18 主题广度套件 +
+   100 次挂载/卸载 mock-GL 零泄漏压测；E2E 门禁页（doc5 §5 矩阵 20 行）。
+2. **提交**：`479c4a7` `6907274` `2102d6c` `a47aa64`。
+3. **套件**：TERRAIN-06、SAVE-04、TERRAIN-10、TERRAIN-08 入库 —— **38 套件
+   76/76 全绿**（2 轮）；金快照 68462446（schemaVersion 2 + terrainEdits 字段）。
+4. **实机/部署**：bundle 138 模块 1623KB（node --check 零错）；lint:static 零违规；
+   README 计数校准；docs/screenshots/ 证据 6 张。
+5. **遗留**：E2E 门禁页 6 项在门禁容器内因 rAF 停摆误报（UI-01/02/04/05/06/07），
+   产品行为以实机操作 + 截图独立验证（见 docs/reports/report-planets.md）；
+   地质钻探器/地面扫描仪工具 UI（doc6 §6.5 表其余两行）为后续增量。
