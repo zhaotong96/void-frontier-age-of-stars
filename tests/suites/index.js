@@ -34,6 +34,9 @@ import { suite as obj01, suiteMin as obj02 } from './objectives-poi.suite.js';
 import { suite as theme01 } from './theme-registry.suite.js';
 import { suite as theme04 } from './theme-expansion.suite.js';
 import { suite as world02 } from './celestial-bodies.suite.js';
+import { suite as terrain06 } from './terrain-edits.suite.js';
+import { suite as save04 } from './save-migration.suite.js';
+import { suite100 as terrain10, suiteMount as terrain08 } from './planetary-terrain-theme.suite.js';
 
 export function collectSuites() {
   return [
@@ -71,5 +74,9 @@ export function collectSuites() {
     theme01,
     theme04,
     world02,
+    terrain06,
+    save04,
+    terrain10,
+    terrain08,
   ].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }

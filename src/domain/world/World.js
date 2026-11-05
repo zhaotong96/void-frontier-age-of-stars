@@ -7,7 +7,10 @@
 
 import { seedFromNumber } from '../../core/rng.js';
 
-export const SCHEMA_VERSION = 1;
+// v2（doc7 TASK-5.3 / spec6 §10.4）：地表存档加入主题/持久 POI/伴生天体/
+// terrainEdits 与 compatLog 兼容日志；v1 档由 persistence/MigrationRegistry.js
+// 的 migrate_v1_to_v2 无损升级（SaveManager.load 按 rec.schemaVersion 自动驱动）。
+export const SCHEMA_VERSION = 2;
 export const GAME_VERSION = '0.1.0';
 
 /**
