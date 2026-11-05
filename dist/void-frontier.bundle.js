@@ -605,6 +605,9 @@ const { BottomBar: BottomBar } = __require("src/ui/shell/BottomBar.js");
 
 let app_keysBound = false;
 
+/** 路由历史栈深度上限（doc5 §3.5：防御性视图栈） */
+const ROUTE_STACK_MAX = 16;
+
 class App {
   constructor(rootEl) {
     this.root = rootEl;
@@ -620,9 +623,14 @@ class App {
     this.tabGuard = new TabGuard();
     this.audio = new AudioManager();
     this.performance = { fps: 0, tickMs: 0, lastSnapshotAt: 0 };
+    // —— 防御性路由历史栈（doc5 §3.5 P0-05）：goto 压栈 / goBack 弹栈回退 ——
+    this._routeStack = [];
+    /** 跨视图切换时保留 Inspector 打开态的屏幕（其余一律自动收起，NAV-04） */
+    this.keepInspectorScreens = new Set(['galaxy']);
     this._frame = this._frame.bind(this);
     // 诊断/测试句柄（只读探测与自动化验证用；生产无副作用）
     window.__VF_APP = this;
+    window.__vfRouteStack = () => this._routeStack;
   }
 
   async boot() {
@@ -757,9 +765,22 @@ class App {
     tb.render();
   }
 
-  /** 悬浮检视器抽屉开合（.vf-inspector.open，见 styles.css） */
+  /** 悬浮检视器抽屉开合（.vf-inspector.open + [hidden]，见 styles.css） */
   setInspectorOpen(open) {
-    if (this.inspectorEl) this.inspectorEl.classList.toggle('open', !!open);
+    if (this.inspectorEl) {
+      this.inspectorEl.classList.toggle('open', !!open);
+      if (open) this.inspectorEl.removeAttribute('hidden');
+      else this.inspectorEl.setAttribute('hidden', '');
+    }
+  }
+
+  /**
+   * 全局检视器清理（doc5 §3.5 P0-07 / NAV-04）：清空选中并收起抽屉。
+   * 路由切换守卫在 _onRoute 中调用（galaxy 等保留屏除外）。
+   */
+  closeInspector() {
+    this.selection = null;
+    this.setInspectorOpen(false);
   }
 
   /** 是否处于战役内 */
@@ -1062,6 +1083,10 @@ class App {
       navigate('menu');
       return;
     }
+    // Inspector 路由守卫（NAV-04）：除保留屏外，切换视图一律收起抽屉并清空选中
+    if (!this.keepInspectorScreens.has(route.screen)) {
+      this.closeInspector();
+    }
     try {
       const view = activateView(route.screen, { root: this.mainEl, app: this, param: route.param });
       this._activeViewObj = view || null;
@@ -1074,8 +1099,43 @@ class App {
     }
   }
 
-  goto(screen, param = null) {
+  /**
+   * 路由跳转（doc5 §3.5 P0-05）：目标路由与当前不同且非 replace 时，
+   * 把当前 {screen, param, selection} 压入防御性历史栈（上限 16，溢出 shift）。
+   * @param {string} screen 目标视图 id
+   * @param {string|null} [param=null] 路由参数（如 systemId / planetId / colonyId）
+   * @param {{replace?:boolean}} [opts={}] replace=true 时不压栈（兜底跳转）
+   */
+  goto(screen, param = null, opts = {}) {
+    const cur = parseHash();
+    const changed = screen !== cur.screen || (param ?? null) !== (cur.param ?? null);
+    if (changed && !opts.replace) {
+      this._routeStack.push({
+        screen: cur.screen,
+        param: cur.param || null,
+        selection: this.selection ? { ...this.selection } : null,
+      });
+      if (this._routeStack.length > ROUTE_STACK_MAX) this._routeStack.shift();
+    }
     navigate(screen, param);
+  }
+
+  /**
+   * 防御性回退（Escape 逐级退避的落点）：弹出历史栈上一跳并恢复其选中态；
+   * 栈空时兜底跳转 fallbackScreen（默认银河）。
+   * @param {string} [fallbackScreen='galaxy']
+   * @param {string|null} [fallbackParam=null]
+   * @returns {boolean} 是否成功弹栈（false = 走了兜底）
+   */
+  goBack(fallbackScreen = 'galaxy', fallbackParam = null) {
+    const prev = this._routeStack.pop();
+    if (prev) {
+      navigate(prev.screen, prev.param);
+      if (prev.selection) this.select(prev.selection.kind, prev.selection.id);
+      return true;
+    }
+    navigate(fallbackScreen, fallbackParam);
+    return false;
   }
 
   /** 检视器支持的选中类型（planet 等由视图内浮面板自行呈现，不弹抽屉） */
@@ -1136,12 +1196,14 @@ const { canScanTarget: canScanTarget, startScan: startScan, scanPower: scanPower
 const { orderMove: orderMove, addShipToFleet: addShipToFleet, createFleet: createFleet } = __require("src/domain/fleets/fleet.js");
 const { orderRetreat: orderRetreat, findAttackTarget: findAttackTarget } = __require("src/domain/combat/engagement.js");
 const { foundColony: foundColony, buildingDef: buildingDef } = __require("src/domain/planets/colony.js");
-const { canAfford: canAfford, pay: pay, debit: debit, credit: credit } = __require("src/domain/economy/ledger.js");
+const { canAfford: canAfford, pay: pay, debit: debit, credit: credit, balance: balance } = __require("src/domain/economy/ledger.js");
 const { canStart: canStart, startResearch: startResearch } = __require("src/domain/research/research.js");
 const { marketBuy: marketBuy, marketSell: marketSell } = __require("src/domain/economy/market.js");
 const { validateFit: validateFit, hullDef: hullDef, computeShipStats: computeShipStats } = __require("src/domain/ships/ship.js");
 const { getMod: getMod } = __require("src/domain/factions/modifiers.js");
-const { declareWar: declareWar, createTreaty: createTreaty, treatyAcceptanceScore: treatyAcceptanceScore, getRelation: getRelation } = __require("src/domain/diplomacy/war.js");
+const { declareWar: declareWar, createTreaty: createTreaty, treatyAcceptanceScore: treatyAcceptanceScore, getRelation: getRelation, resolvePeaceProposal: resolvePeaceProposal, annexOccupiedSystem: annexOccupiedSystem, warScore: warScore, OCCUPATION_ANNEX_THRESHOLD: OCCUPATION_ANNEX_THRESHOLD } = __require("src/domain/diplomacy/war.js");
+const { buildTerrainField: buildTerrainField } = __require("src/domain/ground/terrainField.js");
+const { applyEdit: applyEdit, attachTerrainEdits: attachTerrainEdits, serializeEdits: serializeEdits, deserializeEdits: deserializeEdits, checkBuildingPlacement: checkBuildingPlacement, rebuildDirtyChunks: rebuildDirtyChunks, BRUSH_LIMITS: BRUSH_LIMITS } = __require("src/domain/ground/terrainEdits.js");
 const { RNG: RNG } = __require("src/core/rng.js");
 const { emit: emit } = __require("src/core/eventBus.js");
 
@@ -1518,6 +1580,8 @@ registerCommand('ImproveRelations', {
 // —— 叙事 ————————————————————————————————————————
 
 const { resolveChoice: resolveChoice } = __require("src/domain/events/narrative.js");
+const { dispatchObjectiveFleet: dispatchObjectiveFleet } = __require("src/domain/events/objectives.js");
+const { harvestPlanetPoi: harvestPlanetPoi } = __require("src/domain/ground/planetPOI.js");
 const { canEnact: canEnact, enactPolicy: enactPolicy, revokePolicy: revokePolicy } = __require("src/domain/politics/policy.js");
 
 registerCommand('EnactPolicy', {
@@ -1576,6 +1640,48 @@ registerCommand('ContributeToCrisis', {
   execute(ctx, cmd) {
     const r = playerContribute(ctx.world, cmd.params.crisisId, cmd.params.amount || 20);
     if (!r.ok) throw new Error(r.reason);
+  },
+});
+
+// —— 空间任务目标（doc5 §3.6 / EVT-02） ————————————————————————
+
+registerCommand('DispatchObjectiveFleet', {
+  desc: '向空间任务目标派遣舰队（复用 OrderFleetMove 域路径）',
+  validate(ctx, cmd) {
+    const o = getEntity(ctx.world, 'objectives', cmd.params.objectiveId);
+    if (!o) return { ok: false, code: 'NO_TARGET', reason: '任务目标不存在' };
+    if (o.status !== 'active') return { ok: false, code: 'DONE', reason: '任务目标已结束' };
+    const { fleet, err } = ownFleet(ctx.world, cmd);
+    if (err) return { ok: false, code: 'NO_FLEET', reason: err };
+    if (fleet.shipIds.length === 0) return { ok: false, code: 'EMPTY', reason: '舰队没有舰船' };
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const res = dispatchObjectiveFleet(ctx.world, cmd.params.objectiveId, cmd.params.fleetId);
+    if (!res.ok) throw new Error(res.reason || '派遣失败');
+  },
+});
+
+// —— 行星 POI（doc5 §3.7 / SAVE-03） ——————————————————————————————
+
+registerCommand('HarvestPlanetPOI', {
+  desc: '采样行星兴趣点（rewardPaid 严格幂等锁，绝不重复发奖）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    const poi = (planet.pois || {})[cmd.params.poiId];
+    if (!poi) return { ok: false, code: 'NO_POI', reason: '兴趣点不存在' };
+    if (poi.rewardPaid || poi.state !== 'unexplored') {
+      return { ok: false, code: 'ALREADY_HARVESTED', reason: '该兴趣点已采样结算' };
+    }
+    if (poi.kind === 'storm_vortex' && balance(ctx.world, cmd.actorId, 'powerCell') < 2) {
+      return { ok: false, code: 'NO_FUNDS', reason: '大气探针需要 能量电池×2' };
+    }
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const res = harvestPlanetPoi(ctx.world, cmd.params.planetId, cmd.params.poiId, cmd.actorId);
+    if (!res.ok) throw new Error(res.reason || res.code);
   },
 });
 
@@ -1638,6 +1744,229 @@ registerCommand('AbortGroundMission', {
   execute(ctx, cmd) {
     const m = ctx.world.entities.groundMissions[cmd.params.missionId];
     finishMission(ctx.world, m, 'aborted');
+  },
+});
+
+// —— 地形整形与地表建造（doc7 TASK-5.1/5.2 槽位 5 / TERRAIN-06、GAME-06..08、SITE-07） ————
+
+const SHAPE_OPS = new Set(['raise', 'lower', 'smooth', 'flatten', 'restore']);
+const FLORA_OPS = new Set(['plant', 'removePlant']);
+
+/** 采掘类建筑与行星矿藏匹配（与 BuildOnColony 同口径：禁止装饰性数据） */
+function miningDepositOk(planet, defId) {
+  const def = buildingDef(defId);
+  if (!def || def.category !== 'mining' || !planet || !planet.deposits) return true;
+  const depMap = { bld_mine_ferro: 'ferro', bld_mine_silicate: 'silicate', bld_mine_rare: 'rareEarth', bld_mine_heavy: 'heavyMetal', bld_volatile_well: 'hydrogen', bld_gas_harvester: 'helium3' };
+  const need = depMap[def.id];
+  return !need || planet.deposits[need] > 0;
+}
+
+/** 取（惰性初始化）行星地形编辑日志（纯 JSON 形态，随行星实体存档 —— SITE-07） */
+function terrainEditLog(world, planetId) {
+  const planet = world.entities.planets[planetId];
+  if (!planet.terrainEdits) {
+    planet.terrainEdits = { v: 1, rev: 0, seq: 0, ops: [] };
+  }
+  return planet.terrainEdits;
+}
+
+/** 命令时点校验/执行：由存档日志重建场域 + 活体编辑仓库（一次性成本，可接受） */
+function loadLiveEdits(world, planetId) {
+  const log = terrainEditLog(world, planetId);
+  const field = buildTerrainField(world, planetId, {});
+  const edits = deserializeEdits(log, field);
+  attachTerrainEdits(field, edits);
+  rebuildDirtyChunks(field); // 日志重放只标脏 —— 命令时点采样前须增量重建受影响区块
+  return { field, edits };
+}
+
+/** ShapeTerrain/RestoreTerrain 共用参数校验（不改状态） */
+function validateShapeParams(ctx, cmd, op) {
+  const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+  if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+  if (!op) return { ok: false, code: 'BAD_OP', reason: '缺少编辑算子' };
+  if (!Number.isFinite(cmd.params.x) || !Number.isFinite(cmd.params.z)) {
+    return { ok: false, code: 'BAD_COORD', reason: '场域坐标非法' };
+  }
+  if (op === 'plant' && (typeof cmd.params.prefabId !== 'string' || cmd.params.prefabId.length === 0)) {
+    return { ok: false, code: 'BAD_PARAM', reason: '植被移植需要 prefabId' };
+  }
+  if (op === 'removePlant' && typeof cmd.params.plantId !== 'string') {
+    return { ok: false, code: 'BAD_PARAM', reason: '植被回收需要 plantId' };
+  }
+  if (SHAPE_OPS.has(op)) {
+    const radius = Number(cmd.params.radius);
+    if (!(radius > 0) || radius > BRUSH_LIMITS.maxRadiusM) {
+      return { ok: false, code: 'BAD_RADIUS', reason: `刷子半径须在 (0,${BRUSH_LIMITS.maxRadiusM}] 米（TERRAIN-06 增量重建约束）` };
+    }
+    const strength = cmd.params.strength;
+    if (op === 'raise' || op === 'lower') {
+      if (!Number.isFinite(strength) || strength <= 0 || strength > BRUSH_LIMITS.maxStrokeM) {
+        return { ok: false, code: 'BAD_STRENGTH', reason: `行程强度须在 (0,${BRUSH_LIMITS.maxStrokeM}] 米` };
+      }
+    } else if (op === 'smooth' || op === 'flatten') {
+      if (!Number.isFinite(strength) || strength <= 0 || strength > 1) {
+        return { ok: false, code: 'BAD_STRENGTH', reason: 'smooth/flatten 强度为混合系数 (0,1]' };
+      }
+    }
+  }
+  return { ok: true, planet };
+}
+
+/** ShapeTerrain/RestoreTerrain 共用执行体：应用编辑 → 写回存档日志 → 事件 */
+function executeShape(ctx, cmd, op) {
+  const planetId = cmd.params.planetId || cmd.targetId;
+  const { field, edits } = loadLiveEdits(ctx.world, planetId);
+  const res = applyEdit(field, edits, {
+    kind: op,
+    x: cmd.params.x,
+    z: cmd.params.z,
+    radius: cmd.params.radius,
+    strength: cmd.params.strength,
+    prefabId: cmd.params.prefabId,
+    plantId: cmd.params.plantId,
+  });
+  // 写回行星实体（紧凑命令序列；GroundView 打开时由该日志确定性重放）
+  ctx.world.entities.planets[planetId].terrainEdits = JSON.parse(serializeEdits(edits));
+  emit(ctx.world, 'TerrainShaped', {
+    planetId,
+    op,
+    x: cmd.params.x,
+    z: cmd.params.z,
+    radius: cmd.params.radius ?? null,
+    strength: cmd.params.strength ?? null,
+    revision: edits.revision,
+    dirtyChunks: res.dirtyChunks,
+    floraId: res.floraId ?? null,
+  }, 'ground');
+}
+
+registerCommand('ShapeTerrain', {
+  desc: '地形整形器：raise/lower/smooth/flatten 刷子与植被移植（TERRAIN-06 增量重建）',
+  validate(ctx, cmd) {
+    const op = cmd.params.op;
+    if (!SHAPE_OPS.has(op) && !FLORA_OPS.has(op)) {
+      return { ok: false, code: 'BAD_OP', reason: `未知算子 ${op}` };
+    }
+    return validateShapeParams(ctx, cmd, op);
+  },
+  execute(ctx, cmd) {
+    executeShape(ctx, cmd, cmd.params.op);
+  },
+});
+
+registerCommand('RestoreTerrain', {
+  desc: '一键恢复自然地貌（DSP 式：清除半径内全部编辑与凹陷影响）',
+  validate(ctx, cmd) {
+    return validateShapeParams(ctx, cmd, 'restore');
+  },
+  execute(ctx, cmd) {
+    executeShape(ctx, cmd, 'restore');
+  },
+});
+
+registerCommand('PlaceBuilding', {
+  desc: '地表放置建筑：9 点三角网格投影坡度校验 + 自动地基承台（GAME-07）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    const defId = cmd.params.defId;
+    if (defId && !buildingDef(defId)) return { ok: false, code: 'NO_DEF', reason: '未知建筑' };
+    if (!Number.isFinite(cmd.params.x) || !Number.isFinite(cmd.params.z)) {
+      return { ok: false, code: 'BAD_COORD', reason: '场域坐标非法' };
+    }
+    if (defId && !miningDepositOk(planet, defId)) {
+      return { ok: false, code: 'NO_DEPOSIT', reason: '该行星缺乏对应矿藏' };
+    }
+    // 命令时点校验：由存档编辑日志重建场域（含既有地形改造），做 9 点投影坡度校验
+    const { field } = loadLiveEdits(ctx.world, planet.id);
+    const chk = checkBuildingPlacement(field, cmd.params.x, cmd.params.z, {
+      footprintHalfM: cmd.params.footprintHalfM,
+      themeId: planet.primaryThemeId,
+    });
+    if (!chk.ok) {
+      const reason = chk.code === 'SLOPE_TOO_STEEP'
+        ? `坡度过大（${chk.maxSlopeDeg.toFixed(1)}° > 阈值），请先整地推平或改用主题桩基`
+        : chk.code === 'HEIGHT_DELTA'
+          ? `落点高差过大（${chk.maxHeightDeltaM.toFixed(2)}m > 阈值），请先整地或使用桩基`
+          : '落点在可建造场域之外';
+      return { ok: false, code: chk.code || 'OUT_OF_FIELD', reason, maxSlopeDeg: chk.maxSlopeDeg, maxHeightDeltaM: chk.maxHeightDeltaM };
+    }
+    return { ok: true, planet, foundation: chk.foundation, maxSlopeDeg: chk.maxSlopeDeg, maxHeightDeltaM: chk.maxHeightDeltaM };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    planet.groundBuildings ||= [];
+    // validate 已通过坡度校验；此处的 foundation 由再次快速校验得出（同输入逐位一致）
+    const { field } = loadLiveEdits(ctx.world, planet.id);
+    const chk = checkBuildingPlacement(field, cmd.params.x, cmd.params.z, {
+      footprintHalfM: cmd.params.footprintHalfM,
+      themeId: planet.primaryThemeId,
+    });
+    const entry = {
+      defId: cmd.params.defId || 'bld_generic_pad',
+      x: cmd.params.x,
+      z: cmd.params.z,
+      foundation: chk.ok ? chk.foundation : { kind: 'flat', piling: 'standard', etaHeightM: 0 },
+      maxSlopeDeg: chk.maxSlopeDeg,
+      maxHeightDeltaM: chk.maxHeightDeltaM,
+      placedTick: ctx.world.tick,
+    };
+    planet.groundBuildings.push(entry);
+    emit(ctx.world, 'BuildingPlaced', {
+      planetId: planet.id,
+      defId: entry.defId,
+      x: entry.x,
+      z: entry.z,
+      foundation: entry.foundation,
+      index: planet.groundBuildings.length - 1,
+    }, 'ground');
+  },
+});
+
+// —— 外交战争终局（doc5 TD2 / DIP-02：和谈与占领吞并） ——————————————————
+
+registerCommand('ProposePeace', {
+  desc: '向交战对方提出和谈（战争疲劳/战况决定接受概率）',
+  validate(ctx, cmd) {
+    const war = ctx.world.entities.wars[cmd.params.warId];
+    if (!war || war.status !== 'active') return { ok: false, code: 'NO_WAR', reason: '战争不存在或已结束' };
+    if (!war.attackers.includes(cmd.actorId) && !war.defenders.includes(cmd.actorId)) {
+      return { ok: false, code: 'NOT_PARTY', reason: '非交战方' };
+    }
+    const terms = cmd.params.terms || 'whitePeace';
+    if (!['whitePeace', 'enforceStatusQuo', 'sueForPeace'].includes(terms)) {
+      return { ok: false, code: 'BAD_TERMS', reason: '未知和谈条款' };
+    }
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const r = resolvePeaceProposal(ctx.world, cmd.actorId, cmd.params.warId, cmd.params.terms || 'whitePeace');
+    if (!r.ok) throw new Error(r.reason || '和谈失败');
+  },
+});
+
+registerCommand('AnnexOccupied', {
+  desc: '正式吞并被占领星系（占领积分达阈值后方可割地）',
+  validate(ctx, cmd) {
+    const war = ctx.world.entities.wars[cmd.params.warId];
+    if (!war) return { ok: false, code: 'NO_WAR', reason: '战争不存在' };
+    if (!war.attackers.includes(cmd.actorId) && !war.defenders.includes(cmd.actorId)) {
+      return { ok: false, code: 'NOT_PARTY', reason: '非交战方' };
+    }
+    const sys = getEntity(ctx.world, 'systems', cmd.params.systemId);
+    if (!sys) return { ok: false, code: 'NO_TARGET', reason: '星系不存在' };
+    if (war.occupiedSystems[cmd.params.systemId] !== cmd.actorId) {
+      return { ok: false, code: 'NOT_OCCUPIED', reason: '该星系未被己方实际占领' };
+    }
+    if (warScore(war, cmd.actorId) < OCCUPATION_ANNEX_THRESHOLD) {
+      return { ok: false, code: 'SCORE_TOO_LOW', reason: '占领积分不足，无法割地' };
+    }
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const r = annexOccupiedSystem(ctx.world, cmd.params.warId, cmd.params.systemId, cmd.actorId);
+    if (!r.ok) throw new Error(r.reason || '吞并失败');
   },
 });
 
@@ -2314,6 +2643,7 @@ const PREFIXES = {
   blueprint: 'blu',
   anomaly: 'ano',
   groundMission: 'gms',
+  objective: 'obj',
   war: 'war',
   treaty: 'try',
   crisis: 'crs',
@@ -2429,7 +2759,10 @@ __register("src/domain/world/World.js", function (__exports, __require) {
 
 const { seedFromNumber: seedFromNumber } = __require("src/core/rng.js");
 
-const SCHEMA_VERSION = 1;
+// v2（doc7 TASK-5.3 / spec6 §10.4）：地表存档加入主题/持久 POI/伴生天体/
+// terrainEdits 与 compatLog 兼容日志；v1 档由 persistence/MigrationRegistry.js
+// 的 migrate_v1_to_v2 无损升级（SaveManager.load 按 rec.schemaVersion 自动驱动）。
+const SCHEMA_VERSION = 2;
 const GAME_VERSION = '0.1.0';
 
 /**
@@ -2466,6 +2799,7 @@ function createWorld(config) {
       blueprints: {},
       anomalies: {},
       groundMissions: {},
+      objectives: {},
       wars: {},
       treaties: {},
       crises: {},
@@ -2556,6 +2890,7 @@ const ENTITY_TYPES = {
   blueprints: 'blueprint',
   anomalies: 'anomaly',
   groundMissions: 'groundMission',
+  objectives: 'objective',
   wars: 'war',
   treaties: 'treaty',
   crises: 'crisis',
@@ -4962,6 +5297,24 @@ const { emit: emit } = __require("src/core/eventBus.js");
 const { createShip: createShip, computeShipStats: computeShipStats } = __require("src/domain/ships/ship.js");
 const { hullDef: hullDef } = __require("src/domain/ships/ship.js");
 const { beginPlannedTransit: beginPlannedTransit, planRoute: planRoute, fleetFuelTotal: fleetFuelTotal } = __require("src/domain/fleets/navigation.js");
+const { getMod: getMod } = __require("src/domain/factions/modifiers.js");
+
+/**
+ * 文明修正表（TD3：combat特质断链清偿）—— computeShipStats 消费的全部乘数键。
+ * 统一经 getMod 聚合（特质 × 科技 × 政策），开局投放与船坞生产共用同一口径。
+ */
+function factionShipMods(world, factionId) {
+  return {
+    strategicSpeed: getMod(world, factionId, 'strategicSpeed', 'mult'),
+    fuelEfficiency: getMod(world, factionId, 'fuelEfficiency', 'mult'),
+    sensorStrength: getMod(world, factionId, 'sensorStrength', 'mult'),
+    ewarStrength: getMod(world, factionId, 'ewarStrength', 'mult'),
+    weaponDamage: getMod(world, factionId, 'weaponDamage', 'mult'),
+    maxShield: getMod(world, factionId, 'maxShield', 'mult'),
+    shieldRegen: getMod(world, factionId, 'shieldRegen', 'mult'),
+    armor: getMod(world, factionId, 'armor', 'mult'),
+  };
+}
 
 /** 创建舰队（ships: [{hullId, moduleIds, name?}] 或直接给 shipIds） */
 function createFleet(world, opts) {
@@ -4989,6 +5342,7 @@ function createFleet(world, opts) {
       systemId: opts.systemId,
       cargo: spec.cargo,
       fuel: spec.fuel,
+      factionMods: factionShipMods(world, opts.factionId), // TD3：文明战斗特质汇入 computeShipStats
     });
     fleet.shipIds.push(ship.id);
   }
@@ -5029,7 +5383,7 @@ function orderMove(world, fleet, targetSystemId) {
   return res;
 }
 
-Object.assign(__exports, { createFleet, addShipToFleet, removeShipFromFleet, orderMove });
+Object.assign(__exports, { factionShipMods, createFleet, addShipToFleet, removeShipFromFleet, orderMove });
 
 });
 __register("src/domain/fleets/navigation.js", function (__exports, __require) {
@@ -5567,6 +5921,138 @@ __register("src/domain/diplomacy/war.js", function (__exports, __require) {
 
 const { emit: emit } = __require("src/core/eventBus.js");
 const { relationKey: relationKey } = __require("src/core/ids.js");
+const { RNG: RNG } = __require("src/core/rng.js");
+
+// ———— 战争终局：占领积分 / 和谈 / 割地吞并（doc5 TD2 / DIP-02） ————
+
+/** 占领吞并积分阈值：占领 1 个星系（30 分）即可在战争结束时主张割地 */
+const OCCUPATION_ANNEX_THRESHOLD = 30;
+const OCCUPIED_SYSTEM_SCORE = 30;
+
+/**
+ * 战争积分（确定性）：占领星系 × 30 + 敌方战争疲劳 × 0.5。
+ * 和谈接受概率与占领吞并阈值共用此口径。
+ */
+function warScore(war, factionId) {
+  const enemy = war.attackers.includes(factionId) ? war.defenders : war.attackers;
+  let occupied = 0;
+  for (const sid of Object.keys(war.occupiedSystems || {})) {
+    if (war.occupiedSystems[sid] === factionId) occupied += 1;
+  }
+  let enemyExhaust = 0;
+  for (const fid of enemy) enemyExhaust += war.exhaustion[fid] || 0;
+  return occupied * OCCUPIED_SYSTEM_SCORE + enemyExhaust * 0.5;
+}
+
+/** 标记星系被某交战方实际占领（战场结算系统调用；不转移主权） */
+function markSystemOccupied(world, warId, systemId, occupantFactionId) {
+  const war = world.entities.wars[warId];
+  if (!war || war.status !== 'active') return false;
+  if (!war.attackers.includes(occupantFactionId) && !war.defenders.includes(occupantFactionId)) return false;
+  const sys = world.entities.systems[systemId];
+  if (!sys) return false;
+  war.occupiedSystems[systemId] = occupantFactionId;
+  emit(world, 'SystemOccupied', { warId, systemId, occupantFactionId }, 'diplomacy');
+  return true;
+}
+
+/**
+ * 和谈提案（ProposePeace 执行体）：
+ * 接受概率 = 0.30 + 敌方战争疲劳/200 + 敌方对我方占领积分/120，钳制 [0.05, 0.95]。
+ * 接受 → 战争结束（occupied 星系按占领积分阈值决定割留，见 endWarPeace）；
+ * 拒绝 → 记入 war.peaceOffers 并轻微恶化关系（确定性 RNG）。
+ */
+function resolvePeaceProposal(world, proposerId, warId, terms = 'whitePeace') {
+  const war = world.entities.wars[warId];
+  if (!war || war.status !== 'active') return { ok: false, reason: '战争不存在或已结束' };
+  if (!war.attackers.includes(proposerId) && !war.defenders.includes(proposerId)) {
+    return { ok: false, reason: '非交战方' };
+  }
+  const enemy = war.attackers.includes(proposerId) ? war.defenders : war.attackers;
+  const enemyId = enemy[0];
+  let enemyExhaust = 0;
+  for (const fid of enemy) enemyExhaust += war.exhaustion[fid] || 0;
+  const p = Math.max(0.05, Math.min(0.95,
+    0.30 + enemyExhaust / 200 + warScore(war, proposerId) / 120));
+  const accepted = RNG.chance(world, p);
+  war.peaceOffers.push({ tick: world.tick, from: proposerId, terms, accepted });
+  if (!accepted) {
+    const rel = getRelation(world, proposerId, enemyId);
+    rel.opinion = Math.max(-100, rel.opinion - 2);
+    emit(world, 'PeaceRejected', { warId, from: proposerId, terms }, 'diplomacy');
+    return { ok: true, accepted: false, p };
+  }
+  endWarPeace(world, war, { peaceTerms: terms, initiator: proposerId });
+  return { ok: true, accepted: true, p };
+}
+
+/**
+ * 和平终局：占领星系按 warScore 阈值割留给占领方，其余回到原主权；
+ * 解除双方 warId 关联并发出 WarEnded 事件。
+ */
+function endWarPeace(world, war, opts = {}) {
+  war.status = 'ended';
+  war.endedTick = world.tick;
+  war.peaceTerms = opts.peaceTerms || 'whitePeace';
+
+  // 占领星系结算：占领方积分达阈值 → 主权转移（割地）；否则占领解除
+  for (const sid of Object.keys(war.occupiedSystems)) {
+    const occupant = war.occupiedSystems[sid];
+    const sys = world.entities.systems[sid];
+    if (!sys) continue;
+    if (warScore(war, occupant) >= OCCUPATION_ANNEX_THRESHOLD) {
+      const prevOwner = sys.ownerFactionId || null;
+      sys.ownerFactionId = occupant;
+      war.annexedSystems ||= [];
+      if (!war.annexedSystems.includes(sid)) war.annexedSystems.push(sid);
+      emit(world, 'SystemAnnexed', { warId: war.id, systemId: sid, from: prevOwner, to: occupant }, 'diplomacy');
+    }
+    delete war.occupiedSystems[sid];
+  }
+
+  const parties = [...war.attackers, ...war.defenders];
+  for (const fid of parties) {
+    for (const other of parties) {
+      if (fid === other) continue;
+      const rel = world.relations.diplomacy[relationKey(fid, other)];
+      if (rel && rel.warId === war.id) rel.warId = null;
+    }
+  }
+  emit(world, 'WarEnded', {
+    warId: war.id,
+    peaceTerms: war.peaceTerms,
+    initiator: opts.initiator || null,
+    attackers: war.attackers,
+    defenders: war.defenders,
+  }, 'diplomacy');
+}
+
+/**
+ * 割地吞并（AnnexOccupied 执行体）：交战方对已实际占领且积分达阈值的星系
+ * 立即完成主权转移（战争进行中即可割地；战争结束时 endWarPeace 自动结算剩余占领）。
+ */
+function annexOccupiedSystem(world, warId, systemId, actorId) {
+  const war = world.entities.wars[warId];
+  if (!war) return { ok: false, reason: '战争不存在' };
+  if (!war.attackers.includes(actorId) && !war.defenders.includes(actorId)) {
+    return { ok: false, reason: '非交战方' };
+  }
+  if (war.occupiedSystems[systemId] !== actorId) {
+    return { ok: false, reason: '该星系未被己方实际占领' };
+  }
+  if (warScore(war, actorId) < OCCUPATION_ANNEX_THRESHOLD) {
+    return { ok: false, reason: '占领积分不足，无法割地' };
+  }
+  const sys = world.entities.systems[systemId];
+  if (!sys) return { ok: false, reason: '星系不存在' };
+  const prevOwner = sys.ownerFactionId || null;
+  sys.ownerFactionId = actorId;
+  delete war.occupiedSystems[systemId];
+  war.annexedSystems ||= [];
+  if (!war.annexedSystems.includes(systemId)) war.annexedSystems.push(systemId);
+  emit(world, 'SystemAnnexed', { warId, systemId, from: prevOwner, to: actorId }, 'diplomacy');
+  return { ok: true };
+}
 
 /** 每小时计时器：条约到期、战争状态推进 */
 function runDiplomacyTimers(world) {
@@ -5718,7 +6204,7 @@ function treatyAcceptanceScore(world, proposerId, targetId, type) {
   return Math.round(score);
 }
 
-Object.assign(__exports, { runDiplomacyTimers, onTreatyEnd, getRelation, declareWar, createTreaty, TREATY_TERMS, treatyAcceptanceScore });
+Object.assign(__exports, { OCCUPATION_ANNEX_THRESHOLD, warScore, markSystemOccupied, resolvePeaceProposal, endWarPeace, annexOccupiedSystem, runDiplomacyTimers, onTreatyEnd, getRelation, declareWar, createTreaty, TREATY_TERMS, treatyAcceptanceScore });
 
 });
 __register("src/content/anomalies.js", function (__exports, __require) {
@@ -7451,6 +7937,124 @@ function buildingDef(id) {
   return bldIndex.get(id);
 }
 
+// ———— 岗位分配与运行状态诊断（doc5 §3.8 P2-01/P2-02 / COL-01..04、ECON-02） ————
+
+/**
+ * 类别岗位定额兜底（doc5:873：采掘/精炼/制造 2、科研 2、农业 1、行政 1）。
+ * 建筑定义自带 jobs（3-6）时优先采用 —— authored 定额是权威口径。
+ */
+const CATEGORY_JOB_SLOTS = {
+  mining: 2, refining: 2, industry: 2, science: 2, agri: 1, admin: 1,
+  energy: 1, service: 1, military: 1,
+};
+
+/** 建筑岗位槽位数：定义 jobs 优先，缺省回退类别定额 */
+function buildingJobSlots(def) {
+  if (def && Number.isFinite(def.jobs) && def.jobs > 0) return def.jobs;
+  return CATEGORY_JOB_SLOTS[def && def.category] || 1;
+}
+
+/** 殖民地仓储容量（原料资源；ECON-02 storage_full 诊断） */
+const STORAGE_BASE_CAP = 600;
+const STORAGE_PLANT_CAP = 500;
+
+/** 仓储容量：基础 + 每座在役仓储平台加成 */
+function storageCapacity(colony) {
+  let cap = STORAGE_BASE_CAP;
+  for (const b of colony.buildings) {
+    const def = buildingDef(b.defId);
+    if (def && def.id === 'bld_storage_plant' && b.state === 'active') cap += STORAGE_PLANT_CAP;
+  }
+  return cap;
+}
+
+/**
+ * 岗位分配（每小时随生产结算执行，确定性）：
+ * 活跃建筑按「玩家优先级权重降序 → 建筑序号升序」从 population.total 依序填充槽位；
+ * 每座建筑写入 jobsFilled（实配人数）与 staffingEta（η = 实配/定额，understaffed 降产系数）。
+ * colony.jobPriority = { category: weight } 缺省逐类权重 1（均等）。
+ * 汇总写入 colony.jobsFilled = { total, byCategory, unassigned }。
+ */
+function assignJobs(world, colony) {
+  const pop = colony.population || { total: 0 };
+  const prio = colony.jobPriority && typeof colony.jobPriority === 'object' ? colony.jobPriority : {};
+  let remaining = Math.max(0, Math.floor(pop.total || 0));
+  const byCategory = {};
+
+  const order = colony.buildings.map((b, i) => ({ b, i })).sort((A, B) => {
+    const ca = buildingDef(A.b.defId)?.category;
+    const cb = buildingDef(B.b.defId)?.category;
+    const pa = Number.isFinite(prio[ca]) ? prio[ca] : 1;
+    const pb = Number.isFinite(prio[cb]) ? prio[cb] : 1;
+    if (pb !== pa) return pb - pa;
+    return A.i - B.i;
+  });
+
+  for (const { b } of order) {
+    const def = buildingDef(b.defId);
+    const need = def && b.state === 'active' ? buildingJobSlots(def) : 0;
+    const give = Math.min(need, remaining);
+    remaining -= give;
+    b.jobsFilled = give;
+    b.staffingEta = need > 0 ? give / need : 1;
+    if (give > 0) {
+      const cat = def ? def.category : 'other';
+      byCategory[cat] = (byCategory[cat] || 0) + give;
+    }
+  }
+
+  colony.jobsFilled = { total: Math.max(0, Math.floor(pop.total || 0)) - remaining, byCategory, unassigned: remaining };
+  return colony.jobsFilled;
+}
+
+/** 配方产出是否被仓储满溢阻塞（存在原料类产出、且全部原料产出都已到容量） */
+function storageBlocked(world, colony, def) {
+  if (!def.recipe) return false;
+  const cap = storageCapacity(colony);
+  let hasRawOut = false;
+  for (const rid of Object.keys(def.recipe.outputs)) {
+    if (!isRaw(rid)) continue; // 精炼品/战略资源入阵营账本，不受殖民仓储容量约束
+    hasRawOut = true;
+    if (colonyStock(world, colony, rid) < cap) return false;
+  }
+  return hasRawOut; // 产出全为精炼品 → 永不受殖民仓储约束
+}
+
+/**
+ * 五态 runtimeStatus 诊断（doc5 §3.8 P2-02 / ECON-02）：
+ *   storage_full > starved_input > low_power > understaffed > running（严重度优先）。
+ * 建造中/手动停摆 → null（尚未投入运行）。starved_input 同时写 b.starvedInput（缺失原料 id）。
+ */
+function deriveRuntimeStatus(world, colony, pf) {
+  for (const b of colony.buildings) {
+    const def = buildingDef(b.defId);
+    if (!def || b.state === 'construction' || b.state === 'suspended') {
+      b.runtimeStatus = null;
+      continue;
+    }
+    const need = buildingJobSlots(def);
+    const eta = need > 0 ? (Number.isFinite(b.jobsFilled) ? b.jobsFilled : 0) / need : 1;
+    b.staffingEta = eta;
+    if (def.recipe && storageBlocked(world, colony, def)) {
+      b.runtimeStatus = 'storage_full';
+      continue;
+    }
+    if (def.recipe && b.state === 'starved') {
+      b.runtimeStatus = 'starved_input';
+      continue;
+    }
+    if (def.recipe && pf < 1) {
+      b.runtimeStatus = 'low_power';
+      continue;
+    }
+    if (eta < 1) {
+      b.runtimeStatus = 'understaffed';
+      continue;
+    }
+    b.runtimeStatus = 'running';
+  }
+}
+
 /**
  * 建立殖民地（FoundOutpost/EstablishColony 命令执行体）。
  * colony = { planetId, factionId, population, buildings, stockpile, stability, ... }
@@ -7483,7 +8087,7 @@ function foundColony(world, planetId, factionId, initialPop = 6, isOutpost = fal
   return colony;
 }
 
-/** 计算殖民地能源平衡（发电 − 用电） */
+/** 计算殖民地能源平衡（发电 − 用电；powerUse 在内容侧为负值 → Σ 后即净余） */
 function powerBalance(colony) {
   let gen = 0;
   let use = 0;
@@ -7493,7 +8097,9 @@ function powerBalance(colony) {
     if (def.powerGen) gen += def.powerGen * (b.level || 1);
     if (def.powerUse) use += def.powerUse * (b.level || 1);
   }
-  return gen - use;
+  // 用电按负值累加，净平衡 = 发电 + 用电（负）；旧实现 gen-use 把缺口翻正成盈余，
+  // 导致 low_power/缺电降产与 AI 扩电梯队永远不可达（五态诊断 low_power 的前置修复）。
+  return gen + use;
 }
 
 /** 能源充足度系数（0.3-1.0）：缺电按比例降产（不出现无因停摆） */
@@ -7513,11 +8119,14 @@ function habitabilityFactor(world, colony) {
 
 /**
  * 每小时生产结算：有配方建筑按周期推进（原料检查在周期开始）。
- * 缺料 → state 'starved'；能源不足 → 按 powerFactor 降速。
+ * 缺料 → state 'starved'（并记 starvedInput）；能源不足 → 按 powerFactor 降速；
+ * 仓储满溢 → 周期不启动（storage_full）；岗位短缺 → 按 staffingEta 降产（P2-01）。
+ * 每轮为全部建筑派生五态 runtimeStatus（P2-02）。
  */
 function tickColonyProduction(world, colony) {
   const pf = powerFactor(colony);
   colony.powerBalance = powerBalance(colony);
+  assignJobs(world, colony);
   for (const b of colony.buildings) {
     const def = bldIndex.get(b.defId);
     if (!def) continue;
@@ -7527,11 +8136,17 @@ function tickColonyProduction(world, colony) {
     if (b.progress === undefined) b.progress = 0;
     // 周期开始：锁定原料（检查且扣款一次）
     if (b.progress === 0 && !b.cycleLocked) {
+      if (storageBlocked(world, colony, def)) {
+        b.state = 'active';
+        continue; // 仓储满溢：不投入原料，等待物流消化（runtimeStatus=storage_full）
+      }
       let ok = true;
+      b.starvedInput = null;
       for (const rid of Object.keys(def.recipe.inputs)) {
         const have = isRaw(rid) ? colonyStock(world, colony, rid) : (world.economy.ledgers[colony.factionId]?.balances?.[rid] ?? 0);
         if (have < def.recipe.inputs[rid]) {
           ok = false;
+          b.starvedInput = rid; // starved_input 诊断指明断供原料（doc5 §3.8）
           break;
         }
       }
@@ -7552,7 +8167,7 @@ function tickColonyProduction(world, colony) {
         getMod(world, colony.factionId, outputStatFor(def.category), 'mult'),
         0.1, 2.0
       );
-      b.progress += eff;
+      b.progress += eff * (Number.isFinite(b.staffingEta) ? b.staffingEta : 1); // understaffed 按 η 降产
       if (b.progress >= def.recipe.hours) {
         b.progress = 0;
         b.cycleLocked = false;
@@ -7562,6 +8177,7 @@ function tickColonyProduction(world, colony) {
       }
     }
   }
+  deriveRuntimeStatus(world, colony, pf);
 }
 
 function outputStatFor(category) {
@@ -7670,7 +8286,7 @@ function dailyPopulation(world, colony) {
   return { before, after: pop.total, delta, foodOK };
 }
 
-Object.assign(__exports, { buildingDef, foundColony, powerBalance, powerFactor, habitabilityFactor, tickColonyProduction, tickColonyConstruction, dailyPopulation });
+Object.assign(__exports, { buildingDef, buildingJobSlots, storageCapacity, assignJobs, foundColony, powerBalance, powerFactor, habitabilityFactor, tickColonyProduction, tickColonyConstruction, dailyPopulation });
 
 });
 __register("src/content/buildings.js", function (__exports, __require) {
@@ -8503,6 +9119,1567 @@ function allPolicies() {
 Object.assign(__exports, { POLICIES, policyDef, allPolicies });
 
 });
+__register("src/domain/ground/planetPOI.js", function (__exports, __require) {
+/**
+ * domain/ground/planetPOI.js — 持久化行星兴趣点（doc5 §3.7 / doc6 §6.6 / TASK-2.3）
+ *
+ * 每颗行星按物理类别与主题确定性地持有 1–3 个持久 POI（gasGiant 固定 1 个），
+ * 挂 `planet.pois`（poiId → poi 纯数据表）随存档持久化。八类玩法与跨系统回写：
+ *   ancient_ruin / crashed_ship / deep_vein / subsurface_ocean /
+ *   bio_trace / magnetic_anomaly / lost_station / storm_vortex
+ *
+ * 确定性红线（doc6 §7.2）：
+ *  - 生成只消费 derivePlanetSeeds(world, planetId).poiSeed(poiId) 派生的行星子流，
+ *    绝不读写 world.rng（金快照 RNG 序列不受影响；同种子 POI 结构逐位一致）。
+ *  - 严禁 Math.random()；position.y 故意不落盘（渲染时由地形场实时求值）。
+ *
+ * 幂等红线（SAVE-03）：rewardPaid === true 为严格发奖锁——重进星球/读档恢复
+ * 绝不重复发奖；POI 完成后改变状态而非重新铸币（doc6 §6.6）。
+ *
+ * 依赖方向：本模块禁止 import galaxyGen（galaxyGen → planetPOI 单向）。
+ */
+
+const { derivePlanetSeeds: derivePlanetSeeds } = __require("src/domain/ground/planetSeeds.js");
+const { getEntity: getEntity } = __require("src/domain/entities/registry.js");
+const { emit: emit } = __require("src/core/eventBus.js");
+const { credit: credit, creditColony: creditColony, debit: debit, balance: balance } = __require("src/domain/economy/ledger.js");
+const { createCharacter: createCharacter } = __require("src/domain/characters/crew.js");
+
+/** 八类 POI 展示名（UI/日志用） */
+const POI_KIND_ZH = {
+  ancient_ruin: '远古先驱遗迹',
+  crashed_ship: '坠毁星舰残骸',
+  deep_vein: '超深层富集矿脉',
+  subsurface_ocean: '冰下热泉生态圈',
+  bio_trace: '异星掠食集群巢穴',
+  magnetic_anomaly: '强磁单极子异常区',
+  lost_station: '失联科考前哨',
+  storm_vortex: '气态风暴超导涡流',
+};
+
+/** 物理类别 → POI 池（doc5 §3.7 表） */
+const CATEGORY_POI_POOLS = {
+  rocky: ['crashed_ship', 'deep_vein', 'ancient_ruin', 'magnetic_anomaly'],
+  ocean: ['subsurface_ocean', 'bio_trace', 'crashed_ship'],
+  ice: ['subsurface_ocean', 'lost_station', 'deep_vein', 'crashed_ship'],
+  desert: ['ancient_ruin', 'crashed_ship', 'lost_station'],
+  gasGiant: ['storm_vortex'],
+  lava: ['deep_vein', 'magnetic_anomaly'],
+  toxic: ['bio_trace', 'lost_station'],
+  artificial: ['ancient_ruin', 'magnetic_anomaly'],
+};
+
+/**
+ * 主题 → POI 池（doc6 §6.6：POI 类型应与主题相关；18 主题全量覆盖，
+ * 未知主题回退类别池）。只在池内引用八类既有玩法，不新铸玩法。
+ */
+const THEME_POI_POOLS = {
+  abyssal_ocean: ['subsurface_ocean', 'bio_trace', 'crashed_ship'],
+  permafrost_furnace: ['subsurface_ocean', 'deep_vein', 'lost_station'],
+  red_regolith_frontier: ['crashed_ship', 'deep_vein', 'ancient_ruin'],
+  dry_night_polar: ['lost_station', 'crashed_ship', 'magnetic_anomaly'],
+  sulfur_marsh: ['bio_trace', 'lost_station', 'magnetic_anomaly'],
+  biolume_canopy: ['bio_trace', 'subsurface_ocean'],
+  obsidian_lava: ['deep_vein', 'magnetic_anomaly', 'ancient_ruin'],
+  prism_crystal: ['magnetic_anomaly', 'deep_vein', 'ancient_ruin'],
+  salt_mirror_desert: ['ancient_ruin', 'crashed_ship', 'lost_station'],
+  cryomethane_sea: ['subsurface_ocean', 'crashed_ship', 'lost_station'],
+  tidal_lock_dusk: ['ancient_ruin', 'deep_vein', 'subsurface_ocean'],
+  cloud_giant_atolls: ['storm_vortex'],
+  fungal_catacombs: ['bio_trace', 'subsurface_ocean', 'ancient_ruin'],
+  ancient_megastructure: ['ancient_ruin', 'magnetic_anomaly', 'lost_station'],
+  glassstorm_barrens: ['crashed_ship', 'deep_vein', 'magnetic_anomaly'],
+  magnetar_aurora: ['magnetic_anomaly', 'lost_station', 'ancient_ruin'],
+  canopy_colossus: ['bio_trace', 'subsurface_ocean', 'ancient_ruin'],
+  fractured_moon: ['crashed_ship', 'ancient_ruin', 'lost_station'],
+};
+
+/**
+ * 恒星类型 → danger（与 galaxyGen.STAR_TYPES 同源的手工副本；
+ * 因依赖方向禁止本模块 import galaxyGen，新增恒星类型时需同步）。
+ */
+const STAR_DANGER = {
+  yellowDwarf: 0,
+  redDwarf: 1,
+  blueGiant: 3,
+  whiteDwarf: 2,
+  neutronStar: 6,
+  pulsar: 5,
+  blackHole: 8,
+};
+
+/** POI 所在程序化外围环带（Planet Local 米；frontier ring 内圈安全范围） */
+const POI_RADIUS_MIN = 100;
+const POI_RADIUS_SPAN = 141; // 100..240m
+
+/** 数据类资源：只入阵营账本（科研/远古数据是文明级库存） */
+const DATA_RESOURCES = new Set(['researchData', 'ancientData']);
+
+function clamp(v, lo, hi) {
+  return Math.min(hi, Math.max(lo, v));
+}
+
+/** 行星 → 恒星危险度（ensure 路径用；galaxyGen 直呼时显式传 star） */
+function starForPlanet(world, planet) {
+  const sys = world.entities.systems[planet.systemId];
+  const typeId = sys?.star?.typeId;
+  const danger = STAR_DANGER[typeId] ?? sys?.dangerRating ?? 0;
+  return { danger };
+}
+
+/** 行星 → 生效 POI 池（主题池优先，未知/缺主题回退类别池） */
+function poiPoolForPlanet(planet) {
+  const theme = planet && planet.primaryThemeId;
+  if (theme && THEME_POI_POOLS[theme]) return THEME_POI_POOLS[theme];
+  return CATEGORY_POI_POOLS[planet.category] || CATEGORY_POI_POOLS.rocky;
+}
+
+/**
+ * 生成一颗行星的持久 POI 表（纯函数：只读 world.seed 与实体字段）。
+ * @returns {Object} poiId → poi（可直接挂 planet.pois）
+ */
+function generatePlanetPois(world, planet, star) {
+  const seeds = derivePlanetSeeds(world, planet.id);
+  const pool = poiPoolForPlanet(planet);
+  const danger = star && Number.isFinite(star.danger) ? star.danger : 0;
+  const count = planet.category === 'gasGiant' ? 1 : 1 + ((seeds.planetSeed >>> 4) % 3); // 1..3
+  const pois = {};
+  const usedKinds = new Set();
+  for (let i = 0; i < count; i++) {
+    const poiId = `${planet.id}_poi_${i + 1}`;
+    const ps = seeds.poiSeed(poiId);
+    // 类别内去重：池不足以全部互异时允许重复（确定性尝试序列）
+    let kind = pool[ps % pool.length];
+    for (let attempt = 1; attempt < 8 && usedKinds.has(kind) && usedKinds.size < pool.length; attempt++) {
+      kind = pool[seeds.poiSeed(`${poiId}#${attempt}`) % pool.length];
+    }
+    usedKinds.add(kind);
+    const radius = POI_RADIUS_MIN + ((ps >>> 8) % POI_RADIUS_SPAN);
+    const angle = (((ps >>> 18) % 4096) / 4096) * Math.PI * 2;
+    pois[poiId] = {
+      id: poiId,
+      planetId: planet.id,
+      themeId: planet.primaryThemeId || null,
+      kind,
+      siteId: null,
+      state: 'unexplored',            // unexplored | explored（发奖状态锁）
+      discoveryState: 'hidden',       // hidden | detected | localized | discovered | exhausted
+      interactionState: 'available',
+      threatLevel: clamp(Math.round(1 + danger * 0.35 + i * 0.8), 1, 5),
+      position: {
+        x: Math.round(Math.cos(angle) * radius * 10) / 10,
+        z: Math.round(Math.sin(angle) * radius * 10) / 10,
+        // y 故意不存：由地形场在渲染/交互时求值（doc6 §6.6）
+      },
+      seed: ps,
+      rewardPaid: false,
+      revision: 1,
+    };
+  }
+  return pois;
+}
+
+/**
+ * 惰性确保行星持有 POI（旧档兼容 + 新档幂等）。
+ * 已存在则原样返回；缺失则按子流重建（结果与开局生成逐位一致）。
+ */
+function ensurePlanetPois(world, planet) {
+  if (planet.pois && typeof planet.pois === 'object' && Object.keys(planet.pois).length > 0) {
+    return planet.pois;
+  }
+  planet.pois = generatePlanetPois(world, planet, starForPlanet(world, planet));
+  return planet.pois;
+}
+
+// —— 奖励表（doc5 §3.7 八类收益） ————————————————————————————————————
+
+/**
+ * 结算单类 POI：返回 { rewards, post }。
+ * rewards 为资源入账表；post 为额外副作用描述（由 harvestPlanetPoi 执行）。
+ */
+function resolveRewards(world, planet, poi, factionId) {
+  switch (poi.kind) {
+    case 'ancient_ruin':
+      return { rewards: { ancientData: 4 + (poi.seed % 5), researchData: 25 } };
+    case 'crashed_ship':
+      return { rewards: { alloy: 35, powerCell: 8 } };
+    case 'deep_vein': {
+      const deps = planet.deposits || {};
+      const resKey = deps.rareEarth > 0 ? 'rareEarth' : deps.heavyMetal > 0 ? 'heavyMetal' : 'rareEarth';
+      return {
+        rewards: { [resKey]: 40 },
+        post: { type: 'depositBoost', resKey, mult: 1.35, grantIfAbsent: 60 },
+      };
+    }
+    case 'subsurface_ocean':
+      return {
+        rewards: { biomass: 35, researchData: 20 },
+        post: { type: 'habitability', delta: 8 },
+      };
+    case 'bio_trace':
+      return {
+        rewards: { medicine: 12, biomass: 45 },
+        post: { type: 'crewXp', amount: 60 }, // 经验挂钩只发事件（人员选择归战斗/任务域）
+      };
+    case 'magnetic_anomaly':
+      return { rewards: { conductor: 10, quantumCrystal: 3, researchData: 30 } };
+    case 'lost_station':
+      return { rewards: {}, post: { type: 'scientist', level: 2, trait: 'bookish', fallback: { researchData: 20 } } };
+    case 'storm_vortex':
+      return {
+        rewards: { helium3: 50, deuterium: 20, researchData: 15 },
+        post: { type: 'probeCost', resId: 'powerCell', amount: 2 },
+      };
+    default:
+      return { rewards: { researchData: 10 } };
+  }
+}
+
+/** 奖励入账：数据类入阵营账本；实体类优先殖民地仓储（无殖民地/非己方 → 阵营账本） */
+function creditRewards(world, planet, factionId, rewards) {
+  const colony = planet.colonyId ? getEntity(world, 'colonies', planet.colonyId) : null;
+  const useColony = !!(colony && colony.factionId === factionId);
+  for (const resId of Object.keys(rewards).sort()) {
+    const amount = rewards[resId];
+    if (!(amount > 0)) continue;
+    if (!useColony || DATA_RESOURCES.has(resId)) {
+      credit(world, factionId, resId, amount, 'poiHarvest', planet.id);
+    } else {
+      creditColony(world, colony, resId, amount, 'poiHarvest', planet.id);
+    }
+  }
+  return { creditedToColony: useColony };
+}
+
+/**
+ * 采样结算（HarvestPlanetPOI 命令执行体）。
+ * 严格幂等：rewardPaid === true → { ok:false, code:'ALREADY_HARVESTED' }。
+ * @returns {{ok:boolean, code?:string, reason?:string, rewards?:Object, scientistId?:string}}
+ */
+function harvestPlanetPoi(world, planetId, poiId, actorId) {
+  const planet = getEntity(world, 'planets', planetId);
+  if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+  const pois = ensurePlanetPois(world, planet);
+  const poi = pois[poiId];
+  if (!poi) return { ok: false, code: 'NO_POI', reason: '兴趣点不存在' };
+  const factionId = actorId || world.playerFactionId;
+  if (!factionId) return { ok: false, code: 'NO_FACTION', reason: '无归属文明' };
+  if (poi.rewardPaid) return { ok: false, code: 'ALREADY_HARVESTED', reason: '该兴趣点已采样结算' };
+
+  const { rewards, post } = resolveRewards(world, planet, poi, factionId);
+
+  // 气态探针成本：能量电池×2 不足则整体失败（不触碰状态，命令事务可回滚）
+  if (post && post.type === 'probeCost' && balance(world, factionId, post.resId) < post.amount) {
+    return { ok: false, code: 'NO_FUNDS', reason: `大气探针需要 ${post.resId}×${post.amount}` };
+  }
+  if (post && post.type === 'probeCost') {
+    debit(world, factionId, post.resId, post.amount, 'poiProbe', planet.id);
+  }
+
+  creditRewards(world, planet, factionId, rewards);
+
+  let scientistId = null;
+  if (post && post.type === 'depositBoost') {
+    planet.deposits ||= {};
+    const cur = planet.deposits[post.resKey] || 0;
+    planet.deposits[post.resKey] = cur > 0 ? Math.round(cur * post.mult) : post.grantIfAbsent;
+  } else if (post && post.type === 'habitability') {
+    planet.habitability = clamp((planet.habitability || 0) + post.delta, 0, 90);
+  } else if (post && post.type === 'crewXp') {
+    emit(world, 'PoiCrewXp', { planetId, poiId, amount: post.amount }, 'world');
+  } else if (post && post.type === 'scientist') {
+    // 失联科考前哨：幸存科学官加入文明人物池（bookish 特质 Lv2；人物名等
+    // 随机项走 createCharacter 既有域路径，随后覆写为规定值）
+    if (world.entities.factions[factionId]) {
+      const c = createCharacter(world, factionId, 'science', `失联前哨幸存者（${planet.name}）`);
+      c.traits = [post.trait];
+      c.level = post.level;
+      c.history.push({ tick: world.tick, event: '加入', note: '失联科考前哨撤离' });
+      scientistId = c.id;
+      emit(world, 'PoiScientistJoined', { planetId, poiId, characterId: c.id }, 'world');
+    } else {
+      Object.assign(rewards, post.fallback);
+      creditRewards(world, planet, factionId, post.fallback);
+    }
+  }
+
+  // 发奖锁 + 状态迁移（完成后改变状态，可通过地形刷新再访但绝不重发奖励）
+  poi.state = 'explored';
+  poi.discoveryState = 'exhausted';
+  poi.interactionState = 'harvested';
+  poi.rewardPaid = true;
+  poi.revision = (poi.revision || 1) + 1;
+  poi.harvestedTick = world.tick;
+
+  emit(world, 'PoiHarvested', {
+    planetId,
+    poiId,
+    kind: poi.kind,
+    factionId,
+    rewards: { ...rewards },
+    scientistId,
+  }, 'world');
+
+  return { ok: true, rewards, scientistId };
+}
+
+/** 汇总行星未探索 POI 数（行星卡/径向菜单 lvl≥2 显示） */
+function unexploredPoiCount(planet) {
+  if (!planet || !planet.pois) return 0;
+  let n = 0;
+  for (const id of Object.keys(planet.pois)) {
+    if (planet.pois[id].state === 'unexplored') n++;
+  }
+  return n;
+}
+
+/** 建档期批量挂载（galaxyGen 行星循环调用；不消费 world.rng） */
+function attachPlanetPois(world, planet, star) {
+  planet.pois = generatePlanetPois(world, planet, star);
+  return planet.pois;
+}
+
+Object.assign(__exports, { POI_KIND_ZH, CATEGORY_POI_POOLS, THEME_POI_POOLS, poiPoolForPlanet, generatePlanetPois, ensurePlanetPois, harvestPlanetPoi, unexploredPoiCount, attachPlanetPois });
+
+});
+__register("src/domain/ground/planetSeeds.js", function (__exports, __require) {
+/**
+ * domain/ground/planetSeeds.js — 行星随机子流隔离树（doc7 TASK-1.1）
+ *
+ * 规范（序列 6 §7.2 / doc7 红线 4）：行星地貌、装饰、任务场景、POI、生态与
+ * 粒子相位一律使用可复现子随机流；严禁消费主 world.rng（保 52/52 测试与
+ * 金快照哈希不漂移），严禁 Math.random()。
+ *
+ * 子流树：
+ *   worldSeed
+ *    └─ planetSeed(planetId) = (world.seed ^ hash32(planetId))
+ *        ├─ themeSeed        主题抽选与主题参数
+ *        ├─ macroTerrainSeed 宏观地貌高度场
+ *        ├─ biomeSeed        生态/地质分区
+ *        ├─ decorationSeed   外围装饰（按 regionId 再派生）
+ *        ├─ cosmeticSeed     纯视觉相位（不进模拟状态）
+ *        ├─ missionSiteSeed(siteId, blueprintVersion)  登陆点蓝图实例
+ *        └─ poiSeed(poiId)   外围持久化兴趣点
+ *
+ * 本模块为纯函数：只读 world.seed，绝不读写 world.rng，无任何内部可变状态。
+ */
+
+const { hash32: hash32 } = __require("src/domain/ground/SurfaceSandbox.js");
+
+/** 子流 salt 的混淆常数（splitmix32 黄金比例常数，防止直接异或撞流） */
+const SALT_SITE = 0x85ebca6b;
+
+/**
+ * 派生一颗行星的确定性随机子流树。
+ * 纯函数 of (world.seed, planetId)：同输入逐位一致，且不触碰 world.rng。
+ * @param {{seed:number}} world 世界实体（只读取 world.seed）
+ * @param {string|number} planetId 行星实体 id
+ * @returns {{
+ *   planetSeed:number,
+ *   themeSeed:number,
+ *   macroTerrainSeed:number,
+ *   biomeSeed:number,
+ *   decorationSeed:number,
+ *   cosmeticSeed:number,
+ *   missionSiteSeed:(siteId:string|number, blueprintVersion?:number)=>number,
+ *   poiSeed:(poiId:string|number)=>number,
+ * }}
+ */
+function derivePlanetSeeds(world, planetId) {
+  const worldSeed = world && Number.isFinite(world.seed) ? world.seed >>> 0 : 0;
+  const base = (worldSeed ^ hash32(planetId)) >>> 0;
+  return {
+    planetSeed: base,
+    themeSeed: (base ^ hash32('theme')) >>> 0,
+    macroTerrainSeed: (base ^ hash32('macro')) >>> 0,
+    biomeSeed: (base ^ hash32('biome')) >>> 0,
+    decorationSeed: (base ^ hash32('deco')) >>> 0,
+    cosmeticSeed: (base ^ hash32('cosmetic')) >>> 0,
+    /** 登陆点蓝图子流：siteId 与蓝图版本共同决定（蓝图升级不漂移旧档语义） */
+    missionSiteSeed(siteId, blueprintVersion = 1) {
+      const v = Number.isFinite(blueprintVersion) ? blueprintVersion >>> 0 : 1;
+      return (base ^ hash32(`site:${siteId}`) ^ Math.imul(v || 1, SALT_SITE)) >>> 0;
+    },
+    /** 外围持久化 POI 子流：poiId 独立派生，增删 POI 不影响其他子流 */
+    poiSeed(poiId) {
+      return (base ^ hash32(`poi:${poiId}`)) >>> 0;
+    },
+  };
+}
+
+Object.assign(__exports, { derivePlanetSeeds });
+
+});
+__register("src/domain/ground/SurfaceSandbox.js", function (__exports, __require) {
+/**
+ * domain/ground/SurfaceSandbox.js — 行星地表体素沙盒数据层（返工 Phase R8）
+ *
+ * 纯逻辑层（无 DOM / 无 WebGL）：三维体素世界的确定性生成、挖掘/放置、
+ * DDA 射线拾取、贪心共面合并（Mikola Lysenko / 0fps 算法，AO 感知）
+ * 与地表寻路。渲染层 PlanetSurface3D 消费本模块的网格输出。
+ *
+ * 世界规格：
+ *  - 64×24×64（X×Y×Z）单体素世界，分 4×4 个 16×16×24 列区块；
+ *  - 材质 ID：0=air 1=surface 2=rock 3=ore_ferro 4=ore_silicate
+ *    5=ore_rare 6=ore_heavy 7=bedrock 8=building；
+ *  - 地貌：表面层（风化表土）/ 地下矿石层（岩层 + 矿脉）/ 基岩层（不可采）；
+ *  - 按 planet.category（8 大类）差异化高度/山脊/洞穴/矿脉丰度；
+ *  - planet.deposits 资量对数映射为确定性矿脉数量（Ore Voxel Veins）。
+ *
+ * 确定性（GROUND-01 兼容）：
+ *  - 种子 = world.seed ^ hash32(planetId)，全部噪声/矿脉/采样由该种子派生；
+ *  - 全程零 Math.random；同 seed 同输入 → 体素网格与网格化输出逐位一致。
+ *
+ * 本文件输出的顶点颜色已烘焙：材质基色 × 行星地表色调 × 逐角点 AO，
+ * 渲染层只需叠加方向光与雾。
+ */
+
+const { seedFromNumber: seedFromNumber, nextU32: nextU32, int: int } = __require("src/core/rng.js");
+
+// ———— 常量 ————
+
+/** 世界与分块尺寸（X×Y×Z = 64×24×64，区块 16×16 列 × 24 高） */
+const SURFACE_SIZE = {
+  X: 64, Y: 24, Z: 64,
+  CHUNK: 16,
+  CHUNKS_X: 4, CHUNKS_Z: 4,
+  CHUNK_COUNT: 16,
+};
+
+/** 体素材质 ID 表 */
+const SURFACE_MAT = {
+  AIR: 0,
+  SURFACE: 1,      // 表面层：风化表土/沙壤（按行星类别着色）
+  ROCK: 2,         // 地下岩层
+  ORE_FERRO: 3,    // 铁族矿脉
+  ORE_SILICATE: 4, // 硅质矿脉
+  ORE_RARE: 5,     // 稀土矿脉
+  ORE_HEAVY: 6,    // 重金属矿脉
+  BEDROCK: 7,      // 基岩：不可挖掘
+  BUILDING: 8,     // 建筑结构体素
+};
+
+/** 材质基色（线性 RGB；index 即材质 ID）。surface 的色调由行星类别 tint 乘出 */
+const MATERIAL_COLORS = [
+  [0.00, 0.00, 0.00], // 0 air（不渲染）
+  [0.55, 0.47, 0.36], // 1 surface
+  [0.40, 0.41, 0.45], // 2 rock
+  [0.78, 0.46, 0.28], // 3 ore_ferro
+  [0.52, 0.74, 0.76], // 4 ore_silicate
+  [0.66, 0.42, 0.88], // 5 ore_rare
+  [0.44, 0.72, 0.44], // 6 ore_heavy
+  [0.15, 0.15, 0.18], // 7 bedrock
+  [0.62, 0.64, 0.68], // 8 building
+];
+
+/** 矿脉材质 → 资源 id（挖掘入账映射） */
+const ORE_RESOURCE_BY_MAT = {
+  3: 'ferro', 4: 'silicate', 5: 'rareEarth', 6: 'heavyMetal',
+};
+
+/** 面法线表（+x -x +y -y +z -z），贪心网格化的 normalIndex 引用 */
+const NORMALS = [
+  [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
+];
+
+/**
+ * 8 大行星类别的地貌参数：
+ *  base/amp  基准高度 / 噪声振幅（体素）
+ *  ridge     山脊噪声权重（ice/lava 起伏最大）
+ *  ore       矿脉数量系数
+ *  cave      洞穴雕刻强度（0..0.25，3D 噪声阈值偏移）
+ *  tint      表面材质色调（乘入顶点色）
+ *  isle      true = 悬浮平台（气态巨行星：边缘之外为虚空）
+ */
+const CATEGORY_TERRAIN = {
+  rocky:      { base: 9.0,  amp: 3.8, ridge: 0.50, ore: 1.0, cave: 0.10, tint: [1.00, 0.90, 0.76] },
+  ocean:      { base: 6.5,  amp: 2.6, ridge: 0.15, ore: 0.7, cave: 0.05, tint: [0.58, 0.78, 0.72] },
+  ice:        { base: 10.0, amp: 4.4, ridge: 0.70, ore: 0.9, cave: 0.08, terrace: 2, tint: [0.85, 0.92, 1.00] },
+  desert:     { base: 8.0,  amp: 3.0, ridge: 0.20, ore: 1.1, cave: 0.08, tint: [1.00, 0.86, 0.58] },
+  gasGiant:   { base: 11.0, amp: 2.0, ridge: 0.10, ore: 1.3, cave: 0.04, tint: [0.96, 0.82, 0.62], isle: true },
+  lava:       { base: 9.0,  amp: 4.0, ridge: 0.55, ore: 1.5, cave: 0.10, terrace: 2, tint: [0.66, 0.46, 0.42] },
+  toxic:      { base: 8.5,  amp: 3.8, ridge: 0.40, ore: 1.2, cave: 0.12, tint: [0.64, 0.76, 0.46] },
+  artificial: { base: 9.5,  amp: 1.4, ridge: 0.06, ore: 0.6, cave: 0.04, tint: [0.80, 0.82, 0.88] },
+};
+
+// ———— 基础工具 ————
+
+/** FNV-1a 32 位哈希：接受字符串或数字（planetId 兼容两种形态） */
+function hash32(v) {
+  const s = String(v);
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < s.length; i++) {
+    h = Math.imul(h ^ s.charCodeAt(i), 16777619) >>> 0;
+  }
+  return h >>> 0;
+}
+
+/** 确定性 [0,1) 浮点（仅用于形状扰动，绝不进模拟状态） */
+function rngFloat(s) {
+  return nextU32(s) / 4294967296;
+}
+
+/** [lo, hi] 闭区间整数的确定性取样 */
+function rngIntRange(s, lo, hi) {
+  return lo + int(s, hi - lo + 1);
+}
+
+/** 数值钳制 */
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
+// ———— 确定性 Simplex 噪声（2D/3D，Gustavson 公版实现移植） ————
+
+const F2 = 0.5 * (Math.sqrt(3) - 1);
+const G2 = (3 - Math.sqrt(3)) / 6;
+const F3 = 1 / 3;
+const G3 = 1 / 6;
+
+/** 12 个梯度方向（展开存储，g*3 取行） */
+const GRAD3 = new Float32Array([
+  1, 1, 0, -1, 1, 0, 1, -1, 0, -1, -1, 0,
+  1, 0, 1, -1, 0, 1, 1, 0, -1, -1, 0, -1,
+  0, 1, 1, 0, -1, 1, 0, 1, -1, 0, -1, -1,
+]);
+
+/**
+ * 创建种子派生的 2D/3D Simplex 噪声。
+ * 置换表由 splitmix32 派生的 xoshiro128** 状态做 Fisher-Yates 洗牌 ——
+ * 完全确定性，绝不触碰 Math.random。
+ * @returns {{ noise2D:(x:number,y:number)=>number, noise3D:(x:number,y:number,z:number)=>number }}
+ */
+function createSimplexNoise(seed) {
+  const st = seedFromNumber(seed >>> 0);
+  const perm = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) perm[i] = i;
+  for (let i = 255; i > 0; i--) {
+    const j = nextU32(st) % (i + 1);
+    const t = perm[i];
+    perm[i] = perm[j];
+    perm[j] = t;
+  }
+  const p = new Uint8Array(512);
+  for (let i = 0; i < 512; i++) p[i] = perm[i & 255];
+
+  const gi2 = (ii, jj) => (p[ii + p[jj]] % 12) * 3;
+  const gi3 = (ii, jj, kk) => (p[ii + p[jj + p[kk]]] % 12) * 3;
+
+  /** 2D Simplex，返回约 [-1,1] */
+  function noise2D(xin, yin) {
+    const s = (xin + yin) * F2;
+    const i = Math.floor(xin + s);
+    const j = Math.floor(yin + s);
+    const t = (i + j) * G2;
+    const x0 = xin - (i - t);
+    const y0 = yin - (j - t);
+    let i1; let j1;
+    if (x0 > y0) { i1 = 1; j1 = 0; } else { i1 = 0; j1 = 1; }
+    const x1 = x0 - i1 + G2;
+    const y1 = y0 - j1 + G2;
+    const x2 = x0 - 1 + 2 * G2;
+    const y2 = y0 - 1 + 2 * G2;
+    const ii = i & 255;
+    const jj = j & 255;
+    let n = 0;
+    let t0 = 0.5 - x0 * x0 - y0 * y0;
+    if (t0 > 0) {
+      const g = gi2(ii, jj);
+      t0 *= t0;
+      n += t0 * t0 * (GRAD3[g] * x0 + GRAD3[g + 1] * y0);
+    }
+    let t1 = 0.5 - x1 * x1 - y1 * y1;
+    if (t1 > 0) {
+      const g = gi2(ii + i1, jj + j1);
+      t1 *= t1;
+      n += t1 * t1 * (GRAD3[g] * x1 + GRAD3[g + 1] * y1);
+    }
+    let t2 = 0.5 - x2 * x2 - y2 * y2;
+    if (t2 > 0) {
+      const g = gi2(ii + 1, jj + 1);
+      t2 *= t2;
+      n += t2 * t2 * (GRAD3[g] * x2 + GRAD3[g + 1] * y2);
+    }
+    return 70 * n;
+  }
+
+  /** 3D Simplex，返回约 [-1,1] */
+  function noise3D(xin, yin, zin) {
+    const s = (xin + yin + zin) * F3;
+    const i = Math.floor(xin + s);
+    const j = Math.floor(yin + s);
+    const k = Math.floor(zin + s);
+    const t = (i + j + k) * G3;
+    const x0 = xin - (i - t);
+    const y0 = yin - (j - t);
+    const z0 = zin - (k - t);
+    // 六面体排序确定两个角点（标准 Gustavson 分支）
+    let i1; let j1; let k1; let i2; let j2; let k2;
+    if (x0 >= y0) {
+      if (y0 >= z0) { i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 1; k2 = 0; }
+      else if (x0 >= z0) { i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 0; k2 = 1; }
+      else { i1 = 0; j1 = 0; k1 = 1; i2 = 1; j2 = 0; k2 = 1; }
+    } else {
+      if (y0 < z0) { i1 = 0; j1 = 0; k1 = 1; i2 = 0; j2 = 1; k2 = 1; }
+      else if (x0 < z0) { i1 = 0; j1 = 1; k1 = 0; i2 = 0; j2 = 1; k2 = 1; }
+      else { i1 = 0; j1 = 1; k1 = 0; i2 = 1; j2 = 1; k2 = 0; }
+    }
+    const x1 = x0 - i1 + G3;
+    const y1 = y0 - j1 + G3;
+    const z1 = z0 - k1 + G3;
+    const x2 = x0 - i2 + 2 * G3;
+    const y2 = y0 - j2 + 2 * G3;
+    const z2 = z0 - k2 + 2 * G3;
+    const x3 = x0 - 1 + 3 * G3;
+    const y3 = y0 - 1 + 3 * G3;
+    const z3 = z0 - 1 + 3 * G3;
+    const ii = i & 255;
+    const jj = j & 255;
+    const kk = k & 255;
+    let n = 0;
+    let t0 = 0.6 - x0 * x0 - y0 * y0 - z0 * z0;
+    if (t0 > 0) {
+      const g = gi3(ii, jj, kk);
+      t0 *= t0;
+      n += t0 * t0 * (GRAD3[g] * x0 + GRAD3[g + 1] * y0 + GRAD3[g + 2] * z0);
+    }
+    let t1 = 0.6 - x1 * x1 - y1 * y1 - z1 * z1;
+    if (t1 > 0) {
+      const g = gi3(ii + i1, jj + j1, kk + k1);
+      t1 *= t1;
+      n += t1 * t1 * (GRAD3[g] * x1 + GRAD3[g + 1] * y1 + GRAD3[g + 2] * z1);
+    }
+    let t2 = 0.6 - x2 * x2 - y2 * y2 - z2 * z2;
+    if (t2 > 0) {
+      const g = gi3(ii + i2, jj + j2, kk + k2);
+      t2 *= t2;
+      n += t2 * t2 * (GRAD3[g] * x2 + GRAD3[g + 1] * y2 + GRAD3[g + 2] * z2);
+    }
+    let t3 = 0.6 - x3 * x3 - y3 * y3 - z3 * z3;
+    if (t3 > 0) {
+      const g = gi3(ii + 1, jj + 1, kk + 1);
+      t3 *= t3;
+      n += t3 * t3 * (GRAD3[g] * x3 + GRAD3[g + 1] * y3 + GRAD3[g + 2] * z3);
+    }
+    return 32 * n;
+  }
+
+  return { noise2D, noise3D };
+}
+
+/** 分形布朗运动（2D）：octaves 个八度叠加，输出约 [-1,1] */
+function fbm2(noise, x, y, octaves, lac = 2.0, gain = 0.5) {
+  let amp = 1;
+  let freq = 1;
+  let sum = 0;
+  let norm = 0;
+  for (let o = 0; o < octaves; o++) {
+    sum += amp * noise.noise2D(x * freq, y * freq);
+    norm += amp;
+    amp *= gain;
+    freq *= lac;
+  }
+  return sum / norm;
+}
+
+/** 分形布朗运动（3D） */
+function fbm3(noise, x, y, z, octaves, lac = 2.0, gain = 0.5) {
+  let amp = 1;
+  let freq = 1;
+  let sum = 0;
+  let norm = 0;
+  for (let o = 0; o < octaves; o++) {
+    sum += amp * noise.noise3D(x * freq, y * freq, z * freq);
+    norm += amp;
+    amp *= gain;
+    freq *= lac;
+  }
+  return sum / norm;
+}
+
+// ———— 世界创建 ————
+
+/**
+ * 创建行星地表体素世界（纯数据实体，可随存档序列化体素主数组）。
+ * @param {object} world 世界实体（只读取 world.seed 与 entities 中的行星档案）
+ * @param {string|number} planetId 行星实体 id
+ * @param {{category?:string, deposits?:object, atmosphere?:string, starTypeId?:string}} [opts]
+ *        行星档案缺失时的兜底输入（保持函数可独立测试）
+ * @returns {object} surfaceWorld 实体
+ */
+function createSurfaceWorld(world, planetId, opts = {}) {
+  const { X, Y, Z, CHUNKS_X, CHUNKS_Z } = SURFACE_SIZE;
+  const seed = (world.seed >>> 0) ^ hash32(planetId);
+
+  // 行星档案：8 大类 + 矿脉储量 + 大气（缺省回落 rocky）
+  const planet = world.entities && world.entities.planets ? world.entities.planets[planetId] : null;
+  const system = planet && world.entities.systems ? world.entities.systems[planet.systemId] : null;
+  const category = (opts.category || (planet && planet.category) || 'rocky');
+  const deposits = opts.deposits || (planet && planet.deposits) || {};
+  const atmosphere = opts.atmosphere || (planet && planet.atmosphere) || '';
+  const starTypeId = opts.starTypeId || (system && system.star ? system.star.typeId : 'yellowDwarf');
+
+  const sw = {
+    kind: 'surfaceWorld',
+    planetId,
+    category,
+    atmosphere,
+    starTypeId,
+    seed,
+    sx: X, sy: Y, sz: Z,
+    voxels: new Uint8Array(X * Y * Z),
+    heights: new Int8Array(X * Z),           // 每列最高非空体素 y（-1 = 空列）
+    chunks: [],
+    spawn: { x: X / 2 + 0.5, y: Y - 2, z: Z / 2 + 0.5 },
+    stats: { dug: 0, placed: 0, mined: {} },
+  };
+  for (let cz = 0; cz < CHUNKS_Z; cz++) {
+    for (let cx = 0; cx < CHUNKS_X; cx++) {
+      sw.chunks.push({ cx, cz, dirty: true });
+    }
+  }
+
+  _generateTerrain(sw, deposits);
+  sw.spawn = findSpawnPoint(sw);
+  return sw;
+}
+
+/** 体素线性索引（y 主序：与渲染层共享布局） */
+function idx(sw, x, y, z) {
+  return (y * sw.sz + z) * sw.sx + x;
+}
+
+/**
+ * 地形生成：fBm 大陆起伏 + 山脊噪声 + 3D 洞穴 + 分层材质 + 悬浮平台边缘衰减。
+ * 噪声种子与矿脉 RNG 相互独立派生，保证增删矿脉不影响地貌。
+ */
+function _generateTerrain(sw, deposits) {
+  const { X, Y, Z } = SURFACE_SIZE;
+  const prof = CATEGORY_TERRAIN[sw.category] || CATEGORY_TERRAIN.rocky;
+  const noise = createSimplexNoise((sw.seed ^ 0x1a2b3c4d) >>> 0);
+  const v = sw.voxels;
+
+  for (let z = 0; z < Z; z++) {
+    for (let x = 0; x < X; x++) {
+      // —— 高度场：大陆 fBm + 山脊（ridged）噪声（3 八度控制碎面数量） ——
+      const cont = fbm2(noise, x * 0.042, z * 0.042, 3);
+      let ridge = 1 - Math.abs(noise.noise2D(x * 0.021 + 37.2, z * 0.021 - 11.7));
+      ridge = ridge * ridge;
+      let h = prof.base + cont * prof.amp + ridge * prof.ridge * prof.amp;
+
+      // 海洋类：洼地峡谷（低频负值区下切）；人工天体：台地量化；
+      // 冰封/熔岩：阶地量化（梯田式平台显著改善贪心合并，兼具地貌辨识度）
+      if (sw.category === 'ocean' && cont < -0.18) h -= 2.4;
+      if (sw.category === 'artificial') h = Math.round(h / 3) * 3;
+      if (prof.terrace) h = Math.floor(h / prof.terrace) * prof.terrace + 1;
+
+      // 悬浮平台（气态巨行星）：Chebyshev 边缘 + 噪声海岸线之外的列为虚空
+      if (prof.isle) {
+        const d = Math.max(Math.abs(x - (X - 1) / 2), Math.abs(z - (Z - 1) / 2)) / ((X - 1) / 2);
+        const edge = 0.80 + fbm2(noise, x * 0.09 + 91, z * 0.09 - 45, 2) * 0.10;
+        if (d > edge) {
+          sw.heights[z * X + x] = -1;
+          continue;
+        }
+      }
+
+      const top = clamp(Math.round(h), 3, SURFACE_SIZE.Y - 5);
+      for (let y = 0; y <= top; y++) {
+        let mat = SURFACE_MAT.ROCK;
+        if (y === top) mat = SURFACE_MAT.SURFACE;
+        else if (y <= 1) mat = SURFACE_MAT.BEDROCK;          // 基岩层（不可采）
+        // —— 3D 洞穴雕刻（保留 2 层表壳与基岩完整；高阈值控制暴露面数量） ——
+        if (y > 2 && y < top - 2 && prof.cave > 0) {
+          const c = fbm3(noise, x * 0.085, y * 0.125, z * 0.085, 2);
+          if (c > 0.68 - prof.cave) mat = SURFACE_MAT.AIR;
+        }
+        v[idx(sw, x, y, z)] = mat;
+      }
+      sw.heights[z * X + x] = top;
+    }
+  }
+
+  // —— Ore Voxel Veins：planet.deposits 资量 → 确定性随机游走矿脉 ——
+  _embedOreVeins(sw, deposits, prof);
+}
+
+/**
+ * 矿脉嵌入：每种资源按 log2(储量) 生成矿脉条数（受类别 ore 系数与上限约束），
+ * 每条矿脉为 5..16 步随机游走 + 1..2 体素半径团簇，只替换岩层（不动表面/基岩）。
+ */
+function _embedOreVeins(sw, deposits, prof) {
+  const { X, Y, Z } = SURFACE_SIZE;
+  const rng = seedFromNumber((sw.seed ^ 0x51ed270b) >>> 0);
+  const v = sw.voxels;
+  for (const resId of ['ferro', 'silicate', 'rareEarth', 'heavyMetal']) {
+    const amount = deposits[resId];
+    if (!(amount > 0)) continue;
+    const matId = Number(Object.keys(ORE_RESOURCE_BY_MAT).find((k) => ORE_RESOURCE_BY_MAT[k] === resId));
+    const veins = clamp(Math.round(Math.log2(amount + 2) * prof.ore), 2, 26);
+    for (let n = 0; n < veins; n++) {
+      let vx = int(rng, X);
+      let vz = int(rng, Z);
+      let vy = rngIntRange(rng, 3, Y - 6);      // 矿脉埋藏在地下层
+      const steps = rngIntRange(rng, 5, 16);
+      for (let s = 0; s < steps; s++) {
+        const r = rngFloat(rng) < 0.35 ? 1 : 0; // 团簇半径（0=单块，1=3×3×3）
+        for (let dx = -r; dx <= r; dx++) {
+          for (let dy = -r; dy <= r; dy++) {
+            for (let dz = -r; dz <= r; dz++) {
+              const bx = vx + dx;
+              const by = vy + dy;
+              const bz = vz + dz;
+              if (bx < 0 || bx >= X || by < 2 || by >= Y || bz < 0 || bz >= Z) continue;
+              const i = idx(sw, bx, by, bz);
+              if (v[i] === SURFACE_MAT.ROCK) v[i] = matId; // 只侵入岩层
+            }
+          }
+        }
+        vx = clamp(vx + int(rng, 3) - 1, 0, X - 1);
+        vy = clamp(vy + int(rng, 3) - 1, 2, Y - 4);
+        vz = clamp(vz + int(rng, 3) - 1, 0, Z - 1);
+      }
+    }
+  }
+}
+
+// ———— 体素访问 ————
+
+/**
+ * 读取体素材质。越界：y 超层返回 AIR；x/z 越界返回 AIR（世界边缘可视）。
+ * @returns {number} 材质 ID
+ */
+function getVoxel(sw, x, y, z) {
+  const { X, Y, Z } = SURFACE_SIZE;
+  const xi = Math.floor(x);
+  const yi = Math.floor(y);
+  const zi = Math.floor(z);
+  if (yi < 0 || yi >= Y || xi < 0 || xi >= X || zi < 0 || zi >= Z) return SURFACE_MAT.AIR;
+  return sw.voxels[(yi * sw.sz + zi) * sw.sx + xi];
+}
+
+/** 列顶扫描：重算 heights 缓存（在 set/dig 后调用） */
+function _rescanColumn(sw, x, z) {
+  const { X, Y } = SURFACE_SIZE;
+  for (let y = Y - 1; y >= 0; y--) {
+    if (sw.voxels[(y * sw.sz + z) * sw.sx + x] !== SURFACE_MAT.AIR) {
+      sw.heights[z * X + x] = y;
+      return;
+    }
+  }
+  sw.heights[z * X + x] = -1;
+}
+
+/** 标记体素所属区块与（跨界时的）邻接区块为脏 */
+function _markDirty(sw, x, z) {
+  const { CHUNK, CHUNKS_X, CHUNKS_Z } = SURFACE_SIZE;
+  const cx = Math.floor(x / CHUNK);
+  const cz = Math.floor(z / CHUNK);
+  const mark = (a, b) => {
+    if (a < 0 || a >= CHUNKS_X || b < 0 || b >= CHUNKS_Z) return;
+    sw.chunks[b * CHUNKS_X + a].dirty = true;
+  };
+  mark(cx, cz);
+  const lx = x - cx * CHUNK;
+  const lz = z - cz * CHUNK;
+  if (lx === 0) mark(cx - 1, cz);
+  if (lx === CHUNK - 1) mark(cx + 1, cz);
+  if (lz === 0) mark(cx, cz - 1);
+  if (lz === CHUNK - 1) mark(cx, cz + 1);
+}
+
+/**
+ * 原始写体素（含边界检查，供挖掘/放置/直接改造共用）。
+ * @returns {boolean} 是否实际写入
+ */
+function setVoxel(sw, x, y, z, matId) {
+  const { X, Y, Z } = SURFACE_SIZE;
+  const xi = Math.floor(x);
+  const yi = Math.floor(y);
+  const zi = Math.floor(z);
+  if (yi < 0 || yi >= Y || xi < 0 || xi >= X || zi < 0 || zi >= Z) return false;
+  if (!Number.isInteger(matId) || matId < SURFACE_MAT.AIR || matId > SURFACE_MAT.BUILDING) return false;
+  const i = (yi * sw.sz + zi) * sw.sx + xi;
+  if (sw.voxels[i] === matId) return false;
+  sw.voxels[i] = matId;
+  _markDirty(sw, xi, zi);
+  if (yi >= sw.heights[zi * X + xi]) {
+    // 写入/删除当前顶面及以上：置顶或重扫该列
+    if (matId !== SURFACE_MAT.AIR) sw.heights[zi * X + xi] = yi;
+    else _rescanColumn(sw, xi, zi);
+  }
+  return true;
+}
+
+/**
+ * 挖掘体素：基岩不可挖；矿脉按 ORE_RESOURCE_BY_MAT 入账。
+ * @returns {{ matId:number, resourceDrop:{resId:string, amount:number}|null }}
+ */
+function digVoxel(sw, x, y, z) {
+  const matId = getVoxel(sw, x, y, z);
+  if (matId === SURFACE_MAT.AIR || matId === SURFACE_MAT.BEDROCK) {
+    return { matId, resourceDrop: null }; // 空气/基岩：不可挖掘
+  }
+  if (!setVoxel(sw, x, y, z, SURFACE_MAT.AIR)) {
+    return { matId, resourceDrop: null };
+  }
+  sw.stats.dug++;
+  let resourceDrop = null;
+  const resId = ORE_RESOURCE_BY_MAT[matId];
+  if (resId) {
+    resourceDrop = { resId, amount: 1 };
+    sw.stats.mined[resId] = (sw.stats.mined[resId] || 0) + 1;
+  } else if (matId === SURFACE_MAT.BUILDING) {
+    resourceDrop = { resId: 'alloy', amount: 1 }; // 拆除建筑结构回收合金
+  }
+  return { matId, resourceDrop };
+}
+
+/**
+ * 放置体素：仅允许写入空气格（已有体素需先挖掘）。
+ * @returns {boolean}
+ */
+function placeVoxel(sw, x, y, z, matId) {
+  if (getVoxel(sw, x, y, z) !== SURFACE_MAT.AIR) return false;
+  if (!setVoxel(sw, x, y, z, matId)) return false;
+  sw.stats.placed++;
+  return true;
+}
+
+// ———— DDA 射线（Amanatides & Woo） ————
+
+/**
+ * 体素 DDA 射线步进：返回命中的体素坐标、进入面法线与材质。
+ * @param {{x:number,y:number,z:number}} origin 射线起点（世界坐标）
+ * @param {{x:number,y:number,z:number}|number[]} dir 单位方向
+ * @param {number} maxDist 最大步进距离
+ * @returns {{ hit:boolean, vx:number, vy:number, vz:number, nx:number, ny:number, nz:number, matId:number, t:number }}
+ */
+function ddaRaycast(sw, origin, dir, maxDist = 8) {
+  const ox = origin[0] !== undefined ? origin[0] : origin.x;
+  const oy = origin[1] !== undefined ? origin[1] : origin.y;
+  const oz = origin[2] !== undefined ? origin[2] : origin.z;
+  const dx = dir[0] !== undefined ? dir[0] : dir.x;
+  const dy = dir[1] !== undefined ? dir[1] : dir.y;
+  const dz = dir[2] !== undefined ? dir[2] : dir.z;
+  let x = Math.floor(ox);
+  let y = Math.floor(oy);
+  let z = Math.floor(oz);
+  const stepX = dx > 0 ? 1 : -1;
+  const stepY = dy > 0 ? 1 : -1;
+  const stepZ = dz > 0 ? 1 : -1;
+  const tDeltaX = dx !== 0 ? Math.abs(1 / dx) : Infinity;
+  const tDeltaY = dy !== 0 ? Math.abs(1 / dy) : Infinity;
+  const tDeltaZ = dz !== 0 ? Math.abs(1 / dz) : Infinity;
+  let tMaxX = dx !== 0 ? (dx > 0 ? x + 1 - ox : ox - x) * tDeltaX : Infinity;
+  let tMaxY = dy !== 0 ? (dy > 0 ? y + 1 - oy : oy - y) * tDeltaY : Infinity;
+  let tMaxZ = dz !== 0 ? (dz > 0 ? z + 1 - oz : oz - z) * tDeltaZ : Infinity;
+  const miss = { hit: false, vx: 0, vy: 0, vz: 0, nx: 0, ny: 0, nz: 0, matId: 0, t: Infinity };
+  let nx = 0;
+  let ny = 0;
+  let nz = 0;
+  let t = 0;
+  // 起点即实体：零法线命中
+  const m0 = getVoxel(sw, x, y, z);
+  if (m0 !== SURFACE_MAT.AIR) {
+    return { hit: true, vx: x, vy: y, vz: z, nx: 0, ny: 0, nz: 0, matId: m0, t: 0 };
+  }
+  for (let guard = 0; guard < 512; guard++) {
+    if (tMaxX < tMaxY && tMaxX < tMaxZ) {
+      x += stepX; t = tMaxX; tMaxX += tDeltaX;
+      nx = -stepX; ny = 0; nz = 0;
+    } else if (tMaxY < tMaxZ) {
+      y += stepY; t = tMaxY; tMaxY += tDeltaY;
+      nx = 0; ny = -stepY; nz = 0;
+    } else {
+      z += stepZ; t = tMaxZ; tMaxZ += tDeltaZ;
+      nx = 0; ny = 0; nz = -stepZ;
+    }
+    if (t > maxDist) break;
+    const m = getVoxel(sw, x, y, z);
+    if (m !== SURFACE_MAT.AIR) {
+      return { hit: true, vx: x, vy: y, vz: z, nx, ny, nz, matId: m, t };
+    }
+  }
+  return miss;
+}
+
+// ———— 地表查询 ————
+
+/**
+ * 列扫描最高非空体素 y（体素占据 [y, y+1)）。空列返回 -1。
+ * @returns {number}
+ */
+function getSurfaceHeight(sw, x, z) {
+  const { X } = SURFACE_SIZE;
+  const xi = Math.floor(x);
+  const zi = Math.floor(z);
+  if (xi < 0 || xi >= SURFACE_SIZE.X || zi < 0 || zi >= SURFACE_SIZE.Z) return -1;
+  return sw.heights[zi * X + xi];
+}
+
+/** 列是否可站立（存在顶面且顶面下有支撑） */
+function isStandable(sw, x, z) {
+  return getSurfaceHeight(sw, x, z) >= 0;
+}
+
+/**
+ * 出生点：自世界中心螺旋外扫，取第一个顶面平整（3×3 高差 ≤1）的列。
+ * 返回世界坐标（列中心，脚底 = 顶面体素上沿）。
+ * @returns {{x:number, y:number, z:number}}
+ */
+function findSpawnPoint(sw) {
+  const { X, Z } = SURFACE_SIZE;
+  const cx = X >> 1;
+  const cz = Z >> 1;
+  let best = null;
+  for (let r = 0; r <= 26 && !best; r++) {
+    for (let dz = -r; dz <= r && !best; dz++) {
+      for (let dx = -r; dx <= r && !best; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+        const x = cx + dx;
+        const z = cz + dz;
+        if (x < 2 || z < 2 || x >= X - 2 || z >= Z - 2) continue;
+        const h0 = getSurfaceHeight(sw, x, z);
+        if (h0 < 2 || h0 > SURFACE_SIZE.Y - 4) continue;
+        // 3×3 邻域平整性：高差 ≤1，保证出生不卡在陡壁
+        let flat = true;
+        for (let qz = -1; qz <= 1 && flat; qz++) {
+          for (let qx = -1; qx <= 1 && flat; qx++) {
+            const h = getSurfaceHeight(sw, x + qx, z + qz);
+            if (h < 0 || Math.abs(h - h0) > 1) flat = false;
+          }
+        }
+        if (flat) best = { x: x + 0.5, y: h0 + 1, z: z + 0.5 };
+      }
+    }
+  }
+  // 兜底：中心列顶面（heights 全空时回落到 y=2 悬空点，理论不可达）
+  if (!best) {
+    const h = getSurfaceHeight(sw, cx, cz);
+    return { x: cx + 0.5, y: (h >= 0 ? h + 1 : 2), z: cz + 0.5 };
+  }
+  return best;
+}
+
+// ———— 寻路（地表 A*） ————
+
+const SQRT2 = Math.SQRT2;
+const PATH_DIRS = [
+  [1, 0, 1], [-1, 0, 1], [0, 1, 1], [0, -1, 1],
+  [1, 1, SQRT2], [1, -1, SQRT2], [-1, 1, SQRT2], [-1, -1, SQRT2],
+];
+
+/**
+ * 地表 A* 寻路：2D 栅格 8 向，可通行条件为两侧列均可站立且顶面高差 ≤ climb。
+ * 对角移动要求两个正交邻格同样可通行（禁止切角）。
+ * 堆序以 (f, node) 双关键字保证确定性。
+ * @param {number} sx,sz 起点格坐标    @param {number} tx,tz 终点格坐标
+ * @param {{climb?:number, maxIter?:number}} [opts]
+ * @returns {Array<{x:number,y:number,z:number}>|null} 世界坐标路径（含起终点）；不可达为 null
+ */
+function findPath(sw, sx, sz, tx, tz, opts = {}) {
+  const { X, Z } = SURFACE_SIZE;
+  const climb = opts.climb == null ? 1 : opts.climb;
+  const maxIter = opts.maxIter || 6000;
+  const inb = (v) => Number.isInteger(v) && v >= 0 && v < X;
+  if (!inb(sx) || !inb(sz) || !inb(tx) || !inb(tz) || sz >= Z || tz >= Z) return null;
+  if (!isStandable(sw, sx, sz) || !isStandable(sw, tx, tz)) return null;
+
+  const N = X;
+  const start = sz * N + sx;
+  const goal = tz * N + tx;
+  if (start === goal) return [{ x: sx + 0.5, y: getSurfaceHeight(sw, sx, sz) + 1, z: sz + 0.5 }];
+
+  const gScore = new Float32Array(N * Z).fill(Infinity);
+  const from = new Int32Array(N * Z).fill(-1);
+  const closed = new Uint8Array(N * Z);
+  const heapF = [];
+  const heapN = [];
+
+  const hOf = (x, z) => sw.heights[z * N + x];
+  const heur = (x, z) => {
+    const dx = Math.abs(x - tx);
+    const dz = Math.abs(z - tz);
+    return (dx + dz) + (SQRT2 - 2) * Math.min(dx, dz); // 八向一致启发
+  };
+  const heapPush = (f, node) => {
+    heapF.push(f);
+    heapN.push(node);
+    let i = heapF.length - 1;
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (heapF[p] < heapF[i] || (heapF[p] === heapF[i] && heapN[p] <= heapN[i])) break;
+      const tf = heapF[i]; heapF[i] = heapF[p]; heapF[p] = tf;
+      const tn = heapN[i]; heapN[i] = heapN[p]; heapN[p] = tn;
+      i = p;
+    }
+  };
+  const heapPop = () => {
+    const topN = heapN[0];
+    const lastF = heapF.pop();
+    const lastN = heapN.pop();
+    if (heapF.length > 0) {
+      heapF[0] = lastF;
+      heapN[0] = lastN;
+      let i = 0;
+      for (;;) {
+        const l = i * 2 + 1;
+        const r = l + 1;
+        let m = i;
+        if (l < heapF.length && (heapF[l] < heapF[m] || (heapF[l] === heapF[m] && heapN[l] < heapN[m]))) m = l;
+        if (r < heapF.length && (heapF[r] < heapF[m] || (heapF[r] === heapF[m] && heapN[r] < heapN[m]))) m = r;
+        if (m === i) break;
+        const tf = heapF[i]; heapF[i] = heapF[m]; heapF[m] = tf;
+        const tn = heapN[i]; heapN[i] = heapN[m]; heapN[m] = tn;
+        i = m;
+      }
+    }
+    return topN;
+  };
+
+  gScore[start] = 0;
+  heapPush(heur(sx, sz), start);
+  let iter = 0;
+  let found = false;
+  while (heapF.length > 0 && iter++ < maxIter) {
+    const cur = heapPop();
+    if (cur === goal) { found = true; break; }
+    if (closed[cur]) continue;
+    closed[cur] = 1;
+    const cxp = cur % N;
+    const czp = (cur / N) | 0;
+    const hc = hOf(cxp, czp);
+    for (let d = 0; d < 8; d++) {
+      const nxp = cxp + PATH_DIRS[d][0];
+      const nzp = czp + PATH_DIRS[d][1];
+      if (nxp < 0 || nxp >= N || nzp < 0 || nzp >= Z) continue;
+      const ni = nzp * N + nxp;
+      if (closed[ni]) continue;
+      const hn = hOf(nxp, nzp);
+      if (hn < 0 || Math.abs(hn - hc) > climb) continue;
+      // 对角禁切角：两个正交邻格须可站立且高差同样合规
+      if (d >= 4) {
+        const h1 = hOf(cxp + PATH_DIRS[d][0], czp);
+        const h2 = hOf(cxp, czp + PATH_DIRS[d][1]);
+        if (h1 < 0 || Math.abs(h1 - hc) > climb || h2 < 0 || Math.abs(h2 - hc) > climb) continue;
+      }
+      const ng = gScore[cur] + PATH_DIRS[d][2];
+      if (ng < gScore[ni]) {
+        gScore[ni] = ng;
+        from[ni] = cur;
+        heapPush(ng + heur(nxp, nzp), ni);
+      }
+    }
+  }
+  if (!found) return null;
+  // 回溯（终点 → 起点），输出世界坐标
+  const path = [];
+  let node = goal;
+  while (node !== -1) {
+    const px = node % N;
+    const pz = (node / N) | 0;
+    path.push({ x: px + 0.5, y: hOf(px, pz) + 1, z: pz + 0.5 });
+    node = from[node];
+  }
+  path.reverse();
+  return path;
+}
+
+// ———— 贪心网格化（0fps 算法，AO 感知共面合并） ————
+
+/** 经典 0fps 逐角点 AO：s1/s2 为两侧邻接，c 为对角 */
+function vertexAO(s1, s2, c) {
+  if (s1 && s2) return 0;
+  return 3 - (s1 + s2 + c);
+}
+
+/**
+ * 贪心网格化一个 16×16 列区块（y 全高 24）。
+ * 算法（Mikola Lysenko / 0fps）：
+ *  1. 对 3 个轴向 × 每层切片构建二值截面 mask：键 = ±(材质+1)
+ *     （正号 = 法线朝 +轴，负号朝 -轴；相邻体素一对 solid/air 才产生面）；
+ *  2. 每个 mask 单元同时计算 4 角点 AO（面外侧 8 邻域占用）；
+ *  3. 矩形最大化：沿 u 向扩张 width、沿 w 向扩张 height，
+ *     要求键与 4 角 AO 全部一致（AO 不一致处断开合并，避免插值破绽）；
+ *  4. 输出四边形按朝向确定三角形绕序，顶点位置为区块原点偏移的世界坐标。
+ * 顶点颜色 = 材质基色 × 行星地表色调(surface) × AO 亮度(0.55..1.0)。
+ *
+ * @param {object} sw surfaceWorld
+ * @param {number} cx 区块 X 索引 0..3  @param {number} cz 区块 Z 索引 0..3
+ * @returns {{positions:Float32Array, normals:Float32Array, colors:Float32Array,
+ *            quadCount:number, triCount:number}}
+ */
+function greedyMeshChunk(sw, cx, cz) {
+  const { X, Y, Z, CHUNK } = SURFACE_SIZE;
+  const dims = [CHUNK, Y, CHUNK];
+  const ox = cx * CHUNK;
+  const oz = cz * CHUNK;
+  const prof = CATEGORY_TERRAIN[sw.category] || CATEGORY_TERRAIN.rocky;
+  const tint = prof.tint;
+  const voxels = sw.voxels;
+
+  // 填充读取：区块内直查，越界回世界（世界外为空气）
+  const getPadded = (x, y, z) => {
+    if (x >= 0 && x < CHUNK && z >= 0 && z < CHUNK && y >= 0 && y < Y) {
+      return voxels[(y * Z + (oz + z)) * X + (ox + x)];
+    }
+    return getVoxel(sw, ox + x, y, oz + z);
+  };
+  const solid = (m) => m !== SURFACE_MAT.AIR;
+
+  const positions = [];
+  const normals = [];
+  const colors = [];
+  let quadCount = 0;
+
+  const maskW = Math.max(dims[1], dims[2]);
+  const maskH = Math.max(dims[1], dims[2]);
+  const maskKey = new Int32Array(maskW * maskH);
+  const maskAO = new Uint8Array(maskW * maskH * 4);
+
+  for (let axis = 0; axis < 3; axis++) {
+    const u = (axis + 1) % 3;
+    const w = (axis + 2) % 3;
+    const x = [0, 0, 0];
+    const q = [0, 0, 0];
+    q[axis] = 1;
+    const mw = dims[u];
+    const mh = dims[w];
+
+    for (x[axis] = -1; x[axis] < dims[axis];) {
+      // —— 1. 构建截面 mask（键 + 4 角 AO） ——
+      let n = 0;
+      for (x[w] = 0; x[w] < mh; x[w]++) {
+        for (x[u] = 0; x[u] < mw; x[u]++, n++) {
+          const a = getPadded(x[0], x[1], x[2]);
+          const b = getPadded(x[0] + q[0], x[1] + q[1], x[2] + q[2]);
+          const solidA = solid(a);
+          if (solidA === solid(b)) { maskKey[n] = 0; continue; }
+          const type = solidA ? a : b;
+          maskKey[n] = solidA ? (type + 1) : -(type + 1);
+
+          // AO 采样面：法线一侧的邻接层
+          const faceShift = solidA ? 1 : -1;
+          const bx = x[0] + q[0] * faceShift;
+          const by = x[1] + q[1] * faceShift;
+          const bz = x[2] + q[2] * faceShift;
+          const duX = u === 0 ? 1 : 0;
+          const duY = u === 1 ? 1 : 0;
+          const duZ = u === 2 ? 1 : 0;
+          const dwX = w === 0 ? 1 : 0;
+          const dwY = w === 1 ? 1 : 0;
+          const dwZ = w === 2 ? 1 : 0;
+          const occ = (uu, ww) => (solid(getPadded(
+            bx + duX * uu + dwX * ww,
+            by + duY * uu + dwY * ww,
+            bz + duZ * uu + dwZ * ww,
+          )) ? 1 : 0);
+          const s1u = occ(1, 0);
+          const s1d = occ(-1, 0);
+          const s2u = occ(0, 1);
+          const s2d = occ(0, -1);
+          const cuu = occ(1, 1);
+          const cud = occ(1, -1);
+          const cdu = occ(-1, 1);
+          const cdd = occ(-1, -1);
+          // 角序：(0,0) (1,0) (1,1) (0,1) —— (u,w) 单元局部坐标
+          maskAO[n * 4 + 0] = vertexAO(s1d, s2d, cdd);
+          maskAO[n * 4 + 1] = vertexAO(s1u, s2d, cud);
+          maskAO[n * 4 + 2] = vertexAO(s1u, s2u, cuu);
+          maskAO[n * 4 + 3] = vertexAO(s1d, s2u, cdu);
+        }
+      }
+
+      x[axis]++;
+      if (x[axis] < 0) continue;
+
+      // —— 2. 矩形最大化（键 + AO 全等才合并） ——
+      n = 0;
+      for (let j = 0; j < mh; j++) {
+        for (let i = 0; i < mw;) {
+          const key = maskKey[n];
+          if (key === 0) { i++; n++; continue; }
+          const ao0 = maskAO[n * 4];
+          const ao1 = maskAO[n * 4 + 1];
+          const ao2 = maskAO[n * 4 + 2];
+          const ao3 = maskAO[n * 4 + 3];
+          let width = 1;
+          while (i + width < mw) {
+            const k2 = maskKey[n + width];
+            if (k2 !== key) break;
+            const b2 = (n + width) * 4;
+            if (maskAO[b2] !== ao0 || maskAO[b2 + 1] !== ao1
+              || maskAO[b2 + 2] !== ao2 || maskAO[b2 + 3] !== ao3) break;
+            width++;
+          }
+          let height = 1;
+          outer: while (j + height < mh) {
+            for (let kk = 0; kk < width; kk++) {
+              const i2 = n + kk + height * mw;
+              if (maskKey[i2] !== key) break outer;
+              const b2 = i2 * 4;
+              if (maskAO[b2] !== ao0 || maskAO[b2 + 1] !== ao1
+                || maskAO[b2 + 2] !== ao2 || maskAO[b2 + 3] !== ao3) break outer;
+            }
+            height++;
+          }
+
+          // —— 3. 发射四边形（世界坐标顶点 + AO 烘焙颜色） ——
+          const type = Math.abs(key) - 1;
+          const dirPositive = key > 0;
+          const pos = [0, 0, 0];
+          pos[axis] = x[axis];
+          pos[u] = i;
+          pos[w] = j;
+          const normalIndex = axis === 0 ? (dirPositive ? 0 : 1)
+            : axis === 1 ? (dirPositive ? 2 : 3) : (dirPositive ? 4 : 5);
+          const nxv = NORMALS[normalIndex][0];
+          const nyv = NORMALS[normalIndex][1];
+          const nzv = NORMALS[normalIndex][2];
+
+          const base = MATERIAL_COLORS[type];
+          const aoBright = [0.55 + 0.15 * ao0, 0.55 + 0.15 * ao1, 0.55 + 0.15 * ao2, 0.55 + 0.15 * ao3];
+          // 顶点基色（surface 乘行星色调）
+          const tr = type === SURFACE_MAT.SURFACE ? base[0] * tint[0] : base[0];
+          const tg = type === SURFACE_MAT.SURFACE ? base[1] * tint[1] : base[1];
+          const tb = type === SURFACE_MAT.SURFACE ? base[2] * tint[2] : base[2];
+
+          const corner = (du, dv, aoB) => {
+            const p = [pos[0], pos[1], pos[2]];
+            p[u] += du;
+            p[w] += dv;
+            positions.push(ox + p[0], p[1], oz + p[2]);
+            normals.push(nxv, nyv, nzv);
+            colors.push(tr * aoB, tg * aoB, tb * aoB);
+          };
+          const v00 = [0, 0, aoBright[0]];
+          const v10 = [width, 0, aoBright[1]];
+          const v11 = [width, height, aoBright[2]];
+          const v01 = [0, height, aoBright[3]];
+          const emit = (A, B, C) => { corner(A[0], A[1], A[2]); corner(B[0], B[1], B[2]); corner(C[0], C[1], C[2]); };
+          if (dirPositive) {
+            emit(v00, v10, v11);
+            emit(v00, v11, v01);
+          } else {
+            emit(v00, v11, v10);
+            emit(v00, v01, v11);
+          }
+          quadCount++;
+
+          // 消费区域清零
+          for (let dj = 0; dj < height; dj++) {
+            for (let di = 0; di < width; di++) {
+              maskKey[n + di + dj * mw] = 0;
+            }
+          }
+          i += width;
+          n += width;
+        }
+      }
+    }
+  }
+
+  return {
+    positions: new Float32Array(positions),
+    normals: new Float32Array(normals),
+    colors: new Float32Array(colors),
+    quadCount,
+    triCount: quadCount * 2,
+  };
+}
+
+Object.assign(__exports, { SURFACE_SIZE, SURFACE_MAT, MATERIAL_COLORS, ORE_RESOURCE_BY_MAT, CATEGORY_TERRAIN, hash32, createSimplexNoise, createSurfaceWorld, getVoxel, setVoxel, digVoxel, placeVoxel, ddaRaycast, getSurfaceHeight, isStandable, findSpawnPoint, findPath, greedyMeshChunk });
+
+});
+__register("src/domain/events/objectives.js", function (__exports, __require) {
+/**
+ * domain/events/objectives.js — 结构化空间任务目标实体（doc5 §3.6 / TASK-2.3 / EVT-01..02）
+ *
+ * WorldObjective 是持久化纯数据实体（world.entities.objectives，'obj' 前缀）：
+ * B 类空间事件触发时绑定真实世界空间实体（目标星系/航路另一端/行星），
+ * 银河图据此绘制 Pin / 离屏方向箭头 / 威胁航路虚线。
+ *
+ * 集成边界（与 TickPipeline/DailySystems 的接线归主工程）：
+ *  - 本模块只导出纯领域函数，不自行注册每日/每小时钩子；
+ *  - dailyObjectiveSweep(world) 供 DailySystems 每日调用（过期 + 一次性罚则）。
+ *
+ * 离屏数学（doc5:730-809）：目标星系投影 (sx,sy) 移出视口安全矩形时，
+ *   θ = atan2(dy,dx)，padX = max(80, cx-84)（避开左侧导航栏），
+ *   padY = max(60, cy-64)，t = min(padX/|dx|, padY/|dy|)，
+ *   边缘点 = (cx,cy) + t×(dx,dy)。
+ */
+
+const { createEntity: createEntity, getEntity: getEntity, listEntities: listEntities } = __require("src/domain/entities/registry.js");
+const { emit: emit } = __require("src/core/eventBus.js");
+const { debit: debit } = __require("src/domain/economy/ledger.js");
+const { orderMove: orderMove } = __require("src/domain/fleets/fleet.js");
+
+/** 目标种类（doc5 §3.6） */
+const OBJECTIVE_KINDS = ['escort_lane', 'investigate_system', 'relief_colony', 'survey_planet'];
+
+/** 默认行动窗口：336 小时 = 14 天 */
+const DEFAULT_DURATION_HOURS = 336;
+
+/**
+ * 创建空间任务目标。
+ * targetSystemId 必须可解析为真实星系实体（绑定真实世界实体是本实体的存在意义），
+ * 否则返回 null（调用方按「无有效空间锚点」静默跳过，不建空目标）。
+ */
+function createWorldObjective(world, opts = {}) {
+  world.entities.objectives ||= {};
+  const kind = opts.kind;
+  if (!OBJECTIVE_KINDS.includes(kind)) return null;
+  const targetSystemId = opts.targetSystemId;
+  if (!targetSystemId || !world.entities.systems[targetSystemId]) return null;
+  const durationHours = Number.isFinite(opts.durationHours) && opts.durationHours > 0
+    ? Math.round(opts.durationHours)
+    : DEFAULT_DURATION_HOURS;
+  const o = createEntity(world, 'objectives', {
+    factionId: opts.factionId || world.playerFactionId,
+    status: 'active', // active | completed | expired
+    kind,
+    titleZh: opts.titleZh || '空间任务目标',
+    descZh: opts.descZh || '',
+    sourceEventId: opts.sourceEventId || null,
+    targetSystemId,
+    secondarySystemId: opts.secondarySystemId || null,
+    targetPlanetId: opts.targetPlanetId || null,
+    priority: opts.priority || 'high',          // high | normal
+    createdTick: world.tick,
+    deadlineTick: world.tick + durationHours,
+    assignedFleetId: null,
+    progress: 0,
+    goalProgress: 100,
+    rewards: opts.rewards || [],
+    penalty: opts.penalty || null,              // { credits: n } | { flag: 'key' }
+  });
+  emit(world, 'ObjectiveCreated', {
+    objectiveId: o.id,
+    targetSystemId: o.targetSystemId,
+    kind: o.kind,
+    sourceEventId: o.sourceEventId,
+  }, 'world');
+  return o;
+}
+
+/** 目标进度推进（到达/调查/护航完成等系统调用；满格自动完成） */
+function progressObjective(world, objectiveId, delta) {
+  const o = getEntity(world, 'objectives', objectiveId);
+  if (!o || o.status !== 'active') return { ok: false, reason: '目标不存在或已结束' };
+  o.progress = Math.max(0, Math.min(o.goalProgress, (o.progress || 0) + delta));
+  if (o.progress >= o.goalProgress) return completeObjective(world, objectiveId);
+  return { ok: true, progress: o.progress };
+}
+
+/** 完成目标（发放 rewards 资源表由调用方/主工程按奖励语义执行，这里只迁移状态） */
+function completeObjective(world, objectiveId) {
+  const o = getEntity(world, 'objectives', objectiveId);
+  if (!o || o.status !== 'active') return { ok: false, reason: '目标不存在或已结束' };
+  o.status = 'completed';
+  o.progress = o.goalProgress;
+  o.completedTick = world.tick;
+  emit(world, 'ObjectiveCompleted', { objectiveId: o.id, sourceEventId: o.sourceEventId }, 'world');
+  return { ok: true };
+}
+
+/**
+ * 每日清扫：过期目标迁移状态并一次性应用罚则。
+ * 返回本次过期的目标数（供 DailySystems 统计）。
+ */
+function dailyObjectiveSweep(world) {
+  world.entities.objectives ||= {};
+  world.narrative.flags ||= {};
+  let expired = 0;
+  for (const o of listEntities(world, 'objectives')) {
+    if (o.status !== 'active') continue;
+    if (world.tick <= o.deadlineTick) continue;
+    o.status = 'expired';
+    o.expiredTick = world.tick;
+    expired++;
+    const pen = o.penalty;
+    if (pen && pen.credits > 0 && o.factionId) {
+      // 信用点不足时挂债标记（不产生负库存，ECON-02）
+      const paid = debit(world, o.factionId, 'credits', pen.credits, 'objectiveExpired', o.id);
+      if (!paid) world.narrative.flags[`${o.id}:creditDebt`] = true;
+    }
+    if (pen && pen.flag) {
+      world.narrative.flags[pen.flag] = world.tick;
+    }
+    emit(world, 'ObjectiveExpired', {
+      objectiveId: o.id,
+      sourceEventId: o.sourceEventId,
+      penaltyApplied: !!(pen && (pen.credits > 0 || pen.flag)),
+    }, 'world');
+  }
+  return expired;
+}
+
+/** 兼容别名（doc5 用语：过期清扫） */
+const expireObjectives = dailyObjectiveSweep;
+
+/**
+ * 目标 → 舰队派遣桥接（EVT-02）：与 OrderFleetMove 命令共用同一域路径
+ * （planRoute 只读预检 → beginPlannedTransit）。失败不触碰任何状态。
+ */
+function dispatchObjectiveFleet(world, objectiveId, fleetId) {
+  const o = getEntity(world, 'objectives', objectiveId);
+  if (!o) return { ok: false, reason: '任务目标不存在' };
+  if (o.status !== 'active') return { ok: false, reason: '任务目标已结束' };
+  const fleet = getEntity(world, 'fleets', fleetId);
+  if (!fleet) return { ok: false, reason: '舰队不存在' };
+  if (!(fleet.shipIds || []).length) return { ok: false, reason: '舰队没有舰船' };
+  const res = orderMove(world, fleet, o.targetSystemId);
+  if (!res.ok) return res;
+  o.assignedFleetId = fleet.id;
+  emit(world, 'ObjectiveFleetDispatched', {
+    objectiveId: o.id,
+    fleetId: fleet.id,
+    targetSystemId: o.targetSystemId,
+    eta: res.eta ?? null,
+  }, 'world');
+  return { ok: true, eta: res.eta ?? null };
+}
+
+/**
+ * 离屏方向箭头数学（纯函数，供渲染层与单测共用）。
+ * @param {number} sx 目标投影屏幕 x
+ * @param {number} sy 目标投影屏幕 y
+ * @param {number} w 视口逻辑宽
+ * @param {number} h 视口逻辑高
+ * @returns {{onScreen:true} | {onScreen:false, x:number, y:number, angle:number, padX:number, padY:number}}
+ */
+function computeOffscreenArrow(sx, sy, w, h) {
+  const cx = w / 2;
+  const cy = h / 2;
+  const padX = Math.max(80, cx - 84); // 避开左侧导航栏
+  const padY = Math.max(60, cy - 64);
+  const dx = sx - cx;
+  const dy = sy - cy;
+  if (Math.abs(dx) <= padX && Math.abs(dy) <= padY) return { onScreen: true };
+  const adx = Math.abs(dx);
+  const ady = Math.abs(dy);
+  const tx = adx > 1e-9 ? padX / adx : Infinity;
+  const ty = ady > 1e-9 ? padY / ady : Infinity;
+  const t = Math.min(tx, ty);
+  return {
+    onScreen: false,
+    x: cx + dx * t,
+    y: cy + dy * t,
+    angle: Math.atan2(dy, dx),
+    padX,
+    padY,
+  };
+}
+
+/** 活跃目标列表（快照/渲染用，确定性序） */
+function activeObjectives(world) {
+  return listEntities(world, 'objectives').filter((o) => o.status === 'active');
+}
+
+Object.assign(__exports, { OBJECTIVE_KINDS, DEFAULT_DURATION_HOURS, createWorldObjective, progressObjective, completeObjective, dailyObjectiveSweep, expireObjectives, dispatchObjectiveFleet, computeOffscreenArrow, activeObjectives });
+
+});
 __register("src/domain/events/narrative.js", function (__exports, __require) {
 /**
  * domain/events/narrative.js — 事件系统引擎（任务书 5.9 / EVENT-01/02）
@@ -8518,7 +10695,8 @@ const { registerScheduled: registerScheduled, schedule: schedule } = __require("
 const { emit: emit, chronicle: chronicle } = __require("src/core/eventBus.js");
 const { credit: credit, debit: debit, balance: balance } = __require("src/domain/economy/ledger.js");
 const { getRelation: getRelation } = __require("src/domain/diplomacy/war.js");
-const { EVENT_DEFS: EVENT_DEFS } = __require("src/content/events.js");
+const { EVENT_DEFS: EVENT_DEFS, objectiveAnchorFor: objectiveAnchorFor } = __require("src/content/events.js");
+const { createWorldObjective: createWorldObjective } = __require("src/domain/events/objectives.js");
 const { DIFFICULTY: DIFFICULTY } = __require("src/content/constants.js");
 
 /** 每日检查（DailySystems 注册）：条件 + 权重抽取 */
@@ -8590,6 +10768,24 @@ function fireEvent(world, def) {
   } else {
     applyEffects(world, def.effects || [], { eventId: def.id });
     chronicle(world, 'event', def.titleZh, { eventId: def.id });
+  }
+
+  // B 类空间事件（doc5 §3.6 / EVT-01）：触发时绑定真实空间实体建立持久目标。
+  // 锚点解析器来自 content/events.js（def.objective 内联解析器优先）；
+  // 同源事件已有 active 目标时不重复建（防冷却期内堆积）。
+  try {
+    const resolver = typeof def.objective === 'function' ? def.objective : objectiveAnchorFor(def.id);
+    const anchor = resolver ? resolver(world) : null;
+    if (anchor) {
+      const bag = world.entities.objectives || {};
+      const dup = Object.keys(bag).some((id) => bag[id].status === 'active' && bag[id].sourceEventId === def.id);
+      if (!dup) {
+        const obj = createWorldObjective(world, { sourceEventId: def.id, ...anchor });
+        if (obj) chronicle(world, 'event', `空间目标建立：${obj.titleZh}`, { objectiveId: obj.id, eventId: def.id });
+      }
+    }
+  } catch (e) {
+    emit(world, 'ObjectiveAnchorError', { eventId: def.id, message: String(e && e.message) }, 'system');
   }
 }
 
@@ -8705,7 +10901,14 @@ __register("src/content/events.js", function (__exports, __require) {
  *
  * conditions(world) 结合世界状态；choices 携带成本与效果算子。
  * 所有文本原创。
+ *
+ * B 类空间事件（doc5 §3.6）：尾部 SPATIAL_OBJECTIVE_RESOLVERS 提供
+ * 「事件 id → 空间锚点」的确定性解析（只增不改，34 个既有事件定义未动）；
+ * narrative.fireEvent 据此创建 WorldObjective（EVT-01）。
  */
+
+const { hash32: hash32 } = __require("src/core/serialization.js");
+const { seedFromNumber: seedFromNumber, int: rngInt } = __require("src/core/rng.js");
 
 const F = (world) => world.narrative.flags;
 const pid = (world) => world.playerFactionId;
@@ -9681,7 +11884,233 @@ const EVENT_DEFS = [
   },
 ];
 
-Object.assign(__exports, { EVENT_DEFS });
+// ———— B 类空间事件目标锚定（doc5 §3.6 / TASK-2.3；只增不改） ————————
+
+/** 玩家殖民地所在星系 id（去重、id 升序，确定性） */
+function playerColonySystems(world) {
+  const pid2 = pid(world);
+  const set = new Set();
+  for (const c of Object.values(world.entities.colonies)) {
+    if (c.factionId === pid2 && world.entities.planets[c.planetId]) {
+      set.add(world.entities.planets[c.planetId].systemId);
+    }
+  }
+  return [...set].sort();
+}
+
+/** 目标星系航路邻居中 id 最小者（可排除集合；无邻居返回 null） */
+function lowestLaneNeighbor(world, systemId, exclude) {
+  const sys = world.entities.systems[systemId];
+  if (!sys) return null;
+  const ex = exclude || new Set();
+  const ids = (sys.lanes || []).filter((lid) => lid !== systemId && !ex.has(lid) && world.entities.systems[lid]).sort();
+  return ids[0] || null;
+}
+
+/** 玩家锚点星系（母星系优先，回退殖民地星系；都没有返回 null） */
+function playerOriginSystem(world) {
+  const fac = world.entities.factions[pid(world)];
+  if (fac && fac.homeSystemId && world.entities.systems[fac.homeSystemId]) return fac.homeSystemId;
+  const cols = playerColonySystems(world);
+  return cols[0] || null;
+}
+
+/** 事件子随机流：world.seed ^ hash32(eventId) ^ world.tick 派生（不触碰 world.rng） */
+function eventRng(world, eventId) {
+  return seedFromNumber(((world.seed >>> 0) ^ hash32(eventId) ^ (world.tick >>> 0)) >>> 0);
+}
+
+/** 距锚点星系最近且测绘等级最低的未深查星系（确定性：距离 → id 排序） */
+function nearestUnderSurveyed(world, origin, maxLevel) {
+  if (!origin) return null;
+  const o = world.entities.systems[origin];
+  const lvl = (s) => (s.surveyedBy ? (s.surveyedBy[pid(world)] ?? 0) : 0);
+  let best = null;
+  let bestKey = null;
+  for (const s of Object.values(world.entities.systems)) {
+    if (s.id === origin || lvl(s) > maxLevel) continue;
+    const d = Math.hypot(s.x - o.x, s.y - o.y);
+    const key = `${Math.round(d * 100).toString(36).padStart(6, '0')}:${s.id}`;
+    if (!bestKey || key < bestKey) {
+      bestKey = key;
+      best = s;
+    }
+  }
+  return best;
+}
+
+/**
+ * B 类事件 → WorldObjective 锚点解析表。
+ * 返回 null 表示「无有效空间锚点」（如零殖民地），fireEvent 跳过建目标。
+ * 全部确定性：只用 id 序/几何距/事件子流，禁 Math.random 与 world.rng。
+ */
+const SPATIAL_OBJECTIVE_RESOLVERS = {
+  // 航线劫掠：玩家最低 id 殖民地星系为护航目标，航路另一端取最低 id 邻居
+  evt_pirate_raid: (world) => {
+    const cols = playerColonySystems(world);
+    if (cols.length < 1) return null;
+    const targetSystemId = cols[0];
+    return {
+      kind: 'escort_lane',
+      titleZh: '护航：边域航路劫掠',
+      descZh: '无旗籍劫掠舰队袭扰商路，派遣舰队前往目标星系护航。',
+      targetSystemId,
+      secondarySystemId: lowestLaneNeighbor(world, targetSystemId),
+      priority: 'high',
+      penalty: { credits: 250 },
+    };
+  },
+  // 饥荒求援：事件子流随机抽一个玩家殖民地星系（带行星锚点）
+  evt_famine_relieef: (world) => {
+    const colonies = Object.values(world.entities.colonies).filter((c) => c.factionId === pid(world));
+    if (!colonies.length) return null;
+    const rng = eventRng(world, 'evt_famine_relieef');
+    const colony = colonies[rngInt(rng, colonies.length)];
+    const planet = world.entities.planets[colony.planetId];
+    return {
+      kind: 'relief_colony',
+      titleZh: '救援：生态循环故障',
+      descZh: '殖民地食物断供，运送救援物资并恢复生态循环。',
+      targetSystemId: planet ? planet.systemId : null,
+      targetPlanetId: colony.planetId,
+      priority: 'normal',
+      penalty: { credits: 150 },
+    };
+  },
+  // 边疆信号：调查距玩家锚点最近的未侦测星域
+  evt_signal_frontier: (world) => {
+    const sys = nearestUnderSurveyed(world, playerOriginSystem(world), 0);
+    if (!sys) return null;
+    return {
+      kind: 'investigate_system',
+      titleZh: '调查：边疆的回声',
+      descZh: '窄带信号源指向一片从未测绘的星域，派遣科考力量溯源。',
+      targetSystemId: sys.id,
+      priority: 'high',
+    };
+  },
+  // 非自然来源：同样锚定最近未侦测星域（与边疆信号独立触发、互不冲突）
+  evt_deepspace_signal: (world) => {
+    const sys = nearestUnderSurveyed(world, playerOriginSystem(world), 0) ||
+      nearestUnderSurveyed(world, playerOriginSystem(world), 1);
+    if (!sys) return null;
+    return {
+      kind: 'investigate_system',
+      titleZh: '解码：非自然来源',
+      descZh: '重复十七天的窄带脉冲需要抵近阵列解码，锁定信号源星系。',
+      targetSystemId: sys.id,
+      priority: 'high',
+    };
+  },
+  // 边境摩擦：巡逻对峙 —— 目标取最低 id 玩家殖民星系及其最低 id 航路邻居
+  evt_frontier_dispute: (world) => {
+    const cols = playerColonySystems(world);
+    if (!cols.length) return null;
+    const targetSystemId = cols[0];
+    return {
+      kind: 'escort_lane',
+      titleZh: '巡逻：边境摩擦对峙',
+      descZh: '边防巡逻与邻国舰队在无主星系边界对峙，保持航线存在感。',
+      targetSystemId,
+      secondarySystemId: lowestLaneNeighbor(world, targetSystemId),
+      priority: 'normal',
+    };
+  },
+};
+
+/** 事件 id → 锚点解析器（无则 null） */
+function objectiveAnchorFor(eventId) {
+  return SPATIAL_OBJECTIVE_RESOLVERS[eventId] || null;
+}
+
+/** 事件 id 是否为 B 类空间事件（EventsView 目标卡判定用） */
+function isSpatialEvent(eventId) {
+  return !!SPATIAL_OBJECTIVE_RESOLVERS[eventId];
+}
+
+/** 目标种类中文名（UI 用） */
+const OBJECTIVE_KIND_ZH = {
+  escort_lane: '护航航线',
+  investigate_system: '调查星域',
+  relief_colony: '殖民地救援',
+  survey_planet: '行星勘探',
+};
+
+Object.assign(__exports, { EVENT_DEFS, SPATIAL_OBJECTIVE_RESOLVERS, objectiveAnchorFor, isSpatialEvent, OBJECTIVE_KIND_ZH });
+
+});
+__register("src/core/serialization.js", function (__exports, __require) {
+/**
+ * core/serialization.js — 稳定序列化、哈希与克隆（任务书 2.5 / 1.5）
+ *
+ * 确定性要求：同一世界两次 JSON 序列化必须逐字节一致 —— 对象键始终排序；
+ * undefined 与函数不得进入世界状态（由 invariant 拒绝）。
+ */
+
+/** 稳定字符串化：键排序、丢弃 undefined、数组保序 */
+function stableStringify(value) {
+  const out = [];
+  walk(value, out);
+  return out.join('');
+}
+
+function walk(v, out) {
+  if (v === undefined || typeof v === 'function') return; // 与 JSON 语义一致
+  if (v === null || typeof v !== 'object') {
+    out.push(JSON.stringify(v));
+    return;
+  }
+  if (Array.isArray(v)) {
+    out.push('[');
+    for (let i = 0; i < v.length; i++) {
+      if (i > 0) out.push(',');
+      walk(v[i], out);
+    }
+    out.push(']');
+    return;
+  }
+  out.push('{');
+  const keys = Object.keys(v).filter((k) => v[k] !== undefined).sort();
+  for (let i = 0; i < keys.length; i++) {
+    if (i > 0) out.push(',');
+    out.push(JSON.stringify(keys[i]), ':');
+    walk(v[keys[i]], out);
+  }
+  out.push('}');
+}
+
+/** FNV-1a 32 位哈希 */
+function hash32(str) {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < str.length; i++) {
+    h = Math.imul(h ^ str.charCodeAt(i), 16777619) >>> 0;
+  }
+  return h >>> 0;
+}
+
+/** 世界规范化哈希：确定性回归测试与存档校验共用 */
+function worldHash(world) {
+  return hash32(stableStringify(world)).toString(16).padStart(8, '0');
+}
+
+/** 深克隆：优先结构化克隆（保留类型），退化 JSON */
+function deepClone(obj) {
+  if (typeof structuredClone === 'function') {
+    try {
+      return structuredClone(obj);
+    } catch {
+      /* 含不可克隆对象时退化为 JSON */
+    }
+  }
+  return JSON.parse(JSON.stringify(obj));
+}
+
+/** 反序列化世界（JSON 文本 → 对象），不做语义校验（校验由 invariant 负责） */
+function parseWorld(text) {
+  return JSON.parse(text);
+}
+
+Object.assign(__exports, { stableStringify, hash32, worldHash, deepClone, parseWorld });
 
 });
 __register("src/core/scheduler.js", function (__exports, __require) {
@@ -9750,6 +12179,2066 @@ function cancelByKind(world, kind, filterFn = null) {
 }
 
 Object.assign(__exports, { registerScheduled, schedule, popDue, runDue, cancelByKind });
+
+});
+__register("src/domain/ground/terrainEdits.js", function (__exports, __require) {
+/**
+ * domain/ground/terrainEdits.js — 地形整形编辑层（doc7 TASK-5.1 / §6.5 地形整形器）
+ *
+ * 职责：
+ *  - 编辑日志（ops）：raise / lower / smooth / flatten / restore 五类刷子 + plant / removePlant 植被移植；
+ *  - 刷子生效不直接改 terrainField 数据，而是挂进 field.evalPoint 的 siteModifier 合成链
+ *    （attachTerrainEdits：既有 siteModifier（GroundView._fieldSiteModifier 采掘凹陷等）先评估，
+ *     编辑层后评估 —— flatten / restore 因此可以覆写采掘凹陷，回任自然地貌）；
+ *  - 每次编辑仅把受影响 Chunk 标脏（TERRAIN-06：刷子半径 ≤ chunkMeters/2 → 至多 2×2 = 4 个区块），
+ *    邻接区块由下一帧增量重建；高度预算 [-40,+80] 仍由 evalPoint 统一钳制；
+ *  - 紧凑 JSON 编辑命令序列（serializeEdits / deserializeEdits）供存档确定性重放（SITE-07）；
+ *  - 建筑落位 9 点三角网格投影校验（doc7 TASK-5.2 / §6.8 坡度阈值）与主题专属桩基类型。
+ *
+ * 确定性（doc7 红线 4）：零 Math.random、零 world.rng；smooth 的局部均值与 flatten 的
+ * 目标高度均在 applyEdit 时用 _macro 纯宏观场按固定采样点预计算（缓存可由
+ * deserializeEdits 重建，逐位一致）；植被 seed 由 hash32(内容串) 派生。
+ * 本文件为纯领域层：无 DOM / 无 WebGL。
+ */
+
+const { MIN_HEIGHT: MIN_HEIGHT, MAX_HEIGHT: MAX_HEIGHT, buildTriangulatedChunkMesh: buildTriangulatedChunkMesh } = __require("src/domain/ground/terrainField.js");
+const { hash32: hash32 } = __require("src/domain/ground/SurfaceSandbox.js");
+const { sampleTerrain: sampleTerrain, slopeAt: slopeAt } = __require("src/domain/ground/surfaceQueries.js");
+
+// ———— 常量 ————
+
+/** 编辑日志 schema 版本（存档兼容性标记） */
+const TERRAIN_EDITS_VERSION = 1;
+
+/**
+ * 刷子参数上限（TERRAIN-06 增量重建约束）：
+ * 半径 ≤ chunkMeters/2 → 圆盘至多跨 2×2 区块（4 个）；强度上限防止一次刷穿高度预算。
+ */
+const BRUSH_LIMITS = {
+  maxRadiusM: 32,        // 米；512m 场默认 64m 区块 → 至多 4 区块受影响
+  maxStrokeM: 8,         // raise/lower 单次行程上限（米）
+  minStrength: 0.001,
+};
+
+/**
+ * 建筑落位阈值（doc7:273 image17/18 阈值公式图不可读，按 GAME-05..08 门禁语义自定
+ * 并在此文档化 —— 后续读回原文图片时仅需改这里）：
+ *  - 建筑底面 9 点（中心 + 4 角 + 4 边中点）投影到三角网格；
+ *  - 任一点坡度 > maxSlopeDeg(16°，与 surfaceQueries.isBuildableSlope 默认一致) → 拒绝 SLOPE_TOO_STEEP；
+ *  - 9 点最大高差 > maxHeightDeltaM(2.2m) → 拒绝 HEIGHT_DELTA（要求先整地/桩基）；
+ *  - 高差 ≤ foundationGradeDeltaM(0.4m) 直接平铺；否则自动地基承台（graded）并按主题选桩基。
+ */
+const BUILDING_PLACEMENT = {
+  maxSlopeDeg: 16,
+  maxHeightDeltaM: 2.2,
+  foundationGradeDeltaM: 0.4,
+  footprintHalfM: 3, // 6m × 6m 占地
+};
+
+/** 主题专属桩基（doc7 TASK-5.2：浮台 / 隔热基座 / 耐酸桩；未列主题 → 标准承台） */
+const THEME_PILING = {
+  obsidian_lava: 'thermal_base',      // 隔热基座（熔岩地表）
+  sulfur_marsh: 'acid_pile',          // 耐酸桩（毒雾沼泽）
+  abyssal_ocean: 'pontoon',           // 浮台（海洋/潮汐带）
+  cryomethane_sea: 'pontoon',
+  prism_crystal: 'standard',
+  permafrost_furnace: 'insulated_base', // 隔热基座（冻土热区）
+  dry_night_polar: 'insulated_base',
+};
+
+/** 编辑算子集合 */
+const SHAPE_KINDS = new Set(['raise', 'lower', 'smooth', 'flatten', 'restore']);
+
+// ———— 小工具 ————
+
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
+function num(v, dflt) {
+  return Number.isFinite(v) ? v : dflt;
+}
+
+/** 纯宏观场原始高度（不含 siteModifier 与编辑层）——smooth/flatten 的确定性基准 */
+function pristineHeight(field, wx, wz) {
+  const macro = field._macro;
+  if (!macro || typeof macro.heightAt !== 'function') {
+    throw new Error('terrainEdits: field 缺少 _macro 宏观场（须由 createTerrainField 构建）');
+  }
+  return clamp(macro.heightAt(wx, wz).y, MIN_HEIGHT, MAX_HEIGHT);
+}
+
+/** 平滑核：(1 - (d/r)^2)^2，d=r 处为 0（C1 连续，避免刷痕硬边） */
+function brushFalloff(d, r) {
+  if (d >= r) return 0;
+  const t = 1 - (d * d) / (r * r);
+  return t * t;
+}
+
+/**
+ * 压平核：半径内圈（r/2）为全强度平台（建筑 9 点落位足印 ±3m 必须落在平芯内），
+ * 外圈 (1-t²)² 平滑过渡到 0 —— 平芯 + 裙边，符合「压平建筑地基」的工具语义。
+ */
+function flattenFalloff(d, r) {
+  const coreR = r * 0.5;
+  if (d <= coreR) return 1;
+  if (d >= r) return 0;
+  const t = (d - coreR) / (r - coreR);
+  const u = 1 - t * t;
+  return u * u;
+}
+
+function chunkKeyOf(field, x, z) {
+  const cx = clamp(Math.floor((x - field.originX) / field.chunkMeters), 0, field.chunksX - 1);
+  const cz = clamp(Math.floor((z - field.originZ) / field.chunkMeters), 0, field.chunksZ - 1);
+  return `${cx},${cz}`;
+}
+
+// ———— 编辑仓库 ————
+
+/**
+ * 创建编辑仓库（挂在一个地形场上，但只通过 siteModifier 合成链接入，
+ * 不直接改写 terrainField 的任何缓冲）。
+ */
+function createTerrainEdits(field) {
+  if (!field || !Array.isArray(field.chunks)) {
+    throw new Error('createTerrainEdits: 需要 createTerrainField 产出的地形场');
+  }
+  return {
+    planetId: field.planetId,
+    revision: 0,   // 每次成功 applyEdit +1（与存档快照 revision 对齐）
+    seq: 0,        // 植被 id 序列（确定性 id 派生）
+    ops: [],       // 时序编辑日志（内部规范形）
+    byChunk: new Map(), // 'cx,cz' → [opIdx...]（按全局顺序追加；渲染增量重建索引）
+    flora: [],     // 在场植被 [{ id, x, z, prefabId, seed }]
+  };
+}
+
+/**
+ * 预计算算子缓存（smooth 局部均值 / flatten 目标高度）。
+ * 固定采样图案：中心 + 内环 8 点(0.55r) + 外环 8 点(0.92r)，全部取纯宏观场高度。
+ * 缓存丢失（反序列化后）时惰性重建 —— 同输入逐位一致。
+ */
+function ensureOpCache(field, op) {
+  if (op.kind === 'flatten') {
+    if (op._targetY === undefined) op._targetY = pristineHeight(field, op.x, op.z);
+    return;
+  }
+  if (op.kind === 'smooth') {
+    if (op._avgY === undefined) {
+      let sum = 0;
+      let n = 0;
+      sum += pristineHeight(field, op.x, op.z); n += 1;
+      for (let ring = 0; ring < 2; ring++) {
+        const rr = op.r * (ring === 0 ? 0.55 : 0.92);
+        for (let a = 0; a < 8; a++) {
+          const ang = (a * Math.PI) / 4;
+          sum += pristineHeight(field, op.x + Math.cos(ang) * rr, op.z + Math.sin(ang) * rr);
+          n += 1;
+        }
+      }
+      op._avgY = sum / n;
+    }
+  }
+}
+
+/**
+ * 应用一次编辑：校验 → 追加日志 → 标脏受影响区块（≤4）。
+ * shape 算子 { kind, x, z, radius, strength }；plant { kind:'plant', x, z, prefabId, seed? }；
+ * removePlant { kind:'removePlant', plantId }。
+ * @returns {{ok:true, op:object, index:number, dirtyChunks:string[], floraId?:string}}
+ * @throws {Error} 参数非法（命令层先行校验并映射错误码）
+ */
+function applyEdit(field, edits, op) {
+  if (!field || !edits || !op || typeof op !== 'object') {
+    throw new Error('applyEdit: 缺少 field/edits/op');
+  }
+  const x = num(op.x, NaN);
+  const z = num(op.z, NaN);
+  if (!Number.isFinite(x) || !Number.isFinite(z)) {
+    throw new Error('applyEdit: 坐标非法');
+  }
+
+  const dirtyChunks = [];
+  let entry;
+
+  if (op.kind === 'plant' || op.kind === 'removePlant') {
+    if (op.kind === 'plant') {
+      if (typeof op.prefabId !== 'string' || op.prefabId.length === 0) {
+        throw new Error('applyEdit: plant 需要 prefabId');
+      }
+      edits.seq += 1;
+      const id = op.id || `flora_${edits.seq}`;
+      const seed = Number.isFinite(op.seed) ? (op.seed >>> 0)
+        : (hash32(`${field.planetId}|${id}|${x.toFixed(3)}|${z.toFixed(3)}|${op.prefabId}`) >>> 0);
+      entry = { kind: 'plant', x, z, id, prefabId: op.prefabId, seed };
+      edits.flora.push({ id, x, z, prefabId: op.prefabId, seed });
+    } else {
+      if (typeof op.plantId !== 'string') throw new Error('applyEdit: removePlant 需要 plantId');
+      entry = { kind: 'removePlant', x, z, plantId: op.plantId };
+      const before = edits.flora.length;
+      edits.flora = edits.flora.filter((f) => f.id !== op.plantId);
+      if (edits.flora.length === before) {
+        throw new Error(`applyEdit: 植被不存在 ${op.plantId}`);
+      }
+    }
+  } else {
+    if (!SHAPE_KINDS.has(op.kind)) throw new Error(`applyEdit: 未知算子 ${op.kind}`);
+    const radius = num(op.radius, 8);
+    if (!(radius > 0) || radius > Math.max(BRUSH_LIMITS.maxRadiusM, field.chunkMeters / 2)) {
+      throw new Error(`applyEdit: 半径越界（0,${Math.min(BRUSH_LIMITS.maxRadiusM, field.chunkMeters / 2)}]）`);
+    }
+    const strength = num(op.strength, op.kind === 'smooth' || op.kind === 'flatten' ? 1 : 2);
+    if (!(strength >= BRUSH_LIMITS.minStrength)) throw new Error('applyEdit: 强度过小');
+    if ((op.kind === 'raise' || op.kind === 'lower') && strength > BRUSH_LIMITS.maxStrokeM) {
+      throw new Error(`applyEdit: 行程强度上限 ${BRUSH_LIMITS.maxStrokeM}m`);
+    }
+    if ((op.kind === 'smooth' || op.kind === 'flatten') && strength > 1) {
+      throw new Error('applyEdit: smooth/flatten 强度为混合系数 (0,1]');
+    }
+    entry = { kind: op.kind, x, z, r: radius, s: strength };
+    ensureOpCache(field, entry);
+  }
+
+  edits.ops.push(entry);
+  const index = edits.ops.length - 1;
+
+  // 标脏：圆盘 AABB 覆盖的区块（半径 ≤ chunkMeters/2 → 至多 2×2 = 4 个，TERRAIN-06）
+  const reach = entry.kind === 'plant' || entry.kind === 'removePlant' ? 0.5 : entry.r;
+  const cxMin = clamp(Math.floor((x - reach - field.originX) / field.chunkMeters), 0, field.chunksX - 1);
+  const cxMax = clamp(Math.floor((x + reach - field.originX) / field.chunkMeters), 0, field.chunksX - 1);
+  const czMin = clamp(Math.floor((z - reach - field.originZ) / field.chunkMeters), 0, field.chunksZ - 1);
+  const czMax = clamp(Math.floor((z + reach - field.originZ) / field.chunkMeters), 0, field.chunksZ - 1);
+  for (let cz = czMin; cz <= czMax; cz++) {
+    for (let cx = cxMin; cx <= cxMax; cx++) {
+      const key = `${cx},${cz}`;
+      let list = edits.byChunk.get(key);
+      if (!list) {
+        list = [];
+        edits.byChunk.set(key, list);
+      }
+      list.push(index);
+      const chunk = field.chunks[cz * field.chunksX + cx];
+      if (chunk) chunk.dirty = true;
+      dirtyChunks.push(key);
+    }
+  }
+
+  edits.revision += 1;
+  return { ok: true, op: entry, index, dirtyChunks, floraId: entry.kind === 'plant' ? entry.id : undefined };
+}
+
+// ———— evalPoint 合成链挂点 ————
+
+/**
+ * 编辑层逐点求值。restore 覆盖点重置此前全部编辑影响与 siteModifier 影响
+ * （DSP 式「一键恢复自然地貌」）。
+ * @param {number} siteDyIn 既有 siteModifier 已算得的 dy（先于编辑层评估）
+ * @returns {number} 合成总 dy（0 = 无影响；无相关列表时原样透传 siteDyIn）
+ */
+function evalEditsDy(field, edits, wx, wz, baseY, siteDyIn) {
+  const key = chunkKeyOf(field, wx, wz);
+  const list = edits.byChunk.get(key);
+  if (!list || list.length === 0) return siteDyIn;
+
+  let siteApplied = siteDyIn; // 既有 siteModifier 影响（restore 可清零）
+  let extra = 0;              // 编辑层累计
+
+  for (let i = 0; i < list.length; i++) {
+    const op = edits.ops[list[i]];
+    const dx = wx - op.x;
+    const dz = wz - op.z;
+    const d = Math.sqrt(dx * dx + dz * dz);
+
+    if (op.kind === 'restore') {
+      if (d <= op.r) {
+        // 一键恢复：清空此前编辑叠加 + siteModifier 叠加，回到纯宏观地貌
+        extra = 0;
+        siteApplied = 0;
+      }
+      continue;
+    }
+
+    const fall = op.kind === 'flatten' ? flattenFalloff(d, op.r) : brushFalloff(d, op.r);
+    if (fall <= 0) continue;
+    ensureOpCache(field, op);
+
+    if (op.kind === 'raise') extra += op.s * fall;
+    else if (op.kind === 'lower') extra -= op.s * fall;
+    else if (op.kind === 'smooth') {
+      // 盒式模糊语义：向预计算的局部均值收敛（applyEdit 时对纯宏观场采样）
+      extra += (op._avgY - (baseY + siteApplied + extra)) * op.s * fall;
+    } else if (op.kind === 'flatten') {
+      // 压平：向算子中心纯宏观高度收敛 → 覆写采掘凹陷（凹陷先于编辑层计入运行高度）
+      extra += (op._targetY - (baseY + siteApplied + extra)) * op.s * fall;
+    }
+  }
+  return siteApplied + extra;
+}
+
+/**
+ * 把编辑仓库接入 field.evalPoint 的 siteModifier 合成链：
+ *   最终 dy = 既有 siteModifier dy（先评估；可被 restore 清零） + 编辑层 dy（后评估）。
+ * 可重复调用（幂等）；再次 attach 会保留最初的地基 siteModifier（GroundView 凹陷等）。
+ * @returns {Function} 合成后的 siteModifier（field.siteModifier）
+ */
+function attachTerrainEdits(field, edits) {
+  if (!field || !edits) throw new Error('attachTerrainEdits: 缺少 field/edits');
+  if (field.__terrainEdits === edits && typeof field.siteModifier === 'function' && field.siteModifier.__terrainEdits) {
+    return field.siteModifier; // 已挂接同一仓库
+  }
+  const underlying = field.__baseSiteModifier !== undefined ? field.__baseSiteModifier : field.siteModifier;
+  field.__baseSiteModifier = underlying; // 保留地基（首次 attach 时为 GroundView/_digDents 链）
+
+  const composed = (fx, fz, base) => {
+    const baseY = num(base && base.y, 0);
+    // 1) 既有 siteModifier（任务核心 SDF / 采掘凹陷）
+    let siteDy = 0;
+    if (typeof underlying === 'function') {
+      const mod = underlying(fx, fz, base);
+      if (mod && Number.isFinite(mod.dy)) siteDy = mod.dy;
+    }
+    // 2) 编辑层（后评估：flatten/restore 可覆写凹陷；restore 清零 siteDy）
+    if (edits.ops.length === 0) {
+      return siteDy !== 0 ? { dy: siteDy } : null;
+    }
+    const total = evalEditsDy(field, edits, fx, fz, baseY, siteDy);
+    return Number.isFinite(baseY + total) && total !== 0 ? { dy: total } : null;
+  };
+  composed.__terrainEdits = true;
+
+  field.siteModifier = composed;
+  field.__terrainEdits = edits;
+  return composed;
+}
+
+// ———— 增量重建 ————
+
+/**
+ * 重建全部脏区块（meshRevision 对齐、dirty 清零）；返回重建数量。
+ * GroundView 的帧同步也可只消费 chunk.dirty 自行重建 —— 本函数供域侧/测试复用。
+ */
+function rebuildDirtyChunks(field) {
+  if (!field || !Array.isArray(field.chunks)) return 0;
+  let n = 0;
+  for (let i = 0; i < field.chunks.length; i++) {
+    const ch = field.chunks[i];
+    if (ch && ch.dirty) {
+      buildTriangulatedChunkMesh(ch, field.evalPoint);
+      n += 1;
+    }
+  }
+  return n;
+}
+
+// ———— 存档序列化（SITE-07：紧凑命令序列，确定性重放） ————
+
+/**
+ * 序列化为紧凑 JSON 字符串（键序固定 → 逐字节可复现；不含运行期缓存 _avgY/_targetY）。
+ */
+function serializeEdits(edits) {
+  if (!edits || !Array.isArray(edits.ops)) throw new Error('serializeEdits: 非法编辑仓库');
+  const ops = [];
+  for (const op of edits.ops) {
+    if (op.kind === 'plant') {
+      ops.push({ kind: 'plant', x: op.x, z: op.z, id: op.id, prefabId: op.prefabId, seed: op.seed });
+    } else if (op.kind === 'removePlant') {
+      ops.push({ kind: 'removePlant', x: op.x, z: op.z, plantId: op.plantId });
+    } else {
+      ops.push({ kind: op.kind, x: op.x, z: op.z, r: op.r, s: op.s });
+    }
+  }
+  return JSON.stringify({ v: TERRAIN_EDITS_VERSION, rev: edits.revision, seq: edits.seq, ops });
+}
+
+/**
+ * 反序列化（接受 JSON 字符串或已解析的 plain 对象）→ 活体编辑仓库。
+ * 空串/缺字段 → 新仓库；shape 算子缓存由 ensureOpCache 在求值时确定性重建。
+ */
+function deserializeEdits(json, field) {
+  let plain = json;
+  if (typeof json === 'string') {
+    plain = json.trim().length === 0 ? null : JSON.parse(json);
+  }
+  const edits = field ? createTerrainEdits(field) : {
+    planetId: null,
+    revision: 0,
+    seq: 0,
+    ops: [],
+    byChunk: new Map(),
+    flora: [],
+  };
+  if (!plain || typeof plain !== 'object') return edits;
+  edits.revision = Number.isFinite(plain.rev) ? plain.rev : 0;
+  edits.seq = Number.isFinite(plain.seq) ? plain.seq : 0;
+  const ops = Array.isArray(plain.ops) ? plain.ops : [];
+  if (!field) {
+    // 轻载模式：仅回放日志与植被（无场可标脏）
+    for (const raw of ops) {
+      const op = { ...raw };
+      edits.ops.push(op);
+      if (op.kind === 'plant') edits.flora.push({ id: op.id, x: op.x, z: op.z, prefabId: op.prefabId, seed: op.seed });
+    }
+    return edits;
+  }
+  // 带场重放：逐条 applyEdit 重建 byChunk 索引与脏标记（确定性；revision/seq 以日志为准）
+  for (const raw of ops) {
+    if (raw && (SHAPE_KINDS.has(raw.kind) || raw.kind === 'plant' || raw.kind === 'removePlant')) {
+      edits.revision = Math.max(0, edits.revision - 1); // applyEdit 会 +1，维持存档 revision
+      if (raw.kind === 'plant') edits.seq = Math.max(0, edits.seq - 1); // applyEdit 会 +1
+      // 紧凑键 (r/s) → applyEdit 规范键 (radius/strength)
+      applyEdit(field, edits, {
+        kind: raw.kind,
+        x: raw.x,
+        z: raw.z,
+        radius: raw.r,
+        strength: raw.s,
+        id: raw.id,
+        prefabId: raw.prefabId,
+        seed: raw.seed,
+        plantId: raw.plantId,
+      });
+    }
+  }
+  if (Number.isFinite(plain.rev)) edits.revision = plain.rev;
+  if (Number.isFinite(plain.seq)) edits.seq = plain.seq;
+  return edits;
+}
+
+// ———— 建筑落位校验（doc7 TASK-5.2 / §6.8；doc7:188） ————
+
+/** 主题 → 桩基类型（未列主题回退标准承台） */
+function foundationTypeForTheme(themeId) {
+  return THEME_PILING[themeId] || 'standard';
+}
+
+/**
+ * 建筑底面 9 点三角网格投影校验：
+ * 采样点 = 中心 + 4 角 + 4 边中点（footprintHalfM 正方形），逐点 sampleTerrain。
+ * @returns {{ ok:boolean, code?:'SLOPE_TOO_STEEP'|'HEIGHT_DELTA'|'OUT_OF_FIELD',
+ *             maxSlopeDeg:number, maxHeightDeltaM:number,
+ *             foundation?:{ kind:'flat'|'graded', piling:string, etaHeightM:number } }}
+ * 通过时 foundation.etaHeightM = 9 点均高（承台基准高），piling 按主题解析。
+ */
+function checkBuildingPlacement(field, x, z, opts = {}) {
+  const half = num(opts.footprintHalfM, BUILDING_PLACEMENT.footprintHalfM);
+  const maxSlope = num(opts.maxSlopeDeg, BUILDING_PLACEMENT.maxSlopeDeg);
+  const maxDelta = num(opts.maxHeightDeltaM, BUILDING_PLACEMENT.maxHeightDeltaM);
+
+  const offs = [[0, 0], [half, half], [-half, half], [half, -half], [-half, -half],
+    [half, 0], [-half, 0], [0, half], [0, -half]];
+  let maxY = -Infinity;
+  let minY = Infinity;
+  let sum = 0;
+  let n = 0;
+  let maxSlopeSeen = 0;
+
+  for (const [ox, oz] of offs) {
+    const px = x + ox;
+    const pz = z + oz;
+    const s = sampleTerrain(field, px, pz);
+    if (!s) {
+      return { ok: false, code: 'OUT_OF_FIELD', maxSlopeDeg: NaN, maxHeightDeltaM: NaN };
+    }
+    const sl = slopeAt(field, px, pz);
+    if (Number.isFinite(sl) && sl > maxSlopeSeen) maxSlopeSeen = sl;
+    maxY = Math.max(maxY, s.y);
+    minY = Math.min(minY, s.y);
+    sum += s.y;
+    n += 1;
+  }
+
+  const delta = maxY - minY;
+  if (maxSlopeSeen > maxSlope) {
+    return { ok: false, code: 'SLOPE_TOO_STEEP', maxSlopeDeg: maxSlopeSeen, maxHeightDeltaM: delta };
+  }
+  if (delta > maxDelta) {
+    return { ok: false, code: 'HEIGHT_DELTA', maxSlopeDeg: maxSlopeSeen, maxHeightDeltaM: delta };
+  }
+  return {
+    ok: true,
+    maxSlopeDeg: maxSlopeSeen,
+    maxHeightDeltaM: delta,
+    foundation: {
+      kind: delta > BUILDING_PLACEMENT.foundationGradeDeltaM ? 'graded' : 'flat',
+      piling: foundationTypeForTheme(opts.themeId),
+      etaHeightM: sum / n,
+    },
+  };
+}
+
+Object.assign(__exports, { TERRAIN_EDITS_VERSION, BRUSH_LIMITS, BUILDING_PLACEMENT, createTerrainEdits, applyEdit, attachTerrainEdits, rebuildDirtyChunks, serializeEdits, deserializeEdits, foundationTypeForTheme, checkBuildingPlacement });
+
+});
+__register("src/domain/ground/surfaceQueries.js", function (__exports, __require) {
+/**
+ * domain/ground/surfaceQueries.js — 连续三角网格地表查询（doc7 TASK-1.2 / TERRAIN-05）
+ *
+ * 在 terrainField 产出的三角化高度场上提供权威连续查询（纯领域层，无 DOM/WebGL）：
+ *  - sampleTerrain   重心坐标连续高度/法线/材质插值（严格复刻构建器对角线选择）；
+ *  - raycastTerrain  Chunk AABB 列 DDA + 高度带剪枝 + 二分精化（替代体素 ddaRaycast）；
+ *  - slopeAt / isBuildableSlope / findPathSurface  坡度查询与坡度代价图 A* 寻路。
+ *
+ * 确定性：全部查询为纯读 + 幂等懒构建（未构建区块按同输入确定性补建），
+ * 零 Math.random，不消费 world.rng。方向参数 dir 需为世界空间方向，
+ * raycastTerrain 返回的 t 以「单位方向米数」计（内部归一化）。
+ */
+
+const { TERRAIN_FLAGS: TERRAIN_FLAGS, buildTriangulatedChunkMesh: buildTriangulatedChunkMesh } = __require("src/domain/ground/terrainField.js");
+
+const SQRT2 = Math.SQRT2;
+
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
+function clampInt(v, lo, hi) {
+  return Math.floor(clamp(Math.floor(v), lo, hi));
+}
+
+function num(v, dflt) {
+  return Number.isFinite(v) ? v : dflt;
+}
+
+/** 未构建区块按同输入确定性补建（幂等；meshRevision 已对齐则跳过） */
+function ensureChunkBuilt(field, chunk) {
+  if (chunk && chunk.meshRevision === 0) {
+    buildTriangulatedChunkMesh(chunk, field.evalPoint);
+  }
+  return chunk;
+}
+
+/** 定位 (x, z) 所在区块；场地外返回 null */
+function chunkAt(field, x, z) {
+  const maxX = field.originX + field.sizeMeters;
+  const maxZ = field.originZ + field.sizeMeters;
+  if (!(x >= field.originX && x <= maxX && z >= field.originZ && z <= maxZ)) return null;
+  const cx = clampInt((x - field.originX) / field.chunkMeters, 0, field.chunksX - 1);
+  const cz = clampInt((z - field.originZ) / field.chunkMeters, 0, field.chunksZ - 1);
+  return field.chunks[cz * field.chunksX + cx];
+}
+
+// ———— 连续采样 ————
+
+/**
+ * 连续地表采样：所在三角形内做重心坐标插值（高度/法线/材质权重），
+ * 语义标记与生态 id 取重心权重最大的顶点。
+ * @returns {null|{y:number, nx:number, ny:number, nz:number, weights:number[4], biomeId:number, flags:number, chunk:object}}
+ */
+function sampleTerrain(field, x, z) {
+  const chunk = chunkAt(field, x, z);
+  if (!chunk) return null;
+  ensureChunkBuilt(field, chunk);
+
+  const N = chunk.gridSize;
+  const cells = N - 1;
+  const step = (chunk.bounds.maxX - chunk.bounds.minX) / cells;
+  const pos = chunk.vertices.position;
+  const nor = chunk.vertices.normal;
+  const wgt = chunk.vertices.materialWeights;
+
+  const u = clamp((x - chunk.bounds.minX) / step, 0, cells);
+  const v = clamp((z - chunk.bounds.minZ) / step, 0, cells);
+  const i = Math.min(Math.floor(u), cells - 1);
+  const j = Math.min(Math.floor(v), cells - 1);
+  const fu = u - i;
+  const fv = v - j;
+
+  const v00 = j * N + i;
+  const v10 = v00 + 1;
+  const v01 = (j + 1) * N + i;
+  const v11 = v01 + 1;
+  const y00 = pos[v00 * 3 + 1];
+  const y10 = pos[v10 * 3 + 1];
+  const y01 = pos[v01 * 3 + 1];
+  const y11 = pos[v11 * 3 + 1];
+
+  // 与构建器逐位一致的对角线选择（含棋盘偏置）
+  const bias = (((i + j) & 1) === 0) ? -0.02 : 0.02;
+  const diffDiagA = Math.abs(y00 - y11) + bias;
+  const diffDiagB = Math.abs(y10 - y01);
+
+  // 四角重心权重（λ00, λ10, λ01, λ11）
+  let l00; let l10; let l01; let l11;
+  let y;
+  if (diffDiagA <= diffDiagB) {
+    if (fv >= fu) { // T1 (v00,v01,v11)
+      y = (1 - fv) * y00 + (fv - fu) * y01 + fu * y11;
+      l00 = 1 - fv; l01 = fv - fu; l11 = fu; l10 = 0;
+    } else {        // T2 (v00,v11,v10)
+      y = (1 - fu) * y00 + (fu - fv) * y10 + fv * y11;
+      l00 = 1 - fu; l10 = fu - fv; l11 = fv; l01 = 0;
+    }
+  } else {
+    if (fu + fv <= 1) { // T1 (v00,v01,v10)
+      y = (1 - fu - fv) * y00 + fv * y01 + fu * y10;
+      l00 = 1 - fu - fv; l01 = fv; l10 = fu; l11 = 0;
+    } else {            // T2 (v10,v01,v11)
+      y = (1 - fv) * y10 + (fu + fv - 1) * y01 + (1 - fu) * y11;
+      l10 = 1 - fv; l01 = fu + fv - 1; l11 = 1 - fu; l00 = 0;
+    }
+  }
+
+  // 法线：重心插值后归一化（退化回退 +Y）
+  let nx = l00 * nor[v00 * 3] + l10 * nor[v10 * 3] + l01 * nor[v01 * 3] + l11 * nor[v11 * 3];
+  let ny = l00 * nor[v00 * 3 + 1] + l10 * nor[v10 * 3 + 1] + l01 * nor[v01 * 3 + 1] + l11 * nor[v11 * 3 + 1];
+  let nz = l00 * nor[v00 * 3 + 2] + l10 * nor[v10 * 3 + 2] + l01 * nor[v01 * 3 + 2] + l11 * nor[v11 * 3 + 2];
+  const nlen = Math.hypot(nx, ny, nz);
+  if (nlen > 1e-12) {
+    nx /= nlen; ny /= nlen; nz /= nlen;
+  } else {
+    nx = 0; ny = 1; nz = 0;
+  }
+
+  // 材质权重：重心插值后取整（和恒 255，因四角各自和为 255 且 Σλ=1）
+  const weights = [0, 0, 0, 0];
+  for (let c = 0; c < 4; c++) {
+    const wAcc = l00 * wgt[v00 * 4 + c] + l10 * wgt[v10 * 4 + c]
+      + l01 * wgt[v01 * 4 + c] + l11 * wgt[v11 * 4 + c];
+    weights[c] = Math.round(wAcc);
+  }
+
+  // 语义标记 / 生态：取重心权重最大的顶点
+  let bestL = l00;
+  let bestV = v00;
+  if (l10 > bestL) { bestL = l10; bestV = v10; }
+  if (l01 > bestL) { bestL = l01; bestV = v01; }
+  if (l11 > bestL) { bestL = l11; bestV = v11; }
+  const bio = chunk.vertices.biomeId;
+  const flg = chunk.vertices.flags;
+
+  return {
+    y,
+    nx, ny, nz,
+    weights,
+    biomeId: bio[bestV],
+    flags: flg[bestV],
+    chunk,
+  };
+}
+
+// ———— 射线求交 ————
+
+function missResult() {
+  return { hit: false, t: -1, point: null, normal: null, chunk: null };
+}
+
+/** 命中包装：在 t 处取样地表得到法线与区块 */
+function hitResult(field, ox, oy, oz, dx, dy, dz, t) {
+  const px = ox + dx * t;
+  const py = oy + dy * t;
+  const pz = oz + dz * t;
+  const s = sampleTerrain(field, px, pz);
+  return {
+    hit: true,
+    t,
+    point: [px, py, pz],
+    normal: s ? [s.nx, s.ny, s.nz] : [0, 1, 0],
+    chunk: s ? s.chunk : null,
+  };
+}
+
+/**
+ * 区间 [ta, tb] 内精化首个「射线降至地表以下」的交点（6 步扫描 + 14 步二分）。
+ * f(t) = oy + dy·t − terrainY(t)；f 单调性不保证，但首次变号即首个穿入点。
+ */
+function refineHit(field, ox, oy, oz, dx, dy, dz, ta, tb) {
+  const span = tb - ta;
+  if (span <= 1e-9) {
+    const s = sampleTerrain(field, ox + dx * ta, oz + dz * ta);
+    return s && oy + dy * ta <= s.y ? ta : -1;
+  }
+  const STEPS = 6;
+  const dt = span / STEPS;
+  let tPrev = ta;
+  for (let k = 1; k <= STEPS; k++) {
+    const tk = ta + dt * k;
+    const sk = sampleTerrain(field, ox + dx * tk, oz + dz * tk);
+    if (sk && oy + dy * tk <= sk.y) {
+      let a = tPrev;
+      let b = tk;
+      for (let it = 0; it < 14; it++) {
+        const m = (a + b) * 0.5;
+        const sm = sampleTerrain(field, ox + dx * m, oz + dz * m);
+        const fm = sm ? (oy + dy * m - sm.y) : 1;
+        if (fm > 0) a = m; else b = m;
+      }
+      return (a + b) * 0.5;
+    }
+    tPrev = tk;
+  }
+  return -1;
+}
+
+/**
+ * 地形射线求交（替代体素 ddaRaycast）：
+ * 2D DDA 步进 Chunk 列（xz 平面 Amanatides–Woo），逐列做高度带剪枝
+ * （y(t) 线性区间 ∩ [chunk.minY, chunk.maxY]），命中带内再做重心精化。
+ * dir.y ≈ 0（平飞）稳健：高度带退化为常量判定。
+ *
+ * @param {object} field 地形场
+ * @param {number[]} origin [x, y, z]
+ * @param {number[]} dir 方向（任意长度，内部归一化；全零向量视为未命中）
+ * @param {number} [maxDist=64] 最大距离（米）
+ * @returns {{hit:boolean, t:number, point:number[]|null, normal:number[]|null, chunk:object|null}}
+ */
+function raycastTerrain(field, origin, dir, maxDist = 64) {
+  const ox = origin[0];
+  const oy = origin[1];
+  const oz = origin[2];
+  let dx = dir[0];
+  let dy = dir[1];
+  let dz = dir[2];
+  const dLen = Math.hypot(dx, dy, dz);
+  if (!(dLen > 1e-12)) return missResult();
+  const inv = 1 / dLen;
+  dx *= inv; dy *= inv; dz *= inv;
+  const tMax = num(maxDist, 64);
+
+  const minX = field.originX;
+  const minZ = field.originZ;
+  const maxX = minX + field.sizeMeters;
+  const maxZ = minZ + field.sizeMeters;
+
+  // 场地 AABB（xz slab）求交
+  let t0 = 0;
+  let t1 = tMax;
+  if (Math.abs(dx) < 1e-12) {
+    if (ox < minX || ox > maxX) return missResult();
+  } else {
+    let ta = (minX - ox) / dx;
+    let tb = (maxX - ox) / dx;
+    if (ta > tb) { const tmp = ta; ta = tb; tb = tmp; }
+    t0 = Math.max(t0, ta);
+    t1 = Math.min(t1, tb);
+  }
+  if (Math.abs(dz) < 1e-12) {
+    if (oz < minZ || oz > maxZ) return missResult();
+  } else {
+    let ta = (minZ - oz) / dz;
+    let tb = (maxZ - oz) / dz;
+    if (ta > tb) { const tmp = ta; ta = tb; tb = tmp; }
+    t0 = Math.max(t0, ta);
+    t1 = Math.min(t1, tb);
+  }
+  if (t0 > t1) return missResult();
+
+  // 起点（或入场点）已在地形之下 → 立即命中
+  const s0 = sampleTerrain(field, ox + dx * t0, oz + dz * t0);
+  if (s0 && oy + dy * t0 <= s0.y) {
+    return hitResult(field, ox, oy, oz, dx, dy, dz, t0);
+  }
+
+  // 2D DDA（Amanatides–Woo on chunk grid）
+  const cm = field.chunkMeters;
+  let cx = clampInt((ox + dx * t0 - minX) / cm, 0, field.chunksX - 1);
+  let cz = clampInt((oz + dz * t0 - minZ) / cm, 0, field.chunksZ - 1);
+  const stepX = dx > 0 ? 1 : -1;
+  const stepZ = dz > 0 ? 1 : -1;
+  const tDeltaX = Math.abs(dx) > 1e-12 ? cm / Math.abs(dx) : Infinity;
+  const tDeltaZ = Math.abs(dz) > 1e-12 ? cm / Math.abs(dz) : Infinity;
+  let tMaxX = Math.abs(dx) > 1e-12
+    ? ((dx > 0 ? minX + (cx + 1) * cm : minX + cx * cm) - ox) / dx
+    : Infinity;
+  let tMaxZ = Math.abs(dz) > 1e-12
+    ? ((dz > 0 ? minZ + (cz + 1) * cm : minZ + cz * cm) - oz) / dz
+    : Infinity;
+
+  let guard = (field.chunksX + field.chunksZ) * 2 + 8; // DDA 步数上限（跨列去重）
+  let tc = t0;
+  while (tc <= t1) {
+    const tc1 = Math.min(t1, Math.min(tMaxX, tMaxZ));
+    const chunk = field.chunks[cz * field.chunksX + cx];
+    if (chunk) {
+      ensureChunkBuilt(field, chunk);
+      // 高度带剪枝：y(t) = oy + dy·t 与 [minY-ε, maxY+ε] 的 t 区间
+      let ba = tc;
+      let bb = tc1;
+      const lo = chunk.bounds.minY - 0.05;
+      const hi = chunk.bounds.maxY + 0.05;
+      if (dy > 1e-12) {
+        ba = Math.max(ba, (lo - oy) / dy);
+        bb = Math.min(bb, (hi - oy) / dy);
+      } else if (dy < -1e-12) {
+        ba = Math.max(ba, (hi - oy) / dy);
+        bb = Math.min(bb, (lo - oy) / dy);
+      } else if (oy < lo || oy > hi) {
+        ba = 1; bb = 0; // 平飞且不在带内 → 本列无交
+      }
+      if (ba <= bb) {
+        const tHit = refineHit(field, ox, oy, oz, dx, dy, dz, ba, bb);
+        if (tHit >= 0 && tHit <= tMax) {
+          return hitResult(field, ox, oy, oz, dx, dy, dz, tHit);
+        }
+      }
+    }
+    if (tc1 >= t1) break;
+    if (tMaxX < tMaxZ) {
+      tc = tMaxX;
+      cx += stepX;
+      tMaxX += tDeltaX;
+      if (cx < 0 || cx >= field.chunksX) break;
+    } else {
+      tc = tMaxZ;
+      cz += stepZ;
+      tMaxZ += tDeltaZ;
+      if (cz < 0 || cz >= field.chunksZ) break;
+    }
+  }
+  return missResult();
+}
+
+// ———— 坡度与寻路 ————
+
+/**
+ * 坡度（度）：由采样法线 ny 反解；场地外返回 NaN。
+ */
+function slopeAt(field, x, z) {
+  const s = sampleTerrain(field, x, z);
+  if (!s) return NaN;
+  const ny = clamp(s.ny, -1, 1);
+  return Math.acos(ny) * (180 / Math.PI);
+}
+
+/**
+ * 坡度可建性：坡度 ≤ maxSlopeDeg（默认 16°）即认为可直建；
+ * 危险/保护区语义由调用方按 flags 叠加裁决（GAME-05..08）。
+ */
+function isBuildableSlope(field, x, z, maxSlopeDeg = 16) {
+  const s = sampleTerrain(field, x, z);
+  if (!s) return false;
+  const ny = clamp(s.ny, -1, 1);
+  const deg = Math.acos(ny) * (180 / Math.PI);
+  return deg <= num(maxSlopeDeg, 16);
+}
+
+/** 八方向邻居（固定顺序 → 确定性） */
+const NBORS = [
+  [1, 0, 1], [-1, 0, 1], [0, 1, 1], [0, -1, 1],
+  [1, 1, SQRT2], [1, -1, SQRT2], [-1, 1, SQRT2], [-1, -1, SQRT2],
+];
+
+/**
+ * 地表 A* 寻路（1m 栅格，8 向）：
+ * 代价 = 步距 × (1 + slopePenalty)；slopePenalty = 3·(slope/maxSlopeDeg)²，
+ * HAZARD 区追加 hazardPenalty（默认 +6）；slope > maxSlopeDeg（默认 35°）不可通行，
+ * 除非顶点 flags 含 BRIDGE_DECK 或 ROAD（拱桥/道路可越陡坡）。
+ * 二叉最小堆（f 相同按格点下标决胜）+ 固定邻居序 → 完全确定性。
+ *
+ * @returns {null|{path:{x:number,z:number,y:number}[], cost:number}}
+ */
+function findPathSurface(field, sx, sz, tx, tz, opts = {}) {
+  const maxSlopeDeg = num(opts.maxSlopeDeg, 35);
+  const hazardPenalty = num(opts.hazardPenalty, 6);
+  const maxExpand = num(opts.maxExpand, 90000);
+
+  // 1m 栅格（内缩 1m 避免场地边界退化）
+  const gx0 = field.originX + 1;
+  const gz0 = field.originZ + 1;
+  const gw = field.sizeMeters - 2;
+  const gh = field.sizeMeters - 2;
+  const sxg = clampInt(Math.round(sx), gx0, gx0 + gw - 1);
+  const szg = clampInt(Math.round(sz), gz0, gz0 + gh - 1);
+  const txg = clampInt(Math.round(tx), gx0, gx0 + gw - 1);
+  const tzg = clampInt(Math.round(tz), gz0, gz0 + gh - 1);
+
+  const idxOf = (x, z) => (z - gz0) * gw + (x - gx0);
+  const total = gw * gh;
+  const gScore = new Float64Array(total).fill(Infinity);
+  const came = new Int32Array(total).fill(-1);
+  const closed = new Uint8Array(total);
+  const nodeY = new Float64Array(total).fill(NaN);
+  const nodeSlope = new Float64Array(total).fill(-1);
+  const nodeFlags = new Uint16Array(total);
+  const nodeState = new Uint8Array(total); // 0 未评估 1 可通行 2 阻断
+
+  const octile = (ax, az, bx, bz) => {
+    const ddx = Math.abs(ax - bx);
+    const ddz = Math.abs(az - bz);
+    return ddx > ddz ? ddx - ddz + SQRT2 * ddz : ddz - ddx + SQRT2 * ddx;
+  };
+
+  const startIdx = idxOf(sxg, szg);
+  const goalIdx = idxOf(txg, tzg);
+
+  // 节点评估（惰性，仅一次；sampleTerrain 幂等）
+  const evalNode = (x, z, ni) => {
+    if (nodeState[ni] !== 0) return nodeState[ni] === 1;
+    const s = sampleTerrain(field, x, z);
+    if (!s) {
+      nodeState[ni] = 2;
+      return false;
+    }
+    nodeY[ni] = s.y;
+    nodeFlags[ni] = s.flags;
+    nodeSlope[ni] = Math.acos(clamp(s.ny, -1, 1)) * (180 / Math.PI);
+    const bridgeable = (s.flags & (TERRAIN_FLAGS.BRIDGE_DECK | TERRAIN_FLAGS.ROAD)) !== 0;
+    nodeState[ni] = (nodeSlope[ni] <= maxSlopeDeg || bridgeable) ? 1 : 2;
+    return nodeState[ni] === 1;
+  };
+
+  if (!evalNode(sxg, szg, startIdx)) return null;
+  if (!evalNode(txg, tzg, goalIdx)) return null;
+  if (startIdx === goalIdx) {
+    return { path: [{ x: sxg, z: szg, y: nodeY[startIdx] }], cost: 0 };
+  }
+
+  // 二叉最小堆：扁平数组 [f0, idx0, f1, idx1, ...]；f 同值按 idx 决胜（确定性）
+  const heap = [];
+  const heapPush = (f, i) => {
+    heap.push(f, i);
+    let c = (heap.length >> 1) - 1;
+    while (c > 0) {
+      const p = (c - 1) >> 1;
+      const pf = heap[p * 2];
+      const pi = heap[p * 2 + 1];
+      const cf = heap[c * 2];
+      const ci = heap[c * 2 + 1];
+      if (pf < cf || (pf === cf && pi <= ci)) break;
+      heap[p * 2] = cf; heap[p * 2 + 1] = ci;
+      heap[c * 2] = pf; heap[c * 2 + 1] = pi;
+      c = p;
+    }
+  };
+  const heapPop = () => {
+    const topF = heap[0];
+    const topI = heap[1];
+    const lastI = heap.pop();
+    const lastF = heap.pop();
+    const n = heap.length >> 1;
+    if (n > 0) {
+      heap[0] = lastF;
+      heap[1] = lastI;
+      let p = 0;
+      for (;;) {
+        const l = p * 2 + 1;
+        const r = l + 1;
+        let m = p;
+        if (l < n && (heap[l * 2] < heap[m * 2] || (heap[l * 2] === heap[m * 2] && heap[l * 2 + 1] < heap[m * 2 + 1]))) m = l;
+        if (r < n && (heap[r * 2] < heap[m * 2] || (heap[r * 2] === heap[m * 2] && heap[r * 2 + 1] < heap[m * 2 + 1]))) m = r;
+        if (m === p) break;
+        const tf = heap[p * 2]; const ti = heap[p * 2 + 1];
+        heap[p * 2] = heap[m * 2]; heap[p * 2 + 1] = heap[m * 2 + 1];
+        heap[m * 2] = tf; heap[m * 2 + 1] = ti;
+        p = m;
+      }
+    }
+    return [topF, topI];
+  };
+
+  gScore[startIdx] = 0;
+  heapPush(octile(sxg, szg, txg, tzg), startIdx);
+
+  let expansions = 0;
+  while (heap.length > 0) {
+    const [, cur] = heapPop();
+    if (closed[cur]) continue;
+    closed[cur] = 1;
+    if (cur === goalIdx) {
+      const path = [];
+      let walk = goalIdx;
+      while (walk >= 0) {
+        const wz = gz0 + Math.floor(walk / gw);
+        const wx = gx0 + (walk % gw);
+        path.push({ x: wx, z: wz, y: nodeY[walk] });
+        walk = came[walk];
+      }
+      path.reverse();
+      return { path, cost: gScore[goalIdx] };
+    }
+    if (++expansions > maxExpand) return null;
+    const cz0 = gz0 + Math.floor(cur / gw);
+    const cx0 = gx0 + (cur % gw);
+    const gCur = gScore[cur];
+    for (let k = 0; k < 8; k++) {
+      const nx = cx0 + NBORS[k][0];
+      const nz = cz0 + NBORS[k][1];
+      if (nx < gx0 || nx >= gx0 + gw || nz < gz0 || nz >= gz0 + gh) continue;
+      const ni = idxOf(nx, nz);
+      if (closed[ni]) continue;
+      if (!evalNode(nx, nz, ni)) continue;
+      const stepDist = NBORS[k][2];
+      const slope = Math.max(0, nodeSlope[ni]);
+      let penalty = 3 * (slope / maxSlopeDeg) * (slope / maxSlopeDeg);
+      if (nodeFlags[ni] & TERRAIN_FLAGS.HAZARD) penalty += hazardPenalty;
+      const ng = gCur + stepDist * (1 + penalty);
+      if (ng < gScore[ni]) {
+        gScore[ni] = ng;
+        came[ni] = cur;
+        heapPush(ng + octile(nx, nz, txg, tzg), ni);
+      }
+    }
+  }
+  return null;
+}
+
+Object.assign(__exports, { sampleTerrain, raycastTerrain, slopeAt, isBuildableSlope, findPathSurface });
+
+});
+__register("src/domain/ground/terrainField.js", function (__exports, __require) {
+/**
+ * domain/ground/terrainField.js — 连续三角化地形场（doc7 TASK-1.1 / §8.1 蓝本）
+ *
+ * 正式地表主几何 = Triangulated Planetary Terrain（序列 6 §2 / doc7 §3）：
+ *  - Planet Local 切平面 [-256,+256]m，512m×512m = 8×8 个 64m×64m 区块，高度预算 [-40,+80]m；
+ *  - 每区块 65×65 顶点（LOD 0 步长 1.0m）规则格网 + 曲率自适应对角线切分；
+ *  - 严格 CCW 索引（gl.CCW，外法线朝 +Y）+ 面积加权顶点法线 + 陡坡材质增强；
+ *  - 顶点语义：position/normal/tangent/materialWeights(4ch)/biomeId/flags/aux(temp,moisture)。
+ *
+ * 确定性（doc7 红线 4）：全部噪声由 derivePlanetSeeds 子种子派生
+ * （createSimplexNoise(macroTerrainSeed) 等），零 Math.random，绝不消费 world.rng；
+ * 同 (world.seed, planetId, profile, siteModifier) 逐位可复现。
+ *
+ * 本文件为纯领域层：无 DOM / 无 WebGL；渲染侧（PlanetTerrainMesh）只消费只读快照。
+ */
+
+const { hash32: hash32, createSimplexNoise: createSimplexNoise } = __require("src/domain/ground/SurfaceSandbox.js");
+const { seedFromNumber: seedFromNumber, nextU32: nextU32 } = __require("src/core/rng.js");
+const { derivePlanetSeeds: derivePlanetSeeds } = __require("src/domain/ground/planetSeeds.js");
+const { profileForPlanet: profileForPlanet, TERRAIN_PROFILES: TERRAIN_PROFILES } = __require("src/content/terrainProfiles.js");
+
+// ———— 常量 ————
+
+/**
+ * 地表语义标记（Uint16 位掩码，序列 6 §2.3 / doc7 §3.2）：
+ * ROAD=道路样条、FOUNDATION=建筑地基、CORE_PROTECTED=任务核心保护区、
+ * HAZARD=危险表面、ORE=可采矿脉、BRIDGE_DECK=桥梁甲板。
+ */
+const TERRAIN_FLAGS = {
+  ROAD: 1,
+  FOUNDATION: 2,
+  CORE_PROTECTED: 4,
+  HAZARD: 8,
+  ORE: 16,
+  BRIDGE_DECK: 32,
+};
+
+/** 高度预算（doc7 §3.1：Planet Local 高度 -40m ~ +80m） */
+const MIN_HEIGHT = -40;
+const MAX_HEIGHT = 80;
+
+const CLIFF_NY = 0.86;      // 法线 y 分量低于此值视为陡坡
+const CLIFF_RANGE = 0.38;   // 陡坡增强的过渡区间宽度
+const SQRT2 = Math.SQRT2;
+
+// ———— 小工具 ————
+
+function num(v, dflt) {
+  return Number.isFinite(v) ? v : dflt;
+}
+
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
+function clampInt(v, lo, hi) {
+  return Math.floor(clamp(Math.floor(v), lo, hi));
+}
+
+/** 平滑阶跃（GLSL smoothstep 语义） */
+function smoothstep(e0, e1, x) {
+  const t = clamp((x - e0) / (e1 - e0 || 1e-12), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+function clampByte(v) {
+  return clamp(Math.round(Number.isFinite(v) ? v : 0), 0, 255);
+}
+
+/** 分形布朗运动（2D）：octaves 个八度叠加，输出约 [-1,1] */
+function fbm2(noise, x, y, octaves) {
+  let amp = 1;
+  let freq = 1;
+  let sum = 0;
+  let norm = 0;
+  for (let o = 0; o < octaves; o++) {
+    sum += amp * noise.noise2D(x * freq, y * freq);
+    norm += amp;
+    amp *= 0.5;
+    freq *= 2.0;
+  }
+  return sum / norm;
+}
+
+// ———— 宏观地貌场（多尺度叠加，序列 6 §2.4 步骤 1/2） ————
+
+/**
+ * 创建剖面驱动的宏观地貌采样器。
+ * 大陆 fBm（3 八度）+ 山脊分量 + 盆地/海沟/陨坑/桌山/沙纹/河道等剖面修饰。
+ * 全部由 seeds 派生的独立噪声流驱动；陨坑散布使用 splitmix32 子种子。
+ */
+function createMacroField(profile, seeds) {
+  const noise = createSimplexNoise(seeds.macroTerrainSeed);
+  const detailNoise = createSimplexNoise((seeds.macroTerrainSeed ^ 0x51ed270b) >>> 0);
+  const biomeNoise = createSimplexNoise(seeds.biomeSeed);
+
+  const base = num(profile.base, 8);
+  const amp = num(profile.amp, 10);
+  const ridgeW = num(profile.ridge, 0);
+  const basin = num(profile.basinDepth, 0);
+  const shelf = profile.shelf || null;
+  const trench = profile.trench || null;
+  const mesa = profile.mesa || null;
+  const terrace = num(profile.terrace, 0);
+  const dune = profile.dune || null;
+  const channel = profile.channel || null;
+
+  // 陨坑群：子种子确定性散布（形状参数带限抖动）
+  const craters = [];
+  if (profile.crater && profile.crater.count > 0) {
+    const st = seedFromNumber((seeds.macroTerrainSeed ^ hash32('crater')) >>> 0);
+    const spread = 480;
+    for (let k = 0; k < profile.crater.count; k++) {
+      const r1 = nextU32(st) / 4294967296;
+      const r2 = nextU32(st) / 4294967296;
+      const r3 = nextU32(st) / 4294967296;
+      const r4 = nextU32(st) / 4294967296;
+      craters.push({
+        x: (r1 - 0.5) * spread,
+        z: (r2 - 0.5) * spread,
+        r: num(profile.crater.radius, 20) * (0.6 + 0.8 * r3),
+        d: num(profile.crater.depth, 5) * (0.6 + 0.7 * r4),
+      });
+    }
+  }
+
+  const duneCa = dune ? Math.cos(num(dune.angle, 0)) : 1;
+  const duneSa = dune ? Math.sin(num(dune.angle, 0)) : 0;
+  const duneAmp = dune ? num(dune.amp, 0.8) : 0;
+  const duneWave = dune ? num(dune.wavelength, 16) : 16;
+  const trenchW = trench ? num(trench.width, 0.05) : 0;
+  const trenchD = trench ? num(trench.depth, 10) : 0;
+  const mesaThr = mesa ? 1 - 2 * clamp(num(mesa.fraction, 0.3), 0, 0.9) : 0;
+  const mesaStep = mesa ? Math.max(0.5, num(mesa.step, 2)) : 1;
+  const chanEdge = channel ? 1 - clamp(num(channel.width, 0.1), 0.01, 0.9) : 1;
+  const chanLevel = channel ? num(channel.level, -4) : 0;
+  const shelfLevel = shelf ? num(shelf.level, 0) : 0;
+  const shelfThr = shelf ? num(shelf.threshold, 0.2) : 0;
+
+  /**
+   * 宏观高度采样：返回 { y: 高度, channelK: 河道掩码强度, trenchK: 断层掩码强度 }。
+   * y 尚未做高度预算钳制（由 evalPoint 统一钳制到 [-40, +80]）。
+   */
+  function heightAt(wx, wz) {
+    // 1) 大陆 fBm（3 八度）
+    let y = base + fbm2(noise, wx * 0.0055, wz * 0.0055, 3) * amp;
+    // 2) 山脊分量（ridged：|n| 反相平方锐化）
+    if (ridgeW > 0) {
+      const r = 1 - Math.abs(noise.noise2D(wx * 0.0105 + 13.7, wz * 0.0105 - 7.3));
+      y += amp * ridgeW * (r * r * 1.6 - 0.35);
+    }
+    // 3) 低频盆地下切
+    if (basin > 0) {
+      const b = fbm2(noise, wx * 0.0035 - 41.2, wz * 0.0035 + 17.8, 2);
+      if (b > 0) y -= basin * b * b;
+    }
+    // 4) 浅海台地抬升（海盆剖面）
+    if (shelf) {
+      const s = fbm2(noise, wx * 0.004 + 91.3, wz * 0.004 - 33.8, 2);
+      if (s > shelfThr) {
+        const k = smoothstep(shelfThr, shelfThr + 0.22, s);
+        y += (shelfLevel - y) * k * 0.9;
+      }
+    }
+    // 5) 断层线掩码：海沟 / 裂隙 / 峡谷
+    let trenchK = 0;
+    if (trench) {
+      const t = Math.abs(noise.noise2D(wx * 0.0062 + 101.3, wz * 0.0062 - 55.9));
+      if (t < trenchW) {
+        const k = 1 - t / trenchW;
+        trenchK = k * k * (3 - 2 * k);
+        y -= trenchD * trenchK;
+      }
+    }
+    // 6) 陨坑碗 + 环形山肩
+    for (let c = 0; c < craters.length; c++) {
+      const cr = craters[c];
+      const ddx = wx - cr.x;
+      const ddz = wz - cr.z;
+      const dd = Math.sqrt(ddx * ddx + ddz * ddz) / cr.r;
+      if (dd < 1) {
+        y -= cr.d * (1 - dd * dd);
+      } else if (dd < 1.35) {
+        const rim = 1 - (dd - 1) / 0.35;
+        y += cr.d * 0.32 * rim * rim;
+      }
+    }
+    // 7) 平顶桌山：平台掩码内高度量化（顶平壁陡）
+    if (mesa) {
+      const m = fbm2(noise, wx * 0.0045 + 77.7, wz * 0.0045 - 21.4, 2);
+      if (m > mesaThr) {
+        const k = smoothstep(mesaThr, mesaThr + 0.10, m);
+        const q = Math.round(y / mesaStep) * mesaStep;
+        y += (q - y) * k;
+      }
+    }
+    // 8) 阶地量化（礁台/酸液阶地）
+    if (terrace > 0) {
+      const q = Math.round(y / terrace) * terrace;
+      y += (q - y) * 0.85;
+    }
+    // 9) 风蚀沙波纹
+    if (dune) {
+      const mask = 0.5 + 0.5 * detailNoise.noise2D(wx * 0.02, wz * 0.02);
+      y += duneAmp * Math.sin(((wx * duneCa + wz * duneSa) * 2 * Math.PI) / duneWave) * mask;
+    }
+    // 10) 低频谷掩码：熔岩河 / 河道
+    let channelK = 0;
+    if (channel) {
+      const v = 1 - Math.abs(noise.noise2D(wx * 0.009 + 37.2, wz * 0.009 - 91.4));
+      if (v > chanEdge) {
+        channelK = smoothstep(chanEdge, 1, v);
+        y += (chanLevel - y) * channelK;
+      }
+    }
+    return { y, channelK, trenchK };
+  }
+
+  return { heightAt, noise, detailNoise, biomeNoise };
+}
+
+// ———— 逐点评估（纯函数、确定性） ————
+
+/**
+ * 评估地表一点：高度 + 4 通道材质权重 + 生态 id + 语义标记 + 温度/湿度。
+ * 纯函数 of (field 参数, wx, wz)：无副作用，同输入逐位一致。
+ * 顺序：宏观场 → 材质/生态 → 危险标记 → siteModifier（Wave C SDF 挂点）→ 高度预算钳制。
+ *
+ * @param {object} field createTerrainField 返回的地形场
+ * @param {number} wx Planet Local x（米）
+ * @param {number} wz Planet Local z（米）
+ * @returns {{ y:number, weights:number[4], biomeId:number, flags:number, temp:number, moisture:number }}
+ */
+function evalPoint(field, wx, wz) {
+  const macro = field._macro;
+  const profile = field.profile;
+
+  // 1) 宏观地貌
+  const h = macro.heightAt(wx, wz);
+  let y = h.y;
+
+  // 2) 生态分区与材质权重
+  const nBiomes = profile.biomeIds.length;
+  const bMask = fbm2(macro.biomeNoise, wx * 0.011, wz * 0.011, 2);
+  const b01 = bMask * 0.5 + 0.5;
+  let biomeId = clampInt(Math.floor(b01 * nBiomes * 0.999), 0, nBiomes - 1);
+
+  const glow = num(profile.glowVeins, 0);
+  let w1 = 0; // 崖壁通道由网格构建器按陡坡注入
+  let w2 = Math.round(clamp((b01 - 0.52) / 0.48, 0, 1) * 190); // 生态/强调
+  let w3 = 0;
+  if (glow > 0) {
+    const veinRaw = Math.abs(macro.detailNoise.noise2D(wx * 0.028 - 5.1, wz * 0.028 + 9.7));
+    const vein = smoothstep(0.72, 0.9, veinRaw) * glow;
+    w3 = Math.round(vein * 235);
+    if (vein > 0.55) biomeId = nBiomes - 1; // 荧光脉络专属生态
+  }
+  if (w2 + w3 > 250) w3 = Math.max(0, 250 - w2);
+  let w0 = 255 - w2 - w3; // 地表/基底兜底，四通道恒和 255
+
+  // 3) 温度 / 湿度（海拔递减 + 低频气候噪声）
+  let temp = clamp(
+    0.5 + 0.3 * macro.detailNoise.noise2D(wx * 0.004 + 501.7, wz * 0.004 - 303.1) - Math.max(0, y) * 0.006,
+    0, 1,
+  );
+  let moisture = clamp(0.35 + 0.5 * b01, 0, 1);
+  if (profile.seaLevel != null && y < profile.seaLevel) moisture = 1;
+
+  // 4) 语义标记
+  let flags = 0;
+  const rule = profile.hazardRule;
+  if (profile.seaLevel != null && y < profile.seaLevel) {
+    flags |= TERRAIN_FLAGS.HAZARD; // 海平面以下 = 高压/淹没危险
+  }
+  if (rule === 'lowland_gas' && Number.isFinite(profile.hazardLevel) && y < profile.hazardLevel) {
+    flags |= TERRAIN_FLAGS.HAZARD; // 低洼毒气湖
+  }
+  if (rule === 'lava_channel' && h.channelK > 0.35) {
+    flags |= TERRAIN_FLAGS.HAZARD; // 岩浆河道
+  }
+  if (rule === 'crevasse' && h.trenchK > 0.5) {
+    flags |= TERRAIN_FLAGS.HAZARD; // 冰裂隙
+  }
+  if (macro.detailNoise.noise2D(wx * 0.05 + 800.3, wz * 0.05 - 313.7) > 0.62) {
+    flags |= TERRAIN_FLAGS.ORE; // 可采矿脉
+  }
+
+  // 5) 人工任务核心 SDF 挂点（Wave C MissionSiteBlueprint；默认无）
+  if (field.siteModifier) {
+    const mod = field.siteModifier(wx, wz, {
+      y,
+      weights: [w0, w1, w2, w3],
+      biomeId,
+      flags,
+      temp,
+      moisture,
+    });
+    if (mod) {
+      if (Number.isFinite(mod.dy)) y += mod.dy;
+      if (Number.isFinite(mod.biomeId)) biomeId = mod.biomeId;
+      if (Number.isFinite(mod.flags)) flags |= mod.flags;
+      if (mod.weights) {
+        let m0 = clampByte(mod.weights[0]);
+        let m1 = clampByte(mod.weights[1]);
+        let m2 = clampByte(mod.weights[2]);
+        let m3 = clampByte(mod.weights[3]);
+        let excess = m0 + m1 + m2 + m3 - 255;
+        if (excess > 0) {
+          const take0 = Math.min(m0, excess); m0 -= take0; excess -= take0;
+        }
+        if (excess > 0) { const take2 = Math.min(m2, excess); m2 -= take2; excess -= take2; }
+        if (excess > 0) { const take1 = Math.min(m1, excess); m1 -= take1; excess -= take1; }
+        w0 = m0; w1 = m1; w2 = m2; w3 = m3;
+      }
+    }
+  }
+
+  // 6) 高度预算（doc7 §3.1：[-40, +80]m，含 SDF 修正后统一钳制）
+  y = clamp(y, MIN_HEIGHT, MAX_HEIGHT);
+
+  return {
+    y,
+    weights: [w0, w1, w2, w3],
+    biomeId: clamp(biomeId | 0, 0, 255),
+    flags: flags & 0xffff,
+    temp,
+    moisture,
+  };
+}
+
+// ———— 场创建 ————
+
+/**
+ * 解析 opts.profile：字符串 id → 注册表查表；对象 → 直接使用；缺省 → 行星查表。
+ */
+function resolveProfile(profileOpt, planet) {
+  if (typeof profileOpt === 'string') {
+    const p = TERRAIN_PROFILES[profileOpt];
+    if (p) return p;
+  }
+  if (profileOpt && typeof profileOpt === 'object') return profileOpt;
+  return profileForPlanet(planet, planet && planet.primaryThemeId);
+}
+
+/**
+ * 创建连续地形场（分配 8×8 区块的 TerrainChunk 数据结构，但尚未构建网格）。
+ * @param {{seed:number}} world 世界实体（只读取 world.seed）
+ * @param {string|number} planetId 行星实体 id
+ * @param {{
+ *   profile?:string|object,            // 剖面覆盖（id 或对象）
+ *   siteModifier?:(wx:number,wz:number,base:object)=>object|null, // Wave C SDF 挂点
+ *   sizeMeters?:number,                // 默认 512
+ *   chunkMeters?:number,               // 默认 64
+ *   lod0Step?:number,                  // 默认 1（米/顶点）
+ * }} [opts]
+ */
+function createTerrainField(world, planetId, opts = {}) {
+  const sizeMeters = num(opts.sizeMeters, 512);
+  const chunkMeters = num(opts.chunkMeters, 64);
+  const lod0Step = Math.max(0.25, num(opts.lod0Step, 1));
+  const chunksX = Math.max(1, Math.round(sizeMeters / chunkMeters));
+  const chunksZ = chunksX;
+  const gridSize = Math.max(2, Math.round(chunkMeters / lod0Step) + 1);
+  const originX = -sizeMeters / 2;
+  const originZ = -sizeMeters / 2;
+
+  const planet = (world && world.entities && world.entities.planets && world.entities.planets[planetId]) || null;
+  const profile = resolveProfile(opts.profile, planet);
+  const seeds = derivePlanetSeeds(world, planetId);
+
+  const field = {
+    planetId,
+    seed: seeds.planetSeed,
+    seeds,
+    profile,
+    generatorVersion: 1,
+    sourceRevision: 1,
+    sizeMeters,
+    chunkMeters,
+    lod0Step,
+    chunksX,
+    chunksZ,
+    originX,
+    originZ,
+    siteModifier: typeof opts.siteModifier === 'function' ? opts.siteModifier : null,
+    chunks: [],
+    evalPoint: null, // 下方回填闭包
+    _macro: createMacroField(profile, seeds),
+  };
+  field.evalPoint = (wx, wz) => evalPoint(field, wx, wz);
+
+  const cells = gridSize - 1;
+  const indexCount = cells * cells * 6;
+  for (let cz = 0; cz < chunksZ; cz++) {
+    for (let cx = 0; cx < chunksX; cx++) {
+      const id = `chunk_${cx}_${cz}`;
+      const nn = gridSize * gridSize;
+      field.chunks[cz * chunksX + cx] = {
+        id,
+        planetId,
+        seed: (seeds.macroTerrainSeed ^ hash32(id)) >>> 0,
+        lod: 0,
+        cx,
+        cz,
+        gridSize,
+        bounds: {
+          minX: originX + cx * chunkMeters,
+          maxX: originX + (cx + 1) * chunkMeters,
+          minZ: originZ + cz * chunkMeters,
+          maxZ: originZ + (cz + 1) * chunkMeters,
+          minY: Infinity, // 构建时统计
+          maxY: -Infinity,
+        },
+        vertices: {
+          position: new Float32Array(nn * 3),
+          normal: new Float32Array(nn * 3),
+          tangent: new Float32Array(nn * 3),
+          materialWeights: new Uint8Array(nn * 4),
+          biomeId: new Uint8Array(nn),
+          flags: new Uint16Array(nn),
+          aux: new Float32Array(nn * 2), // [temp, moisture]
+        },
+        indices: new Uint32Array(indexCount),
+        sourceRevision: 1,
+        meshRevision: 0,
+        dirty: true,
+      };
+    }
+  }
+  return field;
+}
+
+// ———— 网格构建（doc7 §8.1 蓝本，逐条实现） ————
+
+/**
+ * 构建单个区块的三角化网格：采样 → 曲率自适应对角线 + 严格 CCW 索引 →
+ * 面积加权法线 + 切线 + 陡坡材质增强。零外部依赖；同输入逐位一致。
+ *
+ * @param {object} chunk createTerrainField 产出的区块（vertices 缓冲就绪）
+ * @param {(wx:number, wz:number)=>{y:number, weights:number[], biomeId:number, flags:number, temp:number, moisture:number}} evalPoint
+ *        已融合宏观地貌 + MissionSiteBlueprint SDF 的高度评估函数
+ * @returns {object} 同一 chunk（meshRevision 已对齐 sourceRevision，dirty=false）
+ */
+function buildTriangulatedChunkMesh(chunk, evalPoint) {
+  const N = chunk.gridSize;
+  const cells = N - 1;
+  const step = (chunk.bounds.maxX - chunk.bounds.minX) / cells;
+  const ox = chunk.bounds.minX;
+  const oz = chunk.bounds.minZ;
+  const verts = chunk.vertices;
+  const pos = verts.position;
+  const nor = verts.normal;
+  const tan = verts.tangent;
+  const wgt = verts.materialWeights;
+  const bio = verts.biomeId;
+  const flg = verts.flags;
+  const aux = verts.aux;
+  const nn = N * N;
+  const yArr = new Float32Array(nn); // 采样高度暂存（对角线选择用）
+
+  chunk.bounds.minY = Infinity;
+  chunk.bounds.maxY = -Infinity;
+
+  // 步骤 1：采样 N×N 顶点（y 非有限 → 0.0；aux = temp/moisture；统计 minY/maxY）
+  for (let j = 0; j < N; j++) {
+    const wz = oz + j * step;
+    for (let i = 0; i < N; i++) {
+      const vIdx = j * N + i;
+      const wx = ox + i * step;
+      const s = evalPoint(wx, wz);
+      let y = s.y;
+      if (!Number.isFinite(y)) y = 0.0;
+      yArr[vIdx] = y;
+      pos[vIdx * 3] = wx;
+      pos[vIdx * 3 + 1] = y;
+      pos[vIdx * 3 + 2] = wz;
+      const w = s.weights;
+      wgt[vIdx * 4] = clampByte(w ? w[0] : 255);
+      wgt[vIdx * 4 + 1] = clampByte(w ? w[1] : 0);
+      wgt[vIdx * 4 + 2] = clampByte(w ? w[2] : 0);
+      wgt[vIdx * 4 + 3] = clampByte(w ? w[3] : 0);
+      bio[vIdx] = (s.biomeId || 0) & 255;
+      flg[vIdx] = (s.flags || 0) & 0xffff;
+      aux[vIdx * 2] = Number.isFinite(s.temp) ? s.temp : 0.5;
+      aux[vIdx * 2 + 1] = Number.isFinite(s.moisture) ? s.moisture : 0.0;
+      if (y < chunk.bounds.minY) chunk.bounds.minY = y;
+      if (y > chunk.bounds.maxY) chunk.bounds.maxY = y;
+    }
+  }
+
+  // 步骤 2：曲率自适应对角线切分 + 严格 CCW（自 +Y 俯视逆时针，外法线朝 +Y）
+  const indices = chunk.indices;
+  let t = 0;
+  for (let j = 0; j < cells; j++) {
+    for (let i = 0; i < cells; i++) {
+      const v00 = j * N + i;
+      const v10 = v00 + 1;
+      const v01 = (j + 1) * N + i;
+      const v11 = v01 + 1;
+      // 奇偶交替微偏置，消除全图单一方向对角线纹理
+      const checkerboardBias = (((i + j) & 1) === 0) ? -0.02 : 0.02;
+      const diffDiagA = Math.abs(yArr[v00] - yArr[v11]) + checkerboardBias;
+      const diffDiagB = Math.abs(yArr[v10] - yArr[v01]);
+      if (diffDiagA <= diffDiagB) {
+        indices[t++] = v00; indices[t++] = v01; indices[t++] = v11;
+        indices[t++] = v00; indices[t++] = v11; indices[t++] = v10;
+      } else {
+        indices[t++] = v00; indices[t++] = v01; indices[t++] = v10;
+        indices[t++] = v10; indices[t++] = v01; indices[t++] = v11;
+      }
+    }
+  }
+
+  // 步骤 3：面积加权法线累积 + 归一化 + 切线 + 陡坡材质增强
+  nor.fill(0);
+  for (let k = 0; k < indices.length; k += 3) {
+    const ia = indices[k] * 3;
+    const ib = indices[k + 1] * 3;
+    const ic = indices[k + 2] * 3;
+    const ax = pos[ia], ay = pos[ia + 1], az = pos[ia + 2];
+    const b1x = pos[ib] - ax, b1y = pos[ib + 1] - ay, b1z = pos[ib + 2] - az;
+    const c1x = pos[ic] - ax, c1y = pos[ic + 1] - ay, c1z = pos[ic + 2] - az;
+    const nx = b1y * c1z - b1z * c1y; // (B-A)×(C-A)，面积加权
+    const ny = b1z * c1x - b1x * c1z;
+    const nz = b1x * c1y - b1y * c1x;
+    nor[ia] += nx; nor[ia + 1] += ny; nor[ia + 2] += nz;
+    nor[ib] += nx; nor[ib + 1] += ny; nor[ib + 2] += nz;
+    nor[ic] += nx; nor[ic + 1] += ny; nor[ic + 2] += nz;
+  }
+  for (let v = 0; v < nn; v++) {
+    const o = v * 3;
+    const len = Math.hypot(nor[o], nor[o + 1], nor[o + 2]) || 1.0;
+    let nx = nor[o] / len;
+    let ny = nor[o + 1] / len;
+    let nz = nor[o + 2] / len;
+    if (ny < 0) { nx = -nx; ny = -ny; nz = -nz; } // 强制朝上
+    nor[o] = nx; nor[o + 1] = ny; nor[o + 2] = nz;
+    // 切线 = (ny, -nx, 0) 归一化
+    const tl = Math.hypot(ny, -nx) || 1.0;
+    tan[o] = ny / tl;
+    tan[o + 1] = -nx / tl;
+    tan[o + 2] = 0;
+    // 陡坡增强：崖壁权重注入通道 1，并归一到 255 总和
+    if (ny < CLIFF_NY) {
+      const cliffFactor = Math.min(1.0, (CLIFF_NY - ny) / CLIFF_RANGE);
+      const addG = Math.round(cliffFactor * 200);
+      const k4 = v * 4;
+      let w0 = wgt[k4];
+      let w1 = Math.min(255, wgt[k4 + 1] + addG);
+      let w2 = wgt[k4 + 2];
+      // 归一：超出的权重从基底/生态通道等比让出，保证 w3 = 255 - 前三通道 有效
+      let excess = w0 + w1 + w2 - 255;
+      if (excess > 0) {
+        const total = w0 + w2;
+        if (total > 0) {
+          const take0 = Math.min(w0, Math.ceil((excess * w0) / total));
+          w0 -= take0;
+          excess -= take0;
+        }
+        if (excess > 0) {
+          const take2 = Math.min(w2, excess);
+          w2 -= take2;
+          excess -= take2;
+        }
+        if (excess > 0) w1 = Math.max(0, w1 - excess);
+      }
+      wgt[k4] = w0;
+      wgt[k4 + 1] = w1;
+      wgt[k4 + 2] = w2;
+      wgt[k4 + 3] = Math.max(0, 255 - w0 - w1 - w2);
+    }
+  }
+
+  chunk.meshRevision = chunk.sourceRevision;
+  chunk.dirty = false;
+  return chunk;
+}
+
+// ———— 便捷构建 ————
+
+/**
+ * 创建 + 构建全部 8×8 区块（meshRevision 对齐、dirty 清零）。
+ * 高度预算 [-40,+80]m 在 evalPoint 统一钳制。
+ */
+function buildTerrainField(world, planetId, opts = {}) {
+  const field = createTerrainField(world, planetId, opts);
+  for (let i = 0; i < field.chunks.length; i++) {
+    buildTriangulatedChunkMesh(field.chunks[i], field.evalPoint);
+  }
+  return field;
+}
+
+Object.assign(__exports, { TERRAIN_FLAGS, MIN_HEIGHT, MAX_HEIGHT, evalPoint, createTerrainField, buildTriangulatedChunkMesh, buildTerrainField });
+
+});
+__register("src/content/terrainProfiles.js", function (__exports, __require) {
+/**
+ * content/terrainProfiles.js — 行星地貌剖面注册表（doc7 TASK-1.1，纯数据）
+ *
+ * 每个剖面描述一种「宏观地貌场」的参数组合（序列 6 §2.4 / doc7 §4.1），
+ * 由 src/domain/ground/terrainField.js 的宏观场采样器消费：
+ *
+ *  - base/amp/ridge        大陆 fBm 基准高度(m) / 振幅(m) / 山脊权重(0..1)
+ *  - terrace?              阶地量化步长(m)；缺省 = 无阶地
+ *  - seaLevel?             海平面高程(m)；null = 无流体表面
+ *  - basinDepth?           低频盆地下切深度(m)
+ *  - trench?               断层线/裂谷/海沟/峡谷掩码 { depth:m, width:0..0.2 }
+ *  - crater?               陨石坑群 { count, radius:m, depth:m }（子种子散布）
+ *  - mesa?                 平顶桌山/盐坪平台化 { fraction:0..1, step:m }
+ *  - dune?                 风蚀沙波纹 { amp:m, wavelength:m, angle:rad }
+ *  - channel?              熔岩河/河道谷掩码 { level:m, width:0..0.3 }
+ *  - shelf?                浅海台地抬升 { level:m, threshold:-1..1 }
+ *  - glowVeins?            生物荧光脉络强度(0..1)，写入材质通道 3
+ *  - hazardLevel?          lowland_gas 危险规则的海拔阈值(m)
+ *  - materialPalette       4 通道语义材质 id：0=地表/基底 1=崖壁/层理 2=生态/强调 3=道路/生物荧光
+ *  - biomeIds              生态/地质分区 id（顶点 biomeId 存其下标）
+ *  - hazardRule            危险标记规则：none|below_sea|crevasse|lowland_gas|lava_channel
+ *  - flagsRule             附加语义标记规则（Phase 1 为 none；道路/桥面由 Wave C SDF 写入）
+ *
+ * 零逻辑、零副作用；仅 profileForPlanet 提供只读查表。
+ */
+
+const TERRAIN_PROFILES = {
+  /** 赤砾边疆（desert/rocky）：60% 干涸河床盆地 + 40% 平顶砂岩桌山、环形陨坑、风蚀沙波纹 */
+  mesa_canyon_crater_steppe: {
+    id: 'mesa_canyon_crater_steppe',
+    label: '平顶峡谷陨坑草原',
+    base: 8, amp: 14, ridge: 0.35,
+    seaLevel: null,
+    basinDepth: 4,
+    trench: { depth: 14, width: 0.045 },   // 风蚀峡谷（断层掩码）
+    crater: { count: 7, radius: 26, depth: 7 },
+    mesa: { fraction: 0.40, step: 3 },     // 40% 面积顶平壁陡桌山
+    dune: { amp: 0.8, wavelength: 18, angle: 0.6 },
+    materialPalette: ['red_regolith', 'sandstone_strata', 'sand_gold_scrub', 'dust_road'],
+    biomeIds: ['red_regolith_flats', 'mesa_strata', 'crater_basin', 'dune_field'],
+    hazardRule: 'none',
+    flagsRule: 'none',
+  },
+
+  /** 碧渊海洋（ocean）：海平面 -4m，浅海环礁台地、中层沙脊平原、-32m 深渊海沟 */
+  ocean_basin_reef_trench: {
+    id: 'ocean_basin_reef_trench',
+    label: '海盆礁脊海沟',
+    base: -12, amp: 9, ridge: 0.15,
+    seaLevel: -4,
+    basinDepth: 8,
+    shelf: { level: 1.0, threshold: 0.18 }, // 浅海台地抬升至约 +1..+6m
+    trench: { depth: 20, width: 0.05 },     // 沿断层骤降 → 约 -32m 深渊海沟
+    terrace: 4,                              // 珊瑚礁阶地
+    dune: { amp: 0.5, wavelength: 14, angle: 2.1 }, // 海底沙脊
+    materialPalette: ['abyssal_sediment', 'basalt_cliff', 'reef_coral', 'glow_kelp_road'],
+    biomeIds: ['shelf_reef', 'mid_plain', 'trench_dark', 'kelp_grove'],
+    hazardRule: 'below_sea',                // 海平面以下 = 高压区
+    flagsRule: 'none',
+  },
+
+  /** 永冬炉境（ice）：四周冰崖环抱的避风冰川盆地，外围 -25m 深冰裂隙 */
+  glacial_basin_crevasse: {
+    id: 'glacial_basin_crevasse',
+    label: '冰川盆地裂隙',
+    base: 6, amp: 12, ridge: 0.55,
+    seaLevel: null,
+    basinDepth: 16,
+    trench: { depth: 25, width: 0.04 },     // 深冰蓝裂隙（仅可经加热钢桥通行）
+    materialPalette: ['snow_ice_white', 'blue_ice_cliff', 'wet_frozen_soil', 'heated_road'],
+    biomeIds: ['ice_basin', 'blue_cliff', 'crevasse_field', 'snow_drift'],
+    hazardRule: 'crevasse',
+    flagsRule: 'none',
+  },
+
+  /** 永夜晶荒（ice/rocky）：干燥黑岩冻原 + 月白盐晶盆地，严禁积雪冰川化 */
+  dry_salt_polar: {
+    id: 'dry_salt_polar',
+    label: '干盐极夜荒原',
+    base: 4, amp: 9, ridge: 0.30,
+    seaLevel: null,
+    basinDepth: 10,
+    trench: { depth: 10, width: 0.035 },    // 断层脊线
+    mesa: { fraction: 0.28, step: 2 },      // 盐晶壳平坦盆地
+    glowVeins: 0.35,                         // 紫晶簇冷冽荧光
+    materialPalette: ['dark_frozen_rock', 'grey_purple_strata', 'moon_white_salt', 'violet_beacon'],
+    biomeIds: ['dark_tundra', 'fault_ridge', 'salt_basin', 'crystal_field'],
+    hazardRule: 'none',
+    flagsRule: 'none',
+  },
+
+  /** 硫雾沼泽（toxic）：焦黑岩柱平台 + 环状酸液阶地池，海拔 <4.5m 洼地为毒气湖 */
+  fumarole_acid_terraces: {
+    id: 'fumarole_acid_terraces',
+    label: '喷气孔酸液阶地',
+    base: 5, amp: 10, ridge: 0.40,
+    seaLevel: null,
+    basinDepth: 6,
+    terrace: 2.5,                            // 环状酸液阶地
+    trench: { depth: 8, width: 0.05 },
+    hazardLevel: 4.5,
+    materialPalette: ['charred_rock', 'altered_strata', 'sulfur_crust', 'acid_glow'],
+    biomeIds: ['black_platform', 'acid_terraces', 'fumarole_cone', 'gas_basin'],
+    hazardRule: 'lowland_gas',
+    flagsRule: 'none',
+  },
+
+  /** 星辉生物圈（rocky/ocean）：潘多拉林冠湿地，生物荧光脉络即地形灯光 */
+  biolume_rainforest: {
+    id: 'biolume_rainforest',
+    label: '星辉雨林',
+    base: 7, amp: 13, ridge: 0.45,
+    seaLevel: null,
+    basinDepth: 8,
+    trench: { depth: 12, width: 0.04 },     // 溪谷
+    crater: { count: 3, radius: 18, depth: 4 }, // 坍陷洼池
+    glowVeins: 1.0,
+    materialPalette: ['deep_canopy_floor', 'wet_moss_cliff', 'glow_flora', 'biolume_vein'],
+    biomeIds: ['moss_floor', 'root_cliff', 'spore_grove', 'glow_vein_net'],
+    hazardRule: 'none',
+    flagsRule: 'none',
+  },
+
+  /** 黑曜熔海（lava）：80% 熔岩黑山脊（高差约 +28m），谷底 -4m 岩浆河 */
+  obsidian_ridge_lava: {
+    id: 'obsidian_ridge_lava',
+    label: '黑曜山脊熔海',
+    base: 8, amp: 16, ridge: 0.85,
+    seaLevel: null,
+    basinDepth: 4,
+    channel: { level: -4, width: 0.10 },    // 低频谷掩码 → 蜿蜒岩浆大河
+    materialPalette: ['obsidian_black', 'basalt_hex_strata', 'scoria_red', 'obsidian_bridge'],
+    biomeIds: ['obsidian_ridge', 'hex_pillar_cliff', 'lava_bank', 'bridge_deck'],
+    hazardRule: 'lava_channel',
+    flagsRule: 'none',
+  },
+
+  // ———— 扩展 P4 主题剖面（doc7 §4.0 矩阵 / doc6 §4.5.8-4.5.18，TASK-4.1/4.2） ————
+
+  /** 棱镜晶原（rocky/ice）：六棱水晶山峰、几何折射峡谷、彩虹色散光带 */
+  crystal_spire_fields: {
+    id: 'crystal_spire_fields',
+    label: '棱镜晶尖原野',
+    base: 8, amp: 18, ridge: 0.75,
+    seaLevel: null,
+    basinDepth: 4,
+    trench: { depth: 16, width: 0.05 },     // 折射光带峡谷
+    glowVeins: 0.25,                         // 色散光斑（材质通道 3 微光）
+    materialPalette: ['prism_quartz_ground', 'crystal_spire_strata', 'refraction_bloom', 'lattice_relay_road'],
+    biomeIds: ['quartz_flats', 'spire_forest', 'refraction_canyon', 'dispersion_band'],
+    hazardRule: 'none',
+    flagsRule: 'none',
+  },
+
+  /** 镜盐荒原（desert）：乌尤尼式镜面盐壳、浅粉尘丘、孤立灰紫岩山，卤水腔塌陷危险 */
+  salt_mirror_flats: {
+    id: 'salt_mirror_flats',
+    label: '镜面盐坪',
+    base: 5, amp: 4, ridge: 0.08,            // 极平坦：天地镜像低频反射
+    seaLevel: null,
+    basinDepth: 2,
+    mesa: { fraction: 0.10, step: 6 },       // 孤立灰紫岛山（inselberg 平台化）
+    dune: { amp: 0.5, wavelength: 22, angle: 0.3 }, // 浅粉尘丘
+    materialPalette: ['salt_crust_white', 'purple_rock_strata', 'pink_dust_scrub', 'brine_pipe_road'],
+    biomeIds: ['mirror_salt_flat', 'inselberg_cliff', 'pink_dust_belt', 'brine_well'],
+    hazardRule: 'crevasse',                  // 盐壳下卤水暗腔塌陷
+    flagsRule: 'none',
+  },
+
+  /** 甲烷雾海（ice/ocean）：-6m 粘稠暗青液态甲烷海、蓝绿水冰海岸、浮冰航道 */
+  methane_shelf_ice: {
+    id: 'methane_shelf_ice',
+    label: '甲烷冰架海岸',
+    base: -12, amp: 7, ridge: 0.12,
+    seaLevel: -6,                            // 与 themePayload THEME_RENDER waterLevel 一致
+    basinDepth: 6,
+    shelf: { level: 0.5, threshold: 0.16 },  // 蓝绿水冰海岸台地
+    trench: { depth: 14, width: 0.045 },     // 浮冰航道（冰间水路）
+    terrace: 3,                              // 冰岸阶地
+    dune: { amp: 0.4, wavelength: 12, angle: 2.6 }, // 海底冰脊
+    materialPalette: ['methane_ice_coast', 'frost_rock_strata', 'dark_hydrocarbon_sea', 'cryo_pipeline'],
+    biomeIds: ['ice_shelf', 'frost_coast', 'methane_deep', 'lead_channel'],
+    hazardRule: 'below_sea',                 // 海平面以下 = 低温烃海承压区
+    flagsRule: 'none',
+  },
+
+  /** 晨昏环带（rocky/lava/ice）：狭长暮光带沿 X 轴温度梯度（昼侧灼金/夜侧蓝黑），
+   *  断层裂谷带 + 融水河道；跨温区输能走廊沿裂谷两侧布局 */
+  terminator_rift_band: {
+    id: 'terminator_rift_band',
+    label: '晨昏裂谷带',
+    base: 7, amp: 13, ridge: 0.50,
+    seaLevel: null,
+    basinDepth: 6,
+    trench: { depth: 18, width: 0.06 },      // 暮光带中央断层裂谷
+    channel: { level: -1, width: 0.07 },     // 融水溪谷（夜侧冰缘融水）
+    materialPalette: ['scorched_gold_regolith', 'twilight_strata', 'night_blue_ice', 'melt_road'],
+    biomeIds: ['day_scorch_flats', 'terminator_band', 'night_frost_field', 'melt_valley'],
+    hazardRule: 'none',                      // 温区危险由 EXPANSION_GAMEPLAY.hazardNote 承载
+    flagsRule: 'none',
+  },
+
+  /** 菌海深渊（toxic/rocky）：双层结构 — 巨型菌盖穹顶层 + 幽暗低谷，发光菌丝网；
+   *  双层地图高度意图：25m 菌盖穹顶层由 mesa 台地化表达，低谷为地下湖/孢子浓雾区 */
+  fungal_dome_underscape: {
+    id: 'fungal_dome_underscape',
+    label: '菌盖穹顶地底',
+    base: 4, amp: 10, ridge: 0.45,
+    seaLevel: null,
+    basinDepth: 12,                          // 幽暗低谷
+    trench: { depth: 10, width: 0.06 },      // 菌盖间沟壑（地下湖谷）
+    mesa: { fraction: 0.30, step: 8 },       // 巨型伞菌盖穹顶层（第二层平台面）
+    glowVeins: 0.7,                          // 发光菌丝网
+    hazardLevel: 3.5,                        // 低洼孢子浓雾区
+    materialPalette: ['cave_underrock', 'fungal_cap_strata', 'spore_glow_mat', 'mycelium_road'],
+    biomeIds: ['underscape_floor', 'dome_cap_tiers', 'spore_lake_basin', 'mycelium_grove'],
+    hazardRule: 'lowland_gas',
+    flagsRule: 'none',
+  },
+
+  /** 机械圣骸（artificial）：断裂沉降六角金属装甲板、输能脊、电路沟壑、不对称坍塌塔 */
+  fractured_hex_plates: {
+    id: 'fractured_hex_plates',
+    label: '断裂六角装甲板',
+    base: 9, amp: 5, ridge: 0.10,            // 大体平整但局部重力沉降错位
+    seaLevel: null,
+    mesa: { fraction: 0.55, step: 4 },       // 沉降装甲板平台面（高度错位）
+    trench: { depth: 7, width: 0.05 },       // 电路沟壑
+    crater: { count: 3, radius: 16, depth: 6 }, // 坍塌沉降坑
+    glowVeins: 0.45,                         // 能量青输能脊微光
+    materialPalette: ['hull_plate_dark', 'oxidized_steel_strata', 'energy_conduit_glow', 'conduit_road'],
+    biomeIds: ['hex_plate_deck', 'sunken_plate_cliff', 'circuit_trench', 'energy_spine'],
+    hazardRule: 'none',                      // 哨卫/电弧危险由 EXPANSION_GAMEPLAY 承载
+    flagsRule: 'none',
+  },
+
+  /** 硅晶风暴（desert/rocky）：半透明熔融玻璃化沙丘、刀刃状硅质山脊（风蚀取向固定） */
+  glass_dune_blades: {
+    id: 'glass_dune_blades',
+    label: '玻璃沙丘刃脊',
+    base: 6, amp: 12, ridge: 0.70,
+    seaLevel: null,
+    basinDepth: 3,
+    dune: { amp: 1.6, wavelength: 13, angle: 1.15 }, // 玻璃沙波纹（主导风向取向）
+    trench: { depth: 9, width: 0.035 },      // 风蚀槽
+    materialPalette: ['vitrified_sand_ground', 'silica_blade_strata', 'glass_glint_scrub', 'shelter_road'],
+    biomeIds: ['glass_dune_field', 'blade_ridge_cliff', 'abrasion_flats', 'wind_shadow_basin'],
+    hazardRule: 'none',                      // 风暴磨蚀/能见度由 EXPANSION_GAMEPLAY 承载
+    flagsRule: 'none',
+  },
+
+  /** 磁暴极光荒原（rocky/artificial）：沿磁力线倾斜的螺旋磁铁矿丘、电弧地裂、极夜蓝黑 */
+  magnetic_spire_tundra: {
+    id: 'magnetic_spire_tundra',
+    label: '磁螺尖丘苔原',
+    base: 5, amp: 11, ridge: 0.60,
+    seaLevel: null,
+    basinDepth: 8,
+    trench: { depth: 12, width: 0.04 },      // 电弧地裂（避雷屏蔽塔窗口路径）
+    glowVeins: 0.5,                          // 磁暴青白电离微光
+    materialPalette: ['magnetite_tundra', 'ionized_strata', 'aurora_glint_mat', 'shielded_conduit_road'],
+    biomeIds: ['magnetite_mound', 'spire_cliff', 'arc_rift_floor', 'shielded_plaza'],
+    hazardRule: 'crevasse',                  // 电弧裂隙危险
+    flagsRule: 'none',
+  },
+
+  /** 巨木云冠（rocky）：底层幽暗根谷 + 树冠第二层（双层地图高度意图：百米巨木平展
+   *  树冠为空中大陆，当前以高台/支柱根台地表达垂直落差，藤蔓桥由 Wave C SDF 写入） */
+  giant_root_valleys: {
+    id: 'giant_root_valleys',
+    label: '巨木根谷',
+    base: 6, amp: 14, ridge: 0.50,
+    seaLevel: null,
+    basinDepth: 14,                          // 幽暗根谷
+    trench: { depth: 16, width: 0.055 },     // 根系峡谷
+    mesa: { fraction: 0.18, step: 10 },      // 支柱根高台（树冠层落地锚点）
+    crater: { count: 3, radius: 14, depth: 3 }, // 树桩坍陷洼地
+    glowVeins: 0.25,                         // 孢子金微光
+    materialPalette: ['root_valley_floor', 'bark_armor_strata', 'canopy_moss_glow', 'vine_bridge_road'],
+    biomeIds: ['root_valley', 'buttress_cliff', 'canopy_grove', 'vine_way'],
+    hazardRule: 'none',                      // 坠落/掠食者危险由 EXPANSION_GAMEPLAY 承载
+    flagsRule: 'none',
+  },
+
+  /** 碎环月（rocky/ice）：0.25g 无大气断裂大峡谷、陨石坑群、坠毁舰船残骸场 */
+  lowg_rift_field: {
+    id: 'lowg_rift_field',
+    label: '低重力裂谷场',
+    base: 4, amp: 15, ridge: 0.55,
+    seaLevel: null,
+    basinDepth: 8,
+    trench: { depth: 30, width: 0.08 },      // 巨大断裂峡谷（低重力喷气飞跃）
+    crater: { count: 9, radius: 22, depth: 8 }, // 陨石坑采矿场
+    materialPalette: ['lunar_regolith_ground', 'fracture_strata', 'wreck_alloy_glint', 'salvage_road'],
+    biomeIds: ['regolith_flats', 'rift_wall_cliff', 'crater_basin', 'wreck_field'],
+    hazardRule: 'crevasse',                  // 真空裂谷：坠落无声音警示
+    flagsRule: 'none',
+  },
+
+  // ———— 通用兜底剖面（按 planet.category 回退） ————
+
+  generic_rocky: {
+    id: 'generic_rocky',
+    label: '通用岩质高地',
+    base: 8, amp: 12, ridge: 0.45,
+    seaLevel: null,
+    basinDepth: 6,
+    crater: { count: 5, radius: 20, depth: 5 },
+    materialPalette: ['regolith_ground', 'rock_strata', 'lichen_accent', 'gravel_road'],
+    biomeIds: ['rock_flats', 'rock_cliff', 'boulder_field', 'dust_road'],
+    hazardRule: 'none',
+    flagsRule: 'none',
+  },
+
+  generic_ocean: {
+    id: 'generic_ocean',
+    label: '通用海洋盆地',
+    base: -10, amp: 8, ridge: 0.15,
+    seaLevel: -4,
+    basinDepth: 6,
+    shelf: { level: 0, threshold: 0.20 },
+    trench: { depth: 18, width: 0.05 },
+    materialPalette: ['ocean_sediment', 'sea_cliff', 'kelp_accent', 'causeway_road'],
+    biomeIds: ['shallow_water', 'open_water', 'deep_floor', 'causeway'],
+    hazardRule: 'below_sea',
+    flagsRule: 'none',
+  },
+
+  generic_ice: {
+    id: 'generic_ice',
+    label: '通用冰封荒原',
+    base: 6, amp: 11, ridge: 0.60,
+    seaLevel: null,
+    basinDepth: 10,
+    trench: { depth: 18, width: 0.04 },
+    materialPalette: ['packed_snow', 'glacier_blue_cliff', 'frost_lichen', 'icy_road'],
+    biomeIds: ['snowfield', 'glacier_cliff', 'ice_field', 'frozen_road'],
+    hazardRule: 'crevasse',
+    flagsRule: 'none',
+  },
+
+  generic_desert: {
+    id: 'generic_desert',
+    label: '通用沙漠',
+    base: 7, amp: 9, ridge: 0.25,
+    seaLevel: null,
+    basinDepth: 4,
+    mesa: { fraction: 0.25, step: 3 },
+    dune: { amp: 1.2, wavelength: 16, angle: 0.9 },
+    crater: { count: 4, radius: 18, depth: 5 },
+    materialPalette: ['dry_sand', 'sandstone_cliff', 'scrub_accent', 'caravan_road'],
+    biomeIds: ['sand_flats', 'dune_belt', 'rocky_outcrop', 'caravan_road'],
+    hazardRule: 'none',
+    flagsRule: 'none',
+  },
+
+  generic_lava: {
+    id: 'generic_lava',
+    label: '通用熔岩高地',
+    base: 7, amp: 14, ridge: 0.70,
+    seaLevel: null,
+    basinDepth: 4,
+    channel: { level: -2, width: 0.09 },
+    materialPalette: ['basalt_black', 'volcanic_strata', 'cinder_red', 'heat_shield_road'],
+    biomeIds: ['basalt_flats', 'ridge_cliff', 'cinder_field', 'shielded_road'],
+    hazardRule: 'lava_channel',
+    flagsRule: 'none',
+  },
+
+  generic_toxic: {
+    id: 'generic_toxic',
+    label: '通用腐蚀大气洼地',
+    base: 5, amp: 9, ridge: 0.35,
+    seaLevel: null,
+    basinDepth: 7,
+    terrace: 3,
+    hazardLevel: 3,
+    materialPalette: ['corroded_soil', 'etched_cliff', 'acid_bloom', 'corrosion_road'],
+    biomeIds: ['etched_flats', 'corroded_cliff', 'acid_pool', 'treated_road'],
+    hazardRule: 'lowland_gas',
+    flagsRule: 'none',
+  },
+
+  generic_artificial: {
+    id: 'generic_artificial',
+    label: '人工改造天体',
+    base: 9, amp: 3, ridge: 0.08,
+    seaLevel: null,
+    mesa: { fraction: 0.50, step: 2 },      // 大面积整平平台
+    trench: { depth: 4, width: 0.05 },      // 电路沟壑
+    materialPalette: ['regolith_pad', 'hull_steel_strata', 'signal_accent', 'transit_road'],
+    biomeIds: ['landing_pad', 'bulkhead_cliff', 'relay_yard', 'transit_way'],
+    hazardRule: 'none',
+    flagsRule: 'none',
+  },
+
+  generic_gas_giant: {
+    id: 'generic_gas_giant',
+    label: '气态巨行星浮台',
+    base: 10, amp: 4, ridge: 0.10,
+    seaLevel: null,
+    mesa: { fraction: 0.60, step: 2 },      // 反重力环状岛链 ≈ 大面积浮空平台
+    dune: { amp: 0.6, wavelength: 24, angle: 1.8 }, // 云瀑波纹
+    materialPalette: ['cloud_deck', 'storm_strata', 'atoll_accent', 'skyway_road'],
+    biomeIds: ['floating_atoll', 'storm_wall', 'cloud_garden', 'skyway'],
+    hazardRule: 'none',
+    flagsRule: 'none',
+  },
+};
+
+/** 主题 id → 剖面 id（doc7 §4.1 首批 7 大旗舰 + §4.0 扩展 11 主题） */
+const THEME_PROFILE_MAP = {
+  abyssal_ocean: 'ocean_basin_reef_trench',
+  permafrost_furnace: 'glacial_basin_crevasse',
+  red_regolith_frontier: 'mesa_canyon_crater_steppe',
+  dry_night_polar: 'dry_salt_polar',
+  sulfur_marsh: 'fumarole_acid_terraces',
+  biolume_canopy: 'biolume_rainforest',
+  obsidian_lava: 'obsidian_ridge_lava',
+  // —— 扩展 P4（TASK-4.1/4.2；云海浮岛无硬质地貌 → 复用气巨浮台剖面） ——
+  prism_crystal: 'crystal_spire_fields',
+  salt_mirror_desert: 'salt_mirror_flats',
+  cryomethane_sea: 'methane_shelf_ice',
+  tidal_lock_dusk: 'terminator_rift_band',
+  cloud_giant_atolls: 'generic_gas_giant',
+  fungal_catacombs: 'fungal_dome_underscape',
+  ancient_megastructure: 'fractured_hex_plates',
+  glassstorm_barrens: 'glass_dune_blades',
+  magnetar_aurora: 'magnetic_spire_tundra',
+  canopy_colossus: 'giant_root_valleys',
+  fractured_moon: 'lowg_rift_field',
+};
+
+/** planet.category → 兜底剖面 id（8 大行星类别，与 galaxyGen PLANET_CATEGORIES 对齐） */
+const CATEGORY_PROFILE_MAP = {
+  rocky: 'generic_rocky',
+  ocean: 'generic_ocean',
+  ice: 'generic_ice',
+  desert: 'generic_desert',
+  lava: 'generic_lava',
+  toxic: 'generic_toxic',
+  artificial: 'generic_artificial',
+  gasGiant: 'generic_gas_giant',
+};
+
+/**
+ * 行星 → 地貌剖面查表：显式 themeId 优先，其次 planet.primaryThemeId，
+ * 再次 planet.category 兜底，最终恒定回退 generic_rocky（绝不返回 undefined）。
+ * @param {{category?:string, primaryThemeId?:string}|null} planet 行星实体（可为 null）
+ * @param {string|null} [themeId] 显式主题 id（优先于行星档案）
+ * @returns {object} TERRAIN_PROFILES 成员
+ */
+function profileForPlanet(planet, themeId) {
+  const tid = themeId || (planet && planet.primaryThemeId) || null;
+  if (tid && THEME_PROFILE_MAP[tid]) {
+    const themed = TERRAIN_PROFILES[THEME_PROFILE_MAP[tid]];
+    if (themed) return themed;
+  }
+  const cat = planet && planet.category;
+  if (cat && CATEGORY_PROFILE_MAP[cat]) {
+    const byCat = TERRAIN_PROFILES[CATEGORY_PROFILE_MAP[cat]];
+    if (byCat) return byCat;
+  }
+  return TERRAIN_PROFILES.generic_rocky;
+}
+
+Object.assign(__exports, { TERRAIN_PROFILES, THEME_PROFILE_MAP, CATEGORY_PROFILE_MAP, profileForPlanet });
 
 });
 __register("src/domain/economy/market.js", function (__exports, __require) {
@@ -11438,80 +15927,6 @@ function checkWorldInvariants(world, opts = {}) {
 Object.assign(__exports, { isFiniteNum, ENTITY_COLLECTIONS, checkQuickInvariants, checkWorldInvariants });
 
 });
-__register("src/core/serialization.js", function (__exports, __require) {
-/**
- * core/serialization.js — 稳定序列化、哈希与克隆（任务书 2.5 / 1.5）
- *
- * 确定性要求：同一世界两次 JSON 序列化必须逐字节一致 —— 对象键始终排序；
- * undefined 与函数不得进入世界状态（由 invariant 拒绝）。
- */
-
-/** 稳定字符串化：键排序、丢弃 undefined、数组保序 */
-function stableStringify(value) {
-  const out = [];
-  walk(value, out);
-  return out.join('');
-}
-
-function walk(v, out) {
-  if (v === undefined || typeof v === 'function') return; // 与 JSON 语义一致
-  if (v === null || typeof v !== 'object') {
-    out.push(JSON.stringify(v));
-    return;
-  }
-  if (Array.isArray(v)) {
-    out.push('[');
-    for (let i = 0; i < v.length; i++) {
-      if (i > 0) out.push(',');
-      walk(v[i], out);
-    }
-    out.push(']');
-    return;
-  }
-  out.push('{');
-  const keys = Object.keys(v).filter((k) => v[k] !== undefined).sort();
-  for (let i = 0; i < keys.length; i++) {
-    if (i > 0) out.push(',');
-    out.push(JSON.stringify(keys[i]), ':');
-    walk(v[keys[i]], out);
-  }
-  out.push('}');
-}
-
-/** FNV-1a 32 位哈希 */
-function hash32(str) {
-  let h = 2166136261 >>> 0;
-  for (let i = 0; i < str.length; i++) {
-    h = Math.imul(h ^ str.charCodeAt(i), 16777619) >>> 0;
-  }
-  return h >>> 0;
-}
-
-/** 世界规范化哈希：确定性回归测试与存档校验共用 */
-function worldHash(world) {
-  return hash32(stableStringify(world)).toString(16).padStart(8, '0');
-}
-
-/** 深克隆：优先结构化克隆（保留类型），退化 JSON */
-function deepClone(obj) {
-  if (typeof structuredClone === 'function') {
-    try {
-      return structuredClone(obj);
-    } catch {
-      /* 含不可克隆对象时退化为 JSON */
-    }
-  }
-  return JSON.parse(JSON.stringify(obj));
-}
-
-/** 反序列化世界（JSON 文本 → 对象），不做语义校验（校验由 invariant 负责） */
-function parseWorld(text) {
-  return JSON.parse(text);
-}
-
-Object.assign(__exports, { stableStringify, hash32, worldHash, deepClone, parseWorld });
-
-});
 __register("src/ui/shell/BottomBar.js", function (__exports, __require) {
 /**
  * ui/shell/BottomBar.js — 底部信息带（任务书 6.1）：命令队列 / 告警 / 日志
@@ -11949,13 +16364,14 @@ class Inspector {
       ['资源评级', `${sys.resourceRating}/10`],
     ]));
     if (lvl >= 2) {
-      // 行星列表
+      // 行星列表（面板稳定键：跨快照折叠记忆，doc5 §3.4）
       const rows = sys.planetIds.map((pid) => w.entities.planets[pid]);
       for (const p of rows) {
         const pe = panel({
           title: `${p.name} · ${p.categoryName}`,
           open: false,
           dense: true,
+          id: `insp:planet:${p.id}`,
         });
         const pb = pe.querySelector('.vf-panel-body') || pe.lastChild;
         pb.appendChild(kvList([
@@ -12136,20 +16552,34 @@ __register("src/ui/components/panels.js", function (__exports, __require) {
 /**
  * ui/components/panels.js — 可折叠面板与键值列表
  *
- *  - panel({ title, content, open = true, tools = [], dense }) → .vf-panel：
+ *  - panel({ title, content, open = true, tools = [], dense, id }) → .vf-panel：
  *    .vf-panel-head（.vf-panel-title + .vf-panel-tools + .vf-panel-toggle 折叠箭头）
  *    + .vf-panel-body（折叠时 body[hidden] + 根节点 is-collapsed，样式由 CSS 负责）。
  *    content：Node | (container) => void | 数组 | 字符串；点击头部空白也可折叠；
  *    tools: [{ label, title, onClick }] 渲染为 .vf-panel-tool 小按钮。
+ *    id：面板稳定键（挂 dataset.panelId 并作为 UIStateStore 折叠记忆键）；
+ *    未传时回退 `panel:${title}`（Node 标题取其 textContent）。
+ *    展开态经 uiState（UIStateStore）跨快照记忆：用户点击折叠/展开立即持久化；
+ *    重建时 uiState 已有记录则以记录为准，否则用 open 参数（不回写仓库）。
  *  - kvList(pairs)：pairs = [k, v][] 或 { k: v } → .vf-kv 两列网格；
  *    v 可为 Node（直接作为值单元格）或原始值（textContent 安全渲染）。
  * 顶层不触碰 document。
  */
 
 const { el: el } = __require("src/ui/components/dom.js");
+const { uiState: uiState } = __require("src/ui/state/UIStateStore.js");
 
-function panel({ title, content, open = true, tools = [], dense } = {}) {
-  let isOpen = open !== false;
+/** 面板稳定键：显式 id 优先，否则 panel:${title}（Node 标题取文本，空白归一） */
+function panelKey(opts) {
+  if (opts && opts.id != null && opts.id !== '') return String(opts.id);
+  const t = opts ? opts.title : null;
+  if (t instanceof Node) return `panel:${String(t.textContent || '').trim()}`;
+  return `panel:${t == null ? '' : String(t).trim()}`;
+}
+
+function panel({ title, content, open = true, tools = [], dense, id } = {}) {
+  const stableId = panelKey({ title, id });
+  let isOpen = uiState.isPanelOpen(stableId, open !== false);
 
   const body = el('div', { class: 'vf-panel-body' });
   fillContent(body, content);
@@ -12186,12 +16616,15 @@ function panel({ title, content, open = true, tools = [], dense } = {}) {
   toggle.addEventListener('click', () => setOpen(!isOpen));
 
   const root = el('section', { class: dense ? 'vf-panel is-dense' : 'vf-panel' }, [head, body]);
-  setOpen(isOpen);
+  if (stableId) root.dataset.panelId = stableId;
+  setOpen(isOpen, false); // 初始同步不回写：uiState 已有记录时以记录为准、否则保留调用方默认
   return root;
 
-  /** 应用展开/折叠态：根类名 + body[hidden] + 箭头字符 + aria-expanded */
-  function setOpen(next) {
+  /** 应用展开/折叠态：根类名 + body[hidden] + 箭头字符 + aria-expanded；
+   *  persist（默认 true）时写入 UIStateStore 跨快照记忆。 */
+  function setOpen(next, persist = true) {
     isOpen = next;
+    if (persist) uiState.setPanelOpen(stableId, next);
     root.classList.toggle('is-collapsed', !isOpen);
     if (isOpen) body.removeAttribute('hidden');
     else body.setAttribute('hidden', '');
@@ -12240,6 +16673,131 @@ function fillContent(container, content) {
 }
 
 Object.assign(__exports, { panel, kvList });
+
+});
+__register("src/ui/state/UIStateStore.js", function (__exports, __require) {
+/**
+ * ui/state/UIStateStore.js — 瞬态 UI 状态仓库（doc5 §3.4 P0-04）
+ *
+ * 职责：把「视图展开/折叠、滚动偏移、焦点键、视图内临时选中」等瞬态交互状态
+ * 从世界状态（world.*）与视图 DOM 生命周期中彻底解耦独立持有：
+ *  - 折叠面板跨快照记忆（_panels：panelKey → isOpen）；
+ *  - 容器滚动/焦点跨重建保持（_scrolls：containerKey → {top,left}）；
+ *  - 视图级瞬态槽（_viewStates：viewId → plain object，惰性初始化）。
+ *
+ * 数据流纪律：本仓库只承载前端瞬态，绝不写入 world；领域状态仍由
+ * CommandBus / SnapshotBuilder 权威驱动（doc5 §1.2 铁律 1）。
+ *
+ * 约束：顶层零副作用、不触碰 DOM（document 仅在 preserveScrollAndFocus 函数体内、
+ * 且带 typeof 守卫访问）——可在 Node 侧安全 import 供单元测试。
+ */
+
+class UIStateManager {
+  constructor() {
+    /** @type {Map<string, boolean>} panelKey → 展开态 */
+    this._panels = new Map();
+    /** @type {Map<string, {top:number, left:number}>} containerKey → 滚动偏移 */
+    this._scrolls = new Map();
+    /** @type {Map<string, object>} viewId → 视图瞬态槽 */
+    this._viewStates = new Map();
+  }
+
+  /**
+   * 折叠面板是否展开（未记录时回退 defaultOpen）。
+   * @param {string} panelKey 面板稳定键（panels.js 的 id / `panel:${title}`）
+   * @param {boolean} [defaultOpen=true] 无记录时的默认展开态
+   */
+  isPanelOpen(panelKey, defaultOpen = true) {
+    const v = this._panels.get(String(panelKey));
+    return v === undefined ? defaultOpen !== false : !!v;
+  }
+
+  /** 记录面板展开态（panels.js setOpen 持久化入口） */
+  setPanelOpen(panelKey, isOpen) {
+    this._panels.set(String(panelKey), !!isOpen);
+  }
+
+  /**
+   * 视图瞬态槽（惰性初始化）：首次调用用 defaults 浅拷贝建槽，后续返回同一对象。
+   * @param {string} viewId 视图标识（如 'system'）
+   * @param {object} [defaults] 首次初始化的默认字段
+   */
+  view(viewId, defaults = null) {
+    const key = String(viewId);
+    let slot = this._viewStates.get(key);
+    if (!slot) {
+      slot = Object.assign({}, defaults && typeof defaults === 'object' ? defaults : {});
+      this._viewStates.set(key, slot);
+    }
+    return slot;
+  }
+
+  /** 丢弃视图瞬态槽（视图卸载且不需要跨挂载保持时可选调用） */
+  dropView(viewId) {
+    this._viewStates.delete(String(viewId));
+  }
+
+  /**
+   * 滚动/焦点保持包裹器：执行 mutateFn（通常是整段 DOM 重建）前后保存并恢复
+   * 容器 scrollTop/scrollLeft 与容器内聚焦元素的 data-focus-key，重建后按
+   * `[data-focus-key="…"]` 查询恢复焦点。
+   *
+   * 滚动偏移同时登记进 _scrolls：容器被整棵重建（滚动归零）后的下一次调用
+   * 仍可从仓库恢复上一次位置（跨视图重挂载保持）。
+   *
+   * @param {string} containerKey 容器稳定键（如 `dossier:${systemId}`）
+   * @param {HTMLElement|null} containerEl 可滚动容器（null 时仅登记键）
+   * @param {Function} mutateFn 变更函数（同步）
+   */
+  preserveScrollAndFocus(containerKey, containerEl, mutateFn) {
+    const key = String(containerKey);
+    const doc = (typeof document !== 'undefined') ? document : null;
+    const box = containerEl || null;
+    const canBox = !!(box && typeof box.scrollTop === 'number');
+
+    // —— 变更前：保存滚动与焦点键 ——
+    const saved = this._scrolls.get(key) || { top: 0, left: 0 };
+    if (canBox) {
+      saved.top = box.scrollTop || 0;
+      saved.left = box.scrollLeft || 0;
+    }
+    let focusKey = null;
+    if (doc && box && doc.activeElement
+      && typeof box.contains === 'function' && box.contains(doc.activeElement)
+      && typeof doc.activeElement.getAttribute === 'function') {
+      focusKey = doc.activeElement.getAttribute('data-focus-key') || null;
+    }
+
+    // —— 变更 ——
+    if (typeof mutateFn === 'function') mutateFn();
+
+    // —— 变更后：恢复滚动与焦点 ——
+    if (canBox) {
+      if (saved.top) box.scrollTop = saved.top;
+      if (saved.left) box.scrollLeft = saved.left;
+    }
+    if (focusKey && box && typeof box.querySelector === 'function') {
+      const target = box.querySelector(`[data-focus-key="${cssAttrEscape(focusKey)}"]`);
+      if (target && typeof target.focus === 'function') {
+        try { target.focus(); } catch (_) { /* 不可聚焦元素忽略 */ }
+      }
+    }
+    this._scrolls.set(key, { top: saved.top, left: saved.left });
+  }
+}
+
+/** 属性选择器值转义（键含引号/反斜杠时安全；常规 id 键直通） */
+function cssAttrEscape(v) {
+  return String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+/** 全局单例（各视图直接 import 使用） */
+const uiState = new UIStateManager();
+
+/** 测试/工具用：类本体（可另建隔离实例） */
+Object.assign(__exports, { UIStateManager: UIStateManager });
+
+Object.assign(__exports, { uiState });
 
 });
 __register("src/ui/shell/SideNav.js", function (__exports, __require) {
@@ -12792,12 +17350,20 @@ __register("src/ui/screens/DiagnosticsView.js", function (__exports, __require) 
 /**
  * ui/screens/DiagnosticsView.js — 系统诊断面板（任务书 10.4）
  * 在浏览器内运行全量/分组测试，展示编号、说明、耗时、通过/失败、实测/期望。
+ * 另含"地表渲染诊断"卡（doc7 §2.2 / doc6 §3.3）：循环地表诊断渲染模式、
+ * 导出 GL 状态快照 JSON —— 经 src/devtools/glGateTest.js 的地表诊断 API，
+ * 其底层通过 window.__vfSurfaceDebug 钩子（PlanetSurface3D.init 注册）操作
+ * 当前挂载的 GroundView 渲染器。
  */
 
 const { el: el } = __require("src/ui/components/dom.js");
 const { panel: panel } = __require("src/ui/components/panels.js");
 const { progressBar: progressBar } = __require("src/ui/components/progress.js");
 const { L: L } = __require("src/core/i18n.js");
+const { surfaceCycleDebugMode: surfaceCycleDebugMode, surfaceGLSnapshot: surfaceGLSnapshot } = __require("src/devtools/glGateTest.js");
+
+/** 地表诊断模式显示名（0..3，与 PlanetSurface3D.setDebugMode 契约一致） */
+const SURFACE_MODE_NAMES = ['0 off', '1 unlit_nocull', '2 wireframe_normal', '3 winding_audit'];
 
 const DiagnosticsView = {
   id: 'diagnostics',
@@ -12823,9 +17389,57 @@ const DiagnosticsView = {
     body.appendChild(this.summary);
     this.resultsBox = el('div', { class: 'mt-2' });
     body.appendChild(this.resultsBox);
+    body.appendChild(this.buildSurfaceDiagCard());
     wrap.appendChild(body);
     root.appendChild(wrap);
     this.results = [];
+  },
+
+  /** 地表渲染诊断卡：循环诊断模式（F3 同效）+ 导出 GL 状态快照 JSON */
+  buildSurfaceDiagCard() {
+    const p = panel({ title: '地表渲染诊断', open: true });
+    const status = el('span', { class: 'vf-faint vf-small', text: '未挂载地表视图时不可用' });
+    const setStatus = (text, ok) => {
+      status.textContent = text;
+      status.className = ok ? 'vf-ok vf-small' : 'vf-faint vf-small';
+    };
+    setStatus('模式: -', false);
+
+    const cycleBtn = el('button', { class: 'vf-btn', text: '循环诊断模式' });
+    cycleBtn.addEventListener('click', () => {
+      const r = surfaceCycleDebugMode();
+      if (r.ok) setStatus(`模式: ${SURFACE_MODE_NAMES[r.debugMode] || r.debugMode}`, true);
+      else setStatus(r.reason || '不可用', false);
+    });
+
+    const snapBtn = el('button', { class: 'vf-btn', text: '导出诊断 JSON' });
+    snapBtn.addEventListener('click', () => {
+      const r = surfaceGLSnapshot();
+      if (!r.ok) {
+        setStatus(r.reason || '不可用', false);
+        return;
+      }
+      console.log('[地表渲染诊断快照]', r.snapshot);
+      try {
+        const blob = new Blob([JSON.stringify(r.snapshot, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'vf-surface-glsnapshot.json';
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        setStatus('快照已导出（vf-surface-glsnapshot.json，另见 Console）', true);
+      } catch (e) {
+        setStatus('快照已打印到 Console（下载失败: ' + (e && e.message) + '）', false);
+      }
+    });
+
+    const row = el('div', { class: 'vf-row' });
+    row.appendChild(cycleBtn);
+    row.appendChild(snapBtn);
+    row.appendChild(status);
+    p.appendChild(row);
+    return p;
   },
 
   async runAll() {
@@ -12919,6 +17533,5608 @@ const DiagnosticsView = {
 };
 
 Object.assign(__exports, { DiagnosticsView });
+
+});
+__register("src/devtools/glGateTest.js", function (__exports, __require) {
+/**
+ * devtools/glGateTest.js — rework.md 图形硬性门禁测试（在真实浏览器 DOM 环境运行）
+ *
+ * 覆盖 rework.md 三项门禁：
+ *   门禁 1 — 50 次视图切换显存泄漏检测：
+ *     模拟 GalaxyView 挂载/卸载循环 50 次（每次全新 CanvasManager + GalaxyRenderer，
+ *     跑一帧裸后处理管线 + 一帧完整 GalaxyRenderer GL 渲染后整体 dispose）。
+ *     以 GLContext 的 _tracked 资源清册（programs/buffers/vaos/textures/fbos）计数：
+ *     第 50 次迭代的 dispose 前峰值 ≤ 第 1 次迭代峰值 + 5（余量）即通过；
+ *     每 10 次采样 performance.memory.usedJSHeapSize（Chrome 专有，缺失时 heap 字段
+ *     置 null，判定仅依赖 GL 对象计数）。
+ *   门禁 2 — WEBGL_lose_context 触发退化：
+ *     经 gl.getExtension('WEBGL_lose_context').loseContext() 主动丢失上下文，验证
+ *     CanvasManager 平滑退化（webglcontextlost 事件 → glDegraded=true + glCanvas 隐藏
+ *     + beginGLFrame 短路返回 null），全程捕获模式不崩溃；随后 restoreContext() 验证
+ *     恢复路径（等待 webglcontextrestored 事件并记录，验证的是"丢失时平滑退化不崩溃"，
+ *     不要求恢复后可继续渲染 —— 恢复是否成功重建管线依环境而定，未恢复只记入
+ *     notes 供面板展示，不作为失败理由）。
+ *   门禁 3 — 100 艘战舰同屏压测：
+ *     不走完整游戏：直接构造 battleView（src/simulation/ViewModels.js）形状的
+ *     100 单位 + 200 投射物渲染数据（坐标/属性全部由确定性 hash01 生成），经
+ *     Battle3D.draw 连续绘制 120 帧（模拟 2 秒 @60fps），用 requestAnimationFrame 的
+ *     performance.now() 差值测每帧真实耗时；统计 avgFps / minFps（排除前 10 帧预热），
+ *     判定 avgFps ≥ 30 && minFps ≥ 20。
+ *     ⚠ 已知兼容问题（结果中 shimApplied/scratchPatched/notes 如实上报，均为
+ *     Battle3D 待修复缺陷，本文件只打临时垫片以完成测量，不修改任何源码）：
+ *     1) Battle3D.js 的着色器源码自带 GLSL_VERSION 前缀，而 GLCore.createProgram 会
+ *        再统一前置一次 → 组装后双 #version 使全部战斗程序编译失败 → 构建 Battle3D
+ *        前对 glc.createProgram 打垫片（剥掉源码自带的 #version 行，构建后立即还原）；
+ *     2) Battle3D 构造函数的 _scratch 缺少 draw() 引用的 proj/view 矩阵槽位 → 首帧
+ *        即抛 TypeError → 为压测实例补齐两个槽位（draw 每帧覆写其内容）。
+ *
+ * 用法（诊断面板 / DevTools 控制台）：
+ *   const { results } = await import('/src/devtools/glGateTest.js')
+ *     .then((m) => m.runGateTests(document.querySelector('.vf-view-body')));
+ *   // container 需有非零布局尺寸（CanvasManager 依赖 getBoundingClientRect 测量），
+ *   // 且页面须处于前台（后台标签页 rAF 被节流，门禁 3 会快速失败并给出提示）。
+ *
+ * 返回契约：
+ * {
+ *   results: {
+ *     leak:    { pass, switches, heap0MB, heap1MB, heapDeltaMB, glObjects0, glObjects1, ... },
+ *     ctxLoss: { pass, degradedAfterLoss, restoredAfterRestore, errors, ... },
+ *     stress:  { pass, shipCount, avgFps, minFps, frameTimesMs, ... },
+ *     allPass: boolean,
+ *   }
+ * }
+ * "..." 为面板诊断用附加字段（逐项含义见各门禁返回处注释），不影响契约字段消费。
+ * 另导出 gateTestProgress（{ gate, iteration, note }）：门禁耗时较长（门禁 1 为
+ * 同步密集循环，会周期性让出主线程），诊断面板可轮询它展示当前进度。
+ *
+ * 地表渲染诊断（doc7 §2.2 / doc6 §3.3）导出：
+ *   surfaceSetDebugMode(mode) / surfaceCycleDebugMode() / surfaceGLSnapshot() ——
+ *   经 window.__vfSurfaceDebug 钩子（PlanetSurface3D.init 注册、destroy 注销）操作
+ *   【当前挂载】的地表渲染器；未挂载时返回 { ok:false, reason }，不抛错。
+ *
+ * 约束：顶层不触碰 document/window（全部 DOM/全局访问发生在函数体内）；禁用
+ * Math.random，全部离散分布由确定性 hash01 生成；本模块只调用渲染层公开 API，
+ * 不写任何世界/快照状态。
+ */
+
+const { CanvasManager: CanvasManager } = __require("src/render/CanvasManager.js");
+const { GalaxyRenderer: GalaxyRenderer } = __require("src/render/GalaxyRenderer.js");
+const { Battle3D: Battle3D } = __require("src/render/gl/Battle3D.js");
+const { mat4: mat4 } = __require("src/render/gl/Mat4.js");
+const { availableHullIds: availableHullIds } = __require("src/render/meshes/ShipMeshes.js");
+
+// —— 门禁参数（可经 runGateTests 的 opts 覆盖） ————————————————————————————
+
+const DEFAULT_OPTS = {
+  switches: 50,   // 门禁 1：挂载/卸载循环次数
+  ships: 100,     // 门禁 3：战舰单位数
+  projectiles: 200, // 门禁 3：投射物数
+  frames: 120,    // 门禁 3：绘制帧数（≈ 2 秒 @60fps）
+  warmup: 10,     // 门禁 3：统计时排除的预热帧数
+};
+
+/** 门禁 1：GL 对象总数判定余量（第 50 次 ≤ 第 1 次 + 余量） */
+const LEAK_TOLERANCE = 5;
+/** 门禁 1：堆采样间隔（每 N 次切换采样一次） */
+const HEAP_SAMPLE_EVERY = 10;
+/** 门禁 2：上下文事件等待超时（ms） */
+const CTX_EVENT_TIMEOUT_MS = 3000;
+/** 门禁 3：压测整体超时兜底（ms；rAF 被节流/卡死时退出） */
+const STRESS_TIMEOUT_MS = 30000;
+/** 门禁 3：FPS 判定线（rework.md：avgFps ≥ 30 && minFps ≥ 20） */
+const AVG_FPS_MIN = 30;
+const MIN_FPS_MIN = 20;
+
+/** 门禁 1 合成星系快照用恒星类型（覆盖普通/黑洞/脉冲星 → 命中球壳绘制路径） */
+const STAR_TYPES = ['yellowDwarf', 'redDwarf', 'blueGiant', 'whiteDwarf', 'neutronStar', 'pulsar', 'blackHole'];
+/** 门禁 3：structureMax 分级阶梯（Battle3D.draw 的 guessHull 按 structureMax 推断船体网格，
+ *  该阶梯覆盖 battleship/carrier/gun_cruiser/destroyer/frigate/scout 全部 6 档网格） */
+const STRUCTURE_LADDER = [100, 200, 320, 600, 1000, 2000];
+
+/**
+ * 门禁运行进度（诊断面板可轮询；runGateTests 启动时重置）。
+ * gate: null | 'leak' | 'ctxLoss' | 'stress'；iteration: 门禁 1 当前迭代序号。
+ */
+const gateTestProgress = { gate: null, iteration: 0, note: '' };
+
+/** 重置进度标记 */
+function setProgress(gate, iteration, note) {
+  gateTestProgress.gate = gate;
+  gateTestProgress.iteration = iteration || 0;
+  gateTestProgress.note = note || '';
+}
+
+// —— 通用工具（仅在函数体内触碰浏览器全局） ————————————————————————————
+
+/** 确定性 hash：f(i) = frac(sin(i·127.1)·43758.5453)（与 GalaxyRenderer 同源，禁用随机数） */
+function hash01(i) {
+  const s = Math.sin(i * 127.1) * 43758.5453;
+  return s - Math.floor(s);
+}
+
+/** 数值取整到 n 位小数；非有限值/空值返回 null */
+function roundN(v, n) {
+  if (v == null || !Number.isFinite(v)) return null;
+  const p = Math.pow(10, n);
+  return Math.round(v * p) / p;
+}
+
+/**
+ * 统计 GLContext 资源清册（glc._tracked）的各类 GL 对象数量。
+ * @param {import('../render/gl/GLCore.js').GLContext|null} glc
+ * @returns {{programs:number, buffers:number, vaos:number, textures:number, fbos:number, total:number}}
+ */
+function countTracked(glc) {
+  const t = glc && glc._tracked;
+  const programs = t && t.programs ? t.programs.length : 0;
+  const buffers = t && t.buffers ? t.buffers.length : 0;
+  const vaos = t && t.vaos ? t.vaos.length : 0;
+  const textures = t && t.textures ? t.textures.length : 0;
+  const fbos = t && t.fbos ? t.fbos.length : 0;
+  return { programs, buffers, vaos, textures, fbos, total: programs + buffers + vaos + textures + fbos };
+}
+
+/**
+ * 采样 JS 堆用量（MB）。
+ * performance.memory 为 Chrome 专有 API；Firefox/Safari 等环境返回 null，
+ * 门禁 1 的判定仅依赖 GL 对象计数，heap 字段置 null 供面板标注"环境不支持"。
+ */
+function heapUsedMB() {
+  if (typeof performance === 'undefined' || !performance.memory) return null;
+  return roundN(performance.memory.usedJSHeapSize / 1048576, 2);
+}
+
+/** 尽力触发 GC（仅当 Chrome 以 --js-flags=--expose-gc 启动时存在 window.gc；否则静默跳过） */
+function tryGc() {
+  if (typeof window !== 'undefined' && typeof window.gc === 'function') {
+    try { window.gc(); } catch (_) { /* GC 失败不影响测试 */ }
+  }
+}
+
+/**
+ * 下一帧 Promise：优先 rAF，同时以 50ms setTimeout 兜底 —— 后台/被遮挡页面 rAF
+ * 可能长期停发，纯 rAF 等待会让 waitFor 无限挂起（兜底保证轮询按期限退出）。
+ */
+function nextFrame() {
+  return new Promise((resolve) => {
+    let done = false;
+    const settle = () => {
+      if (done) return;
+      done = true;
+      resolve();
+    };
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(settle);
+    setTimeout(settle, 50);
+  });
+}
+
+/**
+ * 剔除着色器源码最前方的一条 #version 行（仅当源码以 #version 指令开头时）。
+ * 背景：GLCore.createProgram 会统一为源码前置 GLSL_VERSION；而 Battle3D.js 的
+ * 着色器源码自带 GLSL_VERSION 前缀 → 组装后出现双 #version（第二行报
+ * "'version' directive must occur before anything else"）编译失败。此垫片把
+ * Battle3D 源码自带的 #version 行剥掉，交由 GLCore 统一前置，使其可构建以完成
+ * 性能压测；不修改任何源码文件。Battle3D 修复（删除自带前缀）后，源码不以
+ * #version 开头，此函数为恒等变换，垫片自动失效。
+ */
+function stripLeadingVersionDirective(src) {
+  return String(src).replace(/^[ \t]*#version[^\n]*\n/, '');
+}
+
+/**
+ * 等待条件成立（每帧轮询一次）。
+ * @returns {Promise<boolean>} 超时返回 false
+ */
+async function waitFor(cond, timeoutMs) {
+  const deadline = performance.now() + timeoutMs;
+  while (!cond()) {
+    if (performance.now() > deadline) return false;
+    await nextFrame();
+  }
+  return true;
+}
+
+/**
+ * 等待目标派发一次指定事件。
+ * @returns {Promise<boolean>} 事件在超时前触发返回 true，超时返回 false（不 reject，
+ *                              避免测试自身产生未捕获异常）
+ */
+function waitForEvent(target, type, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const onEvt = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      target.removeEventListener(type, onEvt);
+      resolve(true);
+    };
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      target.removeEventListener(type, onEvt);
+      resolve(false);
+    }, timeoutMs);
+    target.addEventListener(type, onEvt);
+  });
+}
+
+/** 错误消息格式化（Error → message，兜底 String） */
+function errMsg(e) {
+  return (e && e.message) ? e.message : String(e);
+}
+
+// —— 合成数据（确定性，禁用随机数） ————————————————————————————————————————
+
+/**
+ * 构造最小可渲染的 App 快照（GalaxyRenderer.render 所需形状）：
+ * 12 个已勘测星系（含黑洞/脉冲星 → 命中超新星球壳路径），链式航路（指向更大 id，
+ * 满足 GalaxyRenderer 的 `laneId <= s.id 跳过` 去重规则），两个势力配色。
+ */
+function makeGalaxySnapshot() {
+  const n = 12;
+  const systems = [];
+  for (let i = 0; i < n; i++) {
+    const pad = (j) => 'sys-' + String(j).padStart(3, '0');
+    systems.push({
+      id: pad(i),
+      name: '门禁星系-' + i,
+      x: Math.round(140 + hash01(i * 3.71 + 0.9) * 720),
+      y: Math.round(140 + hash01(i * 9.13 + 4.7) * 720),
+      lanes: i < n - 1 ? [pad(i + 1)] : [],
+      surveyedLevel: 4,
+      ownerFactionId: i % 3 === 0 ? null : (i % 2 === 0 ? 'fac-a' : 'fac-b'),
+      dangerRating: Math.round(hash01(i * 5.39 + 1.1) * 100) / 10,
+      star: { typeId: STAR_TYPES[i % STAR_TYPES.length] },
+      colonyCount: i % 2,
+      resourceRating: Math.round(hash01(i * 2.93 + 8.8) * 100) / 10,
+    });
+  }
+  return {
+    systems,
+    factions: [
+      { id: 'fac-a', color: '#4fd8e8' },
+      { id: 'fac-b', color: '#e85f5f' },
+    ],
+    fleets: [],
+    battles: [],
+  };
+}
+
+/**
+ * 构造门禁 3 压测数据：battleView（ViewModels.js）形状的战斗视图。
+ *  - 单位字段与 battleView 输出一一对应：shipId/side/x/y/heading/hullId/retreatCharge/
+ *    name/hullName/shield/shieldMax/structure/structureMax/destroyed/order；
+ *  - hullId 从 availableHullIds() 轮转取值（覆盖 12 种船体形状的数据侧）；
+ *  - structureMax 按 STRUCTURE_LADDER 轮转（Battle3D.draw 经 guessHull(structureMax)
+ *    选择网格，该阶梯覆盖全部 6 档船体网格的绘制路径）；
+ *  - 每 25 艘置 1 艘 retreat + retreatCharge（命中跃迁漏斗绘制路径）；
+ *  - 投射物 beamFx / missile 交替（分别命中光束带 / 导弹光点路径）。
+ */
+function makeBattleData(shipCount, projectileCount) {
+  const hulls = availableHullIds();
+  const units = [];
+  for (let i = 0; i < shipCount; i++) {
+    const hullId = hulls[i % hulls.length];
+    const structureMax = STRUCTURE_LADDER[i % STRUCTURE_LADDER.length];
+    const retreat = i % 25 === 0;
+    units.push({
+      shipId: 'gate-' + String(i).padStart(3, '0'),
+      side: i % 2 === 0 ? 'a' : 'b',
+      x: Math.round(hash01(i * 1.7 + 0.3) * 1000),
+      y: Math.round(hash01(i * 2.3 + 5.1) * 320),
+      heading: Math.round(hash01(i * 3.1 + 9.9) * 628) / 100, // 0..6.28 弧度
+      hullId,
+      name: '门禁战舰-' + i,
+      hullName: hullId,
+      shield: Math.round(40 + hash01(i * 4.7 + 2.2) * 160),
+      shieldMax: 200,
+      structure: Math.round(structureMax * (0.55 + hash01(i * 5.9 + 7.7) * 0.4)),
+      structureMax,
+      destroyed: false,
+      order: retreat ? 'retreat' : 'attack',
+      retreatCharge: retreat ? Math.round(hash01(i * 6.1 + 3.3) * 250) / 10 : 0,
+    });
+  }
+  const projectiles = [];
+  for (let i = 0; i < projectileCount; i++) {
+    const src = units[(i * 7) % units.length];
+    const dst = units[(i * 7 + 3) % units.length];
+    if (i % 2 === 0) {
+      projectiles.push({ kind: 'beamFx', x: src.x, y: src.y, x0: src.x, y0: src.y, x1: dst.x, y1: dst.y, side: src.side });
+    } else {
+      projectiles.push({
+        kind: 'missile',
+        x: Math.round(hash01(i * 7.7 + 1.9) * 1000),
+        y: Math.round(hash01(i * 8.3 + 6.6) * 320),
+        x0: src.x, y0: src.y, x1: dst.x, y1: dst.y,
+        side: src.side,
+      });
+    }
+  }
+  return {
+    id: 'gate-battle',
+    systemId: 'sys-gate',
+    systemName: '门禁战场',
+    time: 0,
+    status: 'active',
+    sides: { a: 'fac-a', b: 'fac-b' },
+    units,
+    projectiles,
+    events: [],
+    losses: { a: 0, b: 0 },
+  };
+}
+
+// —— 门禁 1：50 次视图切换显存泄漏检测 ——————————————————————————————————————
+
+/**
+ * @param {HTMLElement} container
+ * @param {object} cfg
+ * @returns {Promise<object>} { pass, switches, heap0MB, heap1MB, heapDeltaMB,
+ *          glObjects0, glObjects1, heapSamplesMB, glObjectPeaksMin, glObjectPeaksMax,
+ *          glModeFrames, errors }
+ *          - glObjects0/glObjects1：第 1 次 / 最后一次迭代在 dispose 前（峰值点）的
+ *            GL 对象总数；每次挂载的分配量应恒定，逐次增长即泄漏；
+ *          - heapSamplesMB：每 HEAP_SAMPLE_EVERY 次切换采样一次的堆序列（无
+ *            performance.memory 的环境为 [null,...]）；
+ *          - glModeFrames：GalaxyRenderer 成功走通 GL 路径的迭代数（0 说明全部回退 2D）。
+ */
+async function gateLeakSwitches(container, cfg) {
+  const switches = cfg.switches;
+  const errors = [];
+  const heapSamplesMB = [];
+  const glObjectPeaks = [];
+  let glModeFrames = 0;
+
+  tryGc();
+  const heap0MB = heapUsedMB(); // 基线（循环前）
+  const snapshot = makeGalaxySnapshot();
+
+  for (let i = 1; i <= switches; i++) {
+    setProgress('leak', i, '挂载/渲染/卸载第 ' + i + ' 次');
+    // 每次迭代让出主线程一帧：避免 50 次连续同步渲染阻塞页面（诊断面板可保持响应，
+    // 浏览器也有机会回收前次迭代的垃圾）
+    await nextFrame();
+    // —— 挂载：全新 CanvasManager + GalaxyRenderer（真实 GalaxyView 挂载形态） ——
+    const cm = new CanvasManager().attach(container);
+    const renderer = new GalaxyRenderer().init(cm);
+    try {
+      cm.beginFrame(); // HUD 2D 变换复位（真实帧同样先调 beginFrame）
+
+      // 帧 A：任务书规定的裸后处理管线帧（beginGLFrame → 清屏 → endGLFrame）
+      const target = cm.beginGLFrame();
+      if (target && cm.gl) {
+        const gl = cm.gl;
+        gl.disable(gl.DEPTH_TEST);
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.ONE, gl.ONE);
+        gl.clearColor(0.0275, 0.0431, 0.0706, 1.0); // --bg #070b12
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      }
+      cm.endGLFrame({ bloom: 0, exposure: 1, time: 0 });
+
+      // 帧 B：完整 GalaxyRenderer 渲染帧（懒构建 Galaxy3D 的 programs/VAO/缓冲 +
+      // 星系盘/星云/航路/节点/球壳绘制 + HUD，与真实挂载帧完全同路径）
+      renderer.render(cm.ctx, cm.width, cm.height, snapshot, {}, { time: i * 0.016 });
+    } catch (e) {
+      errors.push('第 ' + i + ' 次切换渲染异常: ' + errMsg(e));
+    }
+    if (renderer._mode === 'gl') glModeFrames++;
+
+    // dispose 前采样清册峰值：同一挂载形态的分配量应恒定
+    glObjectPeaks.push(countTracked(cm.glc).total);
+    if (i % HEAP_SAMPLE_EVERY === 0) {
+      tryGc();
+      heapSamplesMB.push(heapUsedMB());
+    }
+
+    // —— 卸载：GalaxyRenderer 当前无公开 dispose 方法（防御式调用，未来补齐即生效）；
+    // 其 GL 资源全部登记在 cm.glc._tracked，由 cm.dispose() 统一 deleteProgram/
+    // deleteBuffer/... 并经 WEBGL_lose_context 弃置上下文 —— 与真实卸载路径一致。
+    try {
+      if (typeof renderer.dispose === 'function') renderer.dispose();
+    } catch (e) {
+      errors.push('第 ' + i + ' 次切换 renderer.dispose 异常: ' + errMsg(e));
+    }
+    cm.dispose();
+  }
+
+  tryGc();
+  const heap1MB = heapUsedMB(); // 终值（循环后）
+  setProgress('leak', switches, '循环完成，统计结果');
+
+  const glObjects0 = glObjectPeaks.length ? glObjectPeaks[0] : 0;
+  const glObjects1 = glObjectPeaks.length ? glObjectPeaks[glObjectPeaks.length - 1] : 0;
+  if (glObjects0 <= 0) {
+    errors.push('未观测到 GL 对象分配（环境无 WebGL2 或 GL 管线未建立），无法判定泄漏');
+  }
+  if (glModeFrames <= 0) {
+    errors.push('GalaxyRenderer 从未走通 GL 渲染路径（全部回退 2D），门禁覆盖不完整');
+  }
+  const noGrowth = glObjects1 <= glObjects0 + LEAK_TOLERANCE;
+  const pass = errors.length === 0 && noGrowth;
+
+  return {
+    pass,
+    switches,
+    heap0MB,
+    heap1MB,
+    heapDeltaMB: (heap0MB != null && heap1MB != null) ? roundN(heap1MB - heap0MB, 2) : null,
+    glObjects0,
+    glObjects1,
+    // —— 附加诊断字段 ——
+    leakTolerance: LEAK_TOLERANCE,
+    heapSamplesMB,
+    glObjectPeaksMin: glObjectPeaks.length ? Math.min.apply(null, glObjectPeaks) : 0,
+    glObjectPeaksMax: glObjectPeaks.length ? Math.max.apply(null, glObjectPeaks) : 0,
+    glModeFrames,
+    errors,
+  };
+}
+
+// —— 门禁 2：WEBGL_lose_context 触发退化 ——————————————————————————————————————
+
+/**
+ * @param {HTMLElement} container
+ * @param {object} cfg
+ * @returns {Promise<object>} { pass, degradedAfterLoss, restoredAfterRestore, errors,
+ *          notes, lostEventFired, restoredEventFired, glDegradedFlag, glCanvasHidden,
+ *          beginGLFrameNullWhileDegraded, pipelineRebuiltAfterRestore, glStillLostAfterRestore,
+ *          glStateTimeline }
+ *          - degradedAfterLoss：丢失后平滑退化验证结论（事件触发 + glDegraded 标记 +
+ *            glCanvas 隐藏 + beginGLFrame 短路，全部成立才为 true）；
+ *          - restoredAfterRestore：webglcontextrestored 是否在超时内触发
+ *            （信息性字段 —— restoreContext 后能否重建管线依环境而定，未触发只记
+ *            notes，不参与判定）；
+ *          - pass = degradedAfterLoss && 全程无异常。
+ */
+async function gateContextLoss(container, cfg) {
+  const errors = [];
+  const notes = [];
+  const result = {
+    pass: false,
+    degradedAfterLoss: false,
+    restoredAfterRestore: false,
+    errors,
+    notes,
+    lostEventFired: false,
+    restoredEventFired: false,
+    glDegradedFlag: false,
+    glCanvasHidden: false,
+    beginGLFrameNullWhileDegraded: false,
+    pipelineRebuiltAfterRestore: false,
+    glStillLostAfterRestore: null,
+  };
+
+  setProgress('ctxLoss', 0, '创建 CanvasManager 并触发上下文丢失');
+  const cm = new CanvasManager().attach(container);
+  if (!cm.hasGL || !cm.gl) {
+    errors.push('环境无 WebGL2（hasGL=false），无法执行上下文丢失门禁');
+    cm.dispose();
+    return result;
+  }
+  // GLContext._init 已缓存 WEBGL_lose_context；兜底再取一次
+  const ext = cm.glc.loseContextExt || cm.gl.getExtension('WEBGL_lose_context');
+  if (!ext) {
+    errors.push('WEBGL_lose_context 扩展不可用，无法模拟上下文丢失');
+    cm.dispose();
+    return result;
+  }
+
+  // GL 状态变化时间线（degraded=true 丢失 / false 恢复重建），诊断用
+  const glStateTimeline = [];
+  const offState = cm.onGLStateChange((degraded) => {
+    glStateTimeline.push({ degraded, atMs: Math.round(performance.now()) });
+  });
+
+  // 1) 预挂监听（先注册再触发，避免竞态）
+  const lostPromise = waitForEvent(cm.glCanvas, 'webglcontextlost', CTX_EVENT_TIMEOUT_MS)
+    .then((fired) => { result.lostEventFired = fired; return fired; });
+
+  // 2) 主动丢失上下文（CanvasManager._onGLLost → preventDefault + _enterDegraded）
+  try {
+    ext.loseContext();
+  } catch (e) {
+    errors.push('loseContext() 抛错: ' + errMsg(e));
+  }
+
+  await lostPromise;
+  // CanvasManager 的事件处理器与本次测试监听同挂 glCanvas（注册在前），事件派发时
+  // glDegraded 已置位；再轮询一帧确保状态稳定
+  await waitFor(() => cm.glDegraded === true, CTX_EVENT_TIMEOUT_MS);
+
+  // 3) 验证退化态：标记 + glCanvas 以 opacity:0 隐藏 + GL 帧短路
+  result.glDegradedFlag = cm.glDegraded === true;
+  result.glCanvasHidden = !!(cm.glCanvas && cm.glCanvas.style.opacity === '0');
+  try {
+    result.beginGLFrameNullWhileDegraded = cm.beginGLFrame() === null;
+  } catch (e) {
+    errors.push('退化期 beginGLFrame 抛错: ' + errMsg(e));
+  }
+  result.degradedAfterLoss =
+    result.lostEventFired && result.glDegradedFlag && result.glCanvasHidden &&
+    result.beginGLFrameNullWhileDegraded;
+  if (!result.lostEventFired) errors.push('webglcontextlost 事件未在超时内触发');
+  if (!result.degradedAfterLoss) errors.push('丢失后未达成平滑退化（glDegraded/glCanvas 隐藏/beginGLFrame 短路任一不成立）');
+
+  // 4) 模拟恢复：等待 webglcontextrestored（CanvasManager._onGLRestored 自动 rebuild，
+  //    rebuild 失败内部自行收敛为降级，不会向外抛错）
+  const restoredPromise = waitForEvent(cm.glCanvas, 'webglcontextrestored', CTX_EVENT_TIMEOUT_MS)
+    .then((fired) => { result.restoredEventFired = fired; return fired; });
+  try {
+    ext.restoreContext(); // 上下文未丢失时调用会抛 InvalidStateError —— 此处已确认丢失
+  } catch (e) {
+    errors.push('restoreContext() 抛错: ' + errMsg(e));
+  }
+  result.restoredAfterRestore = await restoredPromise;
+  if (!result.restoredAfterRestore) {
+    // 按任务约定：restoreContext 后能否真实恢复依环境而定（部分环境上下文一经
+    // 丢失即无法重建）。恢复成功与否只记入 notes，不影响门禁判定 —— 门禁验证的
+    // 是"丢失时平滑退化不崩溃"。
+    notes.push('webglcontextrestored 事件未在超时内触发：环境未真实恢复上下文（isContextLost 仍为 true 时按 2D 兜底继续，属预期行为）');
+  }
+
+  // 5) 恢复后捕获模式探测：不要求"恢复后继续渲染"，只要求不崩溃
+  try {
+    result.glStillLostAfterRestore = cm.gl.isContextLost();
+    const target = cm.beginGLFrame(); // 已重建 → 正常帧；仍降级 → null；均不得抛错
+    if (target) cm.endGLFrame({ bloom: 0, exposure: 1, time: 0 });
+    result.pipelineRebuiltAfterRestore = !result.glStillLostAfterRestore && cm.glDegraded === false;
+  } catch (e) {
+    errors.push('恢复后 GL 探测帧抛错: ' + errMsg(e));
+  }
+
+  result.glStateTimeline = glStateTimeline;
+  result.pass = result.degradedAfterLoss && errors.length === 0;
+
+  offState();
+  cm.dispose();
+  return result;
+}
+
+// —— 门禁 3：100 艘战舰同屏压测 ———————————————————————————————————————————————
+
+/**
+ * @param {HTMLElement} container
+ * @param {object} cfg
+ * @returns {Promise<object>} { pass, shipCount, avgFps, minFps, frameTimesMs, errors,
+ *          notes, projectileCount, frames, warmup, drawMsAvg, timedOut, shimApplied,
+ *          scratchPatched, glObjectsTracked }
+ *          - frameTimesMs：相邻 rAF 时间戳差值序列（ms，含预热段；统计段为 slice(warmup)）；
+ *          - avgFps = 1000 / 统计段平均帧耗时；minFps = 1000 / 统计段最慢帧耗时；
+ *          - shimApplied / scratchPatched：是否启用了 Battle3D 兼容垫片（true 时
+ *            notes 有说明，对应 Battle3D 的两处待修复缺陷）；
+ *          - pass = avgFps ≥ 30 && minFps ≥ 20 && 全程无异常且未超时。
+ */
+async function gateBattleStress(container, cfg) {
+  const errors = [];
+  const notes = [];
+  const shipCount = cfg.ships;
+  const projectileCount = cfg.projectiles;
+  const frames = cfg.frames;
+  const warmup = cfg.warmup;
+  const result = {
+    pass: false,
+    shipCount,
+    avgFps: null,
+    minFps: null,
+    frameTimesMs: [],
+    errors,
+    notes,
+    projectileCount,
+    frames,
+    warmup,
+    drawMsAvg: null,
+    timedOut: false,
+    shimApplied: false,
+    scratchPatched: false,
+    glObjectsTracked: 0,
+  };
+
+  // 后台标签页 rAF 被节流至 0，压测无法进行 —— 快速失败并说明
+  if (typeof document !== 'undefined' && document.hidden) {
+    errors.push('页面处于后台（document.hidden=true），requestAnimationFrame 被节流；请在前台运行门禁 3');
+    return result;
+  }
+
+  setProgress('stress', 0, '创建 CanvasManager 与 Battle3D 资源');
+  const cm = new CanvasManager().attach(container);
+  if (!cm.hasGL || !cm.gl) {
+    errors.push('环境无 WebGL2（hasGL=false），无法执行战舰压测');
+    cm.dispose();
+    return result;
+  }
+
+  // —— Battle3D 双 #version 兼容垫片（详见文件头说明） ——
+  // 仅在 Battle3D 构建期间生效：剥掉源码自带的 #version 行（GLCore 会统一前置），
+  // 构建后立即还原原方法；是否剥除了版本行记录进 result.shimApplied 供面板/报告展示。
+  let battle3d = null;
+  const origCreateProgram = cm.glc.createProgram;
+  cm.glc.createProgram = (vsSource, fsSource, opts) => {
+    const vs = stripLeadingVersionDirective(vsSource);
+    const fs = stripLeadingVersionDirective(fsSource);
+    if (vs !== vsSource || fs !== fsSource) result.shimApplied = true;
+    return origCreateProgram.call(cm.glc, vs, fs, opts);
+  };
+  try {
+    battle3d = new Battle3D(cm.glc, 1); // tier 1：完整 LOD（蜂窝护盾等全量路径）
+  } catch (e) {
+    errors.push('Battle3D 资源构建失败: ' + errMsg(e));
+    cm.glc.createProgram = origCreateProgram;
+    cm.dispose();
+    return result;
+  }
+  cm.glc.createProgram = origCreateProgram; // 还原：绘制路径使用原生 createProgram
+  if (result.shimApplied) {
+    notes.push('已应用 #version 剥离垫片：Battle3D.js 着色器源码自带 GLSL_VERSION 前缀，' +
+      'GLCore.createProgram 又统一前置导致双 #version 编译失败（待 Battle3D/GLCore 修复）；' +
+      '垫片仅在 Battle3D 构建期间生效并已还原，不影响绘制路径');
+  }
+
+  // —— Battle3D scratch 槽位补齐垫片 ——
+  // Battle3D.draw 每帧写入 _scratch.proj / _scratch.view（mat4Perspective/mat4LookAt
+  // 的 out 参数），但构造函数只创建了 mvp/model/view2/tmp/inv 槽位 → draw 首帧即抛
+  // "Cannot read properties of undefined (reading 'fill')"。此处为压测实例补齐两个
+  // 矩阵槽位（draw 每帧覆写其内容，不影响渲染语义），只作用于本实例。
+  if (!battle3d._scratch) battle3d._scratch = {};
+  if (!battle3d._scratch.proj) { battle3d._scratch.proj = mat4(); result.scratchPatched = true; }
+  if (!battle3d._scratch.view) { battle3d._scratch.view = mat4(); result.scratchPatched = true; }
+  if (result.scratchPatched) {
+    notes.push('已补齐 Battle3D._scratch 的 proj/view 矩阵槽位：构造函数未创建 draw() 所需的' +
+      '这两个槽位，首帧即崩溃（待 Battle3D 修复）；补齐只作用于压测实例，draw 每帧覆写其内容');
+  }
+
+  const data = makeBattleData(shipCount, projectileCount);
+  const frameTimes = []; // 相邻 rAF 时间戳差（ms）
+  const drawTimes = [];  // battle3d.draw 纯 CPU 提交耗时（ms，诊断用）
+
+  // 连续 frames 帧绘制（rAF 驱动）：每帧 beginGLFrame → 清屏 → battle3d.draw → endGLFrame，
+  // 与 BattleRenderer._render3D 的真实帧结构一致（含 HDR Bloom 合成）。
+  // 独立 setTimeout 看门狗兜底：rAF 被节流/停发时（页面后台化、渲染器卡顿）也能退出。
+  await new Promise((resolve) => {
+    let frame = 0;
+    let lastTs = 0;
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(watchdog);
+      resolve();
+    };
+    const deadline = performance.now() + STRESS_TIMEOUT_MS;
+    const watchdog = setTimeout(() => {
+      result.timedOut = true;
+      errors.push('压测超时（' + STRESS_TIMEOUT_MS + 'ms 内未完成 ' + frames + ' 帧；rAF 可能被节流）');
+      settle();
+    }, STRESS_TIMEOUT_MS);
+    const step = () => {
+      const now = performance.now();
+      if (now > deadline) {
+        result.timedOut = true;
+        errors.push('压测超时（' + STRESS_TIMEOUT_MS + 'ms 内未完成 ' + frames + ' 帧）');
+        settle();
+        return;
+      }
+      if (lastTs > 0) frameTimes.push(now - lastTs); // 每帧真实耗时 = rAF 差值
+      lastTs = now;
+      if (frame >= frames) { settle(); return; }
+      frame += 1;
+      setProgress('stress', frame, '绘制第 ' + frame + '/' + frames + ' 帧');
+      try {
+        const target = cm.beginGLFrame();
+        if (!target) throw new Error('beginGLFrame 返回 null（GL 管线不可用或已降级）');
+        const gl = cm.gl;
+        gl.clearColor(0.008, 0.012, 0.024, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        const time = frame / 60; // 确定性时间轴（模拟 2 秒 @60fps）
+        const ang = time * 0.05; // 与 BattleRenderer 相同的环绕运镜公式
+        const camPos = [Math.sin(ang) * 4.5, 6.2, 10.5 - Math.cos(ang) * 2.0];
+        const camTarget = [0, 0, 0];
+        const t0 = performance.now();
+        battle3d.draw(gl, target.width, target.height, data, { time, camPos, camTarget, tier: 1 });
+        drawTimes.push(performance.now() - t0);
+        cm.endGLFrame({ bloom: 1.1, exposure: 1.05, time });
+      } catch (e) {
+        errors.push('第 ' + frame + ' 帧绘制异常: ' + errMsg(e));
+        settle();
+        return;
+      }
+      requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  });
+
+  result.frameTimesMs = frameTimes.map((v) => roundN(v, 2));
+  result.drawMsAvg = drawTimes.length
+    ? roundN(drawTimes.reduce((a, b) => a + b, 0) / drawTimes.length, 2)
+    : null;
+  result.glObjectsTracked = countTracked(cm.glc).total;
+
+  // 统计（排除前 warmup 帧预热）
+  const measured = frameTimes.slice(warmup);
+  if (measured.length < frames - warmup) {
+    errors.push('帧采样不完整（' + measured.length + '/' + (frames - warmup) + '），压测未有效执行');
+  } else {
+    const sum = measured.reduce((a, b) => a + b, 0);
+    const avgMs = sum / measured.length;
+    const maxMs = Math.max.apply(null, measured);
+    result.avgFps = roundN(1000 / Math.max(avgMs, 0.001), 1);
+    result.minFps = roundN(1000 / Math.max(maxMs, 0.001), 1);
+    if (result.avgFps < AVG_FPS_MIN) {
+      errors.push('avgFps ' + result.avgFps + ' < ' + AVG_FPS_MIN);
+    }
+    if (result.minFps < MIN_FPS_MIN) {
+      errors.push('minFps ' + result.minFps + ' < ' + MIN_FPS_MIN);
+    }
+  }
+
+  result.pass = errors.length === 0;
+
+  // 清理：不调用 battle3d.destroy() —— 它会整体销毁共享的 GLContext（含 CanvasManager
+  // 的 PostProcessor 资源）；battle3d 登记的全部 GL 资源在 cm.glc._tracked 中，
+  // 由 cm.dispose() 统一回收，与 BattleRenderer 的真实卸载路径一致。
+  cm.dispose();
+  return result;
+}
+
+// —— 入口 ———————————————————————————————————————————————————————————————————————
+
+/**
+ * 单项门禁崩溃隔离：任一门禁抛出未捕获异常时收敛为该形状的失败结果，不拖垮整份报告。
+ * @param {Function} fn 门禁执行函数
+ * @param {Function} makeFallback 失败兜底形状（含该门禁契约字段的默认值）
+ */
+async function runSafely(fn, makeFallback) {
+  try {
+    return await fn();
+  } catch (e) {
+    const base = makeFallback();
+    base.errors.push('门禁执行崩溃: ' + ((e && e.stack) ? e.stack : errMsg(e)));
+    base.pass = false;
+    return base;
+  }
+}
+
+/**
+ * 运行全部三项图形门禁（顺序执行：三项各自挂载/释放独立的 CanvasManager，互不污染）。
+ * @param {HTMLElement} container 挂载 CanvasManager 的 DOM 元素（需有非零布局尺寸）
+ * @param {{switches?:number, ships?:number, projectiles?:number, frames?:number, warmup?:number}} [opts]
+ * @returns {Promise<{results:{leak:object, ctxLoss:object, stress:object, allPass:boolean}}>}
+ */
+async function runGateTests(container, opts = {}) {
+  if (!container || typeof container.appendChild !== 'function') {
+    throw new Error('[glGateTest] runGateTests 需要传入挂载 CanvasManager 的容器元素');
+  }
+  const cfg = Object.assign({}, DEFAULT_OPTS, opts || {});
+  setProgress(null, 0, '准备运行');
+  const leak = await runSafely(
+    () => gateLeakSwitches(container, cfg),
+    () => ({ pass: false, switches: cfg.switches, heap0MB: null, heap1MB: null, heapDeltaMB: null, glObjects0: 0, glObjects1: 0, errors: [] }),
+  );
+  const ctxLoss = await runSafely(
+    () => gateContextLoss(container, cfg),
+    () => ({ pass: false, degradedAfterLoss: false, restoredAfterRestore: false, errors: [], notes: [] }),
+  );
+  const stress = await runSafely(
+    () => gateBattleStress(container, cfg),
+    () => ({ pass: false, shipCount: cfg.ships, avgFps: null, minFps: null, frameTimesMs: [], errors: [], notes: [] }),
+  );
+  const results = {
+    leak,
+    ctxLoss,
+    stress,
+    allPass: !!(leak.pass && ctxLoss.pass && stress.pass),
+  };
+  setProgress(null, 0, results.allPass ? '全部通过' : '存在未通过项');
+  return { results };
+}
+
+// —— 地表渲染诊断（doc7 §2.2 三档诊断模式 / doc6 §3.3 状态快照） ——————————————————
+
+/**
+ * 地表渲染器操作钩子的存活探测（钩子由 PlanetSurface3D.init() 注册到
+ * window.__vfSurfaceDebug，destroy() 注销 —— 仅当地表视图已挂载且持有 GL 时存在）。
+ */
+function surfaceHook() {
+  if (typeof window === 'undefined' || !window.__vfSurfaceDebug) return null;
+  return window.__vfSurfaceDebug;
+}
+
+/**
+ * 设置当前挂载地表渲染器的诊断模式（0=off 1=unlit_nocull 2=wireframe_normal
+ * 3=winding_audit）。未挂载地表视图时返回 { ok:false }，不抛错。
+ * @param {number} mode
+ * @returns {{ok:boolean, debugMode?:number, reason?:string}}
+ */
+function surfaceSetDebugMode(mode) {
+  const hook = surfaceHook();
+  if (!hook) return { ok: false, reason: '地表渲染器未挂载（window.__vfSurfaceDebug 不存在；需先进入地表视图）' };
+  try {
+    return { ok: true, debugMode: hook.setDebugMode(mode) };
+  } catch (e) {
+    return { ok: false, reason: errMsg(e) };
+  }
+}
+
+/** 循环诊断模式 0→1→2→3→0（契约同 surfaceSetDebugMode）。 */
+function surfaceCycleDebugMode() {
+  const hook = surfaceHook();
+  if (!hook) return { ok: false, reason: '地表渲染器未挂载（window.__vfSurfaceDebug 不存在；需先进入地表视图）' };
+  try {
+    return { ok: true, debugMode: hook.cycleDebugMode() };
+  } catch (e) {
+    return { ok: false, reason: errMsg(e) };
+  }
+}
+
+/**
+ * 采集 GL 状态快照（JSON-able：浏览器/GPU/viewport/FBO 附件/剔除与深度状态/
+ * getError/地形顶点与三角形数/区块数/drawCalls）。未挂载时 snapshot 为 null。
+ * @returns {{ok:boolean, snapshot:object|null, reason?:string}}
+ */
+function surfaceGLSnapshot() {
+  const hook = surfaceHook();
+  if (!hook) return { ok: false, snapshot: null, reason: '地表渲染器未挂载（window.__vfSurfaceDebug 不存在；需先进入地表视图）' };
+  try {
+    return { ok: true, snapshot: hook.getSnapshot() };
+  } catch (e) {
+    return { ok: false, snapshot: null, reason: errMsg(e) };
+  }
+}
+
+Object.assign(__exports, { gateTestProgress, runGateTests, surfaceSetDebugMode, surfaceCycleDebugMode, surfaceGLSnapshot });
+
+});
+__register("src/render/meshes/ShipMeshes.js", function (__exports, __require) {
+/**
+ * render/meshes/ShipMeshes.js — 12 种船体的程序化 3D 网格（返工 Phase R4）
+ *
+ * 纯代码生成的低多边形硬表面网格（每船体 48..180 三角形），带法线，
+ * 局部坐标系：+X 舰首、+Y 上、-Z 右舷；整体长度归一约 1.0，渲染层按
+ * 舰种缩放与横滚。阵营涂装灯带与材质槽位由着色器 uniform 处理。
+ * 全部确定性生成（无随机）；顶层禁止访问 document/window。
+ */
+
+// —— 几何构建器 ————————————————————————————————————————
+
+/** 顶点累积器：push 三角形并自动计算面法线 */
+class MeshBuilder {
+  constructor() {
+    this.positions = [];
+    this.normals = [];
+  }
+
+  tri(ax, ay, az, bx, by, bz, cx, cy, cz) {
+    // 面法线（右手系：b-a × c-a）
+    const ux = bx - ax;
+    const uy = by - ay;
+    const uz = bz - az;
+    const vx = cx - ax;
+    const vy = cy - ay;
+    const vz = cz - az;
+    let nx = uy * vz - uz * vy;
+    let ny = uz * vx - ux * vz;
+    let nz = ux * vy - uy * vx;
+    const len = Math.hypot(nx, ny, nz) || 1;
+    nx /= len;
+    ny /= len;
+    nz /= len;
+    for (const p of [[ax, ay, az], [bx, by, bz], [cx, cy, cz]]) {
+      this.positions.push(p[0], p[1], p[2]);
+      this.normals.push(nx, ny, nz);
+    }
+  }
+
+  /** 轴对齐盒子（中心 cx,cy,cz；半尺寸 hx,hy,hz）→ 12 三角形 */
+  box(cx, cy, cz, hx, hy, hz) {
+    const x0 = cx - hx;
+    const x1 = cx + hx;
+    const y0 = cy - hy;
+    const y1 = cy + hy;
+    const z0 = cz - hz;
+    const z1 = cz + hz;
+    // +X（右舷）
+    this.tri(x1, y0, z1, x1, y0, z0, x1, y1, z0);
+    this.tri(x1, y0, z1, x1, y1, z0, x1, y1, z1);
+    // -X
+    this.tri(x0, y0, z0, x0, y0, z1, x0, y1, z1);
+    this.tri(x0, y0, z0, x0, y1, z1, x0, y1, z0);
+    // +Y（上）
+    this.tri(x0, y1, z1, x1, y1, z1, x1, y1, z0);
+    this.tri(x0, y1, z1, x1, y1, z0, x0, y1, z0);
+    // -Y
+    this.tri(x0, y0, z0, x1, y0, z0, x1, y0, z1);
+    this.tri(x0, y0, z0, x1, y0, z1, x0, y0, z1);
+    // +Z（舰首向 +X 时 z=+ 为一侧舷）
+    this.tri(x0, y0, z1, x1, y0, z1, x1, y1, z1);
+    this.tri(x0, y0, z1, x1, y1, z1, x0, y1, z1);
+    // -Z
+    this.tri(x1, y0, z0, x0, y0, z0, x0, y1, z0);
+    this.tri(x1, y0, z0, x0, y1, z0, x1, y1, z0);
+  }
+
+  /** 楔形舰体：沿 +X 由舰尾(宽 w0) 收窄到舰首(宽 w1)，高 h0→h1，长 len */
+  hullWedge(len, w0, w1, h0, h1, zOff = 0) {
+    const x0 = -len / 2;
+    const x1 = len / 2;
+    // 八顶点
+    const p = [
+      [x0, 0, zOff + w0], [x0, 0, zOff - w0], [x0, h0, zOff], // 尾：右、左、脊
+      [x1, 0, zOff + w1], [x1, 0, zOff - w1], [x1, h1, zOff], // 首
+      [x0, -h0 * 0.35, zOff], [x1, -h1 * 0.35, zOff], // 底龙骨
+    ];
+    // 上甲板两侧
+    this.tri(...p[0], ...p[5], ...p[2]);
+    this.tri(...p[1], ...p[2], ...p[5]);
+    this.tri(...p[1], ...p[5], ...p[4]);
+    this.tri(...p[0], ...p[3], ...p[5]);
+    // 两侧舷
+    this.tri(...p[0], ...p[6], ...p[3]);
+    this.tri(...p[0], ...p[3], ...p[5]);
+    this.tri(...p[1], ...p[4], ...p[7]);
+    this.tri(...p[1], ...p[7], ...p[6]);
+    this.tri(...p[1], ...p[6], ...p[0]);
+    // 底部
+    this.tri(...p[6], ...p[7], ...p[3]);
+    this.tri(...p[6], ...p[3], ...p[0]);
+    // 舰尾封板
+    this.tri(...p[2], ...p[5], ...p[7]);
+    this.tri(...p[2], ...p[7], ...p[6]);
+  }
+
+  /** 四棱锥（炮塔/钻头/鳍尖） */
+  pyramid(cx, baseY, cz, w, h, dir = 1) {
+    const h2 = w / 2;
+    if (dir >= 0) {
+      this.tri(cx - h2, baseY, cz - h2, cx + h2, baseY, cz - h2, cx, baseY + h, cz);
+      this.tri(cx + h2, baseY, cz - h2, cx + h2, baseY, cz + h2, cx, baseY + h, cz);
+      this.tri(cx + h2, baseY, cz + h2, cx - h2, baseY, cz + h2, cx, baseY + h, cz);
+      this.tri(cx - h2, baseY, cz + h2, cx - h2, baseY, cz - h2, cx, baseY + h, cz);
+    } else {
+      this.tri(cx + h2, baseY, cz - h2, cx - h2, baseY, cz - h2, cx, baseY - h, cz);
+      this.tri(cx + h2, baseY, cz + h2, cx + h2, baseY, cz - h2, cx, baseY - h, cz);
+      this.tri(cx - h2, baseY, cz + h2, cx + h2, baseY, cz + h2, cx, baseY - h, cz);
+      this.tri(cx - h2, baseY, cz - h2, cx - h2, baseY, cz + h2, cx, baseY - h, cz);
+    }
+  }
+
+  /** 垂直鳍板（双面三角） */
+  fin(cx, cy, cz, len, h) {
+    this.tri(cx - len / 2, cy, cz, cx + len / 2, cy, cz, cx + len * 0.2, cy + h, cz);
+    this.tri(cx + len / 2, cy, cz, cx - len / 2, cy, cz, cx + len * 0.2, cy - h * 0.4, cz);
+  }
+
+  /** 低多边形球（经纬各 seg 段） */
+  sphere(cx, cy, cz, r, seg = 5) {
+    const at = (i, j) => {
+      const phi = (i / seg) * Math.PI; // 0..π
+      const theta = (j / seg) * Math.PI * 2;
+      return [
+        cx + r * Math.sin(phi) * Math.cos(theta),
+        cy + r * Math.cos(phi),
+        cz + r * Math.sin(phi) * Math.sin(theta),
+      ];
+    };
+    for (let i = 0; i < seg; i++) {
+      for (let j = 0; j < seg; j++) {
+        const a = at(i, j);
+        const b = at(i + 1, j);
+        const c = at(i + 1, j + 1);
+        const d = at(i, j + 1);
+        this.tri(...a, ...b, ...c);
+        this.tri(...a, ...c, ...d);
+      }
+    }
+  }
+
+  build() {
+    return {
+      positions: new Float32Array(this.positions),
+      normals: new Float32Array(this.normals),
+      triCount: this.positions.length / 9,
+    };
+  }
+}
+
+// —— 12 船体定义 ————————————————————————————————————————
+
+const BUILDERS = {
+  // 侦察艇：细长 needle + 大型传感鳍
+  hull_scout(m) {
+    m.hullWedge(1.0, 0.10, 0.04, 0.07, 0.03);
+    m.fin(-0.2, 0.06, 0, 0.34, 0.2);
+    m.sphere(0.28, 0.06, 0, 0.055, 4); // 传感穹顶
+  },
+  // 截击艇：前掠翼楔形
+  hull_interceptor(m) {
+    m.hullWedge(0.8, 0.16, 0.02, 0.06, 0.02);
+    // 前掠双翼（上下双面 + 翼尖配重）
+    m.tri(0.1, 0, 0.05, 0.42, 0, 0.30, 0.16, 0, 0.04);
+    m.tri(-0.1, 0, 0.05, 0.1, 0, 0.05, 0.16, 0, 0.04);
+    m.tri(0.1, 0, -0.05, 0.16, 0, -0.04, 0.42, 0, -0.30);
+    m.tri(-0.1, 0, -0.05, 0.1, 0, -0.05, 0.1, 0, -0.05);
+    m.box(0.30, 0.0, 0.28, 0.05, 0.02, 0.03); // 翼尖配重
+    m.box(0.30, 0.0, -0.28, 0.05, 0.02, 0.03);
+    m.box(-0.1, 0.05, 0, 0.12, 0.04, 0.06); // 座舱
+    m.pyramid(-0.38, 0.03, 0, 0.10, 0.08, -1); // 尾喷锥
+    m.fin(-0.15, 0.06, 0, 0.18, 0.10); // 背鳍
+  },
+  // 护卫舰：均衡舰体 + 小舰桥 + 双推进短舱
+  hull_frigate(m) {
+    m.hullWedge(1.0, 0.18, 0.06, 0.10, 0.04);
+    m.box(-0.05, 0.11, 0, 0.14, 0.05, 0.08); // 舰桥
+    m.box(0.30, 0.03, 0.10, 0.12, 0.035, 0.035); // 右推进短舱
+    m.box(0.30, 0.03, -0.10, 0.12, 0.035, 0.035); // 左推进短舱
+    m.pyramid(0.18, 0.10, 0, 0.08, 0.07); // 前炮座
+    m.fin(-0.34, 0.08, 0, 0.26, 0.16);
+    m.box(-0.44, 0.06, 0, 0.06, 0.06, 0.10); // 尾封板
+  },
+  // 驱逐舰：修长双联前爪
+  hull_destroyer(m) {
+    m.hullWedge(1.15, 0.16, 0.05, 0.09, 0.04);
+    m.box(0.30, 0.0, 0.09, 0.20, 0.03, 0.035); // 右前爪
+    m.box(0.30, 0.0, -0.09, 0.20, 0.03, 0.035);
+    m.box(-0.02, 0.11, 0, 0.16, 0.05, 0.075);
+    m.pyramid(0.16, 0.10, 0, 0.09, 0.09);
+  },
+  // 炮击巡洋舰：厚重舰体 + 主炮塔
+  hull_gun_cruiser(m) {
+    m.hullWedge(1.2, 0.24, 0.08, 0.14, 0.06);
+    m.box(0.0, 0.15, 0, 0.18, 0.06, 0.10);
+    m.pyramid(0.34, 0.12, 0, 0.14, 0.14); // 主炮基座
+    m.box(0.5, 0.17, 0, 0.16, 0.035, 0.035); // 主炮身
+    m.box(-0.34, 0.13, 0, 0.12, 0.05, 0.09);
+  },
+  // 防空巡洋舰：桅杆雷达 + 多联小炮塔
+  hull_aa_cruiser(m) {
+    m.hullWedge(1.1, 0.22, 0.07, 0.12, 0.05);
+    m.box(0.0, 0.14, 0, 0.14, 0.05, 0.09);
+    m.box(-0.02, 0.22, 0, 0.02, 0.09, 0.02); // 桅杆
+    m.box(-0.02, 0.30, 0, 0.10, 0.02, 0.10); // 雷达板
+    m.pyramid(0.30, 0.10, 0.10, 0.07, 0.06);
+    m.pyramid(0.30, 0.10, -0.10, 0.07, 0.06);
+    m.pyramid(-0.2, 0.11, 0.12, 0.06, 0.05);
+    m.pyramid(-0.2, 0.11, -0.12, 0.06, 0.05);
+  },
+  // 战列舰：阶梯重装甲舰桥 + 双主炮塔
+  hull_battleship(m) {
+    m.hullWedge(1.5, 0.32, 0.12, 0.20, 0.09);
+    m.box(-0.1, 0.20, 0, 0.22, 0.07, 0.13); // 一阶舰桥
+    m.box(0.18, 0.24, 0, 0.14, 0.05, 0.10); // 二阶
+    m.box(0.36, 0.27, 0, 0.08, 0.04, 0.07); // 顶部指挥塔
+    m.pyramid(0.52, 0.16, 0, 0.16, 0.16); // A 炮塔
+    m.box(0.72, 0.19, 0, 0.14, 0.04, 0.04); // 主炮身
+    m.pyramid(-0.3, 0.18, 0, 0.14, 0.14); // X 炮塔
+    m.box(-0.48, 0.20, 0, 0.12, 0.035, 0.035);
+    m.box(-0.1, 0.05, 0.18, 0.4, 0.05, 0.04); // 侧装甲带
+    m.box(-0.1, 0.05, -0.18, 0.4, 0.05, 0.04);
+  },
+  // 航母：双体不对称飞行甲板 + 蓝光机库槽
+  hull_carrier(m) {
+    m.hullWedge(1.4, 0.30, 0.10, 0.12, 0.05);
+    m.box(0.1, 0.14, 0.16, 0.55, 0.03, 0.16); // 左偏置飞行甲板
+    m.box(-0.2, 0.10, -0.12, 0.3, 0.05, 0.08); // 右侧岛式建筑
+    m.box(0.35, 0.145, 0.16, 0.2, 0.005, 0.05); // 机库槽（着色器灯带）
+    m.box(0.0, 0.145, 0.16, 0.15, 0.005, 0.05);
+    m.fin(-0.5, 0.10, 0, 0.3, 0.18);
+  },
+  // 工业舰：模块化货舱块
+  hull_industrial(m) {
+    m.hullWedge(0.9, 0.20, 0.08, 0.14, 0.06);
+    m.box(-0.15, 0.12, 0.12, 0.22, 0.09, 0.09);
+    m.box(-0.15, 0.12, -0.12, 0.22, 0.09, 0.09);
+    m.box(0.25, 0.10, 0, 0.14, 0.08, 0.12);
+    m.box(-0.48, 0.08, 0, 0.08, 0.10, 0.14);
+  },
+  // 矿业舰：前部采集钻锥 + 侧挂矿石舱
+  hull_miner(m) {
+    m.hullWedge(0.9, 0.22, 0.10, 0.13, 0.07);
+    m.pyramid(0.62, 0.0, 0, 0.18, 0.26); // 采集钻锥
+    m.box(-0.2, 0.10, 0.14, 0.2, 0.08, 0.07); // 矿石舱
+    m.box(-0.2, 0.10, -0.14, 0.2, 0.08, 0.07);
+    m.box(0.1, 0.13, 0, 0.12, 0.05, 0.08);
+  },
+  // 科学船：大型传感阵列穹顶
+  hull_science(m) {
+    m.hullWedge(1.0, 0.20, 0.06, 0.11, 0.05);
+    m.sphere(0.05, 0.16, 0, 0.11, 5); // 主穹顶
+    m.sphere(-0.3, 0.10, 0.09, 0.05, 4);
+    m.sphere(-0.3, 0.10, -0.09, 0.05, 4);
+    m.fin(-0.35, 0.07, 0, 0.24, 0.14);
+  },
+  // 补给舰：粗胖货舱 + 燃料罐
+  hull_supply(m) {
+    m.hullWedge(1.2, 0.30, 0.12, 0.20, 0.10);
+    m.box(-0.2, 0.16, 0.16, 0.3, 0.07, 0.05); // 燃料罐
+    m.box(-0.2, 0.16, -0.16, 0.3, 0.07, 0.05);
+    m.box(-0.2, 0.16, 0, 0.34, 0.08, 0.09); // 主货舱
+    m.box(0.3, 0.14, 0, 0.1, 0.06, 0.08);
+  },
+};
+
+const meshCache = new Map();
+
+/** 构建并缓存船体网格（渲染层每 GL 上下文再上传 VBO） */
+function buildHullMesh(hullId) {
+  if (meshCache.has(hullId)) return meshCache.get(hullId);
+  const m = new MeshBuilder();
+  const builder = BUILDERS[hullId];
+  if (builder) builder(m);
+  else m.hullWedge(1.0, 0.18, 0.06, 0.10, 0.04); // 兜底：通用护卫舰形
+  const mesh = m.build();
+  meshCache.set(hullId, mesh);
+  return mesh;
+}
+
+/** 全部可用船体 id（12 种） */
+function availableHullIds() {
+  return Object.keys(BUILDERS).sort();
+}
+
+Object.assign(__exports, { buildHullMesh, availableHullIds });
+
+});
+__register("src/render/gl/Mat4.js", function (__exports, __require) {
+/**
+ * render/gl/Mat4.js — 4x4 列主序矩阵工具（WebGL 约定）
+ *
+ * 移植自参考实现 simulation-matrix/common/math/mat4.js，并补全：
+ *  - mat4TRS：欧拉角（yaw=Y, pitch=X, roll=Z，合成顺序 R = Ry·Rx·Rz）模型矩阵；
+ *  - vec3ApplyMat4 / mat4MulVec4：向量变换。
+ *
+ * 零分配约定：所有 out 均由调用方传入 Float32Array(16)（vec3 为 Float32Array(3)），
+ * 渲染循环内不产生任何新数组。存储布局：m[col * 4 + row]（列主序）。
+ */
+
+/** 新建单位矩阵（唯一的分配点：仅限初始化阶段调用） */
+function mat4() {
+  const m = new Float32Array(16);
+  m[0] = 1; m[5] = 1; m[10] = 1; m[15] = 1;
+  return m;
+}
+
+/** out = 单位矩阵 */
+function mat4Identity(out) {
+  out.fill(0);
+  out[0] = 1; out[5] = 1; out[10] = 1; out[15] = 1;
+  return out;
+}
+
+/** out = a * b（列主序；语义为先施加 b 再施加 a） */
+function mat4Multiply(out, a, b) {
+  const a00 = a[0], a01 = a[1], a02 = a[2], a03 = a[3];
+  const a10 = a[4], a11 = a[5], a12 = a[6], a13 = a[7];
+  const a20 = a[8], a21 = a[9], a22 = a[10], a23 = a[11];
+  const a30 = a[12], a31 = a[13], a32 = a[14], a33 = a[15];
+  for (let i = 0; i < 4; i++) {
+    const b0 = b[i * 4], b1 = b[i * 4 + 1], b2 = b[i * 4 + 2], b3 = b[i * 4 + 3];
+    out[i * 4] = b0 * a00 + b1 * a10 + b2 * a20 + b3 * a30;
+    out[i * 4 + 1] = b0 * a01 + b1 * a11 + b2 * a21 + b3 * a31;
+    out[i * 4 + 2] = b0 * a02 + b1 * a12 + b2 * a22 + b3 * a32;
+    out[i * 4 + 3] = b0 * a03 + b1 * a13 + b2 * a23 + b3 * a33;
+  }
+  return out;
+}
+
+/** 透视投影矩阵（fovy 为竖直视场角，弧度） */
+function mat4Perspective(out, fovyRad, aspect, near, far) {
+  const f = 1 / Math.tan(fovyRad / 2);
+  out.fill(0);
+  out[0] = f / aspect;
+  out[5] = f;
+  out[10] = (far + near) / (near - far);
+  out[11] = -1;
+  out[14] = (2 * far * near) / (near - far);
+  return out;
+}
+
+/** 正交投影矩阵 */
+function mat4Ortho(out, left, right, bottom, top, near, far) {
+  out.fill(0);
+  out[0] = 2 / (right - left);
+  out[5] = 2 / (top - bottom);
+  out[10] = -2 / (far - near);
+  out[12] = -(right + left) / (right - left);
+  out[13] = -(top + bottom) / (top - bottom);
+  out[14] = -(far + near) / (far - near);
+  out[15] = 1;
+  return out;
+}
+
+/** 视图矩阵：相机位于 eye，看向 center，up 为世界上方向（右手系） */
+function mat4LookAt(out, eye, center, up) {
+  let zx = eye[0] - center[0];
+  let zy = eye[1] - center[1];
+  let zz = eye[2] - center[2];
+  let len = Math.sqrt(zx * zx + zy * zy + zz * zz);
+  if (len === 0) { zx = 0; zy = 0; zz = 1; len = 1; }
+  zx /= len; zy /= len; zz /= len;
+  let xx = up[1] * zz - up[2] * zy;
+  let xy = up[2] * zx - up[0] * zz;
+  let xz = up[0] * zy - up[1] * zx;
+  len = Math.sqrt(xx * xx + xy * xy + xz * xz);
+  if (len === 0) { xx = 1; xy = 0; xz = 0; } else { xx /= len; xy /= len; xz /= len; }
+  const yx = zy * xz - zz * xy;
+  const yy = zz * xx - zx * xz;
+  const yz = zx * xy - zy * xx;
+  out[0] = xx; out[1] = yx; out[2] = zx; out[3] = 0;
+  out[4] = xy; out[5] = yy; out[6] = zy; out[7] = 0;
+  out[8] = xz; out[9] = yz; out[10] = zz; out[11] = 0;
+  out[12] = -(xx * eye[0] + xy * eye[1] + xz * eye[2]);
+  out[13] = -(yx * eye[0] + yy * eye[1] + yz * eye[2]);
+  out[14] = -(zx * eye[0] + zy * eye[1] + zz * eye[2]);
+  out[15] = 1;
+  return out;
+}
+
+/** 一般 4x4 求逆（伴随展开法）。奇异矩阵返回 null。 */
+function mat4Invert(out, m) {
+  const a00 = m[0], a01 = m[1], a02 = m[2], a03 = m[3];
+  const a10 = m[4], a11 = m[5], a12 = m[6], a13 = m[7];
+  const a20 = m[8], a21 = m[9], a22 = m[10], a23 = m[11];
+  const a30 = m[12], a31 = m[13], a32 = m[14], a33 = m[15];
+
+  const b00 = a00 * a11 - a01 * a10;
+  const b01 = a00 * a12 - a02 * a10;
+  const b02 = a00 * a13 - a03 * a10;
+  const b03 = a01 * a12 - a02 * a11;
+  const b04 = a01 * a13 - a03 * a11;
+  const b05 = a02 * a13 - a03 * a12;
+  const b06 = a20 * a31 - a21 * a30;
+  const b07 = a20 * a32 - a22 * a30;
+  const b08 = a20 * a33 - a23 * a30;
+  const b09 = a21 * a32 - a22 * a31;
+  const b10 = a21 * a33 - a23 * a31;
+  const b11 = a22 * a33 - a23 * a32;
+
+  let det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+  if (!det) return null;
+  det = 1.0 / det;
+
+  out[0] = (a11 * b11 - a12 * b10 + a13 * b09) * det;
+  out[1] = (a02 * b10 - a01 * b11 - a03 * b09) * det;
+  out[2] = (a31 * b05 - a32 * b04 + a33 * b03) * det;
+  out[3] = (a22 * b04 - a21 * b05 - a23 * b03) * det;
+  out[4] = (a12 * b08 - a10 * b11 - a13 * b07) * det;
+  out[5] = (a00 * b11 - a02 * b08 + a03 * b07) * det;
+  out[6] = (a32 * b02 - a30 * b05 - a33 * b01) * det;
+  out[7] = (a20 * b05 - a22 * b02 + a23 * b01) * det;
+  out[8] = (a10 * b10 - a11 * b08 + a13 * b06) * det;
+  out[9] = (a01 * b08 - a00 * b10 - a03 * b06) * det;
+  out[10] = (a30 * b04 - a31 * b02 + a33 * b00) * det;
+  out[11] = (a21 * b02 - a20 * b04 - a23 * b00) * det;
+  out[12] = (a11 * b07 - a10 * b09 - a12 * b06) * det;
+  out[13] = (a00 * b09 - a01 * b07 + a02 * b06) * det;
+  out[14] = (a31 * b01 - a30 * b03 - a32 * b00) * det;
+  out[15] = (a20 * b03 - a21 * b01 + a22 * b00) * det;
+  return out;
+}
+
+/** 平移矩阵（覆盖 out，非右乘叠加） */
+function mat4Translate(out, x, y, z) {
+  mat4Identity(out);
+  out[12] = x; out[13] = y; out[14] = z;
+  return out;
+}
+
+/** 缩放矩阵（覆盖 out） */
+function mat4Scale(out, x, y, z) {
+  mat4Identity(out);
+  out[0] = x; out[5] = y; out[10] = z;
+  return out;
+}
+
+/** 绕 X 轴旋转矩阵（弧度，右手系；覆盖 out） */
+function mat4RotateX(out, rad) {
+  mat4Identity(out);
+  const c = Math.cos(rad), s = Math.sin(rad);
+  out[5] = c; out[6] = s; out[9] = -s; out[10] = c;
+  return out;
+}
+
+/** 绕 Y 轴旋转矩阵（弧度，右手系；覆盖 out） */
+function mat4RotateY(out, rad) {
+  mat4Identity(out);
+  const c = Math.cos(rad), s = Math.sin(rad);
+  out[0] = c; out[2] = -s; out[8] = s; out[10] = c;
+  return out;
+}
+
+/** 绕 Z 轴旋转矩阵（弧度，右手系；覆盖 out） */
+function mat4RotateZ(out, rad) {
+  mat4Identity(out);
+  const c = Math.cos(rad), s = Math.sin(rad);
+  out[0] = c; out[1] = s; out[4] = -s; out[5] = c;
+  return out;
+}
+
+/**
+ * 欧拉合成模型矩阵：out = T(t) · Ry(ry) · Rx(rx) · Rz(rz) · S(s)
+ * 约定：ry = yaw（偏航，绕 Y），rx = pitch（俯仰，绕 X），rz = roll（翻滚，绕 Z），
+ * 旋转合成顺序为 R = Ry·Rx·Rz（先 roll，再 pitch，最后 yaw）。
+ * 解析展开一次写就，避免中间矩阵与临时分配。
+ */
+function mat4TRS(out, tx, ty, tz, rx, ry, rz, s) {
+  const cx = Math.cos(rx), sx = Math.sin(rx);
+  const cy = Math.cos(ry), sy = Math.sin(ry);
+  const cz = Math.cos(rz), sz = Math.sin(rz);
+
+  // R = Ry·Rx·Rz 的三个列向量（展开自 (cy·cz + sy·sx·sz) 等解析式）
+  out[0] = (cy * cz + sy * sx * sz) * s;   // 列 0 行 0：R·e_x.x
+  out[1] = cx * sz * s;                    // 列 0 行 1
+  out[2] = (-sy * cz + cy * sx * sz) * s;  // 列 0 行 2
+  out[3] = 0;
+  out[4] = (-cy * sz + sy * sx * cz) * s;  // 列 1 行 0：R·e_y.x
+  out[5] = cx * cz * s;                    // 列 1 行 1
+  out[6] = (sy * sz + cy * sx * cz) * s;   // 列 1 行 2
+  out[7] = 0;
+  out[8] = sy * cx * s;                    // 列 2 行 0：R·e_z.x
+  out[9] = -sx * s;                        // 列 2 行 1
+  out[10] = cy * cx * s;                   // 列 2 行 2
+  out[11] = 0;
+  out[12] = tx;                            // 列 3：平移
+  out[13] = ty;
+  out[14] = tz;
+  out[15] = 1;
+  return out;
+}
+
+/**
+ * 用 4x4 矩阵变换三维点/向量（隐含 w=1）并做透视除法（w=0 时按 1 处理）。
+ * out 为 Float32Array(3)，允许 out === v。
+ */
+function vec3ApplyMat4(out, m, v) {
+  const x = v[0], y = v[1], z = v[2];
+  const w = m[3] * x + m[7] * y + m[11] * z + m[15];
+  const inv = w !== 0 ? 1 / w : 1;
+  out[0] = (m[0] * x + m[4] * y + m[8] * z + m[12]) * inv;
+  out[1] = (m[1] * x + m[5] * y + m[9] * z + m[13]) * inv;
+  out[2] = (m[2] * x + m[6] * y + m[10] * z + m[14]) * inv;
+  return out;
+}
+
+/** 用 4x4 矩阵变换四维向量（完整分量，含 w 行），允许 out === v。 */
+function mat4MulVec4(out, m, v) {
+  const x = v[0], y = v[1], z = v[2], w = v[3];
+  out[0] = m[0] * x + m[4] * y + m[8] * z + m[12] * w;
+  out[1] = m[1] * x + m[5] * y + m[9] * z + m[13] * w;
+  out[2] = m[2] * x + m[6] * y + m[10] * z + m[14] * w;
+  out[3] = m[3] * x + m[7] * y + m[11] * z + m[15] * w;
+  return out;
+}
+
+Object.assign(__exports, { mat4, mat4Identity, mat4Multiply, mat4Perspective, mat4Ortho, mat4LookAt, mat4Invert, mat4Translate, mat4Scale, mat4RotateX, mat4RotateY, mat4RotateZ, mat4TRS, vec3ApplyMat4, mat4MulVec4 });
+
+});
+__register("src/render/gl/Battle3D.js", function (__exports, __require) {
+/**
+ * render/gl/Battle3D.js — 战术战斗 GL 资源构建与绘制（返工 Phase R4）
+ *
+ * 消费 BattleRenderer 传入的 battleView 数据（CPU 确定性坐标），将逻辑
+ * 坐标 (x∈0..1000, y∈0..320) 映射至三维战术空间并绘制：
+ *   三维舰体网格（12 船体，阵营色 Phong）+ 尾焰等离子锥 + 菲涅尔蜂窝
+ *   护盾壳层（受击闪白）+ 相机对齐光束带 + 导弹光点尾迹 + 跃迁漏斗。
+ * 动画时间仅作视觉 uniform，绝不触碰 world 状态。
+ */
+
+const { mat4: mat4, mat4Identity: mat4Identity, mat4Multiply: mat4Multiply, mat4Perspective: mat4Perspective, mat4LookAt: mat4LookAt, mat4Invert: mat4Invert, mat4TRS: mat4TRS, vec3ApplyMat4: vec3ApplyMat4 } = __require("src/render/gl/Mat4.js");
+const { buildHullMesh: buildHullMesh } = __require("src/render/meshes/ShipMeshes.js");
+
+/** 逻辑坐标 → 世界坐标（x 纵深为战列线，z 为横向展开） */
+function logicalToWorld(x, y, out = [0, 0, 0]) {
+  out[0] = (y - 160) * 0.03;   // 逻辑纵向 → 世界 Z（战场纵深）
+  out[1] = 0;                  // 战列基准面
+  out[2] = (x - 500) * 0.022;  // 逻辑横向 → 世界 X
+  return out;
+}
+
+const SHIP_VS = `
+in vec3 aPos;
+in vec3 aNormal;
+uniform mat4 uMVP;
+uniform mat4 uModel;
+uniform mat3 uNormalMat;
+out vec3 vNormal;
+out vec3 vWorldPos;
+void main() {
+  vec4 wp = uModel * vec4(aPos, 1.0);
+  vWorldPos = wp.xyz;
+  vNormal = uNormalMat * aNormal;
+  gl_Position = uMVP * wp;
+}`;
+
+const SHIP_FS = `
+precision highp float;
+in vec3 vNormal;
+in vec3 vWorldPos;
+uniform vec3 uColor;
+uniform vec3 uCamPos;
+uniform float uFlash;   // 受击闪白 0..1
+out vec4 fragColor;
+void main() {
+  vec3 N = normalize(vNormal);
+  vec3 L = normalize(vec3(0.4, 1.0, 0.55));
+  vec3 V = normalize(uCamPos - vWorldPos);
+  float diff = max(dot(N, L), 0.0) * 0.75 + 0.25;
+  vec3 H = normalize(L + V);
+  float spec = pow(max(dot(N, H), 0.0), 42.0) * 0.9;
+  vec3 col = uColor * diff + vec3(1.0, 1.0, 1.05) * spec;
+  // 阵营灯带：沿舰体边缘（世界 y 接近甲板高度）发暖光
+  float stripe = smoothstep(0.015, 0.0, abs(vWorldPos.y - 0.05));
+  col += uColor * stripe * 0.9;
+  col = mix(col, vec3(2.2, 2.3, 2.6), uFlash);
+  fragColor = vec4(col, 1.0);
+}`;
+
+const THRUST_VS = `
+in vec3 aPos;
+uniform mat4 uMVP;
+void main() { gl_Position = uMVP * vec4(aPos, 1.0); }`;
+
+const THRUST_FS = `
+precision highp float;
+uniform vec3 uColor;
+uniform float uIntensity;
+out vec4 fragColor;
+void main() { fragColor = vec4(uColor * uIntensity, 1.0); }`;
+
+const SHIELD_VS = `
+in vec3 aPos;
+uniform mat4 uMVP;
+uniform mat4 uModel;
+out vec3 vLocal;
+out vec3 vWorldPos;
+void main() {
+  vLocal = aPos;
+  vec4 wp = uModel * vec4(aPos * 1.6, 1.0); // 包络放大
+  vWorldPos = wp.xyz;
+  gl_Position = uMVP * wp;
+}`;
+
+const SHIELD_FS = `
+precision highp float;
+in vec3 vLocal;
+in vec3 vWorldPos;
+uniform vec3 uColor;
+uniform vec3 uCamPos;
+uniform float uPower;    // 护盾比 0..1
+uniform float uFlash;    // 受击闪白 0..1
+uniform float uHex;      // 1=蜂窝细节（tier1），0=素壳
+out vec4 fragColor;
+void main() {
+  vec3 N = normalize(vLocal);
+  vec3 V = normalize(uCamPos - vWorldPos);
+  float fres = pow(1.0 - abs(dot(N, V)), 2.4);
+  float hex = 1.0;
+  if (uHex > 0.5) {
+    // 蜂窝六边形网格（局部坐标平面投影近似）
+    vec2 p = vLocal.xz * 14.0 + vLocal.yx * 5.0;
+    vec2 g = vec2(1.7320508 * p.x, p.y + 0.8660254 * abs(mod(p.x, 2.0) - 1.0));
+    vec2 f = abs(fract(g) - 0.5);
+    hex = smoothstep(0.42, 0.5, max(f.x, f.y)) * 0.8 + 0.2;
+  }
+  float a = fres * (0.25 + uPower * 0.5) * hex + uFlash * 0.55;
+  vec3 col = uColor * (1.6 + uFlash * 2.5) + vec3(0.6) * uFlash;
+  fragColor = vec4(col * a, clamp(a, 0.0, 0.85));
+}`;
+
+const QUAD_VS = `
+in vec3 aPos;
+in vec2 aUV;
+uniform mat4 uMVP;
+out vec2 vUV;
+void main() {
+  vUV = aUV;
+  gl_Position = uMVP * vec4(aPos, 1.0);
+}`;
+
+const BEAM_FS = `
+precision highp float;
+in vec2 vUV;             // u: 沿光束 0..1；v: 横向 -1..1
+uniform vec3 uColor;
+uniform float uTime;
+out vec4 fragColor;
+void main() {
+  float core = exp(-vUV.y * vUV.y * 9.0);
+  float glow = exp(-vUV.y * vUV.y * 2.2) * 0.5;
+  float pulse = 0.85 + 0.15 * sin(uTime * 40.0 + vUV.x * 30.0);
+  vec3 col = vec3(2.6, 2.7, 3.0) * core + uColor * glow;
+  float endFade = smoothstep(0.0, 0.06, vUV.x) * smoothstep(1.0, 0.94, vUV.x);
+  fragColor = vec4(col * pulse * endFade, clamp(core + glow, 0.0, 0.9) * endFade);
+}`;
+
+const GLOW_FS = `
+precision highp float;
+in vec2 vUV;             // -1..1
+uniform vec3 uColor;
+uniform float uIntensity;
+out vec4 fragColor;
+void main() {
+  float d = exp(-dot(vUV, vUV) * 4.5);
+  fragColor = vec4(uColor * d * uIntensity, d * 0.8);
+}`;
+
+const WARP_FS = `
+precision highp float;
+in vec2 vUV;             // -1..1（锥面展开）
+uniform float uCharge;   // 0..1 蓄能比
+out vec4 fragColor;
+void main() {
+  // 不断坍缩聚焦的蓝紫色切伦科夫空间扭曲漏斗
+  float rings = fract(vUV.x * 3.0 - uCharge * 6.0);
+  float ring = smoothstep(0.0, 0.25, rings) * smoothstep(0.75, 0.5, rings);
+  float body = exp(-abs(vUV.y) * 3.5) * (0.4 + uCharge);
+  vec3 col = mix(vec3(0.4, 0.9, 3.2), vec3(1.6, 0.5, 3.4), vUV.x);
+  float a = (body * (0.5 + ring) ) * uCharge;
+  fragColor = vec4(col * a * 2.4, clamp(a, 0.0, 0.9));
+}`;
+
+const BG_VS = `
+in vec3 aPos;
+out vec2 vXY;
+void main() { vXY = aPos.xy; gl_Position = vec4(aPos.xy, 0.9999, 1.0); }`;
+
+const BG_FS = `
+precision highp float;
+in vec2 vXY;
+uniform float uTime;
+uniform float uHue;
+out vec4 fragColor;
+/* 确定性哈希与 3D fBm 星云背景（返工 R3 规范：5 八度 + 域扭曲） */
+float hash21(vec2 p) {
+  p = fract(p * vec2(234.34, 435.345));
+  p += dot(p, p + 34.23);
+  return fract(p.x * p.y);
+}
+float noise2D(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash21(i), hash21(i + vec2(1, 0)), f.x),
+             mix(hash21(i + vec2(0, 1)), hash21(i + vec2(1, 1)), f.x), f.y);
+}
+float fbm(vec2 p) {
+  float v = 0.0, a = 0.5;
+  for (int i = 0; i < 5; i++) { v += a * noise2D(p); p = p * 2.03 + vec2(11.3, 7.7); a *= 0.5; }
+  return v;
+}
+void main() {
+  vec3 col = vec3(0.010, 0.014, 0.024);
+  vec2 q = vXY * 2.4 + vec2(uTime * 0.004, 0.0);
+  float warp = fbm(q);
+  float neb = fbm(q + warp * 1.4 + uHue * 7.0);
+  vec3 nebA = vec3(0.30, 0.10, 0.42);
+  vec3 nebB = vec3(0.05, 0.22, 0.38);
+  col += mix(nebA, nebB, uHue) * pow(max(neb - 0.42, 0.0), 1.6) * 1.15;
+  // 远景恒星
+  vec2 sp = vXY * 160.0;
+  float star = pow(hash21(floor(sp)), 40.0) * smoothstep(0.5, 0.05, length(fract(sp) - 0.5));
+  col += vec3(1.5, 1.6, 1.9) * star;
+  fragColor = vec4(col, 1.0);
+}`;
+
+/** 相机基（每帧由 BattleRenderer 计算传入） */
+function makeCamera(aspect) {
+  const proj = mat4();
+  const view = mat4();
+  const vp = mat4();
+  return { proj, view, vp, aspect };
+}
+
+class Battle3D {
+  /**
+   * @param glc GLContext 实例（CanvasManager.glc）
+   * @param tier LOD 档位 1|2
+   */
+  constructor(glc, tier = 1) {
+    this.glc = glc;
+    this.tier = tier;
+    this._buildResources();
+    this._unitCache = new Map();   // shipId → { prevShield, flashUntil }
+    this._scratch = {
+      mvp: mat4(), model: mat4(), view2: mat4(), tmp: mat4(),
+      proj: mat4(), view: mat4(),
+      camPos: [0, 0, 0], inv: mat4(),
+    };
+  }
+
+  _buildResources() {
+    const glc = this.glc;
+    const gl = glc.gl;
+    this.progShip = glc.createProgram(SHIP_VS, SHIP_FS, { label: 'battle:ship' });
+    this.progShield = glc.createProgram(SHIELD_VS, SHIELD_FS, { label: 'battle:shield' });
+    this.progFlat = glc.createProgram(THRUST_VS, THRUST_FS, { label: 'battle:flat' });
+    this.progQuad = glc.createProgram(QUAD_VS, BEAM_FS, { label: 'battle:beam', attributes: { aPos: 0, aUV: 1 } });
+    this.progGlow = glc.createProgram(QUAD_VS, GLOW_FS, { label: 'battle:glow', attributes: { aPos: 0, aUV: 1 } });
+    this.progWarp = glc.createProgram(QUAD_VS, WARP_FS, { label: 'battle:warp', attributes: { aPos: 0, aUV: 1 } });
+    this.progBg = glc.createProgram(BG_VS, BG_FS, { label: 'battle:bg', attributes: { aPos: 0 } });
+
+    // 单位四边形（光束/光斑/漏斗通用，aPos xy 平面 + aUV）
+    const quad = new Float32Array([
+      -1, -1, 0, 0, 1,
+      1, -1, 0, 1, 1,
+      1, 1, 0, 1, 0,
+      -1, -1, 0, 0, 1,
+      1, 1, 0, 1, 0,
+      -1, 1, 0, 0, 0,
+    ]);
+    this.quadBuf = glc.createBuffer(quad);
+    this.quadVAO = glc.createVAO((g) => {
+      g.bindBuffer(g.ARRAY_BUFFER, this.quadBuf);
+      g.enableVertexAttribArray(0);
+      g.vertexAttribPointer(0, 3, g.FLOAT, false, 20, 0);
+      g.enableVertexAttribArray(1);
+      g.vertexAttribPointer(1, 2, g.FLOAT, false, 20, 12);
+    });
+
+    // 背景全屏三角形
+    this.bgBuf = glc.createBuffer(new Float32Array([-1, -1, 0, 3, -1, 0, -1, 3, 0]));
+    this.bgVAO = glc.createVAO((g) => {
+      g.bindBuffer(g.ARRAY_BUFFER, this.bgBuf);
+      g.enableVertexAttribArray(0);
+      g.vertexAttribPointer(0, 3, g.FLOAT, false, 0, 0);
+    });
+
+    // 船体网格 → VAO（含位置/法线）
+    this.hullVAOs = new Map();
+    for (const hullId of ['hull_scout', 'hull_interceptor', 'hull_frigate', 'hull_destroyer',
+      'hull_gun_cruiser', 'hull_aa_cruiser', 'hull_battleship', 'hull_carrier',
+      'hull_industrial', 'hull_miner', 'hull_science', 'hull_supply']) {
+      const mesh = buildHullMesh(hullId);
+      const vboP = glc.createBuffer(mesh.positions);
+      const vboN = glc.createBuffer(mesh.normals);
+      const vao = glc.createVAO((g) => {
+        g.bindBuffer(g.ARRAY_BUFFER, vboP);
+        g.enableVertexAttribArray(0);
+        g.vertexAttribPointer(0, 3, g.FLOAT, false, 0, 0);
+        g.bindBuffer(g.ARRAY_BUFFER, vboN);
+        g.enableVertexAttribArray(1);
+        g.vertexAttribPointer(1, 3, g.FLOAT, false, 0, 0);
+      });
+      this.hullVAOs.set(hullId, { vao, triCount: mesh.triCount });
+    }
+
+    // 护盾球（低模球 5×5 段）
+    const sb = new MeshBuilderLite();
+    sphereTo(sb, 0, 0, 0, 1, 5);
+    const shieldMesh = sb.build();
+    this.shieldVAO = glc.createVAO(((vboP) => (g) => {
+      g.bindBuffer(g.ARRAY_BUFFER, vboP);
+      g.enableVertexAttribArray(0);
+      g.vertexAttribPointer(0, 3, g.FLOAT, false, 0, 0);
+    })(glc.createBuffer(shieldMesh.positions)));
+    this.shieldTriCount = shieldMesh.triCount;
+
+    gl.checkError && glc.checkError('Battle3D.build');
+  }
+
+  /**
+   * 绘制一帧战斗场景（在 cm.beginGLFrame() 之后调用）。
+   * @param data battleView 数据
+   * @param opts { time, camPos, camTarget, tier }
+   */
+  draw(gl, width, height, data, opts) {
+    const s = this._scratch;
+    const time = opts.time || 0;
+    const tier = this.tier;
+
+    // —— 相机 ——
+    mat4Perspective(s.proj, Math.PI / 4, width / Math.max(1, height), 0.1, 120);
+    mat4LookAt(s.view, opts.camPos, opts.camTarget, [0, 1, 0]);
+    mat4Multiply(s.mvp, s.proj, s.view);
+    s.inv.set(s.proj);
+    mat4Invert(s.tmp, s.view);
+
+    // —— 背景（关深度写） ——
+    gl.disable(gl.DEPTH_TEST);
+    gl.useProgram(this.progBg);
+    gl.bindVertexArray(this.bgVAO);
+    gl.uniform1f(gl.getUniformLocation(this.progBg, 'uTime'), time);
+    gl.uniform1f(gl.getUniformLocation(this.progBg, 'uHue'), Math.abs(Math.sin((data.systemId || 'x').split('').reduce((a, c) => a + c.charCodeAt(0), 0))) * 0.8);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.enable(gl.DEPTH_TEST);
+
+    // —— 舰体 ——
+    gl.enable(gl.DEPTH_TEST);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(this.progShip);
+    const uShipMVP = gl.getUniformLocation(this.progShip, 'uMVP');
+    const uShipModel = gl.getUniformLocation(this.progShip, 'uModel');
+    const uShipColor = gl.getUniformLocation(this.progShip, 'uColor');
+    const uShipFlash = gl.getUniformLocation(this.progShip, 'uFlash');
+    const uCam = gl.getUniformLocation(this.progShip, 'uCamPos');
+    gl.uniform3fv(uCam, opts.camPos);
+
+    const sideColors = {
+      a: [0.31, 0.85, 0.91],
+      b: [0.91, 0.42, 0.38],
+    };
+    if (data.sides) {
+      // 玩家侧按阵营主色；敌侧固定红系（数据里无颜色则用默认）
+    }
+
+    const visible = (data.units || []).filter((u) => !u.destroyed);
+    for (const u of visible) {
+      const w = logicalToWorld(u.x, u.y);
+      // 横滚：按航向角与逻辑朝向的耦合做视觉侧倾（CPU 坐标不改）
+      const bank = Math.sin((u.heading || 0)) * 0.35;
+      mat4TRS(s.model, w[0], w[1], w[2], 0, -(u.heading || 0), bank, 0.9);
+      mat4Multiply(s.mvp, s.view, s.model);
+      mat4Multiply(s.mvp, s.proj, s.mvp);
+
+      const flash = this._flashOf(u);
+      const hullKey = guessHull(u);
+      const hv = this.hullVAOs.get(hullKey) || this.hullVAOs.get('hull_frigate');
+      gl.useProgram(this.progShip);
+      gl.uniformMatrix4fv(uShipMVP, false, s.mvp);
+      gl.uniformMatrix4fv(uShipModel, false, s.model);
+      gl.uniform3fv(uShipColor, sideColors[u.side] || sideColors.a);
+      gl.uniform1f(uShipFlash, flash);
+      gl.bindVertexArray(hv.vao);
+      gl.drawArrays(gl.TRIANGLES, 0, hv.triCount);
+
+      // 尾焰等离子锥（推进中更亮）
+      if (tier <= 2) {
+        const speed = Math.abs(Math.sin(u.heading || 0)) + Math.abs(Math.cos(u.heading || 0));
+        this._drawFlat(gl, s, u, -0.55, 0.16, [1.2, 3.2, 6.5], 0.9 + speed * 0.4, Math.PI / 2);
+      }
+
+      // 菲涅尔蜂窝护盾壳层
+      if ((u.shieldMax || 0) > 0 && u.shield > 0) {
+        gl.useProgram(this.progShield);
+        gl.uniformMatrix4fv(gl.getUniformLocation(this.progShield, 'uMVP'), false, s.mvp);
+        gl.uniformMatrix4fv(gl.getUniformLocation(this.progShield, 'uModel'), false, s.model);
+        gl.uniform3fv(gl.getUniformLocation(this.progShield, 'uColor'), sideColors[u.side] || sideColors.a);
+        gl.uniform3fv(gl.getUniformLocation(this.progShield, 'uCamPos'), opts.camPos);
+        gl.uniform1f(gl.getUniformLocation(this.progShield, 'uPower'), u.shield / Math.max(1, u.shieldMax));
+        gl.uniform1f(gl.getUniformLocation(this.progShield, 'uFlash'), flash);
+        gl.uniform1f(gl.getUniformLocation(this.progShield, 'uHex'), tier === 1 ? 1 : 0);
+        gl.depthMask(false);
+        gl.bindVertexArray(this.shieldVAO);
+        gl.drawArrays(gl.TRIANGLES, 0, this.shieldTriCount);
+        gl.depthMask(true);
+      }
+
+      // 撤退跃迁漏斗
+      if (u.order === 'retreat') {
+        const charge = Math.min(1, (u.retreatCharge || 0) / 25);
+        this._drawQuad(gl, s, u, 0.9, 0.0, 1.2 + charge, 0.8, this.progWarp, { uCharge: charge });
+      }
+    }
+
+    // —— 光束带 / 导弹光点 ——
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE); // 加性
+    gl.depthMask(false);
+    for (const p of data.projectiles || []) {
+      if (p.kind === 'beamFx') {
+        this._drawBeam(gl, s, p, time);
+      } else if (p.kind === 'missile') {
+        const w = logicalToWorld(p.x, p.y);
+        this._drawGlow(gl, s, w, [2.6, 2.2, 1.2], 0.85, 0.5);
+      }
+    }
+    gl.depthMask(true);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  }
+
+  _drawFlat(gl, s, u, offX, size, color, intensity, rotY) {
+    const w = logicalToWorld(u.x, u.y);
+    const cx = w[0] - Math.cos(0) * 0; // 尾部
+    mat4TRS(s.model, w[0] - 0.55, w[1], w[2], 0, Math.PI / 2, 0, size);
+    mat4Multiply(s.mvp, s.view, s.model);
+    mat4Multiply(s.mvp, s.proj, s.mvp);
+    gl.useProgram(this.progFlat);
+    gl.uniformMatrix4fv(gl.getUniformLocation(this.progFlat, 'uMVP'), false, s.mvp);
+    gl.uniform3fv(gl.getUniformLocation(this.progFlat, 'uColor'), color);
+    gl.uniform1f(gl.getUniformLocation(this.progFlat, 'uIntensity'), intensity);
+    gl.bindVertexArray(this.shieldVAO);
+    gl.drawArrays(gl.TRIANGLES, 0, this.shieldTriCount);
+  }
+
+  _drawBeam(gl, s, p, time) {
+    const a = logicalToWorld(p.x0, p.y0);
+    const b = logicalToWorld(p.x1, p.y1);
+    const mx = (a[0] + b[0]) / 2;
+    const mz = (a[2] + b[2]) / 2;
+    const len = Math.hypot(b[0] - a[0], b[2] - a[2]) || 0.001;
+    const ang = Math.atan2(b[2] - a[2], b[0] - a[0]);
+    mat4TRS(s.model, mx, 0.06, mz, 0, -ang, 0, len * 0.5);
+    mat4Multiply(s.mvp, s.view, s.model);
+    mat4Multiply(s.mvp, s.proj, s.mvp);
+    gl.useProgram(this.progQuad);
+    gl.uniformMatrix4fv(gl.getUniformLocation(this.progQuad, 'uMVP'), false, s.mvp);
+    gl.uniform3fv(gl.getUniformLocation(this.progQuad, 'uColor'), p.side === 'a' ? [0.5, 1.6, 2.8] : [2.8, 0.7, 0.4]);
+    gl.uniform1f(gl.getUniformLocation(this.progQuad, 'uTime'), time);
+    gl.bindVertexArray(this.quadVAO);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+  }
+
+  _drawGlow(gl, s, w, color, intensity, size) {
+    mat4TRS(s.model, w[0], 0.08, w[2], 0, 0, 0, size);
+    mat4Multiply(s.mvp, s.view, s.model);
+    mat4Multiply(s.mvp, s.proj, s.mvp);
+    gl.useProgram(this.progGlow);
+    gl.uniformMatrix4fv(gl.getUniformLocation(this.progGlow, 'uMVP'), false, s.mvp);
+    gl.uniform3fv(gl.getUniformLocation(this.progGlow, 'uColor'), color);
+    gl.uniform1f(gl.getUniformLocation(this.progGlow, 'uIntensity'), intensity);
+    gl.bindVertexArray(this.quadVAO);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+  }
+
+  _drawQuad(gl, s, u, offX, height, size, alphaFrac, prog, extraUniforms = {}) {
+    const w = logicalToWorld(u.x, u.y);
+    mat4TRS(s.model, w[0] + offX, height, w[2], 0, Math.PI / 2, 0, size);
+    mat4Multiply(s.mvp, s.view, s.model);
+    mat4Multiply(s.mvp, s.proj, s.mvp);
+    gl.useProgram(prog);
+    gl.uniformMatrix4fv(gl.getUniformLocation(prog, 'uMVP'), false, s.mvp);
+    for (const [k, v] of Object.entries(extraUniforms)) {
+      gl.uniform1f(gl.getUniformLocation(prog, k), v);
+    }
+    gl.bindVertexArray(this.quadVAO);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+  }
+
+  /** 受击闪白：按护盾/结构下降检测（渲染层视觉缓存，不触碰世界） */
+  _flashOf(u) {
+    const now = performance.now() / 1000;
+    let c = this._unitCache.get(u.shipId);
+    if (!c) {
+      c = { prevShield: u.shield, prevStruct: u.structure, flashUntil: 0 };
+      this._unitCache.set(u.shipId, c);
+    }
+    if (u.shield < c.prevShield - 0.5 || u.structure < c.prevStruct - 0.5) {
+      c.flashUntil = now + 0.35;
+    }
+    c.prevShield = u.shield;
+    c.prevStruct = u.structure;
+    if (u.destroyed) this._unitCache.delete(u.shipId);
+    return Math.max(0, Math.min(1, (c.flashUntil - now) / 0.35));
+  }
+
+  /** 屏幕拾取：把每个存活单位投影到屏幕空间 */
+  buildPickList(gl, width, height, data, opts) {
+    const s = this._scratch;
+    mat4Perspective(s.proj, Math.PI / 4, width / Math.max(1, height), 0.1, 120);
+    mat4LookAt(s.view, opts.camPos, opts.camTarget, [0, 1, 0]);
+    mat4Multiply(s.vp, s.proj, s.view);
+    const list = [];
+    for (const u of data.units || []) {
+      if (u.destroyed) continue;
+      const w = logicalToWorld(u.x, u.y);
+      const out = [0, 0, 0];
+      vec3ApplyMat4(out, s.vp, [w[0], w[1], w[2]]);
+      const sx = (out[0] * 0.5 + 0.5) * width;
+      const sy = (0.5 - out[1] * 0.5) * height;
+      if (out[2] >= 0 && out[2] <= 1) list.push({ shipId: u.shipId, sx, sy });
+    }
+    return list;
+  }
+
+  destroy() {
+    this.glc.destroy();
+  }
+}
+
+/** 极简几何累积器（护盾球专用） */
+class MeshBuilderLite {
+  constructor() {
+    this.positions = [];
+  }
+
+  tri(a, b, c) {
+    this.positions.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
+  }
+
+  build() {
+    return { positions: new Float32Array(this.positions), triCount: this.positions.length / 9 };
+  }
+}
+
+function sphereTo(sb, cx, cy, cz, r, seg) {
+  const at = (i, j) => {
+    const phi = (i / seg) * Math.PI;
+    const theta = (j / seg) * Math.PI * 2;
+    return [
+      cx + r * Math.sin(phi) * Math.cos(theta),
+      cy + r * Math.cos(phi),
+      cz + r * Math.sin(phi) * Math.sin(theta),
+    ];
+  };
+  for (let i = 0; i < seg; i++) {
+    for (let j = 0; j < seg; j++) {
+      sb.tri(at(i, j), at(i + 1, j), at(i + 1, j + 1));
+      sb.tri(at(i, j), at(i + 1, j + 1), at(i, j + 1));
+    }
+  }
+}
+
+/** 由战斗数据推测船体（hullId 未在 battleView 中时按尺寸分级） */
+function guessHull(u) {
+  const ratio = u.structureMax || 100;
+  if (ratio > 1800) return 'hull_battleship';
+  if (ratio > 900) return 'hull_carrier';
+  if (ratio > 500) return 'hull_gun_cruiser';
+  if (ratio > 260) return 'hull_destroyer';
+  if (ratio < 140) return 'hull_scout';
+  return 'hull_frigate';
+}
+
+Object.assign(__exports, { logicalToWorld, makeCamera, Battle3D });
+
+});
+__register("src/render/GalaxyRenderer.js", function (__exports, __require) {
+/**
+ * render/GalaxyRenderer.js — 银河地图渲染器（R3：WebGL2 全 3D 棒旋星系 + Canvas 2D 退化保护）
+ *
+ * 职责：
+ *  - 三维透视轨道相机：策略坐标 (x,y ∈ 0..1000) 映射世界 (x-500, y-500)*0.02（±10 世界单位），
+ *    星系高度 z = hash(systemId)·核球厚度剖面（银心厚、边缘薄，见 Galaxy3D.systemWorldPos）。
+ *    相机默认 pitch 55°、yaw 0°，半径 = CAM_R0/zoom（zoom 0.5..4 与旧 2D 语义兼容）；
+ *  - 双渲染路径：
+ *      GL 路径（cm.hasGL && cm.tier<3 && 快照有效）：cm.beginGLFrame() → 星系盘实例化粒子
+ *      → 体积星云全屏 raymarch（uSteps 按 tier 24/14/0）→ 航路/标尺线 → 星系节点/势力环
+ *      sprite → 超新星球壳 → cm.endGLFrame()（HDR Bloom + ACES）；
+ *      2D 路径 _render2D：webglcontextlost / Tier3 / 无 WebGL 时的退化保护（原 Canvas 2D
+ *      实现完整保留，任何 GL 异常都平滑回落，render() 绝不抛错）；
+ *  - HUD 文字/指示继续画在 cm.ctx（2D HUD 透明层）：名称标签（surveyedLevel≥1、贪心抽稀）、
+ *    选中/悬停圈、势力范围、舰队/殖民/资源/贸易/前线等标记，坐标一律来自 _projCache 投影；
+ *  - pick(sx, sy)：把每个可见星系的三维位置经 viewProj 投影回屏幕空间缓存到 _projCache /
+ *    _pickList（每帧 render 时更新；交互事件触发相机变化后懒重建），按最近命中
+ *    （阈值 max(10, 14/zoom)）返回 systemId；
+ *  - 交互：左键平移（沿相机右/基准面投影上向量）、滚轮缩放半径（光标锚定）、
+ *    右键/中键拖拽旋转 pitch/yaw（限制 10°..85°）——旋转监听由本渲染器在 init(cm) 时
+ *    自行挂载到 cm.canvas（按下期间临时挂 window move/up，松开即卸，不与 GalaxyView 的
+ *    左键交互冲突，也不产生跨视图泄漏）。
+ *
+ * ⚠ 设计令牌同步声明：本文件的色板字面量是 styles.css `:root` 变量的手工副本
+ *   （读取 getComputedStyle 每帧开销过高），若调整 styles.css 的变量需同步改这里：
+ *   --bg #070b12 / --panel #0e1520 / --line #1d2a3a / --ink #c9d6e3 / --ink-dim #71839a
+ *   --ink-faint #46586e / --accent #4fd8e8 / --accent2 #7ea8ff / --warn #e8b04f
+ *   --danger #e85f5f / --ok #62d98a
+ *
+ * 确定性约束：背景星点与星系高度使用固定 hash（禁用随机数）；动画时间只经
+ * opts.time 传入 uniform；本渲染器不写任何世界/快照状态、不使用 gl.readPixels。
+ */
+
+const { mat4LookAt: mat4LookAt, mat4Perspective: mat4Perspective, mat4Multiply: mat4Multiply, mat4Invert: mat4Invert, mat4Identity: mat4Identity, mat4MulVec4: mat4MulVec4 } = __require("src/render/gl/Mat4.js");
+const { WORLD_SCALE: WORLD_SCALE, systemWorldPos: systemWorldPos, generateSupernovaSeeds: generateSupernovaSeeds, Galaxy3D: Galaxy3D } = __require("src/render/gl/Galaxy3D.js");
+const { computeOffscreenArrow: computeOffscreenArrow } = __require("src/domain/events/objectives.js");
+
+/** 与 styles.css 同步的字面量色板（见文件头同步声明） */
+const C = {
+  BG: '#070b12',
+  BG_DEEP: '#0d1626',
+  LINE: '#1d2a3a',
+  INK: '#c9d6e3',
+  INK_DIM: '#71839a',
+  INK_FAINT: '#46586e',
+  ACCENT: '#4fd8e8',
+  ACCENT2: '#7ea8ff',
+  WARN: '#e8b04f',
+  DANGER: '#e85f5f',
+  OK: '#62d98a',
+  NODE_UNSEEN: '#39465a', // 未探索星系的暗灰点
+  LABEL: '#e9f0f7',       // 标签近白色
+};
+
+/** 视图字体（与 styles.css --font 栈一致） */
+const FONT = '"Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif';
+
+/** 恒星类型 → 地图节点本色（与 SystemRenderer 的恒星着色同源） */
+const STAR_COLORS = {
+  yellowDwarf: '#ffd27a',
+  redDwarf: '#ff8a6a',
+  blueGiant: '#9ecbff',
+  whiteDwarf: '#e8f2ff',
+  neutronStar: '#b8e8ff',
+  pulsar: '#b8e8ff',
+  blackHole: '#2a2f3a', // 本体近黑，靠吸积环辨识
+};
+
+/** 恒星类型 → 地图节点基准半径（逻辑像素，随 zoom 轻微缩放） */
+const STAR_SIZES = {
+  yellowDwarf: 3.4,
+  redDwarf: 2.8,
+  blueGiant: 5.0,
+  whiteDwarf: 3.0,
+  neutronStar: 2.8,
+  pulsar: 3.0,
+  blackHole: 3.6,
+};
+
+/** 世界坐标范围（与 galaxyGen 的 W=1000 一致） */
+const WORLD = 1000;
+
+/** 透视相机竖直视场角（弧度） */
+const FOV = 50 * (Math.PI / 180);
+/** zoom=1 时的轨道半径（世界单位）：竖直可见跨度 ≈ 24 世界单位，整盘 20 单位入画 */
+const CAM_R0 = 26;
+/** 相机半径硬钳制（世界单位） */
+const CAM_R_MIN = 3;
+const CAM_R_MAX = 80;
+/** 旋转灵敏度（弧度/像素） */
+const ROT_SPEED = 0.005;
+/** GL 航路透明度（两端 surveyedLevel>=1 亮 / 其余暗） */
+const LANE_A_KNOWN = 0.35;
+const LANE_A_DIM = 0.10;
+/** 垂直投影标尺线透明度 */
+const STALK_A = 0.08;
+/** 超新星球壳基准半径（世界单位；规格“~12”按 0.1 世界单位刻度解读为 1.2，
+ *  即银盘半径的 12%，并随 zoom 软压避免近景遮蔽邻星） */
+const SHELL_R_BASE = 1.2;
+/** 星云辐射增益 */
+const NEBULA_GAIN = 0.42;
+
+/** 确定性 hash：f(i) = frac(sin(i*127.1)*43758.5453)，禁用随机数 */
+function hash01(i) {
+  const s = Math.sin(i * 127.1) * 43758.5453;
+  return s - Math.floor(s);
+}
+
+/** hex(#rgb/#rrggbb) → rgba 字符串；解析失败回退灰 */
+function rgba(hex, a) {
+  let h = String(hex || '');
+  if (h.startsWith('#')) h = h.slice(1);
+  if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+  const n = parseInt(h, 16);
+  if (!Number.isFinite(n) || h.length !== 6) return `rgba(113,131,154,${a})`;
+  const r = (n >> 16) & 255;
+  const g = (n >> 8) & 255;
+  const b = n & 255;
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+/** hex → [r,g,b] 0..1（GL uniform 用）；解析失败回退灰 */
+function hexToRgb(hex) {
+  let h = String(hex || '');
+  if (h.startsWith('#')) h = h.slice(1);
+  if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+  const n = parseInt(h, 16);
+  if (!Number.isFinite(n) || h.length !== 6) return [113 / 255, 131 / 255, 154 / 255];
+  return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+}
+
+/** 常用色的 GL float 三元组（模块期解析一次） */
+const ACCENT_RGB = hexToRgb(C.ACCENT);
+const WARN_RGB = hexToRgb(C.WARN);
+const DANGER_RGB = hexToRgb(C.DANGER);
+const INK_RGB = hexToRgb(C.INK);
+const INK_DIM_RGB = hexToRgb(C.INK_DIM);
+const UNSEEN_RGB = hexToRgb(C.NODE_UNSEEN);
+/** 恒星类型 → GL 颜色三元组 */
+const STAR_RGB = {};
+for (const k of Object.keys(STAR_COLORS)) STAR_RGB[k] = hexToRgb(STAR_COLORS[k]);
+
+// —— 模块级 scratch（渲染为同步单线程调用，复用以保证循环内零分配） ——————
+const UP_VEC = new Float32Array([0, 0, 1]);
+const _tView = new Float32Array(16);
+const _tProj = new Float32Array(16);
+const _tVP = new Float32Array(16);
+const _tIVP = new Float32Array(16);
+const _tEye = new Float32Array(3);
+const _tCtr = new Float32Array(3);
+const _v4a = new Float32Array(4);
+const _v4b = new Float32Array(4);
+const _v4c = new Float32Array(4);
+const _v4d = new Float32Array(4);
+const _ptTmp = new Float32Array(2);
+const _ptA = new Float32Array(2);
+const _ptB = new Float32Array(2);
+const _wp3 = new Float32Array(3);
+const _wp3b = new Float32Array(3);
+const _prj2 = new Float32Array(2);
+
+class GalaxyRenderer {
+  constructor() {
+    /** 视图状态：x/y 为基准面中心（策略坐标 0..1000，与相机目标同步），zoom 0.5..4 */
+    this.view = { x: WORLD / 2, y: WORLD / 2, zoom: 1 };
+    /** @type {import('./CanvasManager.js').CanvasManager|null} */
+    this.cm = null;
+    /** 最新快照引用（视图通过 setSnapshot 更新；渲染循环读最新值） */
+    this._snapshot = null;
+    /** 悬停命中的星系 id（视图直接写 renderer._hoverId 或调用 setHover） */
+    this._hoverId = null;
+    this._bgKey = '';    // 背景渐变缓存键（w×h，2D 路径用）
+    this._bgGrad = null; // 背景渐变缓存
+    this._stars = null;  // 程序化静态星点（世界坐标，懒构建一次）
+
+    // —— R3：轨道相机与渲染路径状态 ——
+    /** 相机姿态：pitch/yaw（弧度）；目标点即 view.x/y 映射的基准面点 */
+    this._cam = { pitch: 55 * (Math.PI / 180), yaw: 0 };
+    /** 上一帧实际使用的渲染路径（'gl' | '2d'），供 pick/坐标换算保持一致 */
+    this._mode = '2d';
+    /** GL 资源容器（首次 GL 帧懒构建；构建失败置 _glBroken 走 2D） */
+    this._gl3d = null;
+    this._glBroken = false;
+    this._offGLState = null;
+
+    // 相机矩阵（实例持有，供 render/pick/坐标换算复用）
+    this._mView = new Float32Array(16);
+    this._mProj = new Float32Array(16);
+    this._mVP = new Float32Array(16);
+    this._mIVP = new Float32Array(16);
+    mat4Identity(this._mView);
+    mat4Identity(this._mProj);
+    mat4Identity(this._mVP);
+    mat4Identity(this._mIVP);
+    this._camEye = new Float32Array(3);
+    this._camCtr = new Float32Array(3);
+    this._frameW = 0; // 与 _mVP 配套的视口逻辑尺寸（0 表示矩阵未就绪）
+    this._frameH = 0;
+    /** 相机代次：panBy/zoomAt/旋转递增；_frameVersion 落后即表示实例矩阵过期 */
+    this._camVersion = 0;
+    this._frameVersion = -1;
+
+    // pick 投影缓存（每帧 render 更新；相机变化后置脏懒重建）
+    /** @type {Map<string|number, {id:any, s:object, sx:number, sy:number, vis:boolean}>} */
+    this._projCache = new Map();
+    /** @type {Array<{id:any, s:object, sx:number, sy:number, vis:boolean}>} */
+    this._pickList = [];
+    this._projValid = false;
+    this._projSnap = null;
+
+    // GL 场景动态数据（预分配，每帧覆写）
+    this._spriteData = new Float32Array(1024 * 12);
+    this._spriteCount = 0;
+    this._shellData = new Float32Array(128 * 8);
+    this._shellCount = 0;
+    this._lineData = new Float32Array(6000 * 7);
+    this._lineVerts = 0;
+    this._byId = null;
+    this._facHex = null;
+    this._facRgb = null;
+    this._novaSeeds = null;
+    this._novaSnap = null;
+
+    // 右键/中键旋转拖拽状态（监听器仅拖拽期间存在于 window）
+    this._rot = { active: false, x: 0, y: 0 };
+    this._rotDetach = null;
+  }
+
+  /**
+   * 绑定画布管理器；持有 GL 时注册上下文恢复重建钩子，并挂载右/中键旋转交互。
+   * @param {import('./CanvasManager.js').CanvasManager} canvasManager
+   */
+  init(canvasManager) {
+    this.cm = canvasManager || null;
+    if (this._offGLState) {
+      try { this._offGLState(); } catch (_) { /* 忽略注销异常 */ }
+      this._offGLState = null;
+    }
+    this._detachRot();
+    if (this.cm) {
+      // 上下文恢复（rebuild 成功）后重建本渲染器的 GL 资源；失败收敛为 2D 兜底
+      if (typeof this.cm.onGLStateChange === 'function') {
+        this._offGLState = this.cm.onGLStateChange((degraded) => {
+          if (degraded) return; // 丢失：render 自动走 _render2D
+          this._glBroken = false;
+          if (this._gl3d && this.cm && this.cm.glc) {
+            try {
+              this._gl3d.rebuild(this.cm.glc);
+            } catch (e) {
+              console.error('[GalaxyRenderer] GL 资源重建失败，退回 2D:', e);
+              this._glBroken = true;
+            }
+          }
+        });
+      }
+      // 旋转交互：仅当画布支持事件监听时挂载（桩环境/极简 cm 下静默跳过）
+      if (this.cm.canvas && typeof this.cm.canvas.addEventListener === 'function') {
+        this._attachRot(this.cm.canvas);
+      }
+    }
+    return this;
+  }
+
+  /** 更新渲染用的最新快照引用（不复制、不修改） */
+  setSnapshot(snap) {
+    this._snapshot = snap || null;
+  }
+
+  /** 更新悬停星系 id */
+  setHover(id) {
+    this._hoverId = id || null;
+  }
+
+  // —— 路径判定 ——————————————————————————————————
+
+  /** 当前视口宽（逻辑像素） */
+  _vw() { return this.cm ? this.cm.width : 0; }
+  /** 当前视口高（逻辑像素） */
+  _vh() { return this.cm ? this.cm.height : 0; }
+
+  /** GL 路径可用性（快照有效性由调用方另行判断） */
+  _glActive() {
+    const cm = this.cm;
+    return !!(cm && cm.hasGL && cm.tier < 3 && !cm.glDegraded && !this._glBroken);
+  }
+
+  // —— 视图变换（GL：轨道相机；2D：旧平面映射） ——————————————————
+
+  /**
+   * 屏幕坐标 → 世界（策略）坐标。
+   * GL 路径：经相机矩阵反投影射线与 z=0 基准面求交（单选/移动命令坐标一致）；
+   * 无交点（射线背向/平行）时回退当前目标点。
+   */
+  screenToWorld(sx, sy) {
+    if (this._mode === 'gl') {
+      const p = this._planePointAt(sx, sy, _ptTmp, NaN);
+      if (p) {
+        return { x: p[0] / WORLD_SCALE + 500, y: p[1] / WORLD_SCALE + 500 };
+      }
+      return { x: this.view.x, y: this.view.y };
+    }
+    const z = this.view.zoom;
+    return {
+      x: (sx - this._vw() / 2) / z + this.view.x,
+      y: (sy - this._vh() / 2) / z + this.view.y,
+    };
+  }
+
+  /**
+   * 世界（策略）坐标 → 屏幕坐标（返回 [sx, sy]）。
+   * GL 路径投影基准面点 (wx, wy, 0)；相机矩阵未就绪时退回 2D 公式。
+   */
+  worldToScreen(wx, wy) {
+    if (this._mode === 'gl') {
+      // 相机在渲染帧之间被 pan/zoom/旋转改动过 → 重建实例矩阵，保证交互期坐标一致
+      if (this._frameVersion !== this._camVersion || this._frameW <= 0) {
+        this._computeCamera(this._vw(), this._vh());
+      }
+      if (this._frameW > 0) {
+        this._projectToScreen((wx - 500) * WORLD_SCALE, (wy - 500) * WORLD_SCALE, 0, _prj2);
+        return [_prj2[0], _prj2[1]];
+      }
+    }
+    const z = this.view.zoom;
+    return [
+      (wx - this.view.x) * z + this._vw() / 2,
+      (wy - this.view.y) * z + this._vh() / 2,
+    ];
+  }
+
+  /**
+   * 按屏幕像素平移视图（dx/dy 为屏幕位移）。
+   * GL 路径沿相机右向量与基准面投影上向量移动目标（保持目标在基准面上，
+   * 使 screenToWorld 的射线求交导航稳定）；比例取目标深度处的 世界/像素 系数。
+   */
+  panBy(dx, dy) {
+    if (this._mode === 'gl') {
+      const w = this._vw();
+      const h = this._vh();
+      if (w > 1 && h > 1) {
+        const cam = this._computeCamera(w, h); // 仅为取 世界/像素 系数 k
+        if (cam) {
+          const k = cam.k;
+          const fx = Math.cos(this._cam.yaw);
+          const fy = Math.sin(this._cam.yaw);
+          const rx = -Math.sin(this._cam.yaw);
+          const ry = Math.cos(this._cam.yaw);
+          // 拖拽方向 = 内容跟随光标：目标沿 -右(-dx) 与 屏幕上(=基准面投影 up = -forward)(+dy) 移动
+          const dwx = (-dx * rx - dy * fx) * k;
+          const dwy = (-dx * ry - dy * fy) * k;
+          this.view.x += dwx / WORLD_SCALE;
+          this.view.y += dwy / WORLD_SCALE;
+          this._clampView();
+          this._camVersion++;
+          this._projValid = false;
+          return;
+        }
+      }
+    }
+    const z = this.view.zoom || 1;
+    // 软边界：防止把星图拖丢（世界 0..1000，放宽 ±200）
+    this.view.x = Math.min(WORLD + 200, Math.max(-200, this.view.x - dx / z));
+    this.view.y = Math.min(WORLD + 200, Math.max(-200, this.view.y - dy / z));
+    this._camVersion++;
+    this._projValid = false;
+  }
+
+  /**
+   * 以屏幕点 (sx,sy) 为锚缩放（factor>1 放大），zoom clamp 0.5–4（等比驱动轨道半径）。
+   * GL 路径：缩放前后光标下的基准面交点保持不动（平移目标补偿透视差）。
+   */
+  zoomAt(sx, sy, factor) {
+    if (this._mode === 'gl') {
+      const w = this._vw();
+      const h = this._vh();
+      if (w > 1 && h > 1) {
+        const before = this._planePointAt(sx, sy, _ptA, NaN);
+        const z1 = Math.min(4, Math.max(0.5, (this.view.zoom || 1) * factor));
+        if (before) {
+          const after = this._planePointAt(sx, sy, _ptB, CAM_R0 / z1);
+          if (after) {
+            this.view.x += (before[0] - after[0]) / WORLD_SCALE;
+            this.view.y += (before[1] - after[1]) / WORLD_SCALE;
+          }
+        }
+        this.view.zoom = z1;
+        this._clampView();
+        this._camVersion++;
+        this._projValid = false;
+        return;
+      }
+    }
+    const before = this.screenToWorld(sx, sy); // 光标下的世界点（缩放前后不动）
+    const z = Math.min(4, Math.max(0.5, this.view.zoom * factor));
+    this.view.zoom = z;
+    this.view.x = before.x - (sx - this._vw() / 2) / z;
+    this.view.y = before.y - (sy - this._vh() / 2) / z;
+    this._clampView();
+    this._camVersion++;
+    this._projValid = false;
+  }
+
+  /** 视图中心软边界约束（与旧版一致：策略坐标 -200..1200） */
+  _clampView() {
+    this.view.x = Math.min(WORLD + 200, Math.max(-200, this.view.x));
+    this.view.y = Math.min(WORLD + 200, Math.max(-200, this.view.y));
+  }
+
+  // —— 相机矩阵与拾取投影 ——————————————————————————————————
+
+  /**
+   * 构建轨道相机矩阵组（写入调用方提供的缓冲）。
+   * eye = target + R·(cosP·cosY, cosP·sinY, sinP)，up = +Z（pitch 限幅内不退化）。
+   */
+  _buildCameraInto(w, h, radius, view, proj, vp, ivp, eye, ctr) {
+    const cp = Math.cos(this._cam.pitch);
+    const sp = Math.sin(this._cam.pitch);
+    const cy = Math.cos(this._cam.yaw);
+    const sy = Math.sin(this._cam.yaw);
+    const tx = (this.view.x - 500) * WORLD_SCALE;
+    const ty = (this.view.y - 500) * WORLD_SCALE;
+    eye[0] = tx + radius * cp * cy;
+    eye[1] = ty + radius * cp * sy;
+    eye[2] = radius * sp;
+    ctr[0] = tx;
+    ctr[1] = ty;
+    ctr[2] = 0;
+    mat4LookAt(view, eye, ctr, UP_VEC);
+    mat4Perspective(proj, FOV, Math.max(0.1, w / Math.max(1, h)), 0.1, 400);
+    mat4Multiply(vp, proj, view);
+    if (!mat4Invert(ivp, vp)) mat4Identity(ivp);
+  }
+
+  /**
+   * 计算当前帧相机：填充实例矩阵 _mView/_mProj/_mVP/_mIVP 并记录配套视口尺寸。
+   * @returns {{eye:Float32Array, radius:number, k:number}|null} k = 目标深度处 世界/逻辑像素
+   */
+  _computeCamera(w, h) {
+    if (!(w > 1 && h > 1)) return null;
+    const zoom = this.view.zoom || 1;
+    const radius = Math.min(CAM_R_MAX, Math.max(CAM_R_MIN, CAM_R0 / zoom));
+    this._buildCameraInto(w, h, radius, this._mView, this._mProj, this._mVP, this._mIVP, this._camEye, this._camCtr);
+    this._frameW = w;
+    this._frameH = h;
+    this._frameVersion = this._camVersion;
+    const k = (2 * radius * Math.tan(FOV / 2)) / h;
+    return { eye: this._camEye, radius, k };
+  }
+
+  /**
+   * 屏幕像素 → z=0 基准面交点（世界坐标）。
+   * @param {number} sx 逻辑像素
+   * @param {number} sy 逻辑像素
+   * @param {Float32Array} out (2) 输出
+   * @param {number} radiusOverride NaN=用当前 zoom 半径（缩放锚定预演时传新半径）
+   * @returns {Float32Array|null} out 或 null（视口未就绪 / 射线无交点）
+   */
+  _planePointAt(sx, sy, out, radiusOverride) {
+    const w = this._vw();
+    const h = this._vh();
+    if (!(w > 1 && h > 1)) return null;
+    let radius;
+    if (Number.isFinite(radiusOverride)) {
+      radius = Math.min(CAM_R_MAX, Math.max(CAM_R_MIN, radiusOverride));
+    } else {
+      const zoom = this.view.zoom || 1;
+      radius = Math.min(CAM_R_MAX, Math.max(CAM_R_MIN, CAM_R0 / zoom));
+    }
+    this._buildCameraInto(w, h, radius, _tView, _tProj, _tVP, _tIVP, _tEye, _tCtr);
+    const nx = (sx / w) * 2 - 1;
+    const ny = 1 - (sy / h) * 2;
+    _v4a[0] = nx; _v4a[1] = ny; _v4a[2] = -1; _v4a[3] = 1;
+    _v4b[0] = nx; _v4b[1] = ny; _v4b[2] = 1; _v4b[3] = 1;
+    mat4MulVec4(_v4c, _tIVP, _v4a);
+    mat4MulVec4(_v4d, _tIVP, _v4b);
+    const w0 = _v4c[3];
+    const w1 = _v4d[3];
+    if (!(Math.abs(w0) > 1e-9 && Math.abs(w1) > 1e-9)) return null;
+    const rox = _v4c[0] / w0;
+    const roy = _v4c[1] / w0;
+    const roz = _v4c[2] / w0;
+    const dxx = _v4d[0] / w1 - rox;
+    const dyy = _v4d[1] / w1 - roy;
+    const dzz = _v4d[2] / w1 - roz;
+    if (Math.abs(dzz) < 1e-6) return null;
+    const t = -roz / dzz;
+    if (!(t > 0)) return null;
+    out[0] = rox + dxx * t;
+    out[1] = roy + dyy * t;
+    return out;
+  }
+
+  /**
+   * 世界坐标 → 屏幕逻辑像素（写入 out[0..1]；相机背后返回 -1e5 哨兵）。
+   * @param {number} wx 世界 x
+   * @param {number} wy 世界 y
+   * @param {number} wz 世界 z
+   */
+  _projectToScreen(wx, wy, wz, out) {
+    const m = this._mVP;
+    const cw = m[3] * wx + m[7] * wy + m[11] * wz + m[15];
+    if (cw <= 1e-6) {
+      out[0] = -1e5;
+      out[1] = -1e5;
+      return out;
+    }
+    const cx = (m[0] * wx + m[4] * wy + m[8] * wz + m[12]) / cw;
+    const cy = (m[1] * wx + m[5] * wy + m[9] * wz + m[13]) / cw;
+    out[0] = (cx * 0.5 + 0.5) * this._frameW;
+    out[1] = (0.5 - cy * 0.5) * this._frameH;
+    return out;
+  }
+
+  // —— 命中检测 ——————————————————————————————————
+
+  /**
+   * 屏幕点命中检测：返回命中的星系 id 或 null。
+   * _pickList 由 _updateProjCache 维护（每帧 render 更新；相机变化后懒重建），
+   * 每项为可见星系三维位置经 viewProj 投影的屏幕坐标；命中半径 = max(10, 14/zoom)。
+   */
+  pick(sx, sy) {
+    const snap = this._snapshot;
+    if (!snap || !Array.isArray(snap.systems) || !snap.systems.length) return null;
+    if (!this._projValid || this._projSnap !== snap) {
+      this._updateProjCache(snap, this._vw(), this._vh());
+    }
+    const r = Math.max(10, 14 / (this.view.zoom || 1));
+    let best = null;
+    let bestD = Infinity;
+    for (const e of this._pickList) {
+      if (!e.vis) continue;
+      const d = Math.hypot(e.sx - sx, e.sy - sy);
+      if (d <= r && d < bestD) {
+        best = e.id;
+        bestD = d;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * 重建 pick/HUD 投影缓存：每个星系的三维位置（GL 模式含高度 z）投影到屏幕空间。
+   * render() 每帧调用；panBy/zoomAt/旋转置 _projValid=false 后由 pick 懒重建。
+   */
+  _updateProjCache(snap, w, h) {
+    this._projCache.clear();
+    this._pickList.length = 0;
+    this._projSnap = snap || null;
+    this._projValid = false;
+    if (!snap || !Array.isArray(snap.systems) || !(w > 1) || !(h > 1)) return;
+    const glMode = this._mode === 'gl' && this._glActive();
+    // 总是重算相机：panBy/zoomAt/旋转只置脏不回写实例矩阵，此处统一刷新防拾取漂移
+    if (glMode) this._computeCamera(w, h);
+    for (const s of snap.systems) {
+      let sx;
+      let sy;
+      if (glMode && this._frameW > 0) {
+        systemWorldPos(s, _wp3);
+        this._projectToScreen(_wp3[0], _wp3[1], _wp3[2], _prj2);
+        sx = _prj2[0];
+        sy = _prj2[1];
+      } else {
+        sx = (s.x - this.view.x) * this.view.zoom + w / 2;
+        sy = (s.y - this.view.y) * this.view.zoom + h / 2;
+      }
+      const vis = sx > -80 && sy > -80 && sx < w + 80 && sy < h + 80;
+      const entry = { id: s.id, s, sx, sy, vis };
+      this._projCache.set(s.id, entry);
+      this._pickList.push(entry);
+    }
+    this._projValid = true;
+  }
+
+  // —— 渲染入口 ——————————————————————————————————
+
+  /**
+   * 渲染一帧。
+   * @param {CanvasRenderingContext2D} ctx HUD 2D 上下文（cm.ctx，dpr 变换已由 beginFrame 设定）
+   * @param {number} w 画布逻辑像素宽
+   * @param {number} h 画布逻辑像素高
+   * @param {object} snapshot App 快照（snapshot.systems / fleets / factions / battles）
+   * @param {object} layers 图层开关 { lanes, ownership, claims, resources, danger,
+   *                                 fleets, surveys, colonies, trade, fronts }
+   * @param {object} opts { selectedId, hoverId, playerFactionId, reducedEffects,
+   *                        time(秒，仅动画 uniform), marketSystemIds(Set|Array，trade 层用) }
+   */
+  render(ctx, w, h, snapshot, layers, opts = {}) {
+    const snap = snapshot || this._snapshot;
+    if (snap) this._snapshot = snap;
+    this._w = w;
+    this._h = h;
+
+    const reduced = !!opts.reducedEffects;
+    const t = Number(opts.time) || 0;
+    const L = { lanes: true, ownership: true, claims: false, resources: false, danger: false,
+      fleets: true, surveys: true, colonies: true, trade: false, fronts: true, ...(layers || {}) };
+
+    // 派生共享数据（2D/GL 两条路径共用的查找表）
+    this._byId = snap && Array.isArray(snap.systems) ? new Map(snap.systems.map((s) => [s.id, s])) : null;
+    this._facHex = new Map(((snap && snap.factions) || []).map((f) => [f.id, f.color || C.ACCENT]));
+    this._facRgb = new Map(((snap && snap.factions) || []).map((f) => [f.id, hexToRgb(f.color || C.ACCENT)]));
+
+    // 路径选择：GL（tier<3、有快照）或 2D 退化保护
+    const glTry = this._glActive() && snap && Array.isArray(snap.systems);
+    this._mode = glTry ? 'gl' : '2d';
+    this._updateProjCache(snap, w, h);
+
+    let drewGL = false;
+    if (this._mode === 'gl') {
+      drewGL = this._renderGLFrame(w, h, snap, L, opts, reduced, t);
+    }
+    if (!drewGL) {
+      // GL 不可用（无 WebGL / tier3 / 上下文丢失 / 帧失败）：本帧起走 2D 并重投影缓存
+      this._mode = '2d';
+      this._updateProjCache(snap, w, h);
+      this._render2D(ctx, w, h, snap, L, opts);
+    } else {
+      this._drawHud(ctx, w, h, snap, L, opts, reduced, t);
+    }
+  }
+
+  // —— GL 路径 ————————————————————————————————————————————
+
+  /** 懒构建 GL 资源（失败抛错由调用方捕获并置 _glBroken） */
+  _ensureGL3D() {
+    if (this._gl3d) return this._gl3d;
+    const cm = this.cm;
+    if (!cm || !cm.glc) throw new Error('GLContext 缺失');
+    const g3 = new Galaxy3D();
+    g3.init(cm.glc);
+    this._gl3d = g3;
+    return g3;
+  }
+
+  /** tier → 星系盘粒子档位（40k/15k/6k；cm.post.particleScale 为一致性硬上界） */
+  _particleCountFor() {
+    const cm = this.cm;
+    const tier = cm.tier;
+    const table = tier <= 1 ? 40000 : tier === 2 ? 15000 : 6000;
+    const scale = cm.post ? (cm.post.particleScale ?? 1) : 1;
+    return Math.min(table, Math.round(40000 * Math.max(0, scale)));
+  }
+
+  /**
+   * GL 帧主体：beginGLFrame → 场景 → endGLFrame。返回 false 表示本帧需回退 2D。
+   * 任何 GL 异常都被捕获并置 _glBroken（后续帧走 _render2D），render() 不抛错。
+   */
+  _renderGLFrame(w, h, snap, L, opts, reduced, t) {
+    const cm = this.cm;
+    const post = cm.post;
+    if (!post || !post.ready) return false;
+    const cam = this._computeCamera(w, h);
+    if (!cam) return false;
+    let g3;
+    try {
+      g3 = this._ensureGL3D();
+    } catch (e) {
+      console.error('[GalaxyRenderer] GL 资源构建失败，退回 2D:', e);
+      this._glBroken = true;
+      return false;
+    }
+    let began = false;
+    try {
+      const target = cm.beginGLFrame(); // 绑定场景 FBO + viewport（tier>=3/降级返回 null）
+      if (!target) return false;
+      began = true;
+      const gl = cm.gl;
+
+      // 共享状态：加法混合、深度关（全 additive，绘制顺序不影响合成结果）
+      gl.disable(gl.DEPTH_TEST);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.ONE, gl.ONE);
+      gl.clearColor(0.0275, 0.0431, 0.0706, 1.0); // C.BG #070b12
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+      const px = this._mProj[0];
+      const py = this._mProj[5];
+
+      // 1) 星系盘：实例化粒子 billboard（一次 drawArraysInstanced）
+      const pcount = this._particleCountFor();
+      if (pcount > 0 && g3.particleCount > 0) {
+        g3.drawDisk(gl, {
+          viewProj: this._mVP,
+          px,
+          py,
+          minSize: cam.k * 0.9,
+          count: Math.min(pcount, g3.particleCount),
+          time: reduced ? 0 : t,
+        });
+      }
+
+      // 2) 体积星云全屏 pass（粒子之后、HUD 之前；uSteps 按 tier 24/14/0）
+      const steps = cm.tier <= 1 ? 24 : cm.tier === 2 ? 14 : 0;
+      if (steps > 0 && !reduced) {
+        g3.drawNebula(gl, {
+          invViewProj: this._mIVP,
+          time: t,
+          steps,
+          gain: NEBULA_GAIN,
+        });
+      }
+
+      // 3) 航路 + 垂直投影标尺线（一次性动态缓冲）
+      this._buildLines(snap, L);
+      if (this._lineVerts > 0) {
+        g3.drawLines(gl, this._lineData, this._lineVerts, { viewProj: this._mVP });
+      }
+
+      // 4) 星系节点 / 归属光晕 / 势力环（billboard 核心 + 环带）
+      this._buildSprites(snap, L, cam);
+      if (this._spriteCount > 0) {
+        g3.drawSprites(gl, this._spriteData, this._spriteCount, { viewProj: this._mVP, px, py });
+      }
+
+      // 5) 超新星球壳（dangerRating>6 / 黑洞 / 脉冲星；additive imposter）
+      this._buildShells(snap);
+      if (this._shellCount > 0) {
+        g3.drawShell(gl, this._shellData, this._shellCount, {
+          view: this._mView,
+          proj: this._mProj,
+          px,
+          py,
+          time: reduced ? 0 : t,
+        });
+      }
+      void opts;
+    } catch (e) {
+      console.error('[GalaxyRenderer] GL 帧绘制失败，退回 2D 路径:', e);
+      this._glBroken = true;
+    }
+    if (!began) return false;
+    try {
+      cm.endGLFrame({ bloom: reduced ? 0.5 : 0.95, exposure: 1.12, time: t });
+    } catch (_) { /* 后处理异常不致命：下一帧按 _glBroken 走 2D */ }
+    return true;
+  }
+
+  /** 航路 + 垂直标尺线几何（写入 _lineData；上限 3000 段，超出截断） */
+  _buildLines(snap, L) {
+    const arr = this._lineData;
+    const cap = arr.length / 7;
+    let v = 0;
+    const pushV = (x, y, z, rgb, a) => {
+      if (v >= cap) return;
+      const o = v * 7;
+      arr[o] = x; arr[o + 1] = y; arr[o + 2] = z;
+      arr[o + 3] = rgb[0]; arr[o + 4] = rgb[1]; arr[o + 5] = rgb[2];
+      arr[o + 6] = a;
+      v++;
+    };
+    const byId = this._byId;
+    if (L.lanes && byId) {
+      for (const s of snap.systems) {
+        systemWorldPos(s, _wp3);
+        const ax = _wp3[0];
+        const ay = _wp3[1];
+        const az = _wp3[2];
+        for (const laneId of s.lanes || []) {
+          if (laneId <= s.id) continue; // 字符串序去重：每条航路只画一次
+          const other = byId.get(laneId);
+          if (!other) continue;
+          systemWorldPos(other, _wp3b);
+          const known = (s.surveyedLevel ?? 0) >= 1 && (other.surveyedLevel ?? 0) >= 1;
+          const a = known ? LANE_A_KNOWN : LANE_A_DIM;
+          pushV(ax, ay, az, ACCENT_RGB, a);
+          pushV(_wp3b[0], _wp3b[1], _wp3b[2], ACCENT_RGB, a);
+        }
+      }
+    }
+    // 垂直投影标尺线：三维位置 → 基准面（z=0）
+    for (const s of snap.systems) {
+      systemWorldPos(s, _wp3);
+      pushV(_wp3[0], _wp3[1], _wp3[2], INK_RGB, STALK_A);
+      pushV(_wp3[0], _wp3[1], 0, INK_RGB, STALK_A);
+    }
+    this._lineVerts = v;
+  }
+
+  /** 星系节点 / 归属光晕 / 势力环实例（写入 _spriteData；尺寸按屏幕像素×k 换算世界单位） */
+  _buildSprites(snap, L, cam) {
+    const arr = this._spriteData;
+    const cap = arr.length / 12;
+    const k = cam.k;
+    const z = this.view.zoom || 1;
+    const sizeK = Math.min(1.5, Math.max(0.8, z));
+    let n = 0;
+    const push = (p3, size, ar, ag, ab, aa, br, bg, bb, ba) => {
+      if (n >= cap) return;
+      const o = n * 12;
+      arr[o] = p3[0]; arr[o + 1] = p3[1]; arr[o + 2] = p3[2];
+      arr[o + 3] = size;
+      arr[o + 4] = ar; arr[o + 5] = ag; arr[o + 6] = ab; arr[o + 7] = aa;
+      arr[o + 8] = br; arr[o + 9] = bg; arr[o + 10] = bb; arr[o + 11] = ba;
+      n++;
+    };
+    for (const s of snap.systems) {
+      systemWorldPos(s, _wp3);
+      const lvl = s.surveyedLevel ?? 0;
+      const typeId = s.star && s.star.typeId;
+      // 归属势力光晕（软高斯薄雾：半径收敛 + 低强度，避免吞没星盘）
+      if (L.ownership && s.ownerFactionId) {
+        const oc = this._facRgb.get(s.ownerFactionId) || ACCENT_RGB;
+        push(_wp3, 11 * k, oc[0] * 0.45, oc[1] * 0.45, oc[2] * 0.45, 0.010, 0, 0, 0, 0);
+      }
+      // 节点核心
+      if (lvl === 0) {
+        // 未探索：暗灰小光斑
+        push(_wp3, 2.2 * sizeK * k * 2.4, UNSEEN_RGB[0], UNSEEN_RGB[1], UNSEEN_RGB[2], 0.5, 0, 0, 0, 0);
+      } else if (typeId === 'blackHole') {
+        // 黑洞：暗核 + 琥珀吸积环
+        push(_wp3, 2.2 * sizeK * k * 2.0, 0.06, 0.07, 0.09, 0.8, 0, 0, 0, 0);
+        push(_wp3, (5.5 * sizeK * k) / 0.75, 0, 0, 0, 0, WARN_RGB[0], WARN_RGB[1], WARN_RGB[2], 0.85);
+      } else {
+        const baseR = (STAR_SIZES[typeId] || 3.2) * sizeK;
+        const sc = STAR_RGB[typeId] || INK_RGB;
+        const inten = lvl >= 4 ? 2.0 : 1.15;
+        push(_wp3, baseR * 2.4 * k, sc[0], sc[1], sc[2], inten, 0, 0, 0, 0);
+        if (lvl >= 4) {
+          // 全亮辉光垫底
+          push(_wp3, baseR * 5.2 * k, sc[0], sc[1], sc[2], 0.16, 0, 0, 0, 0);
+        }
+        if (typeId === 'pulsar' || typeId === 'neutronStar') {
+          // 脉冲星：外围十字光近似（大半径微光斑）
+          push(_wp3, baseR * 4.6 * k, sc[0], sc[1], sc[2], 0.5, 0, 0, 0, 0);
+        }
+      }
+      // 外圈（归属势力色 / 无主灰）
+      const orc = s.ownerFactionId ? (this._facRgb.get(s.ownerFactionId) || ACCENT_RGB) : INK_DIM_RGB;
+      const ringA = lvl === 0 ? 0.28 : 0.9;
+      push(_wp3, (7 * sizeK * k) / 0.75, 0, 0, 0, 0, orc[0], orc[1], orc[2], ringA);
+    }
+    this._spriteCount = n;
+  }
+
+  /** 超新星球壳实例（dangerRating>6 / 黑洞 / 脉冲星；写入 _shellData） */
+  _buildShells(snap) {
+    const arr = this._shellData;
+    const cap = arr.length / 8;
+    if (this._novaSnap !== snap) {
+      this._novaSeeds = generateSupernovaSeeds(snap.systems, WORLD_SCALE);
+      this._novaSnap = snap;
+    }
+    const z = this.view.zoom || 1;
+    const base = SHELL_R_BASE / Math.sqrt(Math.max(0.5, z));
+    let n = 0;
+    for (let i = 0; i < snap.systems.length; i++) {
+      const s = snap.systems[i];
+      const typeId = s.star && s.star.typeId;
+      const danger = s.dangerRating ?? 0;
+      if (danger <= 6 && typeId !== 'blackHole' && typeId !== 'pulsar') continue;
+      const rgb = danger > 6 ? DANGER_RGB : typeId === 'blackHole' ? WARN_RGB : STAR_RGB.pulsar;
+      systemWorldPos(s, _wp3);
+      if (n >= cap) break;
+      const o = n * 8;
+      arr[o] = _wp3[0];
+      arr[o + 1] = _wp3[1];
+      arr[o + 2] = _wp3[2];
+      arr[o + 3] = base;
+      arr[o + 4] = rgb[0];
+      arr[o + 5] = rgb[1];
+      arr[o + 6] = rgb[2];
+      const seeds = this._novaSeeds;
+      arr[o + 7] = seeds && i < seeds.length ? seeds[i] : ((i * 0.618034) % 1);
+      n++;
+    }
+    this._shellCount = n;
+  }
+
+  // —— HUD（2D 透明层；GL 模式下所有坐标来自 _projCache 投影） ————————
+
+  /** GL 模式取星系屏幕坐标：优先 _projCache（三维位置投影），缺省退 worldToScreen */
+  _hudPosFn() {
+    const cache = this._projCache;
+    const self = this;
+    return (s) => {
+      const e = cache.get(s.id);
+      if (e) return [e.sx, e.sy];
+      return self.worldToScreen(s.x, s.y);
+    };
+  }
+
+  /** 构建世界锚定静态星点（一次） */
+  _buildStars() {
+    const stars = [];
+    const N = 260;
+    for (let i = 0; i < N; i++) {
+      stars.push({
+        x: hash01(i) * WORLD,
+        y: hash01(i * 1.37 + 7.31) * WORLD,
+        r: 0.5 + hash01(i * 2.11 + 13.7) * 1.3,
+        a: 0.12 + hash01(i * 3.73 + 29.1) * 0.5,
+      });
+    }
+    this._stars = stars;
+  }
+
+  /** GL 模式背景星点（透明 HUD 上叠画，经矩阵投影保持世界锚定） */
+  _drawHudStars(ctx, w, h) {
+    if (!this._stars) this._buildStars();
+    const m = 60; // 视口外剔除边距
+    for (const st of this._stars) {
+      const p = this.worldToScreen(st.x, st.y);
+      if (p[0] < -m || p[1] < -m || p[0] > w + m || p[1] > h + m) continue;
+      ctx.fillStyle = `rgba(201,214,227,${st.a * 0.8})`;
+      ctx.fillRect(p[0] - st.r / 2, p[1] - st.r / 2, st.r, st.r);
+    }
+  }
+
+  /** GL 模式 HUD：星点 → 势力范围 → 星系标记 → 舰队 → 标签 → 前线 */
+  _drawHud(ctx, w, h, snap, L, opts, reduced, t) {
+    ctx.clearRect(0, 0, w, h);
+    if (this._mode !== 'gl') this._drawHudStars(ctx, w, h);
+    if (!snap || !Array.isArray(snap.systems)) return;
+    const facColor = this._facHex;
+    const posFn = this._hudPosFn();
+    // 势力范围雾效已由 GL 通道的归属光晕承担（HUD 层不再叠加 R=90 渐变圆，
+    // 否则 16 星系渐变叠加会形成吞没星盘的巨型色球）
+    const sizeK = Math.min(1.5, Math.max(0.8, this.view.zoom));
+    for (const s of snap.systems) {
+      const p = posFn(s);
+      const sx = p[0];
+      const sy = p[1];
+      if (sx < -60 || sy < -60 || sx > w + 60 || sy > h + 60) continue;
+      const ownerColor = s.ownerFactionId ? (facColor.get(s.ownerFactionId) || C.ACCENT) : C.INK_DIM;
+      this._drawSystemOverlays(ctx, s, sx, sy, sizeK, ownerColor, facColor, L, opts, reduced, t);
+    }
+    if (L.fleets) this._drawFleets(ctx, snap, facColor, posFn);
+    this._drawLabels(ctx, snap, facColor, posFn);
+    if (L.fronts) this._drawFronts(ctx, snap, reduced, t, posFn);
+    this._drawObjectivesOverlay(ctx, snap, t, posFn);
+  }
+
+  // —— 2D 路径（原实现完整保留：webglcontextlost / Tier3 / 无 WebGL 退化保护） ——
+
+  /**
+   * 2D 渲染一帧（传入已合并默认值的图层开关 L）。
+   * @param {CanvasRenderingContext2D} ctx 2D 上下文
+   */
+  _render2D(ctx, w, h, snap, L, opts) {
+    const reduced = !!opts.reducedEffects;
+    const t = Number(opts.time) || 0;
+    const facColor = this._facHex;
+
+    // 1) 背景深空渐变 + 程序化静态星点
+    this._drawBackground(ctx, w, h);
+
+    if (!snap || !Array.isArray(snap.systems)) return;
+
+    // 2) 航路（两端 surveyedLevel>=1 实线 0.25，否则 0.08）
+    if (L.lanes) this._drawLanes(ctx, snap);
+
+    // 3) 势力范围光晕
+    if (L.ownership) this._drawOwnership(ctx, snap, facColor, reduced, null);
+
+    // 4) 星系节点（含 claims / danger / surveys / colonies / trade 叠加层）
+    this._drawSystems(ctx, snap, this._byId, facColor, L, opts, reduced, t);
+
+    // 5) 舰队图标（同系多队横向偏移）
+    if (L.fleets) this._drawFleets(ctx, snap, facColor, null);
+
+    // 6) 标签（zoom<0.8 时按 y 贪心抽稀）
+    this._drawLabels(ctx, snap, facColor, null);
+
+    // 7) 战争前线（战斗星系脉冲环，置于最上）
+    if (L.fronts) this._drawFronts(ctx, snap, reduced, t, null);
+
+    // 8) 空间任务目标叠加层（Pin / 离屏箭头 / 威胁航路虚线，置于最上）
+    this._drawObjectivesOverlay(ctx, snap, t, null);
+  }
+
+  /** 背景深空渐变 + 世界锚定的静态星点（2D 路径） */
+  _drawBackground(ctx, w, h) {
+    const key = `${w}x${h}`;
+    if (this._bgKey !== key) {
+      const g = ctx.createRadialGradient(w / 2, h * 0.38, 0, w / 2, h / 2, Math.max(w, h) * 0.78);
+      g.addColorStop(0, C.BG_DEEP);
+      g.addColorStop(1, C.BG);
+      this._bgGrad = g;
+      this._bgKey = key;
+    }
+    ctx.fillStyle = this._bgGrad;
+    ctx.fillRect(0, 0, w, h);
+
+    if (!this._stars) this._buildStars();
+    const m = 60; // 视口外剔除边距
+    for (const st of this._stars) {
+      const [sx, sy] = this.worldToScreen(st.x, st.y);
+      if (sx < -m || sy < -m || sx > w + m || sy > h + m) continue;
+      ctx.fillStyle = `rgba(201,214,227,${st.a})`;
+      ctx.fillRect(sx - st.r / 2, sy - st.r / 2, st.r, st.r);
+    }
+  }
+
+  /** 航路：两端均已侦测(surveyedLevel>=1) → 0.25 实线，否则 0.08（2D 路径） */
+  _drawLanes(ctx, snap) {
+    const byId = this._byId;
+    if (!byId) return;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    let knownPath = false;
+    // 分两批描边，减少状态切换：先画已知（亮），再画未知（暗）
+    const dimSegs = [];
+    for (const s of snap.systems) {
+      for (const laneId of s.lanes || []) {
+        if (laneId <= s.id) continue; // 字符串序去重：每条航路只画一次
+        const other = byId.get(laneId);
+        if (!other) continue;
+        const known = (s.surveyedLevel ?? 0) >= 1 && (other.surveyedLevel ?? 0) >= 1;
+        if (known) {
+          const [ax, ay] = this.worldToScreen(s.x, s.y);
+          const [bx, by2] = this.worldToScreen(other.x, other.y);
+          ctx.moveTo(ax, ay);
+          ctx.lineTo(bx, by2);
+          knownPath = true;
+        } else {
+          dimSegs.push([s.x, s.y, other.x, other.y]);
+        }
+      }
+    }
+    if (knownPath) {
+      ctx.strokeStyle = rgba(C.ACCENT, 0.25);
+      ctx.stroke();
+    }
+    ctx.beginPath();
+    for (const [ax, ay, bx, by2] of dimSegs) {
+      const [x1, y1] = this.worldToScreen(ax, ay);
+      const [x2, y2] = this.worldToScreen(bx, by2);
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+    }
+    ctx.strokeStyle = rgba(C.ACCENT, 0.08);
+    ctx.stroke();
+  }
+
+  /** 势力范围：每个有主星系画一层大半径径向渐变（faction.color, alpha 0.05） */
+  _drawOwnership(ctx, snap, facColor, reduced, posFn) {
+    const at = posFn || ((s) => this.worldToScreen(s.x, s.y));
+    const R = 90; // 世界单位半径
+    for (const s of snap.systems) {
+      if (!s.ownerFactionId) continue;
+      const color = facColor.get(s.ownerFactionId) || C.ACCENT;
+      const p = at(s);
+      const sx = p[0];
+      const sy = p[1];
+      const sr = R * this.view.zoom;
+      if (sx < -sr || sy < -sr || sx > this._w + sr || sy > this._h + sr) continue;
+      if (reduced) {
+        // 减少动效：以平涂替代径向渐变
+        ctx.fillStyle = rgba(color, 0.04);
+        ctx.beginPath();
+        ctx.arc(sx, sy, sr, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        const g = ctx.createRadialGradient(sx, sy, 0, sx, sy, sr);
+        g.addColorStop(0, rgba(color, 0.05));
+        g.addColorStop(1, rgba(color, 0));
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(sx, sy, sr, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  /**
+   * 星系节点主体（2D 路径）。
+   * surveyedLevel 0 → 暗灰小点（无名字）；1–3 → 按恒星类型的星点（黑洞吸积环 / 脉冲星十字光）；
+   * 4 → 全亮（带辉光）；随后绘制共享叠加层 _drawSystemOverlays。
+   */
+  _drawSystems(ctx, snap, byId, facColor, L, opts, reduced, t) {
+    const z = this.view.zoom;
+    const sizeK = Math.min(1.5, Math.max(0.8, z)); // 节点随缩放的轻微尺寸响应
+    const M = 60; // 视口外剔除边距
+
+    for (const s of snap.systems) {
+      const [sx, sy] = this.worldToScreen(s.x, s.y);
+      if (sx < -M || sy < -M || sx > this._w + M || sy > this._h + M) continue;
+      const lvl = s.surveyedLevel ?? 0;
+      const ownerColor = s.ownerFactionId ? (facColor.get(s.ownerFactionId) || C.ACCENT) : C.INK_DIM;
+
+      // —— 星点本体 ——
+      if (lvl === 0) {
+        // 未探索：暗灰小点，无任何额外信息
+        ctx.fillStyle = C.NODE_UNSEEN;
+        ctx.beginPath();
+        ctx.arc(sx, sy, 2.2 * sizeK, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        const typeId = s.star && s.star.typeId;
+        const baseR = (STAR_SIZES[typeId] || 3.2) * sizeK;
+        const color = STAR_COLORS[typeId] || C.INK;
+        if (lvl >= 4) {
+          // 全亮：低配辉光（大半透明圆垫底）
+          ctx.fillStyle = rgba(color, 0.18);
+          ctx.beginPath();
+          ctx.arc(sx, sy, baseR * 2.4, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        if (typeId === 'blackHole') {
+          // 黑洞：暗核 + 吸积环
+          ctx.fillStyle = '#111318';
+          ctx.beginPath();
+          ctx.arc(sx, sy, baseR, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = rgba(C.WARN, 0.85);
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(sx, sy, baseR + 1.8, 0, Math.PI * 2);
+          ctx.stroke();
+        } else if (typeId === 'pulsar' || typeId === 'neutronStar') {
+          // 脉冲星：十字光 + 亮核
+          ctx.strokeStyle = rgba(color, 0.65);
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(sx - baseR * 3, sy);
+          ctx.lineTo(sx + baseR * 3, sy);
+          ctx.moveTo(sx, sy - baseR * 3);
+          ctx.lineTo(sx, sy + baseR * 3);
+          ctx.stroke();
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.arc(sx, sy, baseR * 0.9, 0, Math.PI * 2);
+          ctx.fill();
+        } else {
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.arc(sx, sy, baseR, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      // —— 叠加层（悬停/选中/势力环/信息标记） ——
+      this._drawSystemOverlays(ctx, s, sx, sy, sizeK, ownerColor, facColor, L, opts, reduced, t);
+    }
+  }
+
+  /**
+   * 星系叠加层（2D/GL 共用，坐标由调用方给出）：
+   * 势力环、悬停圈、选中呼吸圈、danger>6 红环、claims/resources/danger/surveys/
+   * colonies/trade 信息标记。
+   */
+  _drawSystemOverlays(ctx, s, sx, sy, sizeK, ownerColor, facColor, L, opts, reduced, t) {
+    void facColor;
+    // —— 外圈（归属势力色 / 无主灰） ——
+    ctx.strokeStyle = rgba(ownerColor, 0.9);
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.arc(sx, sy, 7 * sizeK, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // —— 悬停圈 ——
+    if (opts.hoverId && opts.hoverId === s.id) {
+      ctx.strokeStyle = rgba(C.INK, 0.55);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 9.5 * sizeK, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // —— 选中：高亮圈 + 呼吸动画（reduced 时静止） ——
+    if (opts.selectedId === s.id) {
+      const pulse = reduced ? 0 : Math.sin(t * 3) * 1.6;
+      ctx.strokeStyle = rgba(C.ACCENT, 0.95);
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.arc(sx, sy, (11 + pulse) * sizeK, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.strokeStyle = rgba(C.ACCENT, 0.35);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(sx, sy, (14 + pulse) * sizeK, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // —— danger > 6：红色细环（常显，不依赖 danger 图层） ——
+    if ((s.dangerRating ?? 0) > 6) {
+      ctx.strokeStyle = rgba(C.DANGER, 0.7);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 9 * sizeK, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // —— 叠加层（按图层开关） ——
+    if (L.claims && s.ownerFactionId) {
+      // 领土主张：势力色虚线边界圈
+      ctx.save();
+      ctx.setLineDash([3, 3]);
+      ctx.strokeStyle = rgba(ownerColor, 0.5);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 15 * sizeK, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+    if (L.resources && (s.surveyedLevel ?? 0) >= 1) {
+      // 资源富集：节点下色条 + 评级小字（resourceRating 0..10）
+      const rating = Math.min(10, Math.max(0, s.resourceRating ?? 0));
+      const bw = 14;
+      ctx.fillStyle = rgba(C.LINE, 0.9);
+      ctx.fillRect(sx - bw / 2, sy + 10, bw, 2.5);
+      ctx.fillStyle = rgba(C.OK, 0.35 + rating / 10 * 0.65);
+      ctx.fillRect(sx - bw / 2, sy + 10, bw * (rating / 10), 2.5);
+      ctx.fillStyle = rgba(C.INK_FAINT, 0.95);
+      ctx.font = `8px ${FONT}`;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(rating.toFixed(1), sx + bw / 2 + 3, sy + 7.5);
+    }
+    if (L.danger) {
+      // 危险度色环：warn(低) → danger(高)
+      const d = Math.min(10, Math.max(0, s.dangerRating ?? 0));
+      if (d > 0.5) {
+        const col = d <= 4 ? C.WARN : C.DANGER;
+        ctx.strokeStyle = rgba(col, Math.min(0.85, 0.15 + d / 10));
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(sx, sy, 10.5 * sizeK, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+    if (L.surveys && (s.surveyedLevel ?? 0) >= 1) {
+      // 扫描覆盖：调查层级进度弧（lvl/4 圆周）
+      const lvl = Math.min(4, s.surveyedLevel ?? 0);
+      ctx.strokeStyle = rgba(C.ACCENT, lvl >= 4 ? 0.9 : 0.6);
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 13 * sizeK, -Math.PI / 2, -Math.PI / 2 + (lvl / 4) * Math.PI * 2);
+      ctx.stroke();
+    }
+    if (L.colonies && (s.colonyCount ?? 0) > 0) {
+      // 殖民状态：白色方旗标记 + 数量
+      ctx.fillStyle = rgba(C.INK, 0.95);
+      ctx.fillRect(sx + 7, sy - 12, 5, 5);
+      ctx.strokeStyle = rgba('#070b12', 0.8);
+      ctx.lineWidth = 1;
+      ctx.strokeRect(sx + 7, sy - 12, 5, 5);
+      if (s.colonyCount > 1) {
+        ctx.fillStyle = rgba(C.INK, 0.9);
+        ctx.font = `8px ${FONT}`;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText(String(s.colonyCount), sx + 13, sy - 12);
+      }
+    }
+    if (L.trade) {
+      // 贸易流：有市场星系画 ◇（琥珀色菱形轮廓）
+      const markets = opts.marketSystemIds || null;
+      const hasMarket = markets && typeof markets.has === 'function' ? markets.has(s.id) : false;
+      if (hasMarket) {
+        const r = 4;
+        ctx.strokeStyle = rgba(C.WARN, 0.9);
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy - 14 - r);
+        ctx.lineTo(sx + r, sy - 14);
+        ctx.lineTo(sx, sy - 14 + r);
+        ctx.lineTo(sx - r, sy - 14);
+        ctx.closePath();
+        ctx.stroke();
+      }
+    }
+  }
+
+  /** 舰队图标：systemId 非空（在系停靠）的舰队画 ▲ 小三角，同系多队横向偏移 */
+  _drawFleets(ctx, snap, facColor, posFn) {
+    const at = posFn || ((s) => this.worldToScreen(s.x, s.y));
+    // 按 systemId 分组（保持确定性顺序）
+    const groups = new Map();
+    for (const f of snap.fleets || []) {
+      if (!f.systemId) continue; // 在途舰队 systemId 为空，不上图
+      if (!groups.has(f.systemId)) groups.set(f.systemId, []);
+      groups.get(f.systemId).push(f);
+    }
+    for (const [systemId, list] of groups) {
+      const sys = (snap.systems || []).find((s) => s.id === systemId);
+      if (!sys) continue;
+      const p = at(sys);
+      const sx = p[0];
+      const sy = p[1];
+      const n = list.length;
+      for (let i = 0; i < n; i++) {
+        const f = list[i];
+        const x = sx + (i - (n - 1) / 2) * 9;
+        const y = sy + 14;
+        const color = facColor.get(f.factionId) || C.ACCENT;
+        ctx.beginPath();
+        ctx.moveTo(x, y - 4);
+        ctx.lineTo(x - 4, y + 3);
+        ctx.lineTo(x + 4, y + 3);
+        ctx.closePath();
+        ctx.fillStyle = rgba(color, 0.95);
+        ctx.fill();
+        ctx.strokeStyle = rgba(C.BG, 0.8); // 深色描边保证与背景分离
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+    }
+  }
+
+  /**
+   * 标签：surveyedLevel>=1 显示名字；zoom<0.8 时按 y 排序做贪心抽稀
+   * （纵向间距 <12px 的后者隐藏）。名字白色 10px，有主星系在名字前加 owner 色点。
+   */
+  _drawLabels(ctx, snap, facColor, posFn) {
+    const at = posFn || ((s) => this.worldToScreen(s.x, s.y));
+    const showAll = this.view.zoom >= 0.8;
+    const candidates = [];
+    for (const s of snap.systems) {
+      if ((s.surveyedLevel ?? 0) < 1) continue; // 未探索无名字
+      const p = at(s);
+      const sx = p[0];
+      const sy = p[1];
+      if (sx < -30 || sy < -16 || sx > this._w + 30 || sy > this._h + 16) continue;
+      candidates.push({ s, sx, sy });
+    }
+    candidates.sort((a, b) => a.sy - b.sy); // 按 y 排序
+
+    ctx.font = `10px ${FONT}`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    let lastY = -Infinity;
+    for (const c of candidates) {
+      if (!showAll) {
+        // 贪心抽稀：与上一个已显示标签纵向间距 <12px 则隐藏
+        if (c.sy - lastY < 12) continue;
+        lastY = c.sy;
+      }
+      const ownerColor = c.s.ownerFactionId ? (facColor.get(c.s.ownerFactionId) || C.ACCENT) : null;
+      let tx = c.sx + 12;
+      if (ownerColor) {
+        ctx.fillStyle = rgba(ownerColor, 0.95);
+        ctx.beginPath();
+        ctx.arc(c.sx + 8, c.sy, 2, 0, Math.PI * 2);
+        ctx.fill();
+        tx = c.sx + 13;
+      }
+      ctx.fillStyle = rgba(C.LABEL, 0.92);
+      ctx.fillText(String(c.s.name || ''), tx, c.sy);
+    }
+  }
+
+  /** 战争前线：有进行中战斗的星系画红色脉冲环 */
+  _drawFronts(ctx, snap, reduced, t, posFn) {
+    const at = posFn || ((s) => this.worldToScreen(s.x, s.y));
+    const battles = snap.battles || [];
+    const byId = this._byId || new Map((snap.systems || []).map((s) => [s.id, s]));
+    for (const b of battles) {
+      const sys = byId.get(b.systemId);
+      if (!sys) continue;
+      const p = at(sys);
+      const sx = p[0];
+      const sy = p[1];
+      const pulse = reduced ? 0 : Math.sin(t * 4) * 2;
+      ctx.strokeStyle = rgba(C.DANGER, 0.85);
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 14 + pulse, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.strokeStyle = rgba(C.DANGER, 0.35);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 19 + pulse, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  /**
+   * 空间任务目标叠加层（doc5 §3.6 / P1-02；只读快照，不写世界状态）：
+   *  - 在屏：脉冲菱形 Pin（pulse = sin(t×5)×2.5，y = sy−18−pulse）+ 目标名；
+   *  - 离屏：θ = atan2(dy,dx)，padX = max(80, cx−84)、padY = max(60, cy−64)，
+   *    t = min(padX/|dx|, padY/|dy|)，在安全矩形交点画旋转实心箭头
+   *    多边形 (8,0)(−6,−5)(−3,0)(−6,5)；红 #e85f5f（high）/ 琥珀 #e8b04f；
+   *  - secondarySystemId 存在：目标航路警戒虚线 lineWidth 2.4、
+   *    setLineDash([8,6])、lineDashOffset = −t×28。
+   * 坐标一律来自 posFn（GL 投影缓存）或 worldToScreen（2D 路径）。
+   */
+  _drawObjectivesOverlay(ctx, snap, t, posFn) {
+    const objs = snap && Array.isArray(snap.objectives) ? snap.objectives : [];
+    if (!objs.length) return;
+    const byId = this._byId;
+    if (!byId) return;
+    const w = this._w || this._vw();
+    const h = this._h || this._vh();
+    const at = posFn || ((s) => this.worldToScreen(s.x, s.y));
+    for (const o of objs) {
+      const sys = byId.get(o.targetSystemId);
+      if (!sys) continue;
+      const color = o.priority === 'high' ? C.DANGER : C.WARN;
+
+      // 威胁航路动态虚线（目标 ↔ 航路另一端）
+      const sec = o.secondarySystemId ? byId.get(o.secondarySystemId) : null;
+      if (sec) {
+        const [ax, ay] = at(sys);
+        const [bx, by2] = at(sec);
+        ctx.save();
+        ctx.strokeStyle = rgba(color, 0.8);
+        ctx.lineWidth = 2.4;
+        ctx.setLineDash([8, 6]);
+        ctx.lineDashOffset = -t * 28;
+        ctx.beginPath();
+        ctx.moveTo(ax, ay);
+        ctx.lineTo(bx, by2);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      const p = at(sys);
+      const arrow = computeOffscreenArrow(p[0], p[1], w, h);
+      if (arrow.onScreen) {
+        // 脉冲菱形 Pin + 目标名
+        const pulse = Math.sin(t * 5) * 2.5;
+        const px = p[0];
+        const py = p[1] - 18 - pulse;
+        const r = 5;
+        ctx.fillStyle = rgba(color, 0.9);
+        ctx.strokeStyle = rgba(C.BG, 0.9);
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(px, py - r);
+        ctx.lineTo(px + r, py);
+        ctx.lineTo(px, py + r);
+        ctx.lineTo(px - r, py);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = rgba(C.LABEL, 0.95);
+        ctx.font = `9px ${FONT}`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(String(o.titleZh || o.kind || '任务目标'), px, py - r - 2);
+        ctx.textAlign = 'left';
+      } else {
+        // 离屏：旋转实心方向箭头
+        ctx.save();
+        ctx.translate(arrow.x, arrow.y);
+        ctx.rotate(arrow.angle);
+        ctx.fillStyle = rgba(color, 0.95);
+        ctx.beginPath();
+        ctx.moveTo(8, 0);
+        ctx.lineTo(-6, -5);
+        ctx.lineTo(-3, 0);
+        ctx.lineTo(-6, 5);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+  }
+
+  // —— 右键 / 中键旋转交互（渲染器自持，不触碰 GalaxyView） ————————————
+
+  /**
+   * 在 cm.canvas 上挂载旋转交互：右键/中键按下 → 拖拽旋转 yaw/pitch
+   * （pitch 限制 10°..85°）。GalaxyView 的 mousedown 只处理左键，互不冲突；
+   * window 的 move/up 监听仅在拖拽期间存在（mouseup 即卸），不产生跨视图泄漏；
+   * contextmenu 被抑制以避免右键拖拽弹出菜单。
+   */
+  _attachRot(canvas) {
+    const st = this._rot;
+    const move = (e) => {
+      if (!st.active) return;
+      const dx = e.clientX - st.x;
+      const dy = e.clientY - st.y;
+      st.x = e.clientX;
+      st.y = e.clientY;
+      this._cam.yaw -= dx * ROT_SPEED;
+      this._cam.pitch = Math.min(85 * (Math.PI / 180), Math.max(10 * (Math.PI / 180), this._cam.pitch - dy * ROT_SPEED));
+      this._camVersion++;
+      this._projValid = false;
+    };
+    const up = () => {
+      if (!st.active) return;
+      st.active = false;
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+    };
+    const down = (e) => {
+      if (st.active) return;
+      if (e.button !== 1 && e.button !== 2) return; // 仅中键/右键
+      if (!this._glActive()) return;                // 纯 2D 下无旋转语义
+      st.active = true;
+      st.x = e.clientX;
+      st.y = e.clientY;
+      window.addEventListener('mousemove', move);
+      window.addEventListener('mouseup', up);
+      e.preventDefault();
+    };
+    const ctxm = (e) => {
+      e.preventDefault(); // 抑制地图上的浏览器右键菜单
+    };
+    canvas.addEventListener('mousedown', down);
+    canvas.addEventListener('contextmenu', ctxm);
+    this._rotDetach = () => {
+      canvas.removeEventListener('mousedown', down);
+      canvas.removeEventListener('contextmenu', ctxm);
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+      st.active = false;
+    };
+  }
+
+  /** 卸载旋转交互（init 重复调用或更换画布时） */
+  _detachRot() {
+    if (this._rotDetach) {
+      try { this._rotDetach(); } catch (_) { /* 忽略 */ }
+      this._rotDetach = null;
+    }
+  }
+}
+
+Object.assign(__exports, { GalaxyRenderer });
+
+});
+__register("src/render/gl/Galaxy3D.js", function (__exports, __require) {
+/**
+ * render/gl/Galaxy3D.js — 银河 3D 场景 GL 资源构建（R3 / WebGL2 全 3D 棒旋星系）
+ *
+ * 职责：为 GalaxyRenderer 承载全部 WebGL2 资源构建与绘制调用（程序 / VAO / 动态缓冲），
+ * 顶层不触碰 document/window/GL（纯 JS + GLSL 字符串，可在 Node 侧安全 import）；
+ * 所有 GL 调用只发生在方法内部（持有真实上下文时）。
+ *
+ * ── 并行模块依赖契约（运行时经非阻塞动态 import 探测，缺席即用本地回退实现） ──
+ * 1) ./GalaxyParticles.js（并行工程师交付中）：
+ *      generateGalaxyParticles({count, seed, worldScale}) →
+ *        { positions: Float32Array(n*3), colors: Float32Array(n*3),
+ *          sizes: Float32Array(n),     seeds:  Float32Array(n) }   // 世界坐标
+ *      generateSupernovaSeeds(systems, worldScale) → Float32Array(systems.length)
+ *    本文件按同签名导出包装函数：外部模块在场且返回形状合法时优先使用，
+ *    否则回退到本地确定性实现（sin-hash，禁用随机数），接口不变。
+ * 2) ../shaders/NebulaShader.js（并行工程师交付中）：
+ *      导出 NEBULA_VERT / NEBULA_FRAG（全屏体积星云）与
+ *      SUPERNOVA_VERT / SUPERNOVA_FRAG（超新星球壳 imposter）。
+ *    约定与 PostProcessor 一致：GLSL ES 3.0 源码、不含 #version 行（GLCore 前置）。
+ *    顶点属性槽位（本文件 VAO 装配基准，真实模块须保持）：
+ *      loc0 aCorner vec2（单位四边形 [-1..1]，TRIANGLE_STRIP 4 顶点）
+ *      loc1 iPos vec3 / loc2 iRadius float / loc3 iColor vec3 / loc4 iSeed float
+ *    uniform：uView、uProj、uProjScale(vec2)、uTime(float)。
+ *    外部源码若带 #version 行会被剥除后再编译。
+ *
+ * ── 程序清单（全部加法混合 ONE/ONE、深度写关闭，绘制顺序不影响结果） ──
+ *   galaxy3d.disk    实例化粒子星系盘（40k billboard，径向高斯软斑，HDR>1）
+ *   galaxy3d.nebula  全屏体积星云 raymarch（3D fBm 5 八度 + 域扭曲 + 尘埃带消光；
+ *                    uSteps 由调用方按 tier 传入 24/14/0，<=0 跳过）
+ *   galaxy3d.line    航路 + 垂直投影标尺线（LINES 动态缓冲）
+ *   galaxy3d.sprite  星系节点核心 / 归属光晕 / 势力环（核心高斯 + 0.75 半径环带）
+ *   galaxy3d.shell   超新星球壳（视图空间射线-球求交 imposter，limb 增亮）
+ */
+
+// —— 并行模块探测（非阻塞动态 import） ——
+// 交付模块在场（http 直连模式）即优先采用其导出；缺席/加载失败静默回退本文件内的
+// 本地确定性实现（接口不变）。刻意不用顶层 await：R1 单文件打包器把模块体封装进
+// 同步工厂函数（tests/tools/build-static-bundle.mjs），await 会使 dist 构建失效；
+// 动态 import 不进入其静态依赖图，file:// 单文件模式下探测 404 后同样回退本地。
+let _extParticles = null;
+let _extNebula = null;
+function _probeExternal(spec, assign) {
+  try {
+    import(spec).then(assign, () => { /* 缺席：保持 null → 本地回退 */ });
+  } catch (_) { /* 极老环境无动态 import：仅用本地回退 */ }
+}
+_probeExternal('./GalaxyParticles.js', (m) => { _extParticles = m || null; });
+_probeExternal('../shaders/NebulaShader.js', (m) => { _extNebula = m || null; });
+
+/** 策略坐标 (0..1000) → 世界坐标的缩放系数（±10 世界单位银盘） */
+const WORLD_SCALE = 0.02;
+/** 星系盘粒子生成种子（确定性；世界静态，一次生成） */
+const GALAXY_SEED = 20261103;
+/** 粒子上限（tier 档位在此之内前缀截取绘制） */
+const PARTICLE_MAX = 40000;
+
+// —— 确定性 hash（禁用随机数） ——————————————————————————————
+
+function fract(x) { return x - Math.floor(x); }
+
+/** 带盐/种子的一维 hash（粒子生成用） */
+function hash01s(i, salt, seed) {
+  return fract(Math.sin(i * 127.1 + salt * 311.7 + seed * 0.618034) * 43758.5453);
+}
+
+/** 字符串 → [0,1) 确定性 hash（FNV-1a 混淆），供星系高度剖面 / 超新星相位使用 */
+function hashString01(str) {
+  const s = String(str == null ? '' : str);
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return (h >>> 0) / 4294967296;
+}
+
+/**
+ * 星系三维位置：策略 (x,y) → 世界 (x-500, y-500)*WORLD_SCALE，
+ * 高度 z = hash(systemId)*±核球厚度剖面（银心厚、边缘薄，最大 ±0.56 世界单位）。
+ * @param {{id:string|number, x:number, y:number}} s 快照星系
+ * @param {Float32Array} [out] 复用输出 (3)
+ * @returns {Float32Array} [wx, wy, wz]
+ */
+function systemWorldPos(s, out) {
+  const o = out || new Float32Array(3);
+  if (!s) { o[0] = 0; o[1] = 0; o[2] = 0; return o; }
+  const wx = ((Number(s.x) || 0) - 500) * WORLD_SCALE;
+  const wy = ((Number(s.y) || 0) - 500) * WORLD_SCALE;
+  const rn = Math.sqrt(wx * wx + wy * wy) / (500 * WORLD_SCALE);
+  const thick = 0.055 + 0.5 * Math.exp(-Math.max(0, rn) * 2.4);
+  const h01 = hashString01(s.id != null ? String(s.id) : '');
+  o[0] = wx;
+  o[1] = wy;
+  o[2] = (h01 * 2 - 1) * thick;
+  return o;
+}
+
+// —— 粒子 / 种子生成（外部模块优先，本地确定性回退） ——————————————————
+
+/** 本地棒旋星系粒子生成：双主旋臂 + 中央棒 + 核球（核厚缘薄）+ HII 粉斑 */
+function generateGalaxyParticlesLocal(params) {
+  const count = Math.max(0, Math.round(Number(params && params.count) || 0));
+  const worldScale = Number(params && params.worldScale) > 0 ? Number(params.worldScale) : WORLD_SCALE;
+  const seedN = Math.abs(Math.round(Number(params && params.seed) || 0)) % 100000;
+  const R = 500 * worldScale; // 银盘世界半径（策略 0..1000 映射）
+
+  const positions = new Float32Array(count * 3);
+  const colors = new Float32Array(count * 3);
+  const sizes = new Float32Array(count);
+  const seeds = new Float32Array(count);
+
+  for (let i = 0; i < count; i++) {
+    const rr = Math.pow(hash01s(i, 1, seedN), 0.62); // 半径分布：内密外疏
+    const r = rr * R;
+    let x;
+    let y;
+    if (rr < 0.42 && hash01s(i, 2, seedN) < 0.30) {
+      // 中央棒：沿 x 轴拉长的椭球
+      const bx = (hash01s(i, 3, seedN) * 2 - 1) * R * 0.34;
+      const by = (hash01s(i, 4, seedN) * 2 - 1) * R * 0.10 * (1.15 - Math.abs(bx) / (R * 0.34));
+      x = bx;
+      y = by;
+    } else {
+      // 双主旋臂（自棒端起螺旋）+ 随半径放大的角向散布
+      const arm = (i % 2) * Math.PI;
+      const jitter = (hash01s(i, 3, seedN) * 2 - 1) * (0.10 + 0.55 * rr);
+      const th = arm + Math.max(0, rr - 0.30) * 6.1 + jitter;
+      const rs = r * (0.92 + hash01s(i, 4, seedN) * 0.16);
+      x = Math.cos(th) * rs;
+      y = Math.sin(th) * rs;
+    }
+    // 核球厚、边缘薄的垂直剖面（双 hash 叠加近似高斯）
+    const thick = 0.055 + 0.5 * Math.exp(-rr * 2.6);
+    const z = (hash01s(i, 5, seedN) + hash01s(i, 6, seedN) - 1) * thick;
+
+    positions[i * 3] = x;
+    positions[i * 3 + 1] = y;
+    positions[i * 3 + 2] = z;
+
+    // 色温：核黄 → 臂蓝白，少量 HII 粉斑；HDR 由着色器增益（颜色本身 <=1.1）
+    const t = Math.min(1, Math.max(0, rr * 1.35 + (hash01s(i, 7, seedN) - 0.5) * 0.4));
+    let cr = 1.0 + (0.60 - 1.0) * t;
+    let cg = 0.82 + (0.74 - 0.82) * t;
+    let cb = 0.55 + (1.00 - 0.55) * t;
+    if (hash01s(i, 8, seedN) > 0.968) { cr = 1.05; cg = 0.42; cb = 0.55; }
+    colors[i * 3] = cr;
+    colors[i * 3 + 1] = cg;
+    colors[i * 3 + 2] = cb;
+
+    // 尺寸：世界单位；少数大颗粒 + 核球增亮
+    let sz = 0.018 + Math.pow(hash01s(i, 9, seedN), 3) * 0.15;
+    if (rr < 0.2) sz += 0.02;
+    sizes[i] = sz;
+    seeds[i] = hash01s(i, 10, seedN);
+  }
+  return { positions, colors, sizes, seeds };
+}
+
+/** 本地超新星相位种子（与 systems 顺序对齐） */
+function generateSupernovaSeedsLocal(systems) {
+  const arr = Array.isArray(systems) ? systems : [];
+  const out = new Float32Array(arr.length);
+  for (let i = 0; i < arr.length; i++) {
+    const id = arr[i] && arr[i].id != null ? String(arr[i].id) : String(i);
+    out[i] = hashString01(`${id}:nova`);
+  }
+  return out;
+}
+
+/**
+ * 星系盘粒子生成（包装）：并行模块在场且返回形状合法时透传，否则本地实现。
+ * @param {{count?:number, seed?:number, worldScale?:number}} [params]
+ * @returns {{positions:Float32Array, colors:Float32Array, sizes:Float32Array, seeds:Float32Array}}
+ */
+function generateGalaxyParticles(params) {
+  const ext = _extParticles;
+  if (ext && typeof ext.generateGalaxyParticles === 'function') {
+    try {
+      const out = ext.generateGalaxyParticles(params || {});
+      if (out && out.positions && out.colors && out.sizes && out.seeds) return out;
+    } catch (_) { /* 外部模块异常：回退本地确定性实现 */ }
+  }
+  return generateGalaxyParticlesLocal(params || {});
+}
+
+/**
+ * 超新星相位种子生成（包装）。
+ * @param {Array<{id:string|number}>} systems
+ * @param {number} [worldScale]
+ * @returns {Float32Array}
+ */
+function generateSupernovaSeeds(systems, worldScale) {
+  void worldScale; // 契约占位参数：本地实现不依赖尺度
+  const ext = _extParticles;
+  const n = Array.isArray(systems) ? systems.length : 0;
+  if (ext && typeof ext.generateSupernovaSeeds === 'function') {
+    try {
+      const out = ext.generateSupernovaSeeds(systems, worldScale);
+      if (out && (out.length ?? -1) === n) return out;
+    } catch (_) { /* 回退本地实现 */ }
+  }
+  return generateSupernovaSeedsLocal(systems);
+}
+
+// —— GLSL（本地契约回退实现；外部 NebulaShader 在场时优先生效） ————————
+
+/** 剥除外部着色器可能自带的 #version 行（GLCore.createProgram 统一前置） */
+function stripVersion(src) {
+  return String(src || '').replace(/^\s*#version[^\n]*\n/, '');
+}
+
+function pickShader(ext, name, local) {
+  const v = ext ? ext[name] : null;
+  return typeof v === 'string' && v.length > 8 ? stripVersion(v) : local;
+}
+
+/** 全屏四边形顶点着色器（星云用，vUv [0..1]） */
+const LOCAL_NEBULA_VERT = `
+precision highp float;
+layout(location = 0) in vec2 aPos;
+out vec2 vUv;
+void main() {
+  vUv = aPos * 0.5 + 0.5;
+  gl_Position = vec4(aPos, 0.0, 1.0);
+}
+`;
+
+/**
+ * 体积星云片元：反投影生成视线，在 |z|<=HZ 薄板内 raymarch；
+ * 密度 = 域扭曲(两级低频 fBm) + 5 八度 3D fBm + 对数螺旋臂偏置 + 核厚缘薄包络；
+ * 尘埃带消光以光程累积 exp(-od) 作用于星云自身辐射（加法管线下不衰减既有像素）。
+ */
+const LOCAL_NEBULA_FRAG = `
+precision highp float;
+in vec2 vUv;
+out vec4 fragColor;
+uniform mat4 uInvViewProj;
+uniform float uTime;
+uniform float uSteps;
+uniform float uGain;
+
+float hash13(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.zyx + 31.32);
+  return fract((p.x + p.y) * p.z);
+}
+float vnoise(vec3 p) {
+  vec3 i = floor(p);
+  vec3 f = fract(p);
+  vec3 u = f * f * (3.0 - 2.0 * f);
+  float a = mix(hash13(i), hash13(i + vec3(1.0, 0.0, 0.0)), u.x);
+  float b = mix(hash13(i + vec3(0.0, 1.0, 0.0)), hash13(i + vec3(1.0, 1.0, 0.0)), u.x);
+  float c = mix(hash13(i + vec3(0.0, 0.0, 1.0)), hash13(i + vec3(1.0, 0.0, 1.0)), u.x);
+  float d = mix(hash13(i + vec3(0.0, 1.0, 1.0)), hash13(i + vec3(1.0, 1.0, 1.0)), u.x);
+  return mix(mix(a, b, u.y), mix(c, d, u.y), u.z);
+}
+float fbm2(vec3 p) {
+  float s = 0.5 * vnoise(p);
+  s += 0.25 * vnoise(p * 2.03 + vec3(11.7, 3.1, 7.9));
+  return s / 0.75;
+}
+float fbm5(vec3 p) {
+  float amp = 0.5;
+  float s = 0.0;
+  float norm = 0.0;
+  for (int i = 0; i < 5; i++) {
+    s += amp * vnoise(p);
+    norm += amp;
+    p = p * 2.02 + vec3(7.3, 1.9, 4.7);
+    amp *= 0.52;
+  }
+  return s / norm;
+}
+void main() {
+  vec2 ndc = vUv * 2.0 - 1.0;
+  vec4 pn = uInvViewProj * vec4(ndc, -1.0, 1.0);
+  vec4 pf = uInvViewProj * vec4(ndc, 1.0, 1.0);
+  vec3 ro = pn.xyz / pn.w;
+  vec3 rd = normalize(pf.xyz / pf.w - ro);
+
+  // 远景星野：视线方向锚定的确定性 hash 点（不随时间漂移）
+  vec3 col = vec3(0.0);
+  vec3 cell = floor(rd * 230.0);
+  float hs = hash13(cell + vec3(7.0));
+  float star = smoothstep(0.9972, 0.9999, hs) * (0.25 + 0.75 * hash13(cell + vec3(19.0)));
+  col += vec3(0.72, 0.8, 0.95) * star;
+
+  // 与银河薄板 |z| <= HZ 求交
+  const float HZ = 2.4;
+  float t0 = 0.0;
+  float t1 = 0.0;
+  bool hit = true;
+  if (abs(rd.z) < 1e-5) {
+    hit = abs(ro.z) < HZ;
+    t1 = hit ? 200.0 : 0.0;
+  } else {
+    float ta = (-HZ - ro.z) / rd.z;
+    float tb = (HZ - ro.z) / rd.z;
+    t0 = max(min(ta, tb), 0.0);
+    t1 = max(ta, tb);
+    hit = t1 > t0;
+  }
+
+  if (hit && uSteps > 0.5) {
+    float dt = (t1 - t0) / uSteps;
+    float t = t0 + dt * hash13(vec3(gl_FragCoord.xy, 1.0));
+    float od = 0.0;
+    vec3 acc = vec3(0.0);
+    for (int i = 0; i < 28; i++) {
+      if (float(i) >= uSteps) break;
+      vec3 p = ro + rd * t;
+      t += dt;
+      float rn = length(p.xy) * 0.1;
+      if (rn > 1.24 || abs(p.z) > HZ) continue;
+      // 域扭曲 + 5 八度 fBm + 对数螺旋臂偏置 + 垂直包络
+      vec3 w = vec3(fbm2(p * 0.4 + vec3(0.0, 0.0, uTime * 0.02)),
+                    fbm2(p * 0.4 + vec3(5.2, 1.3, 9.4)),
+                    fbm2(p * 0.4 + vec3(1.7, 8.1, 3.0)));
+      vec3 q = p * 0.55 + (w - 0.5) * 2.6;
+      float d = fbm5(q);
+      float ang = atan(p.y, p.x);
+      float arm = 0.5 + 0.5 * sin(ang * 2.0 - log(max(rn, 0.06)) * 4.6 + 1.7);
+      d *= 0.6 + 0.6 * arm;
+      float hThick = 0.09 + 0.5 * exp(-rn * 2.4);
+      d *= exp(-abs(p.z) / hThick) * smoothstep(1.24, 0.4, rn) * smoothstep(0.015, 0.14, rn);
+      d = smoothstep(0.3, 0.85, d);
+      if (d <= 0.002) continue;
+      // 尘埃带消光（自遮蔽光程）
+      float du = fbm2(q * 1.9 + vec3(13.1, 3.7, 8.2));
+      float dust = smoothstep(0.5, 0.78, du) * d;
+      // 辐射色：核暖黄 → 外缘蓝白 + HII 粉斑
+      vec3 em = mix(vec3(1.0, 0.62, 0.34), vec3(0.36, 0.55, 1.0), clamp(rn * 1.4 - 0.08, 0.0, 1.0));
+      float hii = fbm2(p * 1.35 + vec3(23.0, 11.0, 5.0));
+      em += vec3(1.0, 0.3, 0.48) * smoothstep(0.6, 0.85, hii) * 0.9;
+      acc += em * d * exp(-od) * dt * uGain;
+      od += dust * dt * 3.2;
+    }
+    col += acc;
+  }
+  fragColor = vec4(col, 1.0);
+}
+`;
+
+/** 超新星球壳顶点：相机朝向 billboard 展开 + 脉冲缩放（视图空间 imposter 基准） */
+const LOCAL_SUPERNOVA_VERT = `
+precision highp float;
+layout(location = 0) in vec2 aCorner;
+layout(location = 1) in vec3 iPos;
+layout(location = 2) in float iRadius;
+layout(location = 3) in vec3 iColor;
+layout(location = 4) in float iSeed;
+uniform mat4 uView;
+uniform mat4 uProj;
+uniform vec2 uProjScale;
+uniform float uTime;
+out vec2 vCorner;
+out vec3 vViewC;
+out float vRadius;
+out vec3 vColor;
+out float vSeed;
+void main() {
+  float pulse = 1.0 + 0.12 * sin(uTime * 2.3 + iSeed * 6.2831853);
+  float r = max(0.0001, iRadius * pulse);
+  vec4 vc = uView * vec4(iPos, 1.0);
+  vec4 cc = uProj * vc;
+  vCorner = aCorner;
+  vViewC = vc.xyz;
+  vRadius = r;
+  vColor = iColor;
+  vSeed = iSeed;
+  if (cc.w <= 0.0001) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    vRadius = 0.0;
+    return;
+  }
+  gl_Position = cc + vec4(aCorner * uProjScale * r * 1.06, 0.0, 0.0);
+}
+`;
+
+/** 超新星球壳片元：视图空间射线-球求交，limb 增亮 + 方位微条纹（additive） */
+const LOCAL_SUPERNOVA_FRAG = `
+precision highp float;
+in vec2 vCorner;
+in vec3 vViewC;
+in float vRadius;
+in vec3 vColor;
+in float vSeed;
+uniform float uTime;
+out vec4 fragColor;
+void main() {
+  if (vRadius <= 0.0) { fragColor = vec4(0.0); return; }
+  vec3 rd = vec3(vCorner * vRadius, vViewC.z);
+  vec3 c = vec3(0.0, 0.0, vViewC.z);
+  float r2 = dot(rd, rd);
+  float b = dot(rd, c);
+  float disc = b * b - r2 * (dot(c, c) - vRadius * vRadius);
+  if (disc <= 0.0) { fragColor = vec4(0.0); return; }
+  float sq = sqrt(disc);
+  float t = (b - sq) / r2;
+  if (t <= 0.0) t = (b + sq) / r2; // 相机入壳内时取后交点
+  if (t <= 0.0) { fragColor = vec4(0.0); return; }
+  vec3 p = rd * t;
+  vec3 n = normalize(p - c);
+  vec3 vdir = normalize(p);
+  float facing = clamp(dot(n, -vdir), 0.0, 1.0);
+  float rim = pow(1.0 - facing, 2.2);
+  float band = 0.78 + 0.22 * sin(atan(n.y, n.x) * 5.0 + uTime * 1.6 + vSeed * 37.0);
+  float inten = (rim * 2.6 + 0.10) * band;
+  fragColor = vec4(vColor * inten, 1.0);
+}
+`;
+
+// —— 星系盘粒子（实例化 billboard） ——————————————————————————————
+
+const VERT_DISK = `
+precision highp float;
+layout(location = 0) in vec2 aCorner;
+layout(location = 1) in vec3 iPos;
+layout(location = 2) in float iSize;
+layout(location = 3) in vec3 iColor;
+layout(location = 4) in float iSeed;
+uniform mat4 uViewProj;
+uniform vec2 uProjScale;
+uniform float uMinSize;
+uniform float uSizeClamp;
+out vec2 vCorner;
+out vec3 vColor;
+out float vSeed;
+void main() {
+  vec4 c = uViewProj * vec4(iPos, 1.0);
+  if (c.w <= 0.0001) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    vCorner = vec2(0.0);
+    vColor = vec3(0.0);
+    vSeed = 0.0;
+    return;
+  }
+  float sz = clamp(iSize, uMinSize, c.w * uSizeClamp);
+  gl_Position = c + vec4(aCorner * uProjScale * sz, 0.0, 0.0);
+  vCorner = aCorner;
+  vColor = iColor;
+  vSeed = iSeed;
+}
+`;
+
+/** 径向高斯软斑 + 亮核 + 种子闪烁（HDR 峰值 ~2.9，供 bloom 提取） */
+const FRAG_DISK = `
+precision highp float;
+in vec2 vCorner;
+in vec3 vColor;
+in float vSeed;
+uniform float uTime;
+out vec4 fragColor;
+void main() {
+  float d2 = dot(vCorner, vCorner);
+  float d = sqrt(d2);
+  float edge = smoothstep(1.0, 0.6, d);
+  float g = exp(-d2 * 5.0);
+  float core = exp(-d2 * 26.0);
+  float tw = 0.82 + 0.34 * sin(uTime * 1.7 + vSeed * 41.0);
+  fragColor = vec4(vColor * ((g * 1.05 + core * 1.9) * tw * edge), 1.0);
+}
+`;
+
+// —— 星系节点 / 归属光晕 / 势力环（实例化 billboard：核心高斯 + 环带） ————
+
+const VERT_SPRITE = `
+precision highp float;
+layout(location = 0) in vec2 aCorner;
+layout(location = 1) in vec3 iPos;
+layout(location = 2) in float iSize;
+layout(location = 3) in vec4 iColA;
+layout(location = 4) in vec4 iColB;
+uniform mat4 uViewProj;
+uniform vec2 uProjScale;
+uniform float uSizeClamp;
+out vec2 vCorner;
+out vec4 vColA;
+out vec4 vColB;
+void main() {
+  vec4 c = uViewProj * vec4(iPos, 1.0);
+  if (c.w <= 0.0001) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    vCorner = vec2(0.0);
+    vColA = vec4(0.0);
+    vColB = vec4(0.0);
+    return;
+  }
+  float sz = min(iSize, c.w * uSizeClamp);
+  gl_Position = c + vec4(aCorner * uProjScale * sz, 0.0, 0.0);
+  vCorner = aCorner;
+  vColA = iColA;
+  vColB = iColB;
+}
+`;
+
+/** 环带中心 d=0.75（调用方按 目标半径/0.75 换算实例尺寸），核心为高斯软斑 */
+const FRAG_SPRITE = `
+precision highp float;
+in vec2 vCorner;
+in vec4 vColA;
+in vec4 vColB;
+out vec4 fragColor;
+void main() {
+  float d = length(vCorner);
+  float edge = smoothstep(1.0, 0.8, d);
+  float core = exp(-d * d * 5.5);
+  float ring = exp(-pow((d - 0.75) * 9.0, 2.0));
+  vec3 col = vColA.rgb * (core * vColA.a) + vColB.rgb * (ring * vColB.a);
+  fragColor = vec4(col * edge, 1.0);
+}
+`;
+
+// —— 航路 / 标尺线 ——————————————————————————————————————————————
+
+const VERT_LINE = `
+precision highp float;
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec4 aColor;
+uniform mat4 uViewProj;
+out vec4 vColor;
+void main() {
+  vColor = aColor;
+  gl_Position = uViewProj * vec4(aPos, 1.0);
+}
+`;
+
+const FRAG_LINE = `
+precision highp float;
+in vec4 vColor;
+out vec4 fragColor;
+void main() {
+  fragColor = vec4(vColor.rgb * vColor.a, 1.0);
+}
+`;
+
+/** 解析实际生效的星云/超新星着色器（外部模块优先，本地契约回退） */
+function resolveNebulaShaders() {
+  return {
+    NEBULA_VERT: pickShader(_extNebula, 'NEBULA_VERT', LOCAL_NEBULA_VERT),
+    NEBULA_FRAG: pickShader(_extNebula, 'NEBULA_FRAG', LOCAL_NEBULA_FRAG),
+    SUPERNOVA_VERT: pickShader(_extNebula, 'SUPERNOVA_VERT', LOCAL_SUPERNOVA_VERT),
+    SUPERNOVA_FRAG: pickShader(_extNebula, 'SUPERNOVA_FRAG', LOCAL_SUPERNOVA_FRAG),
+  };
+}
+
+// —— GL 资源容器 ——————————————————————————————————————————————————
+
+/** 星系盘实例步长：pos3 + size1 + color3 + seed1（float） */
+const DISK_STRIDE_F = 8;
+/** 节点 sprite 实例步长：pos3 + size1 + colA4 + colB4（float） */
+const SPRITE_STRIDE_F = 12;
+/** 球壳实例步长：pos3 + radius1 + color3 + seed1（float） */
+const SHELL_STRIDE_F = 8;
+/** 线段顶点步长：pos3 + rgba4（float） */
+const LINE_STRIDE_F = 7;
+
+class Galaxy3D {
+  constructor() {
+    this.glc = null;
+    this.gl = null;
+    /** 实际可绘制粒子实例数（生成结果可能少于请求值） */
+    this.particleCount = 0;
+
+    this._quadBuf = null;
+    this._quadVao = null;
+    this._bufDisk = null;
+    this._vaoDisk = null;
+    this._bufSprite = null;
+    this._vaoSprite = null;
+    this._bufShell = null;
+    this._vaoShell = null;
+    this._bufLine = null;
+    this._vaoLine = null;
+
+    this._progDisk = null;
+    this._progSprite = null;
+    this._progLine = null;
+    this._progNebula = null;
+    this._progShell = null;
+    this._u = {};
+  }
+
+  /**
+   * 构建全部程序 / VAO / 缓冲（上下文丢失恢复后可重复调用：rebuild）。
+   * 任一着色器编译失败即抛错（调用方捕获后整体退回 2D 路径）。
+   * @param {import('./GLCore.js').GLContext} glc
+   */
+  init(glc) {
+    if (!glc || !glc.gl) throw new Error('[Galaxy3D] 需要 GLContext 实例');
+    this.glc = glc;
+    this.gl = glc.gl;
+    const gl = glc.gl;
+
+    this._buildPrograms();
+
+    // 单位四边形（TRIANGLE_STRIP 4 顶点）：billboard 与全屏 pass 共用数据
+    this._quadBuf = glc.createBuffer(new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    this._quadVao = glc.createFullscreenVAO();
+
+    this._buildDiskResources(glc, gl);
+    this._buildSpriteResources(glc, gl);
+    this._buildShellResources(glc, gl);
+    this._buildLineResources(glc, gl);
+    return this;
+  }
+
+  /** 上下文恢复钩子：旧句柄已随上下文失效，整体重建 */
+  rebuild(glc) {
+    this.init(glc);
+  }
+
+  // —— 资源构建 ————————————————————————————————————————————
+
+  _buildPrograms() {
+    const glc = this.glc;
+    const sh = resolveNebulaShaders();
+    const loc = (prog, name) => glc.gl.getUniformLocation(prog, name);
+
+    this._progDisk = glc.createProgram(VERT_DISK, FRAG_DISK, { label: 'galaxy3d.disk' });
+    this._u.disk = {
+      viewProj: loc(this._progDisk, 'uViewProj'),
+      projScale: loc(this._progDisk, 'uProjScale'),
+      minSize: loc(this._progDisk, 'uMinSize'),
+      sizeClamp: loc(this._progDisk, 'uSizeClamp'),
+      time: loc(this._progDisk, 'uTime'),
+    };
+
+    this._progSprite = glc.createProgram(VERT_SPRITE, FRAG_SPRITE, { label: 'galaxy3d.sprite' });
+    this._u.sprite = {
+      viewProj: loc(this._progSprite, 'uViewProj'),
+      projScale: loc(this._progSprite, 'uProjScale'),
+      sizeClamp: loc(this._progSprite, 'uSizeClamp'),
+    };
+
+    this._progLine = glc.createProgram(VERT_LINE, FRAG_LINE, { label: 'galaxy3d.line' });
+    this._u.line = { viewProj: loc(this._progLine, 'uViewProj') };
+
+    this._progNebula = glc.createProgram(sh.NEBULA_VERT, sh.NEBULA_FRAG, { label: 'galaxy3d.nebula' });
+    this._u.nebula = {
+      invViewProj: loc(this._progNebula, 'uInvViewProj'),
+      time: loc(this._progNebula, 'uTime'),
+      steps: loc(this._progNebula, 'uSteps'),
+      gain: loc(this._progNebula, 'uGain'),
+    };
+
+    this._progShell = glc.createProgram(sh.SUPERNOVA_VERT, sh.SUPERNOVA_FRAG, { label: 'galaxy3d.shell' });
+    this._u.shell = {
+      view: loc(this._progShell, 'uView'),
+      proj: loc(this._progShell, 'uProj'),
+      projScale: loc(this._progShell, 'uProjScale'),
+      time: loc(this._progShell, 'uTime'),
+    };
+  }
+
+  /** 星系盘：生成（外部模块优先）→ 交错 → 静态实例缓冲 + VAO */
+  _buildDiskResources(glc, gl) {
+    const gen = generateGalaxyParticles({ count: PARTICLE_MAX, seed: GALAXY_SEED, worldScale: WORLD_SCALE });
+    const pos = gen.positions;
+    const col = gen.colors;
+    const siz = gen.sizes;
+    const sd = gen.seeds;
+    const n = Math.min(Math.floor(pos.length / 3), Math.floor(col.length / 3), siz.length, sd.length);
+    this.particleCount = Math.max(0, n);
+
+    const inst = new Float32Array(this.particleCount * DISK_STRIDE_F);
+    for (let i = 0; i < this.particleCount; i++) {
+      const o = i * DISK_STRIDE_F;
+      inst[o] = pos[i * 3];
+      inst[o + 1] = pos[i * 3 + 1];
+      inst[o + 2] = pos[i * 3 + 2];
+      inst[o + 3] = siz[i];
+      inst[o + 4] = col[i * 3];
+      inst[o + 5] = col[i * 3 + 1];
+      inst[o + 6] = col[i * 3 + 2];
+      inst[o + 7] = sd[i];
+    }
+    this._bufDisk = glc.createBuffer(inst, gl.STATIC_DRAW);
+    const quad = this._quadBuf;
+    this._vaoDisk = glc.createVAO((g) => {
+      g.bindBuffer(g.ARRAY_BUFFER, quad);
+      g.enableVertexAttribArray(0);
+      g.vertexAttribPointer(0, 2, g.FLOAT, false, 0, 0);
+      g.bindBuffer(g.ARRAY_BUFFER, this._bufDisk);
+      g.enableVertexAttribArray(1);
+      g.vertexAttribPointer(1, 3, g.FLOAT, false, DISK_STRIDE_F * 4, 0);
+      g.vertexAttribDivisor(1, 1);
+      g.enableVertexAttribArray(2);
+      g.vertexAttribPointer(2, 1, g.FLOAT, false, DISK_STRIDE_F * 4, 12);
+      g.vertexAttribDivisor(2, 1);
+      g.enableVertexAttribArray(3);
+      g.vertexAttribPointer(3, 3, g.FLOAT, false, DISK_STRIDE_F * 4, 16);
+      g.vertexAttribDivisor(3, 1);
+      g.enableVertexAttribArray(4);
+      g.vertexAttribPointer(4, 1, g.FLOAT, false, DISK_STRIDE_F * 4, 28);
+      g.vertexAttribDivisor(4, 1);
+    });
+  }
+
+  /** 节点 sprite：动态实例缓冲（每帧 bufferSubData 覆盖）+ VAO */
+  _buildSpriteResources(glc, gl) {
+    this._bufSprite = glc.createBuffer(new Float32Array(1024 * SPRITE_STRIDE_F), gl.DYNAMIC_DRAW);
+    const quad = this._quadBuf;
+    this._vaoSprite = glc.createVAO((g) => {
+      g.bindBuffer(g.ARRAY_BUFFER, quad);
+      g.enableVertexAttribArray(0);
+      g.vertexAttribPointer(0, 2, g.FLOAT, false, 0, 0);
+      g.bindBuffer(g.ARRAY_BUFFER, this._bufSprite);
+      g.enableVertexAttribArray(1);
+      g.vertexAttribPointer(1, 3, g.FLOAT, false, SPRITE_STRIDE_F * 4, 0);
+      g.vertexAttribDivisor(1, 1);
+      g.enableVertexAttribArray(2);
+      g.vertexAttribPointer(2, 1, g.FLOAT, false, SPRITE_STRIDE_F * 4, 12);
+      g.vertexAttribDivisor(2, 1);
+      g.enableVertexAttribArray(3);
+      g.vertexAttribPointer(3, 4, g.FLOAT, false, SPRITE_STRIDE_F * 4, 16);
+      g.vertexAttribDivisor(3, 1);
+      g.enableVertexAttribArray(4);
+      g.vertexAttribPointer(4, 4, g.FLOAT, false, SPRITE_STRIDE_F * 4, 32);
+      g.vertexAttribDivisor(4, 1);
+    });
+  }
+
+  /** 超新星球壳：动态实例缓冲 + VAO */
+  _buildShellResources(glc, gl) {
+    this._bufShell = glc.createBuffer(new Float32Array(128 * SHELL_STRIDE_F), gl.DYNAMIC_DRAW);
+    const quad = this._quadBuf;
+    this._vaoShell = glc.createVAO((g) => {
+      g.bindBuffer(g.ARRAY_BUFFER, quad);
+      g.enableVertexAttribArray(0);
+      g.vertexAttribPointer(0, 2, g.FLOAT, false, 0, 0);
+      g.bindBuffer(g.ARRAY_BUFFER, this._bufShell);
+      g.enableVertexAttribArray(1);
+      g.vertexAttribPointer(1, 3, g.FLOAT, false, SHELL_STRIDE_F * 4, 0);
+      g.vertexAttribDivisor(1, 1);
+      g.enableVertexAttribArray(2);
+      g.vertexAttribPointer(2, 1, g.FLOAT, false, SHELL_STRIDE_F * 4, 12);
+      g.vertexAttribDivisor(2, 1);
+      g.enableVertexAttribArray(3);
+      g.vertexAttribPointer(3, 3, g.FLOAT, false, SHELL_STRIDE_F * 4, 16);
+      g.vertexAttribDivisor(3, 1);
+      g.enableVertexAttribArray(4);
+      g.vertexAttribPointer(4, 1, g.FLOAT, false, SHELL_STRIDE_F * 4, 28);
+      g.vertexAttribDivisor(4, 1);
+    });
+  }
+
+  /** 线（航路 + 标尺）：动态顶点缓冲 + VAO */
+  _buildLineResources(glc, gl) {
+    this._bufLine = glc.createBuffer(new Float32Array(6000 * LINE_STRIDE_F), gl.DYNAMIC_DRAW);
+    this._vaoLine = glc.createVAO((g) => {
+      g.bindBuffer(g.ARRAY_BUFFER, this._bufLine);
+      g.enableVertexAttribArray(0);
+      g.vertexAttribPointer(0, 3, g.FLOAT, false, LINE_STRIDE_F * 4, 0);
+      g.enableVertexAttribArray(1);
+      g.vertexAttribPointer(1, 4, g.FLOAT, false, LINE_STRIDE_F * 4, 12);
+    });
+  }
+
+  // —— 绘制调用（每帧；混合/深度状态由调用方统一：additive ONE/ONE、depth 关） ——
+
+  /**
+   * 星系盘粒子：一次 drawArraysInstanced 画 count 个 billboard（count <= particleCount）。
+   * @param {{viewProj:Float32Array, px:number, py:number, minSize:number, count:number, time:number}} o
+   */
+  drawDisk(gl, o) {
+    const u = this._u.disk;
+    const count = Math.min(Math.max(0, Math.round(o.count) || 0), this.particleCount);
+    if (count <= 0) return;
+    gl.useProgram(this._progDisk);
+    gl.uniformMatrix4fv(u.viewProj, false, o.viewProj);
+    gl.uniform2f(u.projScale, o.px, o.py);
+    gl.uniform1f(u.minSize, o.minSize);
+    gl.uniform1f(u.sizeClamp, 0.5);
+    gl.uniform1f(u.time, o.time || 0);
+    gl.bindVertexArray(this._vaoDisk);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
+    gl.bindVertexArray(null);
+  }
+
+  /**
+   * 节点 sprite 批量绘制（data 为预填实例数组，count 为实例数）。
+   * @param {{viewProj:Float32Array, px:number, py:number}} o
+   */
+  drawSprites(gl, data, count, o) {
+    const n = Math.max(0, Math.round(count) || 0);
+    if (n <= 0 || !this._bufSprite) return;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._bufSprite);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, data, 0, n * SPRITE_STRIDE_F);
+    const u = this._u.sprite;
+    gl.useProgram(this._progSprite);
+    gl.uniformMatrix4fv(u.viewProj, false, o.viewProj);
+    gl.uniform2f(u.projScale, o.px, o.py);
+    gl.uniform1f(u.sizeClamp, 0.5);
+    gl.bindVertexArray(this._vaoSprite);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, n);
+    gl.bindVertexArray(null);
+  }
+
+  /**
+   * 超新星球壳批量绘制。
+   * @param {{view:Float32Array, proj:Float32Array, px:number, py:number, time:number}} o
+   */
+  drawShell(gl, data, count, o) {
+    const n = Math.max(0, Math.round(count) || 0);
+    if (n <= 0 || !this._bufShell) return;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._bufShell);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, data, 0, n * SHELL_STRIDE_F);
+    const u = this._u.shell;
+    gl.useProgram(this._progShell);
+    gl.uniformMatrix4fv(u.view, false, o.view);
+    gl.uniformMatrix4fv(u.proj, false, o.proj);
+    gl.uniform2f(u.projScale, o.px, o.py);
+    gl.uniform1f(u.time, o.time || 0);
+    gl.bindVertexArray(this._vaoShell);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, n);
+    gl.bindVertexArray(null);
+  }
+
+  /**
+   * 线段批量绘制（航路 + 垂直标尺；data 已填充 vertCount 个顶点）。
+   * @param {{viewProj:Float32Array}} o
+   */
+  drawLines(gl, data, vertCount, o) {
+    const n = Math.max(0, Math.round(vertCount) || 0);
+    if (n <= 0 || !this._bufLine) return;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._bufLine);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, data, 0, n * LINE_STRIDE_F);
+    const u = this._u.line;
+    gl.useProgram(this._progLine);
+    gl.uniformMatrix4fv(u.viewProj, false, o.viewProj);
+    gl.bindVertexArray(this._vaoLine);
+    gl.drawArrays(gl.LINES, 0, n);
+    gl.bindVertexArray(null);
+  }
+
+  /**
+   * 全屏体积星云 pass（加法；uSteps <= 0 时调用方应整体跳过本 pass）。
+   * @param {{invViewProj:Float32Array, time:number, steps:number, gain:number}} o
+   */
+  drawNebula(gl, o) {
+    const steps = Math.max(0, Math.min(28, Math.round(o.steps) || 0));
+    if (steps <= 0) return;
+    const u = this._u.nebula;
+    gl.useProgram(this._progNebula);
+    gl.uniformMatrix4fv(u.invViewProj, false, o.invViewProj);
+    gl.uniform1f(u.time, o.time || 0);
+    gl.uniform1f(u.steps, steps);
+    gl.uniform1f(u.gain, o.gain);
+    gl.bindVertexArray(this._quadVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.bindVertexArray(null);
+  }
+}
+
+Object.assign(__exports, { WORLD_SCALE, hashString01, systemWorldPos, generateGalaxyParticles, generateSupernovaSeeds, Galaxy3D });
+
+});
+__register("src/render/CanvasManager.js", function (__exports, __require) {
+/**
+ * render/CanvasManager.js — 画布生命周期管理器（任务书 2.5 渲染基建 / R2 升级）
+ *
+ * 职责：
+ *  - 在给定容器内创建包裹 div（class "vf-view-canvas"，复用 styles.css 的绝对定位布局），
+ *    并搭建三层画布：
+ *      底层 glCanvas —— WebGL2（GL 场景 + HDR Bloom 后处理输出）；
+ *      顶层 hudCanvas —— 2D 画布（透明背景，仅画 HUD 文字/指示框），pointer-events:none，
+ *                        不改变事件目标（鼠标事件仍落在 glCanvas 上，由调用方绑定）；
+ *    两层绝对定位重合（zIndex 显式分层）。无 WebGL2 时只保留 2D 画布（行为与旧版一致）。
+ *  - 处理 devicePixelRatio（上限 2.0），ResizeObserver 监听容器尺寸并同步三层物理像素，
+ *    触发 onResize 回调并同步 PostProcessor 的渲染目标尺寸。
+ *  - WebGL 上下文丢失（webglcontextlost）：preventDefault + 标记 glDegraded +
+ *    隐藏 glCanvas（以 opacity:0 隐藏而非 display:none —— 保持事件目标不变，
+ *    调用方已绑定在 glCanvas 上的交互在退化期间继续工作；2D 兜底照常绘制）；
+ *    上下文恢复（webglcontextrestored）：自动重建 PostProcessor/GL 资源（rebuild 钩子，
+ *    视图层可经 onGLStateChange 感知并重挂网格），失败则维持 2D 兜底，不抛错不白屏。
+ *
+ * 既有公开 API（100% 兼容，调用方无感知）：
+ *  attach(container) → this；ctx / width / height / dpr / canvas；
+ *  beginFrame()（HUD 2D setTransform(dpr,0,0,dpr,0,0)）；onResize(cb) → 注销函数；dispose()。
+ * 新增（增量）：gl / glc / post / hasGL / glDegraded / tier；
+ *  beginGLFrame() / endGLFrame(opts) / setTier(t) / onGLStateChange(cb) / rebuild()。
+ *
+ * 约束：顶层不触碰 document/window，仅类方法内部访问 DOM，可在 Node 侧安全 import。
+ */
+
+const { GLContext: GLContext } = __require("src/render/gl/GLCore.js");
+const { PostProcessor: PostProcessor } = __require("src/render/gl/PostProcessor.js");
+
+class CanvasManager {
+  constructor() {
+    // —— 既有公开 API 字段 ——
+    /** @type {HTMLCanvasElement|null} 事件目标画布（有 GL 时为底层 glCanvas，无 GL 时为 2D 画布）。
+     *  hudCanvas 带 pointer-events:none 永不成为事件目标，调用方绑定在 canvas 上的
+     *  鼠标事件因此保持与旧版完全一致的行为。 */
+    this.canvas = null;
+    /** @type {CanvasRenderingContext2D|null} HUD 2D 上下文（顶层 hudCanvas） */
+    this.ctx = null;
+    /** CSS 逻辑像素宽度 */
+    this.width = 0;
+    /** CSS 逻辑像素高度 */
+    this.height = 0;
+    /** 实际使用的 devicePixelRatio（上限 2.0） */
+    this.dpr = 1;
+
+    // —— R2 新增公开字段 ——
+    /** @type {HTMLCanvasElement|null} 底层 WebGL2 画布（无 GL 时为 null） */
+    this.glCanvas = null;
+    /** @type {HTMLCanvasElement|null} 顶层 2D HUD 画布 */
+    this.hudCanvas = null;
+    /** @type {WebGL2RenderingContext|null} */
+    this.gl = null;
+    /** @type {GLContext|null} GL 封装（托管资源清册） */
+    this.glc = null;
+    /** @type {PostProcessor|null} HDR Bloom 后处理管线 */
+    this.post = null;
+    /** 是否持有可用 WebGL2（false 时为纯 2D，行为与旧版一致） */
+    this.hasGL = false;
+    /** GL 上下文丢失/重建失败标记（true 时调用方可退回 this.ctx 画基础图形） */
+    this.glDegraded = false;
+    /** 渲染层级：1=完整管线；2=降级管线；3=纯 2D（GL 短路），经 setTier 调整 */
+    this.tier = 1;
+
+    this._wrap = null;           // 包裹 div（.vf-view-canvas）
+    this._observer = null;       // ResizeObserver 实例
+    this._resizeCbs = new Set(); // 尺寸变化回调集合
+    this._glStateCbs = new Set();// GL 状态变化回调集合（参数 degraded:boolean）
+    this._onMeasure = null;      // 绑定后的观察回调
+    this._onWinResize = null;    // window resize 兜底（捕捉 dpr 变化）
+    this._onGLLost = null;       // webglcontextlost 监听
+    this._onGLRestored = null;   // webglcontextrestored 监听
+  }
+
+  /**
+   * 在容器内创建三层画布并开始观察尺寸。
+   * @param {HTMLElement} container 容器元素（通常为 .vf-view-body 或其子容器）
+   * @returns {CanvasManager} 返回自身，便于链式调用
+   */
+  attach(container) {
+    if (!container) throw new Error('[CanvasManager] attach 需要容器元素');
+    // 包裹层复用 styles.css 中 .vf-view-canvas { position:absolute; inset:0 }
+    const wrap = document.createElement('div');
+    wrap.className = 'vf-view-canvas';
+    const hudCanvas = document.createElement('canvas');
+    const glCanvas = document.createElement('canvas');
+
+    // —— 尝试取得 WebGL2（画布无需先入 DOM 即可 getContext）——
+    let gl = null;
+    try {
+      gl = this._tryGetGL(glCanvas);
+    } catch (e) {
+      gl = null;
+    }
+
+    if (gl) {
+      // GL 管线初始化失败（如着色器编译异常）同样退化为纯 2D
+      try {
+        this.gl = gl;
+        this.glc = GLContext.fromExisting(glCanvas, gl);
+        this.post = new PostProcessor(this.glc);
+        this.hasGL = true;
+      } catch (e) {
+        console.error('[CanvasManager] GL 管线初始化失败，退化为纯 2D:', e);
+        try { if (this.glc) this.glc.destroy(); } catch (_) { /* 忽略销毁异常 */ }
+        this.gl = null;
+        this.glc = null;
+        this.post = null;
+        this.hasGL = false;
+      }
+    }
+
+    if (this.hasGL) {
+      // 底层：WebGL2 画布（接收鼠标事件，zIndex 0）
+      this._applyCanvasStyle(glCanvas, 0);
+      wrap.appendChild(glCanvas);
+      this.glCanvas = glCanvas;
+      this.canvas = glCanvas;
+      this._bindGLLifecycle(glCanvas);
+      // 顶层 HUD 画布透明且不拦截事件：事件目标保持为 glCanvas
+      hudCanvas.style.pointerEvents = 'none';
+    } else {
+      // 无 GL：2D 画布保持默认事件目标（与旧版行为一致）
+      hudCanvas.style.pointerEvents = '';
+    }
+
+    // 顶层：HUD 2D 画布（透明背景，仅画文字/指示框，zIndex 1）
+    this._applyCanvasStyle(hudCanvas, 1);
+    wrap.appendChild(hudCanvas);
+    this.hudCanvas = hudCanvas;
+    this.ctx = hudCanvas.getContext('2d');
+    this._wrap = wrap;
+    container.appendChild(wrap);
+
+    // 首次测量并应用尺寸（内部会同步 post.resize）
+    this._measure();
+
+    // 尺寸观察：容器尺寸变化 → 重新测量
+    this._onMeasure = () => this._measure();
+    if (typeof ResizeObserver !== 'undefined') {
+      this._observer = new ResizeObserver(this._onMeasure);
+      this._observer.observe(wrap);
+    }
+    // window resize 兜底：跨屏拖动 / 浏览器缩放导致的 dpr 变化不会触发 ResizeObserver
+    if (typeof window !== 'undefined') {
+      this._onWinResize = () => this._measure();
+      window.addEventListener('resize', this._onWinResize);
+    }
+    return this;
+  }
+
+  /**
+   * 注册尺寸变化回调（参数为 CSS 逻辑像素宽高）。
+   * @param {(w:number,h:number)=>void} cb 回调
+   * @returns {()=>void} 注销函数
+   */
+  onResize(cb) {
+    if (typeof cb !== 'function') return () => {};
+    this._resizeCbs.add(cb);
+    return () => this._resizeCbs.delete(cb);
+  }
+
+  /**
+   * 注册 GL 状态变化回调（可选；参数 degraded:boolean）。
+   * 上下文丢失/恢复/重建失败时触发，视图层可借此重挂 GL 网格或提示降级。
+   * @param {(degraded:boolean)=>void} cb 回调
+   * @returns {()=>void} 注销函数
+   */
+  onGLStateChange(cb) {
+    if (typeof cb !== 'function') return () => {};
+    this._glStateCbs.add(cb);
+    return () => this._glStateCbs.delete(cb);
+  }
+
+  /** 每帧渲染前调用：把 HUD 2D 上下文变换重置为 dpr 缩放（逻辑像素坐标系） */
+  beginFrame() {
+    if (!this.ctx) return;
+    this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    this.ctx.clearRect(0, 0, this.width, this.height);
+  }
+
+  /**
+   * 开始 GL 帧（有 GL 且 tier<3 时）：设置 viewport 到物理像素并绑定场景 FBO。
+   * @returns {{fbo:Object, width:number, height:number}|null} 场景目标信息；无 GL/降级/目标未就绪时为 null
+   */
+  beginGLFrame() {
+    if (!this.hasGL || !this.post || this.glDegraded || this.tier >= 3) return null;
+    const glCanvas = this.glCanvas;
+    this.gl.viewport(0, 0, glCanvas.width, glCanvas.height);
+    return this.post.beginScene();
+  }
+
+  /**
+   * 结束 GL 帧：执行 HDR Bloom 后处理并合成到默认帧缓冲。
+   * @param {{bloom?:number, exposure?:number, time?:number}} [opts] 透传 post.endScene
+   */
+  endGLFrame(opts) {
+    if (!this.hasGL || !this.post || this.glDegraded || this.tier >= 3) return;
+    this.post.endScene(opts);
+  }
+
+  /**
+   * 设置渲染层级（同步本管理器与 PostProcessor）。
+   * 1=完整管线；2=降级管线（2 级金字塔）；3=纯 2D（GL 调用全部短路）。
+   * @param {number} t
+   * @returns {number} 实际生效层级
+   */
+  setTier(t) {
+    if (this.post) {
+      this.tier = this.post.setTier(t);
+      return this.tier;
+    }
+    const n = Math.round(Number(t));
+    this.tier = Number.isFinite(n) ? Math.min(3, Math.max(1, n)) : 1;
+    return this.tier;
+  }
+
+  /**
+   * 重建 GL 管线资源（rebuild 钩子）：
+   *  - webglcontextrestored 后自动调用；视图层亦可手动触发；
+   *  - 重建 PostProcessor 的程序/VAO/FBO（尺寸沿用当前物理像素），视图层可监听
+   *    onGLStateChange(false) 重挂自身网格/几何；
+   *  - 任何异常都收敛为降级状态：不抛错、不白屏（HUD 2D 兜底照常）。
+   * @returns {boolean} 是否重建成功
+   */
+  rebuild() {
+    if (!this.hasGL || !this.post || !this.glc) return false;
+    try {
+      this.glc.resetTracking();          // 旧句柄已随上下文失效，清空清册防膨胀
+      this.post.rebuild();               // 重建程序 / VAO / 场景与金字塔目标
+      if (this.glCanvas) {
+        this.glCanvas.style.opacity = '';            // 恢复 GL 画面
+        this.glCanvas.style.display = '';
+      }
+      if (this.hudCanvas) this.hudCanvas.style.pointerEvents = 'none'; // 事件目标交还 glCanvas
+      this.glDegraded = false;
+      this._syncGLSize();                // 视口与目标尺寸对齐当前物理像素
+      this._fireGLStateChange(false);
+      return true;
+    } catch (e) {
+      console.error('[CanvasManager] GL 上下文恢复重建失败，保持 2D 兜底:', e);
+      this._enterDegraded();
+      return false;
+    }
+  }
+
+  /** 释放：断开观察者、移除监听、销毁 GL 管线并移除画布节点 */
+  dispose() {
+    if (this._observer) {
+      this._observer.disconnect();
+      this._observer = null;
+    }
+    if (this._onWinResize) {
+      window.removeEventListener('resize', this._onWinResize);
+      this._onWinResize = null;
+    }
+    if (this.glCanvas && this._onGLLost) {
+      this.glCanvas.removeEventListener('webglcontextlost', this._onGLLost);
+      this.glCanvas.removeEventListener('webglcontextrestored', this._onGLRestored);
+      this._onGLLost = null;
+      this._onGLRestored = null;
+    }
+    this._resizeCbs.clear();
+    this._glStateCbs.clear();
+    // GL 资源回收：post 先释放自身目标，glc 统一回收清册并经 lose_context 丢弃上下文
+    if (this.post) {
+      try { this.post.destroy(); } catch (e) { console.error('[CanvasManager] post.destroy 异常:', e); }
+      this.post = null;
+    }
+    if (this.glc) {
+      try { this.glc.destroy(); } catch (e) { console.error('[CanvasManager] glc.destroy 异常:', e); }
+      this.glc = null;
+    }
+    this.gl = null;
+    this.hasGL = false;
+    this.glDegraded = false;
+    if (this._wrap && this._wrap.parentNode) this._wrap.parentNode.removeChild(this._wrap);
+    this._wrap = null;
+    this.canvas = null;
+    this.ctx = null;
+    this.glCanvas = null;
+    this.hudCanvas = null;
+  }
+
+  // —— 内部实现 ——————————————————————————————————————————————
+
+  /** 请求 webgl2 上下文（属性固定：不透明 + 抗锯齿 + 深度 + 高性能偏好） */
+  _tryGetGL(canvas) {
+    return canvas.getContext('webgl2', {
+      antialias: true,
+      alpha: false,
+      depth: true,
+      powerPreference: 'high-performance',
+    });
+  }
+
+  /** 三层画布共用的绝对定位样式（styles.css 仅约定 display:block，定位在此补齐） */
+  _applyCanvasStyle(canvas, z) {
+    canvas.style.position = 'absolute';
+    canvas.style.inset = '0';
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+    canvas.style.zIndex = String(z);
+  }
+
+  /** 绑定 WebGL 上下文丢失/恢复监听 */
+  _bindGLLifecycle(glCanvas) {
+    this._onGLLost = (e) => {
+      // 必须 preventDefault，否则浏览器不会派发 webglcontextrestored
+      e.preventDefault();
+      console.warn('[CanvasManager] WebGL 上下文丢失，切换 2D 兜底');
+      this._enterDegraded();
+    };
+    this._onGLRestored = () => {
+      this.rebuild(); // 失败时 rebuild 内部已自行降级，不会抛错
+    };
+    glCanvas.addEventListener('webglcontextlost', this._onGLLost);
+    glCanvas.addEventListener('webglcontextrestored', this._onGLRestored);
+  }
+
+  /** 进入 GL 降级态：隐藏 glCanvas 画面、放开 HUD 事件、广播 degraded=true */
+  _enterDegraded() {
+    this.glDegraded = true;
+    if (this.glCanvas) {
+      // 以 opacity:0 隐藏而非 display:none：保持 glCanvas 为事件目标，
+      // 调用方已绑定的交互（拖拽/单击/滚轮）在退化期间继续工作
+      this.glCanvas.style.opacity = '0';
+    }
+    if (this.hudCanvas) this.hudCanvas.style.pointerEvents = ''; // 2D 兜底期间接收事件
+    this._fireGLStateChange(true);
+  }
+
+  /** 广播 GL 状态变化（快照遍历，允许回调内注销自身） */
+  _fireGLStateChange(degraded) {
+    for (const cb of [...this._glStateCbs]) {
+      try {
+        cb(degraded);
+      } catch (e) {
+        console.error('[CanvasManager] onGLStateChange 回调异常:', e);
+      }
+    }
+  }
+
+  /** 按当前逻辑尺寸 + dpr 同步 glCanvas 物理像素与 post 渲染目标 */
+  _syncGLSize() {
+    if (!this.hasGL || !this.post) return;
+    const pw = Math.max(1, Math.round(this.width * this.dpr));
+    const ph = Math.max(1, Math.round(this.height * this.dpr));
+    if (this.glCanvas) {
+      this.glCanvas.width = pw;
+      this.glCanvas.height = ph;
+    }
+    this.post.resize(pw, ph);
+  }
+
+  /**
+   * 测量容器尺寸并同步三层画布物理像素与 post 目标；
+   * 尺寸与 dpr 均未变化时跳过，避免 ResizeObserver 抖动导致的无谓重置。
+   */
+  _measure() {
+    if (!this._wrap || !this.hudCanvas) return;
+    const rect = this._wrap.getBoundingClientRect();
+    const w = Math.max(1, Math.round(rect.width));
+    const h = Math.max(1, Math.round(rect.height));
+    const rawDpr = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
+    const dpr = Math.min(2.0, rawDpr); // 上限 2.0：高分屏下控制填充率
+    if (w === this.width && h === this.height && dpr === this.dpr) return;
+
+    this.width = w;
+    this.height = h;
+    this.dpr = dpr;
+    const pw = Math.round(w * dpr);
+    const ph = Math.round(h * dpr);
+    this.hudCanvas.width = pw;
+    this.hudCanvas.height = ph;
+    this._syncGLSize();
+
+    // 通知回调（快照遍历，允许回调内注销自身）
+    for (const cb of [...this._resizeCbs]) {
+      try {
+        cb(this.width, this.height);
+      } catch (e) {
+        console.error('[CanvasManager] onResize 回调异常:', e);
+      }
+    }
+  }
+}
+
+Object.assign(__exports, { CanvasManager });
+
+});
+__register("src/render/gl/PostProcessor.js", function (__exports, __require) {
+/**
+ * render/gl/PostProcessor.js — HDR Bloom 后处理管线（VOID FRONTIER 渲染底座 R2）
+ *
+ * 管线（tier 1，物理像素分辨率）：
+ *  1. beginScene() 绑定场景浮点 FBO（RGBA16F + 24 位深度渲染缓冲；无浮点渲染能力时
+ *     回退 RGBA8 模拟），并执行 8 步清屏/状态复位契约（见 beginScene 注释）——
+ *     beginScene 是场景 FBO 清屏的【唯一所有者】（doc6 规范 6 §3.2：一个显式所有者
+ *     + 注释 + 测试；调用方随后的 clearColor/clear 属允许的冗余防御，不构成第二所有者）。
+ *     调用方在返回的目标中渲染 HDR 场景（颜色可 >1，模拟模式下须先除以 hdrRange 预缩放）；
+ *  2. endScene()：
+ *     a) 软膝盖高亮提取（threshold 0.85 / knee 0.55，smoothstep 软过渡）+ 半分辨率降采样；
+ *     b) 4 级金字塔（1/2、1/4、1/8、1/16），每级水平+垂直 9-tap 可分离高斯模糊；
+ *     c) 自底向上 3x3 tent 双线性上采样，加法混合（ONE, ONE）逐级累加辉光；
+ *     d) 全屏合成：scene + bloomStrength×glow → Narkowicz ACES 色调映射 → sRGB 伽马
+ *        → 抖动去色带 → 写默认帧缓冲。
+ *
+ * 降级：
+ *  - floatOk=false（RGBA8 回退）：scene/glow 以 hdrRange（默认 4）预除编码存储，
+ *    合成时乘回再曝光；hdrSimulated=true 标记；
+ *  - tier=2：金字塔砍半为 2 级，particleScale=0.5 供调用方做粒子减量提示；
+ *  - tier=3：调用方整体跳过 GL（Canvas 2D 退化），beginScene/endScene 直接短路。
+ *
+ * 约束：顶层不触碰 document/window（纯 JS，可在 Node 侧安全 import）；所有 GLSL
+ * 均为手写 GLSL ES 3.0 字符串（#version 行由 GLCore 统一前置），不拼接外部库。
+ */
+
+/** RGBA8 模拟 HDR 时的编码基准亮度：存储值 = HDR 值 / hdrRange（钳在 [0,1]） */
+const HDR_SIM_BASE = 4.0;
+/** 软膝盖高亮提取参数（HDR 亮度域） */
+const BRIGHT_THRESHOLD = 0.85;
+const BRIGHT_KNEE = 0.55;
+/** tier 1 完整金字塔级数；tier 2 减为 2 级 */
+const PYRAMID_LEVELS_FULL = 4;
+const PYRAMID_LEVELS_LOW = 2;
+/** beginScene 默认清屏色（深空底色；调用方可传入主题天空/地平线色覆盖） */
+const DEFAULT_SCENE_CLEAR = [0.02, 0.03, 0.06, 1.0];
+
+// —— GLSL ES 3.0 着色器（手写字符串，#version 由 GLCore.createProgram 前置） ——
+
+/** 全屏四边形顶点着色器：aPos [-1..1] → vUv [0..1] */
+const VERT_QUAD = `
+precision highp float;
+layout(location = 0) in vec2 aPos;
+out vec2 vUv;
+void main() {
+  vUv = aPos * 0.5 + 0.5;
+  gl_Position = vec4(aPos, 0.0, 1.0);
+}
+`;
+
+/** 高亮提取 + 2x2 盒式降采样：软膝盖 smoothstep(t-k, t+k, luma) * luma 风格 */
+const FRAG_BRIGHT = `
+precision highp float;
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D uTexture;
+uniform vec2 uSrcTexel;   // 1/源纹理尺寸（2x2 盒式降采样半 texel 偏移）
+uniform float uThreshold; // 软膝盖阈值
+uniform float uKnee;      // 膝盖半宽
+void main() {
+  vec2 o = uSrcTexel * 0.5;
+  vec3 c = texture(uTexture, vUv + vec2(-o.x, -o.y)).rgb
+         + texture(uTexture, vUv + vec2( o.x, -o.y)).rgb
+         + texture(uTexture, vUv + vec2(-o.x,  o.y)).rgb
+         + texture(uTexture, vUv + vec2( o.x,  o.y)).rgb;
+  c *= 0.25;
+  float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
+  float w = smoothstep(uThreshold - uKnee, uThreshold + uKnee, luma);
+  fragColor = vec4(c * w, 1.0);
+}
+`;
+
+/** 9-tap 可分离高斯模糊（单方向；uDir = texel × 方向 × 步长） */
+const FRAG_BLUR = `
+precision highp float;
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D uTexture;
+uniform vec2 uDir;
+void main() {
+  vec3 acc = texture(uTexture, vUv).rgb * 0.22702703;
+  acc += texture(uTexture, vUv + uDir        ).rgb * 0.19459459;
+  acc += texture(uTexture, vUv - uDir        ).rgb * 0.19459459;
+  acc += texture(uTexture, vUv + uDir * 2.0  ).rgb * 0.12162162;
+  acc += texture(uTexture, vUv - uDir * 2.0  ).rgb * 0.12162162;
+  acc += texture(uTexture, vUv + uDir * 3.0  ).rgb * 0.05405405;
+  acc += texture(uTexture, vUv - uDir * 3.0  ).rgb * 0.05405405;
+  acc += texture(uTexture, vUv + uDir * 4.0  ).rgb * 0.01621622;
+  acc += texture(uTexture, vUv - uDir * 4.0  ).rgb * 0.01621622;
+  fragColor = vec4(acc, 1.0);
+}
+`;
+
+/**
+ * 3x3 tent 双线性上采样（权重和为 1）。
+ * uSrcTexel = 0 时退化为逐点拷贝（兼作金字塔降采样链的拷贝 pass）。
+ */
+const FRAG_UPSAMPLE = `
+precision highp float;
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D uTexture;
+uniform vec2 uSrcTexel;
+void main() {
+  vec2 t = uSrcTexel;
+  vec3 acc = vec3(0.0);
+  acc += texture(uTexture, vUv + vec2(-t.x, -t.y)).rgb * 1.0;
+  acc += texture(uTexture, vUv + vec2( 0.0, -t.y)).rgb * 2.0;
+  acc += texture(uTexture, vUv + vec2( t.x, -t.y)).rgb * 1.0;
+  acc += texture(uTexture, vUv + vec2(-t.x,  0.0)).rgb * 2.0;
+  acc += texture(uTexture, vUv                  ).rgb * 4.0;
+  acc += texture(uTexture, vUv + vec2( t.x,  0.0)).rgb * 2.0;
+  acc += texture(uTexture, vUv + vec2(-t.x,  t.y)).rgb * 1.0;
+  acc += texture(uTexture, vUv + vec2( 0.0,  t.y)).rgb * 2.0;
+  acc += texture(uTexture, vUv + vec2( t.x,  t.y)).rgb * 1.0;
+  fragColor = vec4(acc / 16.0, 1.0);
+}
+`;
+
+/** 全屏合成：scene + bloom×glow → ACES(Narkowicz) → sRGB 伽马 → 抖动去色带 */
+const FRAG_COMPOSITE = `
+precision highp float;
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D uScene;
+uniform sampler2D uGlow;
+uniform float uBloom;    // 辉光强度
+uniform float uExposure; // 曝光
+uniform float uHdrRange; // 1.0=真 HDR；RGBA8 模拟时为编码基准（存储值已预除）
+uniform float uTime;     // 抖动相位（秒）
+vec3 aces(vec3 x) {
+  return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+}
+float hash12(vec2 p) {
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
+void main() {
+  vec3 hdr = texture(uScene, vUv).rgb * uHdrRange;
+  vec3 glow = texture(uGlow, vUv).rgb * uHdrRange;
+  vec3 c = hdr + uBloom * glow;
+  c *= uExposure;
+  c = aces(c);
+  c = pow(c, vec3(1.0 / 2.2)); // sRGB 伽马
+  // 确定性时间抖动（±1/255）消除伽马后暗部色带；不使用随机数
+  float d = (hash12(gl_FragCoord.xy + vec2(uTime * 60.0, uTime * 47.0)) - 0.5) / 255.0;
+  fragColor = vec4(c + d, 1.0);
+}
+`;
+
+class PostProcessor {
+  /**
+   * @param {import('./GLCore.js').GLContext} glc GLContext 实例
+   */
+  constructor(glc) {
+    if (!glc || !glc.gl) throw new Error('[PostProcessor] 需要 GLContext 实例');
+    this.glc = glc;
+    this.gl = glc.gl;
+    /** 渲染层级：1=完整 4 级；2=2 级金字塔（管线降级）；3=调用方跳过 GL（本类短路） */
+    this.tier = 1;
+    /** 物理像素尺寸（resize 后有效；构造时尚未建立目标） */
+    this.width = 0;
+    this.height = 0;
+    /** RGBA8 模拟 HDR 标记（scene 目标实际格式决定，见 _buildTargets） */
+    this.hdrSimulated = !glc.floatOk;
+    /** HDR 编码基准：1.0=真 HDR；模拟模式下 scene 内容须先除以该值写入 */
+    this.hdrRange = this.hdrSimulated ? HDR_SIM_BASE : 1.0;
+    /** 粒子减量提示（仅管线降级提示）：tier1=1.0 / tier2=0.5 / tier3=0.0 */
+    this.particleScale = 1.0;
+
+    this._progBright = null;
+    this._progBlur = null;
+    this._progUp = null;
+    this._progComp = null;
+    this._quadVao = null;
+    this._scene = null;   // { texture, fbo, rbo, width, height, float, hasDepth }
+    this._levels = [];    // 金字塔：[{ a, b, width, height }]，a 为主缓冲，b 为模糊中转
+    this._u = { bright: null, blur: null, up: null, comp: null };
+
+    // 尺寸无关资源：程序 + 全屏 VAO（目标缓冲等 resize 建立后再分配）
+    this._buildPrograms();
+    this._quadVao = glc.createFullscreenVAO();
+  }
+
+  /** 场景目标是否就绪（resize 之后为 true） */
+  get ready() {
+    return !!this._scene;
+  }
+
+  /**
+   * 设置渲染层级。
+   *  1 = 完整 4 级金字塔；2 = 2 级金字塔 + 粒子减量提示（仅管线降级）；
+   *  3 = 调用方直接跳过 GL（Canvas 2D 退化），beginScene/endScene 直接短路。
+   * @param {number} t
+   * @returns {number} 实际生效的层级
+   */
+  setTier(t) {
+    const n = Math.round(Number(t));
+    const v = Number.isFinite(n) ? Math.min(3, Math.max(1, n)) : 1;
+    if (v === this.tier) return this.tier;
+    this.tier = v;
+    this.particleScale = v === 1 ? 1.0 : v === 2 ? 0.5 : 0.0;
+    // 层级数变化影响金字塔级数 → 按当前尺寸重建目标
+    if (this.width > 0 && this.height > 0) this._buildTargets();
+    return this.tier;
+  }
+
+  /**
+   * 重建全部渲染目标（窗口/画布尺寸变化时调用）。
+   * 场景 FBO 与金字塔均按物理像素尺寸分配；尺寸未变且目标已就绪时跳过。
+   * @param {number} width 物理像素宽
+   * @param {number} height 物理像素高
+   */
+  resize(width, height) {
+    const w = Math.max(1, Math.round(Number(width) || 1));
+    const h = Math.max(1, Math.round(Number(height) || 1));
+    if (w === this.width && h === this.height && this._scene) return;
+    this.width = w;
+    this.height = h;
+    this._buildTargets();
+  }
+
+  /**
+   * 开始场景 pass：绑定场景 FBO，执行 8 步清屏/状态复位契约，返回目标信息。
+   * 本方法是场景 FBO 清屏与初始渲染状态的【唯一所有者】（doc6 §3.2：唯一显式
+   * 所有者 + 注释 + 测试；doc7 §2.2 修复 2）——每帧固定顺序：
+   *   1. bindFramebuffer(_scene.fbo)
+   *   2. viewport(0, 0, w, h)
+   *   3. disable(SCISSOR_TEST)
+   *   4. disable(BLEND)
+   *   5. colorMask(true, true, true, true)
+   *   6. depthMask(true)
+   *   7. frontFace(CCW) + cullFace(BACK) + disable(CULL_FACE)（声明默认绕序，不开启剔除）
+   *   8. clearColor(clearColor || 深空底色) + clearDepth(1.0)
+   *      + clear(COLOR_BUFFER_BIT | DEPTH_BUFFER_BIT)
+   * 背景"懒刷新"重影的根治点：不再依赖"天空恰好覆盖所有像素"间接清色，
+   * 残留状态（blend/colorMask/scissor）在此统一复位。tier>=3 或目标未就绪时
+   * 返回 null（调用方应整体跳过 GL）。
+   * @param {[number,number,number,number]?} clearColor 可选清屏色 RGBA
+   * @returns {{fbo:WebGLFramebuffer, width:number, height:number}|null}
+   */
+  beginScene(clearColor = null) {
+    if (this.tier >= 3 || !this._scene) return null;
+    const gl = this.gl;
+    const s = this._scene;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, s.fbo); // 1
+    gl.viewport(0, 0, s.width, s.height); // 2
+    gl.disable(gl.SCISSOR_TEST); // 3
+    gl.disable(gl.BLEND); // 4
+    gl.colorMask(true, true, true, true); // 5
+    gl.depthMask(true); // 6
+    gl.frontFace(gl.CCW); // 7：声明默认绕序（不开启剔除，由各渲染器按 pass 管理）
+    gl.cullFace(gl.BACK);
+    gl.disable(gl.CULL_FACE);
+    const cc = clearColor || DEFAULT_SCENE_CLEAR; // 8
+    gl.clearColor(cc[0], cc[1], cc[2], cc[3] != null ? cc[3] : 1.0);
+    gl.clearDepth(1.0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    return { fbo: s.fbo, width: s.width, height: s.height };
+  }
+
+  /**
+   * 结束场景 pass：执行 亮度提取 → 高斯金字塔 → 上采样累加 → ACES 合成，
+   * 最终写默认帧缓冲。
+   * @param {{bloom?:number, exposure?:number, time?:number}} [opts]
+   *        bloom 辉光强度（默认 1）、exposure 曝光（默认 1）、time 秒（抖动相位）
+   */
+  endScene(opts = {}) {
+    if (this.tier >= 3) return; // Canvas 2D 退化：直接跳过
+    const levels = this._levels;
+    if (!this._scene || !levels.length) return;
+
+    const gl = this.gl;
+    const bloom = this._num(opts.bloom, 1.0);
+    const exposure = this._num(opts.exposure, 1.0);
+    const time = this._num(opts.time, 0.0);
+
+    // 后处理全屏 pass 不需要深度；混合默认关闭（累加阶段单独开启）
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.BLEND);
+
+    // —— 1. 软膝盖高亮提取 + 降采样到 1/2 分辨率 → levels[0].a ——
+    this._pass(this._progBright, levels[0].a, () => {
+      this._bindTex(0, this._scene.texture, this._u.bright.tex);
+      gl.uniform2f(this._u.bright.srcTexel, 1 / this._scene.width, 1 / this._scene.height);
+      // 模拟模式下场景已预除 hdrRange，阈值/膝宽同步缩放，保持 HDR 域语义一致
+      gl.uniform1f(this._u.bright.threshold, this.hdrSimulated ? BRIGHT_THRESHOLD / this.hdrRange : BRIGHT_THRESHOLD);
+      gl.uniform1f(this._u.bright.knee, this.hdrSimulated ? BRIGHT_KNEE / this.hdrRange : BRIGHT_KNEE);
+    });
+
+    // —— 2. level0 水平 + 垂直高斯模糊 ——
+    this._blurLevel(0);
+
+    // —— 3. 逐级降采样拷贝 + 模糊（1/4、1/8、1/16）——
+    for (let i = 1; i < levels.length; i++) {
+      const src = levels[i - 1].a;
+      this._pass(this._progUp, levels[i].a, () => {
+        this._bindTex(0, src.texture, this._u.up.tex);
+        gl.uniform2f(this._u.up.srcTexel, 0.0, 0.0); // 零 texel → 等价逐点拷贝
+      });
+      this._blurLevel(i);
+    }
+
+    // —— 4. 自底向上 tent 上采样，加法混合逐级累加辉光 ——
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    for (let i = levels.length - 1; i >= 1; i--) {
+      const src = levels[i].a;
+      this._pass(this._progUp, levels[i - 1].a, () => {
+        this._bindTex(0, src.texture, this._u.up.tex);
+        gl.uniform2f(this._u.up.srcTexel, 1 / src.width, 1 / src.height);
+      });
+    }
+    gl.disable(gl.BLEND);
+
+    // —— 5. 全屏合成到默认帧缓冲（ACES + 伽马 + 抖动）——
+    this._pass(this._progComp, null, () => {
+      this._bindTex(0, this._scene.texture, this._u.comp.scene);
+      this._bindTex(1, levels[0].a.texture, this._u.comp.glow);
+      gl.uniform1f(this._u.comp.bloom, bloom);
+      gl.uniform1f(this._u.comp.exposure, exposure);
+      gl.uniform1f(this._u.comp.hdrRange, this.hdrRange);
+      gl.uniform1f(this._u.comp.time, time);
+    });
+
+    // —— 还原共享状态，避免污染调用方后续 GL 绘制 ——
+    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+  }
+
+  /**
+   * 上下文恢复后重建全部 GPU 资源（程序 / VAO / 目标缓冲）。
+   * 旧句柄随上下文失效，对其的删除调用为安全空操作。
+   */
+  rebuild() {
+    this._releaseTargets();
+    this._releasePrograms();
+    this._buildPrograms();
+    this._quadVao = this.glc.createFullscreenVAO();
+    if (this.width > 0 && this.height > 0) {
+      this._buildTargets();
+    } else {
+      this._scene = null;
+      this._levels = [];
+    }
+  }
+
+  /** 释放本类创建的全部登记资源（glc.destroy() 会再次幂等清理） */
+  destroy() {
+    this._releaseTargets();
+    this._releasePrograms();
+    this._quadVao = null;
+    this._scene = null;
+    this._levels = [];
+  }
+
+  // —— 内部实现 ——————————————————————————————————————————————
+
+  /** 数字参数兜底：非法值回退默认 */
+  _num(v, dft) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : dft;
+  }
+
+  /** 编译 4 个后处理程序并缓存 uniform 位置 */
+  _buildPrograms() {
+    const glc = this.glc;
+    const loc = (prog, name) => glc.gl.getUniformLocation(prog, name);
+
+    this._progBright = glc.createProgram(VERT_QUAD, FRAG_BRIGHT, { label: 'post.bright' });
+    this._u.bright = {
+      tex: loc(this._progBright, 'uTexture'),
+      srcTexel: loc(this._progBright, 'uSrcTexel'),
+      threshold: loc(this._progBright, 'uThreshold'),
+      knee: loc(this._progBright, 'uKnee'),
+    };
+
+    this._progBlur = glc.createProgram(VERT_QUAD, FRAG_BLUR, { label: 'post.blur' });
+    this._u.blur = {
+      tex: loc(this._progBlur, 'uTexture'),
+      dir: loc(this._progBlur, 'uDir'),
+    };
+
+    this._progUp = glc.createProgram(VERT_QUAD, FRAG_UPSAMPLE, { label: 'post.upsample' });
+    this._u.up = {
+      tex: loc(this._progUp, 'uTexture'),
+      srcTexel: loc(this._progUp, 'uSrcTexel'),
+    };
+
+    this._progComp = glc.createProgram(VERT_QUAD, FRAG_COMPOSITE, { label: 'post.composite' });
+    this._u.comp = {
+      scene: loc(this._progComp, 'uScene'),
+      glow: loc(this._progComp, 'uGlow'),
+      bloom: loc(this._progComp, 'uBloom'),
+      exposure: loc(this._progComp, 'uExposure'),
+      hdrRange: loc(this._progComp, 'uHdrRange'),
+      time: loc(this._progComp, 'uTime'),
+    };
+  }
+
+  /** 重建场景 FBO 与辉光金字塔（调用前须先释放旧目标） */
+  _buildTargets() {
+    this._releaseTargets();
+    const glc = this.glc;
+    const w = this.width;
+    const h = this.height;
+
+    // 场景浮点目标（floatOk=false 或 FBO 不完整时 GLCore 内部回退 RGBA8）。
+    // depth:true —— 挂载 DEPTH_COMPONENT24 渲染缓冲（doc7 TERRAIN-07）：场景 FBO
+    // 无深度附件时 gl.enable(DEPTH_TEST)/gl.clear(DEPTH_BUFFER_BIT) 均无效，
+    // 是"地形像被背面剔除"故障的根因；辉光金字塔缓冲保持无深度（纯颜色 pass）。
+    this._scene = glc.createFloatTarget(w, h, { linear: true, depth: true });
+    // 以场景目标的实际格式为准刷新模拟标记（floatOk=true 但驱动回退的极端情况）
+    this.hdrSimulated = !this._scene.float;
+    this.hdrRange = this.hdrSimulated ? HDR_SIM_BASE : 1.0;
+
+    // 辉光金字塔：1/2、1/4、1/8、1/16（tier 2 时仅前 2 级），每级 a/b 两个缓冲
+    const n = this.tier === 2 ? PYRAMID_LEVELS_LOW : PYRAMID_LEVELS_FULL;
+    this._levels = [];
+    for (let i = 0; i < n; i++) {
+      const lw = Math.max(1, w >> (i + 1));
+      const lh = Math.max(1, h >> (i + 1));
+      this._levels.push({
+        a: glc.createFloatTarget(lw, lh, { linear: true }),
+        b: glc.createFloatTarget(lw, lh, { linear: true }),
+        width: lw,
+        height: lh,
+      });
+    }
+  }
+
+  /** 对第 i 级执行水平 → 垂直 9-tap 可分离高斯模糊（结果写回 a） */
+  _blurLevel(i) {
+    const gl = this.gl;
+    const lv = this._levels[i];
+    const tx = 1 / lv.width;
+    const ty = 1 / lv.height;
+    // 水平：a → b
+    this._pass(this._progBlur, lv.b, () => {
+      this._bindTex(0, lv.a.texture, this._u.blur.tex);
+      gl.uniform2f(this._u.blur.dir, tx, 0.0);
+    });
+    // 垂直：b → a
+    this._pass(this._progBlur, lv.a, () => {
+      this._bindTex(0, lv.b.texture, this._u.blur.tex);
+      gl.uniform2f(this._u.blur.dir, 0.0, ty);
+    });
+  }
+
+  /**
+   * 执行一次全屏 pass。
+   * @param {WebGLProgram} prog 程序
+   * @param {Object} u uniform 位置表
+   * @param {{fbo:WebGLFramebuffer, width:number, height:number}|null} target 目标（null = 默认帧缓冲）
+   * @param {Function} setUniforms uniform/纹理装配回调
+   */
+  _pass(prog, target, setUniforms) {
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+    gl.viewport(0, 0, target ? target.width : this.width, target ? target.height : this.height);
+    gl.useProgram(prog);
+    gl.bindVertexArray(this._quadVao);
+    setUniforms();
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  /** 绑定纹理单元并设置 sampler uniform */
+  _bindTex(unit, tex, loc) {
+    const gl = this.gl;
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    if (loc) gl.uniform1i(loc, unit);
+  }
+
+  /** 释放场景与金字塔目标（对已失效句柄的删除为空操作，可安全重复调用） */
+  _releaseTargets() {
+    const gl = this.gl;
+    if (!gl) return;
+    if (this._scene) {
+      gl.deleteFramebuffer(this._scene.fbo);
+      gl.deleteTexture(this._scene.texture);
+      if (this._scene.rbo) gl.deleteRenderbuffer(this._scene.rbo); // 场景深度渲染缓冲
+      this._scene = null;
+    }
+    for (const lv of this._levels) {
+      gl.deleteFramebuffer(lv.a.fbo);
+      gl.deleteTexture(lv.a.texture);
+      gl.deleteFramebuffer(lv.b.fbo);
+      gl.deleteTexture(lv.b.texture);
+    }
+    this._levels = [];
+  }
+
+  /** 释放 4 个后处理程序 */
+  _releasePrograms() {
+    const gl = this.gl;
+    if (!gl) return;
+    if (this._progBright) { gl.deleteProgram(this._progBright); this._progBright = null; }
+    if (this._progBlur) { gl.deleteProgram(this._progBlur); this._progBlur = null; }
+    if (this._progUp) { gl.deleteProgram(this._progUp); this._progUp = null; }
+    if (this._progComp) { gl.deleteProgram(this._progComp); this._progComp = null; }
+    if (this._quadVao) { gl.deleteVertexArray(this._quadVao); this._quadVao = null; }
+    this._u = { bright: null, blur: null, up: null, comp: null };
+  }
+}
+
+Object.assign(__exports, { PostProcessor });
+
+});
+__register("src/render/gl/GLCore.js", function (__exports, __require) {
+/**
+ * render/gl/GLCore.js — 轻量 WebGL 2.0 上下文封装（VOID FRONTIER 渲染底座）
+ *
+ * 以参考实现 simulation-matrix/common/engine/gl.js 为基础升级：
+ *  - 构造时探测 EXT_color_buffer_float（floatOk，决定 HDR 管线能否落到 RGBA16F）
+ *    与 MAX_TEXTURE_SIZE（maxTextureSize，供贴图/目标尺寸钳制）；
+ *  - createProgram 支持 { label } 标签化错误报告；保留 _tracked 资源清册，
+ *    destroy() 统一回收并经 WEBGL_lose_context 主动丢弃上下文（防 iframe/切页泄漏）；
+ *  - createFloatTarget：单附件 RGBA16F（floatOk=false 时回退 RGBA8 并标记）FBO，
+ *    线性采样，检查 FRAMEBUFFER_COMPLETE，登记清册；opts.depth=true 时挂载
+ *    DEPTH_COMPONENT24 渲染缓冲（场景 FBO 深度生效的前提，doc7 TERRAIN-07）；
+ *  - createFullscreenVAO：单位四边形（aPos vec2，[-1..1]，TRIANGLE_STRIP 4 顶点），
+ *    供全屏后处理 pass 复用；
+ *  - 静态工厂 fromExisting(canvas, gl)：复用调用方已取得的 gl 上下文
+ *    （CanvasManager 先自行 getContext 以决定是否退化，再交给本封装托管）。
+ *
+ * 约束：顶层不触碰 document/window（纯 JS，可在 Node 侧安全 import）；
+ * 所有 GL 调用仅发生在持有真实上下文的方法内部。
+ */
+
+const GLSL_VERSION = '#version 300 es\n';
+
+function buildContextAttrs(opts) {
+  return {
+    antialias: opts.antialias !== false,
+    alpha: !!opts.alpha,
+    depth: opts.depth !== false,
+    powerPreference: opts.powerPreference || 'high-performance',
+  };
+}
+
+class GLContext {
+  /**
+   * 常规构造：自行向 canvas 请求 webgl2 上下文，失败即抛错。
+   * @param {HTMLCanvasElement} canvas
+   * @param {{antialias?:boolean, alpha?:boolean, depth?:boolean, powerPreference?:string}} [opts]
+   */
+  constructor(canvas, opts = {}) {
+    const gl = canvas.getContext('webgl2', buildContextAttrs(opts));
+    if (!gl) throw new Error('WebGL 2.0 is not available in this environment');
+    this._init(canvas, gl, opts);
+  }
+
+  /**
+   * 静态工厂：复用调用方已取得的 gl 上下文（不再重复 getContext）。
+   * 典型用法：CanvasManager 先自行 getContext 决定降级路径，再交给本封装托管。
+   * @param {HTMLCanvasElement} canvas
+   * @param {WebGL2RenderingContext} gl 已取得的 webgl2 上下文（不可为空）
+   * @returns {GLContext}
+   */
+  static fromExisting(canvas, gl) {
+    if (!gl) throw new Error('[GLContext] fromExisting 需要已创建的 WebGL2 上下文');
+    const inst = Object.create(GLContext.prototype);
+    inst._init(canvas, gl, {});
+    return inst;
+  }
+
+  /** 内部共享初始化（构造与 fromExisting 共用） */
+  _init(canvas, gl, opts) {
+    this.canvas = canvas;
+    this.gl = gl;
+    // HDR 能力探测：能否渲染到浮点颜色附件（RGBA16F 等）
+    this.floatOk = !!gl.getExtension('EXT_color_buffer_float');
+    // 线性过滤 32 位浮点纹理需要独立扩展（16F 为 WebGL2 核心可过滤格式）
+    this.floatLinearOk = !!gl.getExtension('OES_texture_float_linear');
+    this.loseContextExt = gl.getExtension('WEBGL_lose_context');
+    this.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    // 资源清册：rbos 为 createFloatTarget({depth:true}) 的 DEPTH_COMPONENT24 渲染缓冲
+    this._tracked = { programs: [], buffers: [], vaos: [], textures: [], fbos: [], rbos: [] };
+    this.errorCount = 0;
+    void opts; // 预留：后续如需按 opts 差异化初始化在此扩展
+    // 调试模式（window.__GL_THROW_ON_ERROR）：包装全部 gl 方法（原型链完整
+    // 遍历），调用后立即 getError，非 NO_ERROR 即抛出带方法名的错误。
+    if (typeof window !== 'undefined' && window.__GL_THROW_ON_ERROR) {
+      let proto = Object.getPrototypeOf(gl);
+      let count = 0;
+      while (proto && proto !== Object.prototype) {
+        for (const name of Object.getOwnPropertyNames(proto)) {
+          if (name === 'constructor' || typeof gl[name] !== 'function') continue;
+          // getError 自引用会导致无限递归； getContext 不可重入 —— 排除
+          if (name === 'getError' || name === 'getContext') continue;
+          const orig = gl[name].bind(gl);
+          const wrapped = (...a) => {
+            const r = orig(...a);
+            const err = gl.getError();
+            if (err !== gl.NO_ERROR) {
+              const args = a.slice(0, 4).map((v) => (typeof v === 'number' ? v : (v && v.length !== undefined ? 'arr/' + v.length : String(v)))).join(',');
+              throw new Error(`[GL_DEBUG] gl.${name} → 0x${err.toString(16)} (${args})`);
+            }
+            return r;
+          };
+          try {
+            Object.defineProperty(gl, name, { value: wrapped, writable: true, configurable: true });
+            count++;
+          } catch { /* 不可包装的方法跳过 */ }
+        }
+        proto = Object.getPrototypeOf(proto);
+      }
+      this.debugWrapped = count;
+    }
+  }
+
+  get isLost() {
+    return !this.gl || this.gl.isContextLost();
+  }
+
+  /** 检查并抛出 GL 错误（开发期防呆；错误计数供诊断） */
+  checkError(where) {
+    const gl = this.gl;
+    const err = gl.getError();
+    if (err !== gl.NO_ERROR) {
+      this.errorCount++;
+      throw new Error(`WebGL error 0x${err.toString(16)} at ${where}`);
+    }
+  }
+
+  /** 编译单个着色器，失败抛出带 label 的信息日志 */
+  compileShader(type, source, label = 'shader') {
+    const gl = this.gl;
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, source);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      const log = gl.getShaderInfoLog(sh);
+      gl.deleteShader(sh);
+      throw new Error(`${label} compile failed: ${log}`);
+    }
+    return sh;
+  }
+
+  /**
+   * 编译并链接程序（自动前置 GLSL ES 3.00 版本行）。
+   * @param {string} vsSource 顶点着色器源码（不含 #version 行）
+   * @param {string} fsSource 片元着色器源码（不含 #version 行）
+   * @param {{label?:string, attributes?:Object<string,number>}} [opts]
+   * @returns {WebGLProgram}
+   */
+  createProgram(vsSource, fsSource, { label = 'program', attributes = {} } = {}) {
+    const gl = this.gl;
+    const vs = this.compileShader(gl.VERTEX_SHADER, GLSL_VERSION + vsSource, `${label}:vertex`);
+    const fs = this.compileShader(gl.FRAGMENT_SHADER, GLSL_VERSION + fsSource, `${label}:fragment`);
+    const prog = gl.createProgram();
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    for (const [name, loc] of Object.entries(attributes)) {
+      gl.bindAttribLocation(prog, loc, name);
+    }
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      const log = gl.getProgramInfoLog(prog);
+      gl.deleteProgram(prog);
+      throw new Error(`${label} link failed: ${log}`);
+    }
+    gl.deleteShader(vs);
+    gl.deleteShader(fs);
+    this._tracked.programs.push(prog);
+    return prog;
+  }
+
+  /** 创建并上传数据的 VBO（登记清册） */
+  createBuffer(data, usage = this.gl.STATIC_DRAW) {
+    const gl = this.gl;
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, data, usage);
+    this._tracked.buffers.push(buf);
+    return buf;
+  }
+
+  /** 创建 VAO 并在 setup(gl) 回调内完成属性装配（登记清册） */
+  createVAO(setup) {
+    const gl = this.gl;
+    const vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    setup(gl);
+    gl.bindVertexArray(null);
+    this._tracked.vaos.push(vao);
+    return vao;
+  }
+
+  /**
+   * 创建 2D 纹理（默认 RGBA8/NEAREST/CLAMP_TO_EDGE）。
+   * @returns {{texture:WebGLTexture, width:number, height:number}}
+   */
+  createTexture2D(width, height, pixels, { internalFormat = null, format = null, type = null, filter = null, wrap = null } = {}) {
+    const gl = this.gl;
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0,
+      internalFormat || gl.RGBA, width, height, 0,
+      format || gl.RGBA, type || gl.UNSIGNED_BYTE, pixels);
+    const filt = filter || gl.NEAREST;
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filt);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filt);
+    const wr = wrap || gl.CLAMP_TO_EDGE;
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wr);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wr);
+    this._tracked.textures.push(tex);
+    return { texture: tex, width, height };
+  }
+
+  /** 上传 2D 纹理数组（TEXTURE_2D_ARRAY），layers 为同尺寸 ImageData/canvas 列表 */
+  createTextureArray(width, height, layers, { filter = null } = {}) {
+    const gl = this.gl;
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
+    gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.RGBA8, width, height, layers.length, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    for (let i = 0; i < layers.length; i++) {
+      gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, i, width, height, 1, gl.RGBA, gl.UNSIGNED_BYTE, layers[i]);
+    }
+    const filt = filter || gl.NEAREST;
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, filt);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, filt);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.REPEAT);
+    this._tracked.textures.push(tex);
+    return { texture: tex, width, height, depth: layers.length };
+  }
+
+  /**
+   * 创建单附件浮点渲染目标（HDR 管线用）。
+   *  - floatOk=true：RGBA16F + HALF_FLOAT；若驱动仍报 FBO 不完整则自动回退 RGBA8；
+   *  - floatOk=false：直接 RGBA8 + UNSIGNED_BYTE（由 PostProcessor 做 HDR 模拟）；
+   *  - depth=true：额外创建 DEPTH_COMPONENT24 渲染缓冲挂 DEPTH_ATTACHMENT
+   *    （doc7 TERRAIN-07：场景 FBO 必须有 24 位深度附件，gl.clear(DEPTH) 才生效）。
+   * @param {number} width
+   * @param {number} height
+   * @param {{linear?:boolean, depth?:boolean}} [opts] linear 采样过滤（默认 LINEAR，
+   *        供降/升采样双线性）；depth 是否挂载 24 位深度渲染缓冲（默认 false）
+   * @returns {{texture:WebGLTexture, fbo:WebGLFramebuffer, rbo:WebGLRenderbuffer|null,
+   *            width:number, height:number, float:boolean, hasDepth:boolean}}
+   */
+  createFloatTarget(width, height, { linear = true, depth = false } = {}) {
+    const gl = this.gl;
+    const make = (floatMode) => {
+      const tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      if (floatMode) {
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, width, height, 0, gl.RGBA, gl.HALF_FLOAT, null);
+      } else {
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      }
+      const filt = linear ? gl.LINEAR : gl.NEAREST;
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filt);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filt);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      const fbo = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      let rbo = null;
+      if (depth) {
+        rbo = gl.createRenderbuffer();
+        gl.bindRenderbuffer(gl.RENDERBUFFER, rbo);
+        gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, width, height);
+        gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, rbo);
+      }
+      const complete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      return { tex, fbo, rbo, complete };
+    };
+
+    let res = make(this.floatOk);
+    let float = this.floatOk;
+    if (!res.complete && this.floatOk) {
+      // 驱动/实现不支持渲染到 RGBA16F：降级 RGBA8（float 标记为 false）
+      gl.deleteTexture(res.tex);
+      gl.deleteFramebuffer(res.fbo);
+      if (res.rbo) gl.deleteRenderbuffer(res.rbo);
+      res = make(false);
+      float = false;
+    }
+    if (!res.complete) {
+      gl.deleteTexture(res.tex);
+      gl.deleteFramebuffer(res.fbo);
+      if (res.rbo) gl.deleteRenderbuffer(res.rbo);
+      throw new Error(`float target FBO incomplete (${width}x${height})`);
+    }
+    this._tracked.textures.push(res.tex);
+    this._tracked.fbos.push(res.fbo);
+    if (res.rbo) this._tracked.rbos.push(res.rbo);
+    return {
+      texture: res.tex, fbo: res.fbo, rbo: res.rbo,
+      width, height, float, hasDepth: !!res.rbo,
+    };
+  }
+
+  /**
+   * 创建全屏四边形 VAO：aPos（location=0，vec2，[-1..1]），TRIANGLE_STRIP 共 4 顶点。
+   * 全屏后处理 pass 复用同一 VAO，配合 drawArrays(gl.TRIANGLE_STRIP, 0, 4) 绘制。
+   * @returns {WebGLVertexArrayObject}
+   */
+  createFullscreenVAO() {
+    const gl = this.gl;
+    const vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    // 顶点顺序：左下 → 右下 → 左上 → 右上（TRIANGLE_STRIP 成整屏四边形）
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    this._tracked.buffers.push(buf);
+    this._tracked.vaos.push(vao);
+    return vao;
+  }
+
+  /**
+   * 双 FBO ping-pong（GPU 模拟类 pass 用；登记清册）。
+   * @returns {{read:Object, write:Object, swap:Function, width:number, height:number}}
+   */
+  createPingPongFBOs(width, height, { internalFormat = null, type = null } = {}) {
+    const gl = this.gl;
+    const make = () => {
+      const tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat || gl.RGBA32F, width, height, 0, gl.RGBA, type || gl.FLOAT, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      const fbo = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+        throw new Error('ping-pong FBO incomplete');
+      }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      this._tracked.textures.push(tex);
+      this._tracked.fbos.push(fbo);
+      return { texture: tex, fbo };
+    };
+    const a = make();
+    const b = make();
+    return {
+      read: a,
+      write: b,
+      swap() { const t = this.read; this.read = this.write; this.write = t; },
+      width, height,
+    };
+  }
+
+  /**
+   * 上下文恢复（webglcontextrestored）后调用：旧句柄已全部失效，
+   * 清空清册但不做删除调用（对失效句柄的删除本为空操作，清空可防清册无限膨胀）。
+   */
+  resetTracking() {
+    this._tracked = { programs: [], buffers: [], vaos: [], textures: [], fbos: [], rbos: [] };
+    this.errorCount = 0;
+    // 调试钩子：window.__GL_TRACE 时包装全部 gl 方法，记录最后 N 次调用（含参数摘要）
+    if (typeof window !== 'undefined' && window.__GL_TRACE) {
+      this.traceLog = [];
+      for (const name of Object.getOwnPropertyNames(Object.getPrototypeOf(gl)).concat(Object.keys(gl))) {
+        if (typeof gl[name] !== 'function') continue;
+        const orig = gl[name].bind(gl);
+        gl[name] = (...a) => {
+          try {
+            this.traceLog.push(name + ' ' + a.slice(0, 4).map((v) => typeof v === 'number' ? v : (v && v.length !== undefined ? ('arr:' + (v.length)) : String(v))).join(','));
+            if (this.traceLog.length > 40) this.traceLog.shift();
+          } catch { /* 追踪不影响主流程 */ }
+          return orig(...a);
+        };
+      }
+    }
+  }
+
+  /** 销毁全部登记资源，并经 WEBGL_lose_context 主动丢弃上下文 */
+  destroy() {
+    const gl = this.gl;
+    if (!gl) return;
+    for (const p of this._tracked.programs) gl.deleteProgram(p);
+    for (const b of this._tracked.buffers) gl.deleteBuffer(b);
+    for (const v of this._tracked.vaos) gl.deleteVertexArray(v);
+    for (const t of this._tracked.textures) gl.deleteTexture(t);
+    for (const f of this._tracked.fbos) gl.deleteFramebuffer(f);
+    for (const r of this._tracked.rbos) gl.deleteRenderbuffer(r);
+    this._tracked = { programs: [], buffers: [], vaos: [], textures: [], fbos: [], rbos: [] };
+    if (this.loseContextExt) this.loseContextExt.loseContext();
+  }
+}
+
+/** 实例化绘制助手：绑定 VAO 后按 instanceCount 批量绘制 */
+function drawInstanced(gl, vao, count, instanceCount, mode = gl.TRIANGLES) {
+  gl.bindVertexArray(vao);
+  gl.drawArraysInstanced(mode, 0, count, instanceCount);
+  gl.bindVertexArray(null);
+}
+
+Object.assign(__exports, { GLSL_VERSION, GLContext, drawInstanced });
 
 });
 __register("src/ui/screens/ChronicleView.js", function (__exports, __require) {
@@ -14670,6 +24886,7 @@ const { panel: panel } = __require("src/ui/components/panels.js");
 const { toast: toast } = __require("src/ui/components/toast.js");
 const { L: L } = __require("src/core/i18n.js");
 const { dateStr: dateStr } = __require("src/core/clock.js");
+const { isSpatialEvent: isSpatialEvent, OBJECTIVE_KIND_ZH: OBJECTIVE_KIND_ZH } = __require("src/content/events.js");
 
 /**
  * 事件/告警类型中文映射（键 = eventBus emit 的 type；未知类型回退原文）。
@@ -14689,6 +24906,9 @@ const EVENT_TYPE_ZH = {
   TechCompleted: '科技完成', ShipCompleted: '舰船建成', BuildingCompleted: '建筑完成',
   EmbargoChanged: '禁运变化', CrisisPhase: '危机阶段', StoryFlag: '剧情标记',
   AIError: 'AI 异常',
+  ObjectiveCreated: '空间目标建立', ObjectiveCompleted: '目标完成',
+  ObjectiveExpired: '目标超时', ObjectiveFleetDispatched: '目标舰队派遣',
+  PoiHarvested: 'POI 采样',
 };
 
 /** 告警优先级：type → 档位（high 危急红 / mid 警示琥珀 / low 通报青） */
@@ -14741,12 +24961,13 @@ const EventsView = {
 
   // —— 内部实现 ——————————————————————————————————
 
-  /** 整体重建：待决事件 → 告警 → 近期日志 */
+  /** 整体重建：待决事件 → 空间目标 → 告警 → 近期日志 */
   _rebuild() {
     const body = this._body;
     if (!body) return;
     clearEl(body);
     body.appendChild(this._pendingEventPanel());
+    body.appendChild(this._objectivesPanel());
     body.appendChild(this._alertsPanel());
     body.appendChild(this._feedPanel());
   },
@@ -14787,6 +25008,132 @@ const EventsView = {
         c.hintZh ? el('div', { class: 'vf-faint', style: { fontSize: '10px', textAlign: 'left' }, text: c.hintZh }) : null,
       ]);
       p.appendChild(btn);
+    }
+
+    // B 类空间事件：目标星系 + 剩余时间 + 直接空间操作入口（doc5 §3.6 / EVT-02）
+    if (isSpatialEvent(ev.eventId)) this._appendSpatialBlock(p, ev);
+    return p;
+  },
+
+  /**
+   * B 类事件目标块：读取 snapshot.objectives 中 sourceEventId 匹配的活跃目标，
+   * 展示目标星系与剩余小时；[聚焦目标] 跳银河图并定位，[派遣护航] 就近派遣
+   * 空闲舰队（确定性解析，同 GroundView._resolveSquad 模式）。
+   */
+  _appendSpatialBlock(p, ev) {
+    const app = this.app;
+    const snap = app.snapshot || {};
+    const objs = Array.isArray(snap.objectives) ? snap.objectives : [];
+    const obj = objs.find((o) => o.sourceEventId === ev.eventId) || null;
+    if (!obj) {
+      p.appendChild(el('div', {
+        class: 'vf-faint vf-small',
+        style: { marginTop: '8px' },
+        text: '本次事件未生成空间目标（无有效空间锚点）。',
+      }));
+      return;
+    }
+    const w = app.world;
+    const sysName = (id) => (w.entities.systems[id] && w.entities.systems[id].name) || id || '—';
+    const hoursLeft = Math.max(0, (obj.deadlineTick || 0) - (w.tick || 0));
+    const box = el('div', { style: { marginTop: '10px', paddingTop: '8px', borderTop: '1px solid rgba(29,42,58,0.5)' } }, [
+      el('div', { class: 'vf-tag', text: `${OBJECTIVE_KIND_ZH[obj.kind] || obj.kind} · ${obj.priority === 'high' ? '高危' : '常规'}` }),
+      el('div', { class: 'vf-small', style: { margin: '4px 0' } }, [
+        el('span', { class: 'vf-dim', text: '目标星系：' }),
+        el('span', { text: sysName(obj.targetSystemId) }),
+      ]),
+      obj.secondarySystemId
+        ? el('div', { class: 'vf-faint vf-small', text: `航路另一端：${sysName(obj.secondarySystemId)}` })
+        : null,
+      el('div', { class: 'vf-faint vf-small', text: `剩余行动窗口：${hoursLeft} 小时` }),
+    ]);
+    const row = el('div', { style: { display: 'flex', gap: '6px', marginTop: '6px' } });
+    row.appendChild(el('button', {
+      class: 'vf-btn',
+      type: 'button',
+      style: { flex: '1' },
+      on: { click: () => this._focusObjective(obj) },
+    }, [el('div', { text: '聚焦目标' })]));
+    row.appendChild(el('button', {
+      class: 'vf-btn',
+      type: 'button',
+      style: { flex: '1' },
+      on: { click: () => this._dispatchEscort(obj) },
+    }, [el('div', { text: '派遣护航' })]));
+    box.appendChild(row);
+    p.appendChild(box);
+  },
+
+  /** 聚焦目标：select + goto galaxy + toast 目标星系名（星图 Pin 同步可见） */
+  _focusObjective(obj) {
+    const app = this.app;
+    const w = app.world;
+    app.select('system', obj.targetSystemId);
+    app.goto('galaxy');
+    const name = (w.entities.systems[obj.targetSystemId] && w.entities.systems[obj.targetSystemId].name) || obj.targetSystemId;
+    toast(`目标星系：${name}`, { kind: 'info' });
+  },
+
+  /** 就近解析可出动舰队：优先目标星系驻留，其次在途/状态，最后按 id 稳定序 */
+  _resolveEscortFleet(w, targetSystemId) {
+    return Object.values(w.entities.fleets || {})
+      .filter((f) => f.factionId === w.playerFactionId &&
+        !f.transit &&
+        (f.shipIds || []).length > 0 &&
+        (f.status || 'idle') !== 'dissolved')
+      .sort((a, b) => (
+        ((a.systemId === targetSystemId ? 0 : 1) - (b.systemId === targetSystemId ? 0 : 1)) ||
+        (({ idle: 0, hold: 1, patrol: 2, aggressive: 3 }[a.status] ?? 4) - ({ idle: 0, hold: 1, patrol: 2, aggressive: 3 }[b.status] ?? 4)) ||
+        (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+      ))[0] || null;
+  },
+
+  /** 派遣护航：dispatch('DispatchObjectiveFleet')，失败 toast 由 App 总线提示 */
+  _dispatchEscort(obj) {
+    const app = this.app;
+    const w = app.world;
+    const fleet = this._resolveEscortFleet(w, obj.targetSystemId);
+    if (!fleet) {
+      toast('没有可出动的舰队', { kind: 'warn' });
+      return;
+    }
+    const res = app.dispatch('DispatchObjectiveFleet', {
+      objectiveId: obj.id,
+      fleetId: fleet.id,
+    });
+    if (res && res.ok) {
+      const name = (w.entities.systems[obj.targetSystemId] && w.entities.systems[obj.targetSystemId].name) || obj.targetSystemId;
+      toast(`已派遣 ${fleet.name} 前往 ${name}`, { kind: 'success' });
+    }
+  },
+
+  /** 进行中的空间目标追踪条（doc5 §3.6：Objective Tracker） */
+  _objectivesPanel() {
+    const snap = this.app.snapshot || {};
+    const objs = Array.isArray(snap.objectives) ? snap.objectives : [];
+    const p = panel({ title: `进行中的空间目标（${objs.length}）`, open: objs.length > 0 });
+    if (!objs.length) {
+      p.appendChild(el('div', { class: 'vf-faint vf-small', text: '当前没有进行中的空间任务目标。' }));
+      return p;
+    }
+    const w = this.app.world;
+    const sysName = (id) => (w.entities.systems[id] && w.entities.systems[id].name) || id || '—';
+    const fleetName = (id) => (w.entities.fleets[id] && w.entities.fleets[id].name) || null;
+    for (const o of objs) {
+      const hoursLeft = Math.max(0, (o.deadlineTick || 0) - (w.tick || 0));
+      p.appendChild(el('div', { class: 'vf-row', style: { borderBottom: '1px solid rgba(29,42,58,0.4)', padding: '4px 2px', cursor: 'pointer' },
+        title: '点击定位目标星系（银河地图）',
+        on: { click: () => this._focusObjective(o) },
+      }, [
+        el('span', {
+          style: { display: 'inline-block', width: '8px', height: '8px', borderRadius: '4px', background: o.priority === 'high' ? '#e85f5f' : '#e8b04f', flexShrink: '0' },
+          'aria-hidden': 'true',
+        }),
+        el('span', { class: 'vf-tag', text: OBJECTIVE_KIND_ZH[o.kind] || o.kind }),
+        el('span', { class: 'vf-small vf-grow', text: `${o.titleZh} → ${sysName(o.targetSystemId)}` }),
+        el('span', { class: 'vf-faint vf-small', text: fleetName(o.assignedFleetId) ? `已派 ${fleetName(o.assignedFleetId)}` : '未派遣' }),
+        el('span', { class: 'vf-faint vf-small', text: `余 ${hoursLeft}h` }),
+      ]));
     }
     return p;
   },
@@ -15057,9 +25404,15 @@ const { showModal: showModal, toast: toast } = __require("src/ui/components/inde
 const { L: L } = __require("src/core/i18n.js");
 const { CanvasManager: CanvasManager } = __require("src/render/CanvasManager.js");
 const { PlanetSurface3D: PlanetSurface3D } = __require("src/render/gl/PlanetSurface3D.js");
+const { PlanetSurfaceScene: PlanetSurfaceScene } = __require("src/render/gl/PlanetSurfaceScene.js");
+const { buildThemePayload: buildThemePayload } = __require("src/render/gl/themePayload.js");
 const { mat4: mat4, mat4Perspective: mat4Perspective, mat4LookAt: mat4LookAt, mat4Multiply: mat4Multiply } = __require("src/render/gl/Mat4.js");
 const { buildBuildingMesh: buildBuildingMesh, buildUnitBox: buildUnitBox } = __require("src/render/meshes/GroundMeshes.js");
 const { createSurfaceWorld: createSurfaceWorld, digVoxel: digVoxel, placeVoxel: placeVoxel, getVoxel: getVoxel, ddaRaycast: ddaRaycast, getSurfaceHeight: getSurfaceHeight, findSpawnPoint: findSpawnPoint, SURFACE_SIZE: SURFACE_SIZE, SURFACE_MAT: SURFACE_MAT } = __require("src/domain/ground/SurfaceSandbox.js");
+const { buildTerrainField: buildTerrainField } = __require("src/domain/ground/terrainField.js");
+const { ensurePlanetPois: ensurePlanetPois, unexploredPoiCount: unexploredPoiCount } = __require("src/domain/ground/planetPOI.js");
+const { createTerrainEdits: createTerrainEdits, applyEdit: applyEdit, attachTerrainEdits: attachTerrainEdits, deserializeEdits: deserializeEdits, rebuildDirtyChunks: rebuildDirtyChunks } = __require("src/domain/ground/terrainEdits.js");
+const { sampleTerrain: sampleTerrain, raycastTerrain: raycastTerrain } = __require("src/domain/ground/surfaceQueries.js");
 const { createGroundMission: createGroundMission, stepMission: stepMission, getMissionView: getMissionView } = __require("src/domain/ground/GroundMission.js");
 const { creditColony: creditColony, debitColony: debitColony } = __require("src/domain/economy/ledger.js");
 const { MISSION_TEMPLATES: MISSION_TEMPLATES, findMissionTemplate: findMissionTemplate } = __require("src/content/missions.js");
@@ -15084,6 +25437,21 @@ const CAM_DIST_MAX = 14;
 const DIG_INTERVAL = 0.2;
 const PLACE_INTERVAL = 0.25;
 const AIM_REACH = 7.0;
+
+/**
+ * 场域集成（doc7 TASK-1.2/1.4，Phase 1 垂直切片）：
+ * 连续三角网格场域 512m×512m（terrainField，origin −256，覆盖 [−256,+256]），
+ * 体素世界 64×64m 资源补丁居中场域中心 —— 体素单位 ≈ 米（1:1 人类尺度），
+ * 场域坐标 = 体素坐标 + FIELD_OFFSET（体素中心 32 → 场域中心 0）。
+ * 角色/单位/建筑等玩法坐标保持体素空间；查询场域高度/射线时 +FIELD_OFFSET。
+ */
+const FIELD_OFFSET = -32;
+/** 采掘凹陷每击深度（米）：场域地形雕刻（TERRAIN-06 增量重建演示） */
+const DIG_DENT_DEPTH = 1.2;
+/** 场域行走坡度阻断阈值（Δh/Δx > 此值的陡壁不可步行） */
+const WALK_SLOPE_BLOCK = 1.6;
+/** 场域可行走范围（体素坐标；对应场域 [−256,+256] 边界内收 2m） */
+const FIELD_WALK_MAX = 286;
 
 /** 喷气背包（本地燃料池；任务模式的耐力由 domain 权威，视图不回写） */
 const JET_DRAIN = 22;
@@ -15428,6 +25796,7 @@ const GroundView = {
     this._tally = {};                  // 本次入账（无殖民地的自由沙盒只记视图侧台账）
     this._resultShown = false;
     this._forceBriefing = false;       // 头部「简报」按钮一次性覆盖自动恢复
+    this._targetPlanetId = null;       // 路由传入的目标行星（doc5 §3.5 NAV-01/02）
     this._lastView = null;
     this._buildingLayout = [];         // 建筑实例（挂载时按殖民地确定性布局一次）
     this._buildingColonists = [];      // 建筑旁作业殖民者
@@ -15454,7 +25823,8 @@ const GroundView = {
   // —— 页面分派 ————————————————
 
   /**
-   * 按 param（missionId | planetId）定位进行中任务；无任务 → 简报页。
+   * 按 param（missionId | planetId）定位进行中任务；param 匹配不到活动任务
+   * 但是一颗行星时 → 简报页并预选该行星（doc5 §3.5 NAV-02：未殖民行星准入）。
    * @param {string|null} param 路由参数
    */
   _build(param) {
@@ -15472,6 +25842,7 @@ const GroundView = {
       this.body.appendChild(el('div', { class: 'pad vf-dim', text: '当前无进行中的战役。' }));
       this._setHead('简报', []);
       this.mode = 'briefing';
+      this._bindBriefingEscape();
       return;
     }
 
@@ -15481,6 +25852,13 @@ const GroundView = {
     let mission = null;
     if (param) mission = missions.find((m) => m.id === param || m.planetId === param) || null;
     else mission = missions[0] || null;
+
+    // —— 目标行星解析（_returnToOrbit 与简报预选共用） ——
+    if (mission) {
+      this._targetPlanetId = mission.planetId || null;
+    } else if (param && w.entities.planets[param]) {
+      this._targetPlanetId = w.entities.planets[param].id; // 显式行星参数（无任务）
+    }
 
     if (mission && !forceBriefing) {
       this._buildMission(mission);
@@ -15507,28 +25885,105 @@ const GroundView = {
   // —— 简报页 ————————————————
 
   /**
-   * 任务简报：行星选择 + 模板列表 + 开始行动 + 自由探索模式 + 既往记录。
+   * 升空返回轨道（doc5 §3.5 NAV-01/03）：由 路由目标行星 / 自由探索行星 /
+   * 进行中任务行星 反查所属星系精确回跳；全部缺失时走 RouteStack 兜底回银河。
+   */
+  _returnToOrbit() {
+    const w = this.app.world;
+    const pid = this._targetPlanetId || this.freePlanetId
+      || (this.mission && this.mission.planetId) || null;
+    const planet = w && pid ? w.entities.planets[pid] : null;
+    if (planet && planet.systemId) this.app.goto('system', planet.systemId);
+    else this.app.goBack('galaxy');
+  },
+
+  /**
+   * 任务简报：行星选择 + 模板列表 + 开始行动 + 自由探索（先遣勘探）模式 + 既往记录。
+   * 头部无条件渲染逃逸按钮（← 返回星系 primary/Esc + ← 银河星图），解除软锁死。
+   * 目标行星选择器（data-focus-key="ground-planet-sel"）按去重 Set 依次填入：
+   * 路由目标行星（无论是否已殖民）→ 玩家全部殖民地行星 → 已完成定位扫描
+   * （surveyedBy≥3）星系下的无主行星（未殖民 · 可勘探，doc5 §3.5 NAV-02）。
    * @param {object|null} resumeMission 已存在的进行中任务（显示恢复入口）
    */
+  /**
+   * 简报页专属 Escape 逃逸监听（NAV-03）。
+   * 任务/自由模式的键位在 _setupScene → _bindInput 中绑定，简报模式不进入该路径，
+   * 故此处独立挂 window 级监听；_teardownScene / unmount 统一移除。
+   */
+  _bindBriefingEscape() {
+    if (this._briefingEsc) return;
+    this._briefingEsc = (e) => {
+      if (!this._mounted || this.mode !== 'briefing') return;
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        this._returnToOrbit();
+      }
+    };
+    window.addEventListener('keydown', this._briefingEsc);
+  },
+
   _buildBriefing(resumeMission) {
     this.mode = 'briefing';
     const app = this.app;
     const w = app.world;
-    this._setHead('简报', []);
+    this._bindBriefingEscape();
+
+    // —— 简报主语行星与所属星系（标题 + 返回按钮文案） ——
+    const targetPlanet = (resumeMission && w.entities.planets[resumeMission.planetId])
+      || (this._targetPlanetId ? w.entities.planets[this._targetPlanetId] : null)
+      || null;
+    const sysName = targetPlanet && targetPlanet.systemId
+      ? ((w.entities.systems[targetPlanet.systemId] || {}).name || '未知星系')
+      : null;
+    const headBtns = [
+      {
+        text: sysName ? `← 返回${sysName}星系` : '← 返回星系',
+        kind: 'primary',
+        title: `返回所属星系（Esc）${targetPlanet ? '' : ' · 未解析到目标行星时回退上一层'}`,
+        onClick: () => this._returnToOrbit(),
+      },
+      { text: '← 银河星图', title: '返回银河地图', onClick: () => app.goto('galaxy') },
+    ];
+    this._setHead(targetPlanet ? `${targetPlanet.name || targetPlanet.id} · 简报` : '简报', headBtns);
 
     // 沉浸式全屏 body：内边距避开悬浮侧栏与顶栏（R7 毛玻璃 chrome）
     const box = el('div', { class: 'pad vf-col', style: { overflowY: 'auto', padding: '64px 200px 24px 72px' } });
     const p1 = panel({ title: '发起地面行动', open: true });
     const planetSel = el('select', { 'aria-label': '目标行星' });
+    planetSel.setAttribute('data-focus-key', 'ground-planet-sel');
+
+    // —— 目标行星选项：去重 Set 依序填入（目标行星 → 殖民地 → 可勘探无主行星） ——
+    const seen = new Set();
+    const addOption = (planet, tag) => {
+      if (!planet || seen.has(planet.id)) return;
+      seen.add(planet.id);
+      planetSel.appendChild(el('option', {
+        value: planet.id,
+        text: `${planet.name || planet.id}${tag ? ` · ${tag}` : ''}`,
+      }));
+    };
+    // 1) 路由传入的目标行星（无论是否已殖民；NAV-02 未殖民准入）
+    if (targetPlanet) {
+      addOption(targetPlanet, targetPlanet.colonyId ? '己方殖民地' : '先遣勘探目标');
+    }
+    // 2) 玩家全部殖民地/前哨行星
     for (const c of Object.values(w.entities.colonies || {})) {
       if (c.factionId !== w.playerFactionId) continue;
-      const planet = w.entities.planets[c.planetId];
-      if (!planet) continue;
-      planetSel.appendChild(el('option', { value: planet.id, text: planet.name || planet.id }));
+      addOption(w.entities.planets[c.planetId], '己方殖民地');
+    }
+    // 3) 已完成「定位」（层级≥3）星系下的全部无主行星（先遣勘探准入）
+    const pid = w.playerFactionId;
+    for (const sys of Object.values(w.entities.systems || {})) {
+      if (((sys.surveyedBy || {})[pid] ?? 0) < 3) continue;
+      for (const plId of sys.planetIds || []) {
+        const pl = w.entities.planets[plId];
+        if (pl && !pl.colonyId) addOption(pl, '未殖民 · 可勘探');
+      }
     }
     if (!planetSel.childElementCount) {
-      p1.appendChild(el('div', { class: 'vf-faint vf-small', text: '尚无玩家殖民地——先在星系视图建立前哨站。' }));
+      p1.appendChild(el('div', { class: 'vf-faint vf-small', text: '暂无可降落目标——派遣舰队扫描星系（调查层级≥3）以解锁先遣勘探。' }));
     }
+    if (targetPlanet) planetSel.value = targetPlanet.id;
     p1.appendChild(el('label', { class: 'vf-col' }, [
       el('span', { class: 'vf-dim vf-small', text: '目标行星' }),
       planetSel,
@@ -15554,9 +26009,9 @@ const GroundView = {
     }
     p1.appendChild(tplBox);
 
-    // —— 自由探索模式（无任务，纯沙盒采掘/建造） ——
+    // —— 自由探索 / 先遣勘探模式（无任务沙盒；无需殖民地，NAV-02） ——
     p1.appendChild(el('div', { class: 'vf-row mt-2' }, [
-      el('span', { class: 'vf-faint vf-small vf-grow', text: '不开任务，直接降落到行星地表进行体素采掘与建造（Esc 或「升空返回轨道」离开）。' }),
+      el('span', { class: 'vf-faint vf-small vf-grow', text: '不开任务，直接派遣先遣队降落地表进行勘探、采掘与建造（无需殖民地；Esc 或「升空返回轨道」离开）。' }),
       el('button', {
         class: 'vf-btn small',
         text: '自由探索模式',
@@ -15616,7 +26071,7 @@ const GroundView = {
     if (res.ok) this._build(planetId);
   },
 
-  /** 自由探索模式：不创建任务，纯沙盒 */
+  /** 自由探索 / 先遣勘探模式：不创建任务，纯沙盒（无需殖民地，NAV-02） */
   _startFree(planetId) {
     const w = this.app.world;
     const planet = w.entities.planets[planetId];
@@ -15626,6 +26081,7 @@ const GroundView = {
     }
     this.mode = 'free';
     this.freePlanetId = planetId;
+    this._targetPlanetId = planetId;
     this._teardownScene();
     this.body.innerHTML = '';
     this._setupScene(planet, null);
@@ -15634,13 +26090,9 @@ const GroundView = {
     ]);
   },
 
-  /** 升空返回轨道：跳回行星所属星系（#/system/<systemId>） */
+  /** 升空返回轨道：跳回行星所属星系（#/system/<systemId>；无星系可回时走路由栈兜底） */
   _ascend() {
-    const w = this.app.world;
-    const pid = this.mode === 'mission' ? (this.mission && this.mission.planetId) : this.freePlanetId;
-    const planet = w && pid ? w.entities.planets[pid] : null;
-    if (planet && planet.systemId) this.app.goto('system', planet.systemId);
-    else this._build(null);
+    this._returnToOrbit();
   },
 
   // —— 场景装配（任务 / 自由共用） ————————————————
@@ -15654,6 +26106,12 @@ const GroundView = {
     const w = this.app.world;
     this.planet = planet;
     this.sw = createSurfaceWorld(w, planet.id);   // 种子 = world.seed ^ hash32(planetId)：同 seed 同地貌
+    // —— 连续三角网格场域（doc7 §3；体素补丁仅作矿脉/结构数据底层，不再承担视觉） ——
+    this.field = buildTerrainField(w, planet.id, {});
+    this._digDents = new Map();                   // 采掘凹陷（列键 → 次数），siteModifier 消费
+    this._placedVoxels = new Map();               // 已放置结构体素（列键 → {x,y,z}，占位盒渲染）
+    this._springDist = -1;                        // 场域弹簧臂臂长（首帧吸附）
+    this.field.siteModifier = (fx, fz, base) => this._fieldSiteModifier(fx, fz, base);
     this.colony = Object.values(w.entities.colonies || {})
       .find((c) => c.planetId === planet.id) || null;
     this.mission = mission || null;
@@ -15661,16 +26119,17 @@ const GroundView = {
     this._layoutColony();
     this._conveyor = this._buildConveyorPaths();
 
-    // —— 初始角色位置：任务取出生小队首位，自由取体素世界出生点 ——
+    // —— 初始角色位置：任务取出生小队首位，自由取体素世界出生点（y 贴场域网格） ——
     const c = this.char3d;
     const spawn = this.sw.spawn;
     c.x = spawn.x;
     c.z = spawn.z;
-    c.y = getSurfaceHeight(this.sw, spawn.x, spawn.z) + 1;
+    c.y = this._groundAt(spawn.x, spawn.z);
     c.vy = 0;
     c.onGround = true;
     c.state = 'idle';
     c.fuel = 100;
+    if (!Number.isFinite(c.y)) c.y = 8;           // 场外兜底（理论不可达：出生列恒在场内）
     // 相机置于角色背后（面向 -Z 时 yaw=0）
     this.cam.yaw = 0;
     this.cam.pitch = 0.5;
@@ -15703,18 +26162,64 @@ const GroundView = {
   /** 创建/重建 GL 资源（上下文恢复后同样走这里） */
   _initGL() {
     this._glOK = false;
+    this.scene = null;
     this.ps3d = null;
     this.bmesh = null;
     if (this.cm && this.cm.hasGL && this.cm.glc && this.cm.tier < 3) {
       try {
+        // —— 场景编排器：连续三角网格地形 + 大气 + 天气（doc7 TASK-1.3） ——
+        this.scene = new PlanetSurfaceScene(this.cm, {});
+        this.scene.mount(this.field, null);
+        // 场域中心 (256,256) → 体素空间 (32,32)：地形平移对齐玩法坐标
+        this.scene.setWorldOffset([-FIELD_OFFSET, 0, -FIELD_OFFSET]);
+        // —— 对象渲染器：箱体/actor/角色七部件/贴花/特效（外部相机，对象独占） ——
         this.ps3d = new PlanetSurface3D(this.cm.glc, this.cm.tier);
         this.ps3d.init(this.sw);
+        this.ps3d.setObjectOnly(true);            // 地形/天空权威移交 PlanetSurfaceScene
         this.bmesh = new BuildingMeshBatch(this.cm.glc);
+        // —— 主题载荷（doc7 TASK-3.1/3.2：planetThemes 九维色板 → 场景主题） ——
+        //     对象/建筑 pass 与场景地形共用同一太阳/雾（THEME-02 一致性）。
+        const gvPlanet = this.planet || {};
+        this._themePayload = buildThemePayload(
+          gvPlanet.primaryThemeId || null, this.app.world, gvPlanet.id || 'unknown',
+          { category: gvPlanet.category, fogRange: [90, 560] },
+        );
+        this.scene.setTheme(this._themePayload);
+        if (this.ps3d) {
+          const env = this._themePayload;
+          this.ps3d._sunDir = env.terrain.sun.dir.slice();
+          this.ps3d._sunColor = env.terrain.sun.color.slice();
+          this.ps3d._fogColor = env.terrain.fog.color.slice();
+          this.ps3d._fogRange = env.terrain.fog.range.slice();
+          this.ps3d._sky = {
+            zenith: env.sky.zenith.slice(),
+            horizon: env.sky.horizon.slice(),
+            ground: env.sky.ground.slice(),
+            stars: env.sky.stars || 0,
+          };
+        }
+        // —— 诊断钩子接管：诊断模式路由到场景地形网格；GL 状态快照仍由 ps3d 供 ——
+        if (typeof window !== 'undefined') {
+          window.__vfSurfaceDebug = {
+            renderer: this.ps3d,
+            scene: this.scene,
+            view: this,
+            setDebugMode: (m) => (this.scene ? this.scene.setDebugMode(m) : 0),
+            cycleDebugMode: () => (this.scene ? this.scene.setDebugMode((this.scene.getDebugMode() + 1) % 4) : 0),
+            getSnapshot: () => ({
+              ...(this.ps3d ? this.ps3d.getGLStateSnapshot() : {}),
+              sceneStats: this.scene ? this.scene.getStats() : null,
+            }),
+          };
+        }
         this._glOK = true;
       } catch (e) {
         console.error('[GroundView] GL 初始化失败，保持 2D 兜底:', e);
+        this._glErr = String((e && e.message) || e);
+        try { if (this.scene) this.scene.destroy(); } catch (_) { /* 忽略 */ }
         try { if (this.ps3d) this.ps3d.destroy(); } catch (_) { /* 忽略 */ }
         try { if (this.bmesh) this.bmesh.destroy(); } catch (_) { /* 忽略 */ }
+        this.scene = null;
         this.ps3d = null;
         this.bmesh = null;
       }
@@ -15725,8 +26230,10 @@ const GroundView = {
   _onGLState(degraded) {
     if (!this._mounted) return;
     if (degraded) {
+      try { if (this.scene) this.scene.destroy(); } catch (_) { /* 忽略 */ }
       try { if (this.ps3d) this.ps3d.destroy(); } catch (_) { /* 忽略 */ }
       try { if (this.bmesh) this.bmesh.destroy(); } catch (_) { /* 忽略 */ }
+      this.scene = null;
       this.ps3d = null;
       this.bmesh = null;
       this._glOK = false;
@@ -15745,12 +26252,19 @@ const GroundView = {
       h.target.removeEventListener(h.type, h.fn);
     }
     this._handlers = [];
+    // 简报页 Escape 逃逸监听（随场景/视图拆卸一并移除）
+    if (this._briefingEsc) {
+      window.removeEventListener('keydown', this._briefingEsc);
+      this._briefingEsc = null;
+    }
     if (this._unsubGL) {
       this._unsubGL();
       this._unsubGL = null;
     }
+    try { if (this.scene) this.scene.destroy(); } catch (_) { /* 忽略 */ }
     try { if (this.ps3d) this.ps3d.destroy(); } catch (_) { /* 忽略 */ }
     try { if (this.bmesh) this.bmesh.destroy(); } catch (_) { /* 忽略 */ }
+    this.scene = null;
     this.ps3d = null;
     this.bmesh = null;
     if (this.cm) {
@@ -15759,6 +26273,8 @@ const GroundView = {
     }
     this._glOK = false;
     this.sw = null;
+    this.field = null;
+    this._digDents = null;
     this.mission = null;
     this.missionId = null;
     this._lastView = null;
@@ -15815,7 +26331,15 @@ const GroundView = {
   },
 
   _onKeyDown(e) {
-    if (!this._mounted || this.mode === 'briefing') return;
+    if (!this._mounted) return;
+    // 简报页 Escape 逃逸（doc5 §3.5 NAV-03）：无条件返回所属星系，解除软锁死
+    if (this.mode === 'briefing') {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        this._returnToOrbit();
+      }
+      return;
+    }
     const code = e.code;
     if (MOVE_CODES.has(code)) {
       this.keys[code] = true;
@@ -15854,6 +26378,9 @@ const GroundView = {
         break;
       case 'KeyE':
         this._oneShot.interact = true;
+        break;
+      case 'KeyR':
+        this._tryRestoreTerrain();
         break;
       case 'Tab':
         e.preventDefault();
@@ -15943,10 +26470,88 @@ const GroundView = {
     return Math.max(0.2, g0) * 9.8;
   },
 
-  /** 列顶地面高度（体素上沿 y；空列返回 Infinity 表示无底） */
+  /**
+   * 地面高度（脚底）。场域优先：连续三角网格重心插值（doc7 TASK-1.2）；
+   * 体素列顶仅作场域缺失时的兜底（2D 降级/场外）。
+   * @returns {number} 高度（米/体素单位同刻度）；场外返回 Infinity
+   */
   _groundAt(x, z) {
+    if (this.field) {
+      const s = sampleTerrain(this.field, x + FIELD_OFFSET, z + FIELD_OFFSET);
+      if (s && Number.isFinite(s.y)) return s.y;
+      return Infinity;
+    }
     const h = getSurfaceHeight(this.sw, x, z);
     return h >= 0 ? h + 1 : Infinity;
+  },
+
+  /**
+   * 场域 siteModifier：采掘凹陷雕刻（TERRAIN-06 增量重建的域侧驱动）。
+   * MissionSiteBlueprint 的 SDF 挂点由后续波次在同一钩子内合成（Wave C）。
+   * @param {number} fx 场域 X（米） @param {number} fz 场域 Z（米）
+   * @param {object} base terrainField 预估点
+   */
+  _fieldSiteModifier(fx, fz, base) {
+    const dents = this._digDents;
+    if (!dents || dents.size === 0) return null;
+    const lx = fx - FIELD_OFFSET;
+    const lz = fz - FIELD_OFFSET;
+    const cx = Math.floor(lx);
+    const cz = Math.floor(lz);
+    let dy = 0;
+    let touched = false;
+    for (let dz = -2; dz <= 2; dz++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        const key = (cx + dx) * 4096 + (cz + dz);
+        const n = dents.get(key);
+        if (!n) continue;
+        const d = Math.hypot(lx - (cx + dx + 0.5), lz - (cz + dz + 0.5));
+        const fall = Math.max(0, 1 - d / 1.8);
+        if (fall > 0) {
+          dy -= n * DIG_DENT_DEPTH * fall * fall;
+          touched = true;
+        }
+      }
+    }
+    return touched && Number.isFinite(base.y + dy) ? { dy } : null;
+  },
+
+  /**
+   * R 键一键恢复自然地貌（doc7 §6 DSP 式）：以角色为中心 RestoreTerrain 命令
+   * （领域写回行星 terrainEdits 日志）+ 本地同 op 应用（即时增量重建）。
+   */
+  _tryRestoreTerrain() {
+    if (!this.field || !this._edits || !this.planet) return;
+    const c = this.char3d;
+    const x = c.x - FIELD_OFFSET;               // 世界 → 场域坐标（命令口径）
+    const z = c.z - FIELD_OFFSET;
+    const res = this.app.dispatch('RestoreTerrain', {
+      planetId: this.planet.id, x, z, radius: 6, strength: 1,
+    });
+    if (!res.ok) {
+      toast(res.reason || '恢复失败', { kind: 'warn' });
+      return;
+    }
+    applyEdit(this.field, this._edits, { kind: 'restore', x, z, radius: 6, strength: 1 });
+    rebuildDirtyChunks(this.field);
+    toast('地形已恢复自然状态（DSP 式）', { kind: 'ok' });
+  },
+
+  /** 采掘后标记场域 Chunk 脏（下一帧 sync 增量重建；TERRAIN-06） */
+  _markFieldDirty(vx, vz) {
+    if (!this.field || !Array.isArray(this.field.chunks)) return;
+    const fx = vx + FIELD_OFFSET;
+    const fz = vz + FIELD_OFFSET;
+    const chSize = this.field.chunkMeters || 64;
+    const tcx = Math.floor(fx / chSize);
+    const tcz = Math.floor(fz / chSize);
+    for (const ch of this.field.chunks) {
+      if (!ch) continue;
+      const ddx = Math.abs(ch.cx - tcx);
+      const ddz = Math.abs(ch.cz - tcz);
+      // 凹陷半径跨列：相邻 Chunk 一并标脏（1.8m 半径只可能触及近邻）
+      if (ddx <= 1 && ddz <= 1) ch.dirty = true;
+    }
   },
 
   // —— 主循环 ————————————————
@@ -16005,12 +26610,48 @@ const GroundView = {
     this._renderFrame(view, dt);
   },
 
-  /** 自由模式帧：本地状态机 + 体素物理 → 渲染 */
+  /** 自由模式帧：本地状态机 + 体素物理 → 渲染（E 键消费 POI 采样） */
   _freeFrame(dt) {
     this._updateAim(dt);
+    if (this._oneShot.interact) {
+      this._oneShot.interact = false;
+      this._tryHarvestPoi();
+    }
     this._freePhysics(dt);
     this._updateFx(dt);
     this._renderFrame(null, dt);
+  },
+
+  /**
+   * E 键采样最近未勘探 POI（doc5 P1-05 / doc7 §6）：HarvestPlanetPOI 命令经
+   * CommandBus 领域结算（rewardPaid 严格幂等锁），奖励回写账本/殖民地仓储。
+   */
+  _tryHarvestPoi() {
+    if (!this._pois) return;
+    const c = this.char3d;
+    let best = null;
+    let bd = 3.0;                              // 交互半径（米）
+    for (const poi of Object.values(this._pois)) {
+      if (poi.rewardPaid || poi.state === 'explored') continue;
+      const px = poi.position.x - FIELD_OFFSET;
+      const pz = poi.position.z - FIELD_OFFSET;
+      const d = Math.hypot(px - c.x, pz - c.z);
+      if (d < bd) { bd = d; best = poi; }
+    }
+    if (!best) {
+      toast('附近没有可采样的兴趣点（靠近发光信标按 E）', { kind: 'info' });
+      return;
+    }
+    const res = this.app.dispatch('HarvestPlanetPOI', {
+      planetId: this.planet.id,
+      poiId: best.id,
+    });
+    if (res.ok) {
+      toast(`已采样：${best.id}（奖励入账）`, { kind: 'ok' });
+      this._tally.poiSampled = (this._tally.poiSampled || 0) + 1;
+    } else {
+      toast(res.reason || '采样失败', { kind: 'warn' });
+    }
   },
 
   /**
@@ -16108,8 +26749,8 @@ const GroundView = {
         c.onGround = false;
       }
     }
-    if (c.y < -12) {
-      // 跌出悬浮平台：回出生点
+    if (c.y < (this.field ? -60 : -12)) {
+      // 跌出悬浮平台（体素兜底模式）：回出生点；场域地形最低 -40m 不会触发
       const sp = this.sw.spawn;
       c.x = sp.x;
       c.z = sp.z;
@@ -16214,8 +26855,9 @@ const GroundView = {
       c.fuel = Math.min(100, c.fuel + JET_REGEN * dt);
     }
     c.y += c.vy * dt;
-    // 头顶体素检测：上升顶头即截停
-    if (c.vy > 0 && getVoxel(sw, Math.floor(c.x), Math.floor(c.y + PLAYER_HEIGHT), Math.floor(c.z)) !== SURFACE_MAT.AIR) {
+    // 头顶体素检测：上升顶头即截停（场域连续地形无洞穴顶盖，跳过）
+    if (!this.field && c.vy > 0
+      && getVoxel(sw, Math.floor(c.x), Math.floor(c.y + PLAYER_HEIGHT), Math.floor(c.z)) !== SURFACE_MAT.AIR) {
       c.vy = 0;
     }
     const ground = this._groundAt(c.x, c.z);
@@ -16226,7 +26868,7 @@ const GroundView = {
     } else {
       c.onGround = false;
     }
-    if (c.y < -12) {
+    if (c.y < (this.field ? -60 : -12)) {
       const sp = findSpawnPoint(sw);
       c.x = sp.x;
       c.z = sp.z;
@@ -16245,11 +26887,25 @@ const GroundView = {
   },
 
   /**
-   * 体素 AABB 碰撞移动：先 X 后 Z，撞实体素即轴分离滑行。
-   * 碰撞盒：脚底 c.y .. 头顶 c.y + PLAYER_HEIGHT，半宽 PLAYER_HALF。
+   * 碰撞移动：场域模式 = 坡度阻断行走（Δh/Δx 超阈值陡壁不可攀，连续三角网格
+   * 无离散墙体）；体素兜底模式 = AABB 轴分离滑行（撞实体素滑开）。
    */
   _moveAABB(dx, dz) {
     const c = this.char3d;
+    if (this.field) {
+      const h0 = this._groundAt(c.x, c.z);
+      if (dx) {
+        const nx = clamp(c.x + dx, 2, FIELD_WALK_MAX);
+        const h1 = this._groundAt(nx, c.z);
+        if (Number.isFinite(h1) && h1 - h0 < WALK_SLOPE_BLOCK) c.x = nx;
+      }
+      if (dz) {
+        const nz = clamp(c.z + dz, 2, FIELD_WALK_MAX);
+        const h1 = this._groundAt(c.x, nz);
+        if (Number.isFinite(h1) && h1 - h0 < WALK_SLOPE_BLOCK) c.z = nz;
+      }
+      return;
+    }
     const solidBox = (px, pz) => {
       const y0 = Math.floor(c.y + 0.05);
       const y1 = Math.floor(c.y + PLAYER_HEIGHT - 0.05);
@@ -16307,26 +26963,75 @@ const GroundView = {
     this._eye[2] = c.z + cp * cy * d;
     const fwd = this._camForward();
 
-    // 第一段：相机 → 瞄准点（命中地形取命中点，否则取视距延伸点）
-    const camRay = ddaRaycast(this.sw, this._eye, fwd, d + AIM_REACH);
-    const camT = camRay.hit ? camRay.t : d + 4;
-    const aimPt = [
-      this._eye[0] + fwd[0] * camT,
-      this._eye[1] + fwd[1] * camT,
-      this._eye[2] + fwd[2] * camT,
-    ];
-    // 第二段：角色胸口 → 瞄准点（触及范围内才有效）
-    const chest = [c.x, c.y + 1.25, c.z];
-    const ddx = aimPt[0] - chest[0];
-    const ddy = aimPt[1] - chest[1];
-    const ddz = aimPt[2] - chest[2];
-    const len = Math.hypot(ddx, ddy, ddz) || 1;
-    this._aimFar = len > AIM_REACH + 0.6;
-    const hit = this._aimFar
-      ? { hit: false }
-      : ddaRaycast(this.sw, chest, [ddx / len, ddy / len, ddz / len], AIM_REACH);
-    this._aim = hit.hit ? hit : null;
-    if (this._aim) this._aim.dug = false;   // 本帧是否实际挖到（角色采掘姿态用）
+    if (this.field) {
+      // —— 场域模式：与连续三角网格求交（doc7 TASK-1.2，替代体素 DDA） ——
+      const eyeF = [this._eye[0] + FIELD_OFFSET, this._eye[1], this._eye[2] + FIELD_OFFSET];
+      const camRay = raycastTerrain(this.field, eyeF, fwd, d + AIM_REACH + 4);
+      const camT = camRay.hit ? camRay.t : d + 4;
+      const aimPt = [
+        this._eye[0] + fwd[0] * camT,
+        this._eye[1] + fwd[1] * camT,
+        this._eye[2] + fwd[2] * camT,
+      ];
+      const chest = [c.x, c.y + 1.25, c.z];
+      const ddx = aimPt[0] - chest[0];
+      const ddy = aimPt[1] - chest[1];
+      const ddz = aimPt[2] - chest[2];
+      const len = Math.hypot(ddx, ddy, ddz) || 1;
+      this._aimFar = len > AIM_REACH + 0.6;
+      let hit = null;
+      if (!this._aimFar) {
+        const r = raycastTerrain(this.field, [chest[0] + FIELD_OFFSET, chest[1], chest[2] + FIELD_OFFSET],
+          [ddx / len, ddy / len, ddz / len], AIM_REACH);
+        if (r.hit) {
+          // 场域命中 → 体素列语义（矿脉/结构数据底层仍在体素补丁内）
+          const vx = Math.floor(r.point[0] - FIELD_OFFSET);
+          const vz = Math.floor(r.point[2] - FIELD_OFFSET);
+          const colTop = getSurfaceHeight(this.sw, vx, vz);
+          // 主导轴法线 → 体素邻面语义（建造放置沿用）
+          const n = r.normal || [0, 1, 0];
+          const ax = Math.abs(n[0]);
+          const ay = Math.abs(n[1]);
+          const az = Math.abs(n[2]);
+          const nx = ax > ay && ax > az ? Math.sign(n[0]) : 0;
+          const ny = ay >= ax && ay >= az ? Math.sign(n[1]) : 0;
+          const nz = az > ax && az > ay ? Math.sign(n[2]) : 0;
+          hit = {
+            hit: true,
+            vx, vz,
+            vy: colTop >= 0 ? colTop : Math.floor(r.point[1]),
+            nx, ny, nz,
+            matId: colTop >= 0 ? getVoxel(this.sw, vx, colTop, vz) : 0,
+            t: r.t,
+            px: r.point[0] - FIELD_OFFSET,
+            py: r.point[1],
+            pz: r.point[2] - FIELD_OFFSET,
+          };
+        }
+      }
+      this._aim = hit;
+      if (this._aim) this._aim.dug = false;
+    } else {
+      // —— 体素兜底（2D 降级/场域缺失）：两段 DDA（原逻辑） ——
+      const camRay = ddaRaycast(this.sw, this._eye, fwd, d + AIM_REACH);
+      const camT = camRay.hit ? camRay.t : d + 4;
+      const aimPt = [
+        this._eye[0] + fwd[0] * camT,
+        this._eye[1] + fwd[1] * camT,
+        this._eye[2] + fwd[2] * camT,
+      ];
+      const chest = [c.x, c.y + 1.25, c.z];
+      const ddx = aimPt[0] - chest[0];
+      const ddy = aimPt[1] - chest[1];
+      const ddz = aimPt[2] - chest[2];
+      const len = Math.hypot(ddx, ddy, ddz) || 1;
+      this._aimFar = len > AIM_REACH + 0.6;
+      const hit = this._aimFar
+        ? { hit: false }
+        : ddaRaycast(this.sw, chest, [ddx / len, ddy / len, ddz / len], AIM_REACH);
+      this._aim = hit.hit ? hit : null;
+      if (this._aim) this._aim.dug = false;
+    }
 
     // —— 采掘（建造模式按住左键，节流 DIG_INTERVAL） ——
     if (this._buildMode && this._mouse.lDown && this._digCd <= 0 && this._aim) {
@@ -16349,7 +27054,12 @@ const GroundView = {
     if (!r || r.matId === SURFACE_MAT.AIR) return;   // domain 判定不可挖（含并发保护）
     if (this._aim) this._aim.dug = true;
     this._fx.dig.push({ x: hit.vx, y: hit.vy, z: hit.vz, matId: r.matId });
-    if (this.ps3d) {
+    if (this.field) {
+      // 场域模式：地形凹陷雕刻 + Chunk 标脏（TERRAIN-06 增量重建由场景 sync 执行）
+      const key = hit.vx * 4096 + hit.vz;
+      this._digDents.set(key, (this._digDents.get(key) || 0) + 1);
+      this._markFieldDirty(hit.vx, hit.vz);
+    } else if (this.ps3d) {
       this.ps3d.digChunk(Math.floor(hit.vx / SURFACE_SIZE.CHUNK), Math.floor(hit.vz / SURFACE_SIZE.CHUNK));
     }
     if (r.resourceDrop) {
@@ -16382,7 +27092,11 @@ const GroundView = {
       debitColony(this.app.world, this.colony, 'alloy', 1, 'surfaceBuild', this.colony.id);
       this._tally.alloy = (this._tally.alloy || 0) - 1;
     }
-    if (this.ps3d) {
+    if (this.field) {
+      // 场域模式：结构体素经建筑批处理渲染（占位盒，Wave F 建筑系统替换为
+      // 坡度地基/模块化结构网格）；不再依赖体素贪心网格重建。
+      this._placedVoxels.set(tx * 4096 + tz, { x: tx, y: ty, z: tz });
+    } else if (this.ps3d) {
       this.ps3d.digChunk(Math.floor(tx / SURFACE_SIZE.CHUNK), Math.floor(tz / SURFACE_SIZE.CHUNK));
     }
   },
@@ -16509,11 +27223,11 @@ const GroundView = {
       const a = i * GOLDEN;
       const x = clamp(sw.spawn.x + Math.cos(a) * r, 3, SURFACE_SIZE.X - 3);
       const z = clamp(sw.spawn.z + Math.sin(a) * r, 3, SURFACE_SIZE.Z - 3);
-      const h = getSurfaceHeight(sw, x, z);
-      if (h < 0) continue;             // 虚空列（悬浮平台边缘）跳过
+      const h = this._groundAt(x, z);
+      if (!Number.isFinite(h)) continue;   // 场外/虚空列跳过
       this._buildingLayout.push({
         x,
-        y: h + 1,
+        y: h,
         z,
         rotY: (i * 0.618) % 1 * Math.PI * 2,
         scale: building ? 1 : 0.55,
@@ -16522,7 +27236,7 @@ const GroundView = {
       });
       this._buildingColonists.push({
         x: x + 1.6,
-        y: h + 1,
+        y: h,
         z: z + 1.2,
         rotY: (i * 0.37) % 1 * Math.PI * 2,
         walk: false,
@@ -16558,8 +27272,8 @@ const GroundView = {
         const f = k / n;
         const x = mn.x + (best.x - mn.x) * f;
         const z = mn.z + (best.z - mn.z) * f;
-        const h = getSurfaceHeight(this.sw, x, z);
-        const y = h >= 0 ? h + 1 : mn.y + (best.y - mn.y) * f;
+        const h = this._groundAt(x, z);
+        const y = Number.isFinite(h) ? h : mn.y + (best.y - mn.y) * f;
         pts.push([x, y, z]);
       }
       paths.push({ pts, speed: 1.6, spacing: 1.1 });
@@ -16570,7 +27284,9 @@ const GroundView = {
   // —— 渲染 ————————————————
 
   /**
-   * 渲染一帧：GL 场景（地形/天空/角色/敌人/特效）→ 建筑批处理 → HUD 2D。
+   * 渲染一帧：GL 场景（连续地形/天空/天气 → 对象 pass → 建筑批处理）→ HUD 2D。
+   * 场景化集成（doc7 TASK-1.2/1.4）：地形/天空权威在 PlanetSurfaceScene；
+   * 相机弹簧臂以场域射线收臂（raycastTerrain），同一 VP 供对象 pass 与建筑批处理。
    * @param {object|null} view getMissionView 快照（自由模式为 null）
    */
   _renderFrame(view, dt) {
@@ -16579,20 +27295,54 @@ const GroundView = {
     cm.beginFrame();
 
     const rd = this._assembleRenderData(view);
-    if (this._glOK && this.ps3d) {
+    if (this._glOK && this.scene && this.ps3d) {
       const target = cm.beginGLFrame();
       if (target) {
         const gl = this.cm.gl;
         const pw = this.cm.glCanvas.width;
         const ph = this.cm.glCanvas.height;
+
+        // —— 弹簧臂相机（场域射线收臂；指数平滑与 PlanetSurface3D 同参） ——
+        const c = this.char3d;
+        const cp = Math.cos(this.cam.pitch);
+        const sp = Math.sin(this.cam.pitch);
+        const sy = Math.sin(this.cam.yaw);
+        const cy = Math.cos(this.cam.yaw);
+        const tgt = [c.x, c.y + 1.55, c.z];
+        const dir = [cp * sy, sp, cp * cy];
+        let want = clamp(this.cam.dist, 2.5, 26);
+        if (this.field) {
+          const hit = raycastTerrain(this.field,
+            [tgt[0] + FIELD_OFFSET, tgt[1], tgt[2] + FIELD_OFFSET], dir, want + 0.6);
+          if (hit.hit) want = Math.max(1.4, hit.t - 0.45);
+        }
+        if (this._springDist < 0) this._springDist = want;
+        this._springDist += (want - this._springDist) * (1 - Math.exp(-dt * 6));
+        const eye = [
+          tgt[0] + dir[0] * this._springDist,
+          tgt[1] + dir[1] * this._springDist,
+          tgt[2] + dir[2] * this._springDist,
+        ];
+        const mm = this._m;
+        mat4Perspective(mm.proj, 1.05, pw / Math.max(1, ph), 0.1, 1600);
+        mat4LookAt(mm.view, eye, tgt, [0, 1, 0]);
+        mat4Multiply(mm.vp, mm.proj, mm.view);
+
+        // —— 1. 场景：连续地形 + 天空 + 天气（清屏唯一所有者仍是 PostProcessor） ——
+        this.scene.draw(gl, pw, ph, {
+          time: this._clock,
+          dt,
+          camera: { eye, target: tgt },
+          actors: rd,
+        }, {});
+
+        // —— 2. 对象 pass：敌人/殖民者/传送带/角色七部件/贴花/特效（外部相机） ——
+        this.ps3d.setExternalCamera(eye, tgt, mm.vp);
         this.ps3d.draw(gl, pw, ph, rd, { time: this._clock, dt });
-        // 建筑网格批处理：与渲染器同帧相机（弹簧平滑后的 eye/target）+ 同源光照
+
+        // —— 3. 建筑网格批处理：与场景同帧相机 + 同源光照 ——
         const bList = this.bmesh ? this._bmeshList() : null;
         if (this.bmesh && bList.length) {
-          const mm = this._m;
-          mat4Perspective(mm.proj, 1.05, pw / Math.max(1, ph), 0.1, 220);
-          mat4LookAt(mm.view, this.ps3d.camera.eye, this.ps3d.camera.target, [0, 1, 0]);
-          mat4Multiply(mm.vp, mm.proj, mm.view);
           this.bmesh.draw(gl, mm.vp, this._envOf(), bList);
         }
         cm.endGLFrame({ time: this._clock });
@@ -16682,7 +27432,7 @@ const GroundView = {
     return rd;
   },
 
-  /** 建筑批处理实例表：殖民地建筑 + 任务目标物 + 数据核心 + 体素选择框 */
+  /** 建筑批处理实例表：殖民地建筑 + 任务目标物 + 数据核心 + 体素选择框 + 已放置结构体素 */
   _bmeshList() {
     const list = this._buildingLayout.slice();
     const fallY = this.char3d.y || 0;
@@ -16713,6 +27463,32 @@ const GroundView = {
           x: ix, y: (gy === Infinity ? fallY : gy) + 0.5, z: iz,
           rotY: this._clock * 0.8, scale: 0.38, meshId: MESH_OF_CATEGORY('selector'),
           emit: 0.9,
+        });
+      }
+    }
+    // 未勘探 POI 全息信标（doc5 P1-04：field 坐标 → 世界 = +FIELD_OFFSET）
+    if (this._pois) {
+      for (const poi of Object.values(this._pois)) {
+        if (poi.rewardPaid || poi.state === 'explored') continue;
+        const bx = poi.position.x - FIELD_OFFSET;
+        const bz = poi.position.z - FIELD_OFFSET;
+        const gy = this._groundAt(bx, bz);
+        if (!Number.isFinite(gy)) continue;
+        list.push({
+          x: bx, y: gy + 0.7 + Math.sin(this._clock * 2.2) * 0.12, z: bz,
+          rotY: this._clock * 0.6, scale: 0.9, meshId: MESH_OF_CATEGORY('selector'),
+          emit: 1.2,
+        });
+      }
+    }
+    // 已放置结构体素（场域模式占位盒；Wave F 建筑系统替换为模块化结构网格）
+    if (this._placedVoxels && this._placedVoxels.size) {
+      for (const pv of this._placedVoxels.values()) {
+        const gy = this._groundAt(pv.x + 0.5, pv.z + 0.5);
+        list.push({
+          x: pv.x + 0.5, y: Number.isFinite(gy) ? gy + 0.45 : pv.y + 0.5, z: pv.z + 0.5,
+          rotY: 0, scale: 0.92, meshId: MESH_OF_CATEGORY('default'),
+          emit: 0.08,
         });
       }
     }
@@ -16760,6 +27536,11 @@ const GroundView = {
       ctx.font = '14px "Segoe UI", system-ui, sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText('当前环境不支持 WebGL2，3D 地表不可用（模拟与 HUD 继续运行）', W / 2, H / 2);
+      if (this._glErr) {
+        ctx.font = '11px monospace';
+        ctx.fillStyle = '#e8b04f';
+        ctx.fillText(`GL init: ${this._glErr.slice(0, 90)}`, W / 2, H / 2 + 22);
+      }
       ctx.textAlign = 'left';
     }
     // 准星（采掘/建造模式为方框 + 目标信息）
@@ -16939,6 +27720,30 @@ const GroundView = {
     ctx.fillStyle = '#9fb6c9';
     ctx.font = '11px "Segoe UI", system-ui, sans-serif';
     ctx.fillText(`采掘/建造模式：${this._buildMode ? '开' : '关'} · Esc 升空返回`, 22, 100);
+    // —— 最近未勘探 POI 罗盘（doc5 P1-04：方位 + 距离 + E 采样提示） ——
+    if (this._pois) {
+      let best = null;
+      let bd = Infinity;
+      for (const poi of Object.values(this._pois)) {
+        if (poi.rewardPaid || poi.state === 'explored') continue;
+        const px = poi.position.x - FIELD_OFFSET;
+        const pz = poi.position.z - FIELD_OFFSET;
+        const d = Math.hypot(px - c.x, pz - c.z);
+        if (d < bd) { bd = d; best = poi; }
+      }
+      const remain = unexploredPoiCount(this.planet || {});
+      if (best) {
+        const ang = Math.atan2(best.position.z - FIELD_OFFSET - c.z, best.position.x - FIELD_OFFSET - c.x);
+        const rel = normAngle(ang - this.cam.yaw + Math.PI);
+        const arrow = Math.abs(rel) < 0.5 ? '↑' : rel > 0 ? '→' : '←';
+        ctx.fillStyle = '#5debdf';
+        ctx.font = 'bold 11px "Segoe UI", system-ui, sans-serif';
+        ctx.fillText(`◆ 兴趣点 ${arrow} ${Math.round(bd)}m（靠近按 E 采样）· 剩余 ${remain}`, 22, 116);
+      } else if (remain === 0 && Object.keys(this._pois).length) {
+        ctx.fillStyle = '#7ee2a8';
+        ctx.fillText('本行星兴趣点已全部采样', 22, 116);
+      }
+    }
 
     // 本次采掘台账
     const keys = Object.keys(this._tally).filter((k) => this._tally[k] !== 0);
@@ -17066,988 +27871,6 @@ const GroundView = {
 };
 
 Object.assign(__exports, { GroundView });
-
-});
-__register("src/domain/ground/SurfaceSandbox.js", function (__exports, __require) {
-/**
- * domain/ground/SurfaceSandbox.js — 行星地表体素沙盒数据层（返工 Phase R8）
- *
- * 纯逻辑层（无 DOM / 无 WebGL）：三维体素世界的确定性生成、挖掘/放置、
- * DDA 射线拾取、贪心共面合并（Mikola Lysenko / 0fps 算法，AO 感知）
- * 与地表寻路。渲染层 PlanetSurface3D 消费本模块的网格输出。
- *
- * 世界规格：
- *  - 64×24×64（X×Y×Z）单体素世界，分 4×4 个 16×16×24 列区块；
- *  - 材质 ID：0=air 1=surface 2=rock 3=ore_ferro 4=ore_silicate
- *    5=ore_rare 6=ore_heavy 7=bedrock 8=building；
- *  - 地貌：表面层（风化表土）/ 地下矿石层（岩层 + 矿脉）/ 基岩层（不可采）；
- *  - 按 planet.category（8 大类）差异化高度/山脊/洞穴/矿脉丰度；
- *  - planet.deposits 资量对数映射为确定性矿脉数量（Ore Voxel Veins）。
- *
- * 确定性（GROUND-01 兼容）：
- *  - 种子 = world.seed ^ hash32(planetId)，全部噪声/矿脉/采样由该种子派生；
- *  - 全程零 Math.random；同 seed 同输入 → 体素网格与网格化输出逐位一致。
- *
- * 本文件输出的顶点颜色已烘焙：材质基色 × 行星地表色调 × 逐角点 AO，
- * 渲染层只需叠加方向光与雾。
- */
-
-const { seedFromNumber: seedFromNumber, nextU32: nextU32, int: int } = __require("src/core/rng.js");
-
-// ———— 常量 ————
-
-/** 世界与分块尺寸（X×Y×Z = 64×24×64，区块 16×16 列 × 24 高） */
-const SURFACE_SIZE = {
-  X: 64, Y: 24, Z: 64,
-  CHUNK: 16,
-  CHUNKS_X: 4, CHUNKS_Z: 4,
-  CHUNK_COUNT: 16,
-};
-
-/** 体素材质 ID 表 */
-const SURFACE_MAT = {
-  AIR: 0,
-  SURFACE: 1,      // 表面层：风化表土/沙壤（按行星类别着色）
-  ROCK: 2,         // 地下岩层
-  ORE_FERRO: 3,    // 铁族矿脉
-  ORE_SILICATE: 4, // 硅质矿脉
-  ORE_RARE: 5,     // 稀土矿脉
-  ORE_HEAVY: 6,    // 重金属矿脉
-  BEDROCK: 7,      // 基岩：不可挖掘
-  BUILDING: 8,     // 建筑结构体素
-};
-
-/** 材质基色（线性 RGB；index 即材质 ID）。surface 的色调由行星类别 tint 乘出 */
-const MATERIAL_COLORS = [
-  [0.00, 0.00, 0.00], // 0 air（不渲染）
-  [0.55, 0.47, 0.36], // 1 surface
-  [0.40, 0.41, 0.45], // 2 rock
-  [0.78, 0.46, 0.28], // 3 ore_ferro
-  [0.52, 0.74, 0.76], // 4 ore_silicate
-  [0.66, 0.42, 0.88], // 5 ore_rare
-  [0.44, 0.72, 0.44], // 6 ore_heavy
-  [0.15, 0.15, 0.18], // 7 bedrock
-  [0.62, 0.64, 0.68], // 8 building
-];
-
-/** 矿脉材质 → 资源 id（挖掘入账映射） */
-const ORE_RESOURCE_BY_MAT = {
-  3: 'ferro', 4: 'silicate', 5: 'rareEarth', 6: 'heavyMetal',
-};
-
-/** 面法线表（+x -x +y -y +z -z），贪心网格化的 normalIndex 引用 */
-const NORMALS = [
-  [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
-];
-
-/**
- * 8 大行星类别的地貌参数：
- *  base/amp  基准高度 / 噪声振幅（体素）
- *  ridge     山脊噪声权重（ice/lava 起伏最大）
- *  ore       矿脉数量系数
- *  cave      洞穴雕刻强度（0..0.25，3D 噪声阈值偏移）
- *  tint      表面材质色调（乘入顶点色）
- *  isle      true = 悬浮平台（气态巨行星：边缘之外为虚空）
- */
-const CATEGORY_TERRAIN = {
-  rocky:      { base: 9.0,  amp: 3.8, ridge: 0.50, ore: 1.0, cave: 0.10, tint: [1.00, 0.90, 0.76] },
-  ocean:      { base: 6.5,  amp: 2.6, ridge: 0.15, ore: 0.7, cave: 0.05, tint: [0.58, 0.78, 0.72] },
-  ice:        { base: 10.0, amp: 4.4, ridge: 0.70, ore: 0.9, cave: 0.08, terrace: 2, tint: [0.85, 0.92, 1.00] },
-  desert:     { base: 8.0,  amp: 3.0, ridge: 0.20, ore: 1.1, cave: 0.08, tint: [1.00, 0.86, 0.58] },
-  gasGiant:   { base: 11.0, amp: 2.0, ridge: 0.10, ore: 1.3, cave: 0.04, tint: [0.96, 0.82, 0.62], isle: true },
-  lava:       { base: 9.0,  amp: 4.0, ridge: 0.55, ore: 1.5, cave: 0.10, terrace: 2, tint: [0.66, 0.46, 0.42] },
-  toxic:      { base: 8.5,  amp: 3.8, ridge: 0.40, ore: 1.2, cave: 0.12, tint: [0.64, 0.76, 0.46] },
-  artificial: { base: 9.5,  amp: 1.4, ridge: 0.06, ore: 0.6, cave: 0.04, tint: [0.80, 0.82, 0.88] },
-};
-
-// ———— 基础工具 ————
-
-/** FNV-1a 32 位哈希：接受字符串或数字（planetId 兼容两种形态） */
-function hash32(v) {
-  const s = String(v);
-  let h = 2166136261 >>> 0;
-  for (let i = 0; i < s.length; i++) {
-    h = Math.imul(h ^ s.charCodeAt(i), 16777619) >>> 0;
-  }
-  return h >>> 0;
-}
-
-/** 确定性 [0,1) 浮点（仅用于形状扰动，绝不进模拟状态） */
-function rngFloat(s) {
-  return nextU32(s) / 4294967296;
-}
-
-/** [lo, hi] 闭区间整数的确定性取样 */
-function rngIntRange(s, lo, hi) {
-  return lo + int(s, hi - lo + 1);
-}
-
-/** 数值钳制 */
-function clamp(v, lo, hi) {
-  return v < lo ? lo : v > hi ? hi : v;
-}
-
-// ———— 确定性 Simplex 噪声（2D/3D，Gustavson 公版实现移植） ————
-
-const F2 = 0.5 * (Math.sqrt(3) - 1);
-const G2 = (3 - Math.sqrt(3)) / 6;
-const F3 = 1 / 3;
-const G3 = 1 / 6;
-
-/** 12 个梯度方向（展开存储，g*3 取行） */
-const GRAD3 = new Float32Array([
-  1, 1, 0, -1, 1, 0, 1, -1, 0, -1, -1, 0,
-  1, 0, 1, -1, 0, 1, 1, 0, -1, -1, 0, -1,
-  0, 1, 1, 0, -1, 1, 0, 1, -1, 0, -1, -1,
-]);
-
-/**
- * 创建种子派生的 2D/3D Simplex 噪声。
- * 置换表由 splitmix32 派生的 xoshiro128** 状态做 Fisher-Yates 洗牌 ——
- * 完全确定性，绝不触碰 Math.random。
- * @returns {{ noise2D:(x:number,y:number)=>number, noise3D:(x:number,y:number,z:number)=>number }}
- */
-function createSimplexNoise(seed) {
-  const st = seedFromNumber(seed >>> 0);
-  const perm = new Uint8Array(256);
-  for (let i = 0; i < 256; i++) perm[i] = i;
-  for (let i = 255; i > 0; i--) {
-    const j = nextU32(st) % (i + 1);
-    const t = perm[i];
-    perm[i] = perm[j];
-    perm[j] = t;
-  }
-  const p = new Uint8Array(512);
-  for (let i = 0; i < 512; i++) p[i] = perm[i & 255];
-
-  const gi2 = (ii, jj) => (p[ii + p[jj]] % 12) * 3;
-  const gi3 = (ii, jj, kk) => (p[ii + p[jj + p[kk]]] % 12) * 3;
-
-  /** 2D Simplex，返回约 [-1,1] */
-  function noise2D(xin, yin) {
-    const s = (xin + yin) * F2;
-    const i = Math.floor(xin + s);
-    const j = Math.floor(yin + s);
-    const t = (i + j) * G2;
-    const x0 = xin - (i - t);
-    const y0 = yin - (j - t);
-    let i1; let j1;
-    if (x0 > y0) { i1 = 1; j1 = 0; } else { i1 = 0; j1 = 1; }
-    const x1 = x0 - i1 + G2;
-    const y1 = y0 - j1 + G2;
-    const x2 = x0 - 1 + 2 * G2;
-    const y2 = y0 - 1 + 2 * G2;
-    const ii = i & 255;
-    const jj = j & 255;
-    let n = 0;
-    let t0 = 0.5 - x0 * x0 - y0 * y0;
-    if (t0 > 0) {
-      const g = gi2(ii, jj);
-      t0 *= t0;
-      n += t0 * t0 * (GRAD3[g] * x0 + GRAD3[g + 1] * y0);
-    }
-    let t1 = 0.5 - x1 * x1 - y1 * y1;
-    if (t1 > 0) {
-      const g = gi2(ii + i1, jj + j1);
-      t1 *= t1;
-      n += t1 * t1 * (GRAD3[g] * x1 + GRAD3[g + 1] * y1);
-    }
-    let t2 = 0.5 - x2 * x2 - y2 * y2;
-    if (t2 > 0) {
-      const g = gi2(ii + 1, jj + 1);
-      t2 *= t2;
-      n += t2 * t2 * (GRAD3[g] * x2 + GRAD3[g + 1] * y2);
-    }
-    return 70 * n;
-  }
-
-  /** 3D Simplex，返回约 [-1,1] */
-  function noise3D(xin, yin, zin) {
-    const s = (xin + yin + zin) * F3;
-    const i = Math.floor(xin + s);
-    const j = Math.floor(yin + s);
-    const k = Math.floor(zin + s);
-    const t = (i + j + k) * G3;
-    const x0 = xin - (i - t);
-    const y0 = yin - (j - t);
-    const z0 = zin - (k - t);
-    // 六面体排序确定两个角点（标准 Gustavson 分支）
-    let i1; let j1; let k1; let i2; let j2; let k2;
-    if (x0 >= y0) {
-      if (y0 >= z0) { i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 1; k2 = 0; }
-      else if (x0 >= z0) { i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 0; k2 = 1; }
-      else { i1 = 0; j1 = 0; k1 = 1; i2 = 1; j2 = 0; k2 = 1; }
-    } else {
-      if (y0 < z0) { i1 = 0; j1 = 0; k1 = 1; i2 = 0; j2 = 1; k2 = 1; }
-      else if (x0 < z0) { i1 = 0; j1 = 1; k1 = 0; i2 = 0; j2 = 1; k2 = 1; }
-      else { i1 = 0; j1 = 1; k1 = 0; i2 = 1; j2 = 1; k2 = 0; }
-    }
-    const x1 = x0 - i1 + G3;
-    const y1 = y0 - j1 + G3;
-    const z1 = z0 - k1 + G3;
-    const x2 = x0 - i2 + 2 * G3;
-    const y2 = y0 - j2 + 2 * G3;
-    const z2 = z0 - k2 + 2 * G3;
-    const x3 = x0 - 1 + 3 * G3;
-    const y3 = y0 - 1 + 3 * G3;
-    const z3 = z0 - 1 + 3 * G3;
-    const ii = i & 255;
-    const jj = j & 255;
-    const kk = k & 255;
-    let n = 0;
-    let t0 = 0.6 - x0 * x0 - y0 * y0 - z0 * z0;
-    if (t0 > 0) {
-      const g = gi3(ii, jj, kk);
-      t0 *= t0;
-      n += t0 * t0 * (GRAD3[g] * x0 + GRAD3[g + 1] * y0 + GRAD3[g + 2] * z0);
-    }
-    let t1 = 0.6 - x1 * x1 - y1 * y1 - z1 * z1;
-    if (t1 > 0) {
-      const g = gi3(ii + i1, jj + j1, kk + k1);
-      t1 *= t1;
-      n += t1 * t1 * (GRAD3[g] * x1 + GRAD3[g + 1] * y1 + GRAD3[g + 2] * z1);
-    }
-    let t2 = 0.6 - x2 * x2 - y2 * y2 - z2 * z2;
-    if (t2 > 0) {
-      const g = gi3(ii + i2, jj + j2, kk + k2);
-      t2 *= t2;
-      n += t2 * t2 * (GRAD3[g] * x2 + GRAD3[g + 1] * y2 + GRAD3[g + 2] * z2);
-    }
-    let t3 = 0.6 - x3 * x3 - y3 * y3 - z3 * z3;
-    if (t3 > 0) {
-      const g = gi3(ii + 1, jj + 1, kk + 1);
-      t3 *= t3;
-      n += t3 * t3 * (GRAD3[g] * x3 + GRAD3[g + 1] * y3 + GRAD3[g + 2] * z3);
-    }
-    return 32 * n;
-  }
-
-  return { noise2D, noise3D };
-}
-
-/** 分形布朗运动（2D）：octaves 个八度叠加，输出约 [-1,1] */
-function fbm2(noise, x, y, octaves, lac = 2.0, gain = 0.5) {
-  let amp = 1;
-  let freq = 1;
-  let sum = 0;
-  let norm = 0;
-  for (let o = 0; o < octaves; o++) {
-    sum += amp * noise.noise2D(x * freq, y * freq);
-    norm += amp;
-    amp *= gain;
-    freq *= lac;
-  }
-  return sum / norm;
-}
-
-/** 分形布朗运动（3D） */
-function fbm3(noise, x, y, z, octaves, lac = 2.0, gain = 0.5) {
-  let amp = 1;
-  let freq = 1;
-  let sum = 0;
-  let norm = 0;
-  for (let o = 0; o < octaves; o++) {
-    sum += amp * noise.noise3D(x * freq, y * freq, z * freq);
-    norm += amp;
-    amp *= gain;
-    freq *= lac;
-  }
-  return sum / norm;
-}
-
-// ———— 世界创建 ————
-
-/**
- * 创建行星地表体素世界（纯数据实体，可随存档序列化体素主数组）。
- * @param {object} world 世界实体（只读取 world.seed 与 entities 中的行星档案）
- * @param {string|number} planetId 行星实体 id
- * @param {{category?:string, deposits?:object, atmosphere?:string, starTypeId?:string}} [opts]
- *        行星档案缺失时的兜底输入（保持函数可独立测试）
- * @returns {object} surfaceWorld 实体
- */
-function createSurfaceWorld(world, planetId, opts = {}) {
-  const { X, Y, Z, CHUNKS_X, CHUNKS_Z } = SURFACE_SIZE;
-  const seed = (world.seed >>> 0) ^ hash32(planetId);
-
-  // 行星档案：8 大类 + 矿脉储量 + 大气（缺省回落 rocky）
-  const planet = world.entities && world.entities.planets ? world.entities.planets[planetId] : null;
-  const system = planet && world.entities.systems ? world.entities.systems[planet.systemId] : null;
-  const category = (opts.category || (planet && planet.category) || 'rocky');
-  const deposits = opts.deposits || (planet && planet.deposits) || {};
-  const atmosphere = opts.atmosphere || (planet && planet.atmosphere) || '';
-  const starTypeId = opts.starTypeId || (system && system.star ? system.star.typeId : 'yellowDwarf');
-
-  const sw = {
-    kind: 'surfaceWorld',
-    planetId,
-    category,
-    atmosphere,
-    starTypeId,
-    seed,
-    sx: X, sy: Y, sz: Z,
-    voxels: new Uint8Array(X * Y * Z),
-    heights: new Int8Array(X * Z),           // 每列最高非空体素 y（-1 = 空列）
-    chunks: [],
-    spawn: { x: X / 2 + 0.5, y: Y - 2, z: Z / 2 + 0.5 },
-    stats: { dug: 0, placed: 0, mined: {} },
-  };
-  for (let cz = 0; cz < CHUNKS_Z; cz++) {
-    for (let cx = 0; cx < CHUNKS_X; cx++) {
-      sw.chunks.push({ cx, cz, dirty: true });
-    }
-  }
-
-  _generateTerrain(sw, deposits);
-  sw.spawn = findSpawnPoint(sw);
-  return sw;
-}
-
-/** 体素线性索引（y 主序：与渲染层共享布局） */
-function idx(sw, x, y, z) {
-  return (y * sw.sz + z) * sw.sx + x;
-}
-
-/**
- * 地形生成：fBm 大陆起伏 + 山脊噪声 + 3D 洞穴 + 分层材质 + 悬浮平台边缘衰减。
- * 噪声种子与矿脉 RNG 相互独立派生，保证增删矿脉不影响地貌。
- */
-function _generateTerrain(sw, deposits) {
-  const { X, Y, Z } = SURFACE_SIZE;
-  const prof = CATEGORY_TERRAIN[sw.category] || CATEGORY_TERRAIN.rocky;
-  const noise = createSimplexNoise((sw.seed ^ 0x1a2b3c4d) >>> 0);
-  const v = sw.voxels;
-
-  for (let z = 0; z < Z; z++) {
-    for (let x = 0; x < X; x++) {
-      // —— 高度场：大陆 fBm + 山脊（ridged）噪声（3 八度控制碎面数量） ——
-      const cont = fbm2(noise, x * 0.042, z * 0.042, 3);
-      let ridge = 1 - Math.abs(noise.noise2D(x * 0.021 + 37.2, z * 0.021 - 11.7));
-      ridge = ridge * ridge;
-      let h = prof.base + cont * prof.amp + ridge * prof.ridge * prof.amp;
-
-      // 海洋类：洼地峡谷（低频负值区下切）；人工天体：台地量化；
-      // 冰封/熔岩：阶地量化（梯田式平台显著改善贪心合并，兼具地貌辨识度）
-      if (sw.category === 'ocean' && cont < -0.18) h -= 2.4;
-      if (sw.category === 'artificial') h = Math.round(h / 3) * 3;
-      if (prof.terrace) h = Math.floor(h / prof.terrace) * prof.terrace + 1;
-
-      // 悬浮平台（气态巨行星）：Chebyshev 边缘 + 噪声海岸线之外的列为虚空
-      if (prof.isle) {
-        const d = Math.max(Math.abs(x - (X - 1) / 2), Math.abs(z - (Z - 1) / 2)) / ((X - 1) / 2);
-        const edge = 0.80 + fbm2(noise, x * 0.09 + 91, z * 0.09 - 45, 2) * 0.10;
-        if (d > edge) {
-          sw.heights[z * X + x] = -1;
-          continue;
-        }
-      }
-
-      const top = clamp(Math.round(h), 3, SURFACE_SIZE.Y - 5);
-      for (let y = 0; y <= top; y++) {
-        let mat = SURFACE_MAT.ROCK;
-        if (y === top) mat = SURFACE_MAT.SURFACE;
-        else if (y <= 1) mat = SURFACE_MAT.BEDROCK;          // 基岩层（不可采）
-        // —— 3D 洞穴雕刻（保留 2 层表壳与基岩完整；高阈值控制暴露面数量） ——
-        if (y > 2 && y < top - 2 && prof.cave > 0) {
-          const c = fbm3(noise, x * 0.085, y * 0.125, z * 0.085, 2);
-          if (c > 0.68 - prof.cave) mat = SURFACE_MAT.AIR;
-        }
-        v[idx(sw, x, y, z)] = mat;
-      }
-      sw.heights[z * X + x] = top;
-    }
-  }
-
-  // —— Ore Voxel Veins：planet.deposits 资量 → 确定性随机游走矿脉 ——
-  _embedOreVeins(sw, deposits, prof);
-}
-
-/**
- * 矿脉嵌入：每种资源按 log2(储量) 生成矿脉条数（受类别 ore 系数与上限约束），
- * 每条矿脉为 5..16 步随机游走 + 1..2 体素半径团簇，只替换岩层（不动表面/基岩）。
- */
-function _embedOreVeins(sw, deposits, prof) {
-  const { X, Y, Z } = SURFACE_SIZE;
-  const rng = seedFromNumber((sw.seed ^ 0x51ed270b) >>> 0);
-  const v = sw.voxels;
-  for (const resId of ['ferro', 'silicate', 'rareEarth', 'heavyMetal']) {
-    const amount = deposits[resId];
-    if (!(amount > 0)) continue;
-    const matId = Number(Object.keys(ORE_RESOURCE_BY_MAT).find((k) => ORE_RESOURCE_BY_MAT[k] === resId));
-    const veins = clamp(Math.round(Math.log2(amount + 2) * prof.ore), 2, 26);
-    for (let n = 0; n < veins; n++) {
-      let vx = int(rng, X);
-      let vz = int(rng, Z);
-      let vy = rngIntRange(rng, 3, Y - 6);      // 矿脉埋藏在地下层
-      const steps = rngIntRange(rng, 5, 16);
-      for (let s = 0; s < steps; s++) {
-        const r = rngFloat(rng) < 0.35 ? 1 : 0; // 团簇半径（0=单块，1=3×3×3）
-        for (let dx = -r; dx <= r; dx++) {
-          for (let dy = -r; dy <= r; dy++) {
-            for (let dz = -r; dz <= r; dz++) {
-              const bx = vx + dx;
-              const by = vy + dy;
-              const bz = vz + dz;
-              if (bx < 0 || bx >= X || by < 2 || by >= Y || bz < 0 || bz >= Z) continue;
-              const i = idx(sw, bx, by, bz);
-              if (v[i] === SURFACE_MAT.ROCK) v[i] = matId; // 只侵入岩层
-            }
-          }
-        }
-        vx = clamp(vx + int(rng, 3) - 1, 0, X - 1);
-        vy = clamp(vy + int(rng, 3) - 1, 2, Y - 4);
-        vz = clamp(vz + int(rng, 3) - 1, 0, Z - 1);
-      }
-    }
-  }
-}
-
-// ———— 体素访问 ————
-
-/**
- * 读取体素材质。越界：y 超层返回 AIR；x/z 越界返回 AIR（世界边缘可视）。
- * @returns {number} 材质 ID
- */
-function getVoxel(sw, x, y, z) {
-  const { X, Y, Z } = SURFACE_SIZE;
-  const xi = Math.floor(x);
-  const yi = Math.floor(y);
-  const zi = Math.floor(z);
-  if (yi < 0 || yi >= Y || xi < 0 || xi >= X || zi < 0 || zi >= Z) return SURFACE_MAT.AIR;
-  return sw.voxels[(yi * sw.sz + zi) * sw.sx + xi];
-}
-
-/** 列顶扫描：重算 heights 缓存（在 set/dig 后调用） */
-function _rescanColumn(sw, x, z) {
-  const { X, Y } = SURFACE_SIZE;
-  for (let y = Y - 1; y >= 0; y--) {
-    if (sw.voxels[(y * sw.sz + z) * sw.sx + x] !== SURFACE_MAT.AIR) {
-      sw.heights[z * X + x] = y;
-      return;
-    }
-  }
-  sw.heights[z * X + x] = -1;
-}
-
-/** 标记体素所属区块与（跨界时的）邻接区块为脏 */
-function _markDirty(sw, x, z) {
-  const { CHUNK, CHUNKS_X, CHUNKS_Z } = SURFACE_SIZE;
-  const cx = Math.floor(x / CHUNK);
-  const cz = Math.floor(z / CHUNK);
-  const mark = (a, b) => {
-    if (a < 0 || a >= CHUNKS_X || b < 0 || b >= CHUNKS_Z) return;
-    sw.chunks[b * CHUNKS_X + a].dirty = true;
-  };
-  mark(cx, cz);
-  const lx = x - cx * CHUNK;
-  const lz = z - cz * CHUNK;
-  if (lx === 0) mark(cx - 1, cz);
-  if (lx === CHUNK - 1) mark(cx + 1, cz);
-  if (lz === 0) mark(cx, cz - 1);
-  if (lz === CHUNK - 1) mark(cx, cz + 1);
-}
-
-/**
- * 原始写体素（含边界检查，供挖掘/放置/直接改造共用）。
- * @returns {boolean} 是否实际写入
- */
-function setVoxel(sw, x, y, z, matId) {
-  const { X, Y, Z } = SURFACE_SIZE;
-  const xi = Math.floor(x);
-  const yi = Math.floor(y);
-  const zi = Math.floor(z);
-  if (yi < 0 || yi >= Y || xi < 0 || xi >= X || zi < 0 || zi >= Z) return false;
-  if (!Number.isInteger(matId) || matId < SURFACE_MAT.AIR || matId > SURFACE_MAT.BUILDING) return false;
-  const i = (yi * sw.sz + zi) * sw.sx + xi;
-  if (sw.voxels[i] === matId) return false;
-  sw.voxels[i] = matId;
-  _markDirty(sw, xi, zi);
-  if (yi >= sw.heights[zi * X + xi]) {
-    // 写入/删除当前顶面及以上：置顶或重扫该列
-    if (matId !== SURFACE_MAT.AIR) sw.heights[zi * X + xi] = yi;
-    else _rescanColumn(sw, xi, zi);
-  }
-  return true;
-}
-
-/**
- * 挖掘体素：基岩不可挖；矿脉按 ORE_RESOURCE_BY_MAT 入账。
- * @returns {{ matId:number, resourceDrop:{resId:string, amount:number}|null }}
- */
-function digVoxel(sw, x, y, z) {
-  const matId = getVoxel(sw, x, y, z);
-  if (matId === SURFACE_MAT.AIR || matId === SURFACE_MAT.BEDROCK) {
-    return { matId, resourceDrop: null }; // 空气/基岩：不可挖掘
-  }
-  if (!setVoxel(sw, x, y, z, SURFACE_MAT.AIR)) {
-    return { matId, resourceDrop: null };
-  }
-  sw.stats.dug++;
-  let resourceDrop = null;
-  const resId = ORE_RESOURCE_BY_MAT[matId];
-  if (resId) {
-    resourceDrop = { resId, amount: 1 };
-    sw.stats.mined[resId] = (sw.stats.mined[resId] || 0) + 1;
-  } else if (matId === SURFACE_MAT.BUILDING) {
-    resourceDrop = { resId: 'alloy', amount: 1 }; // 拆除建筑结构回收合金
-  }
-  return { matId, resourceDrop };
-}
-
-/**
- * 放置体素：仅允许写入空气格（已有体素需先挖掘）。
- * @returns {boolean}
- */
-function placeVoxel(sw, x, y, z, matId) {
-  if (getVoxel(sw, x, y, z) !== SURFACE_MAT.AIR) return false;
-  if (!setVoxel(sw, x, y, z, matId)) return false;
-  sw.stats.placed++;
-  return true;
-}
-
-// ———— DDA 射线（Amanatides & Woo） ————
-
-/**
- * 体素 DDA 射线步进：返回命中的体素坐标、进入面法线与材质。
- * @param {{x:number,y:number,z:number}} origin 射线起点（世界坐标）
- * @param {{x:number,y:number,z:number}|number[]} dir 单位方向
- * @param {number} maxDist 最大步进距离
- * @returns {{ hit:boolean, vx:number, vy:number, vz:number, nx:number, ny:number, nz:number, matId:number, t:number }}
- */
-function ddaRaycast(sw, origin, dir, maxDist = 8) {
-  const ox = origin[0] !== undefined ? origin[0] : origin.x;
-  const oy = origin[1] !== undefined ? origin[1] : origin.y;
-  const oz = origin[2] !== undefined ? origin[2] : origin.z;
-  const dx = dir[0] !== undefined ? dir[0] : dir.x;
-  const dy = dir[1] !== undefined ? dir[1] : dir.y;
-  const dz = dir[2] !== undefined ? dir[2] : dir.z;
-  let x = Math.floor(ox);
-  let y = Math.floor(oy);
-  let z = Math.floor(oz);
-  const stepX = dx > 0 ? 1 : -1;
-  const stepY = dy > 0 ? 1 : -1;
-  const stepZ = dz > 0 ? 1 : -1;
-  const tDeltaX = dx !== 0 ? Math.abs(1 / dx) : Infinity;
-  const tDeltaY = dy !== 0 ? Math.abs(1 / dy) : Infinity;
-  const tDeltaZ = dz !== 0 ? Math.abs(1 / dz) : Infinity;
-  let tMaxX = dx !== 0 ? (dx > 0 ? x + 1 - ox : ox - x) * tDeltaX : Infinity;
-  let tMaxY = dy !== 0 ? (dy > 0 ? y + 1 - oy : oy - y) * tDeltaY : Infinity;
-  let tMaxZ = dz !== 0 ? (dz > 0 ? z + 1 - oz : oz - z) * tDeltaZ : Infinity;
-  const miss = { hit: false, vx: 0, vy: 0, vz: 0, nx: 0, ny: 0, nz: 0, matId: 0, t: Infinity };
-  let nx = 0;
-  let ny = 0;
-  let nz = 0;
-  let t = 0;
-  // 起点即实体：零法线命中
-  const m0 = getVoxel(sw, x, y, z);
-  if (m0 !== SURFACE_MAT.AIR) {
-    return { hit: true, vx: x, vy: y, vz: z, nx: 0, ny: 0, nz: 0, matId: m0, t: 0 };
-  }
-  for (let guard = 0; guard < 512; guard++) {
-    if (tMaxX < tMaxY && tMaxX < tMaxZ) {
-      x += stepX; t = tMaxX; tMaxX += tDeltaX;
-      nx = -stepX; ny = 0; nz = 0;
-    } else if (tMaxY < tMaxZ) {
-      y += stepY; t = tMaxY; tMaxY += tDeltaY;
-      nx = 0; ny = -stepY; nz = 0;
-    } else {
-      z += stepZ; t = tMaxZ; tMaxZ += tDeltaZ;
-      nx = 0; ny = 0; nz = -stepZ;
-    }
-    if (t > maxDist) break;
-    const m = getVoxel(sw, x, y, z);
-    if (m !== SURFACE_MAT.AIR) {
-      return { hit: true, vx: x, vy: y, vz: z, nx, ny, nz, matId: m, t };
-    }
-  }
-  return miss;
-}
-
-// ———— 地表查询 ————
-
-/**
- * 列扫描最高非空体素 y（体素占据 [y, y+1)）。空列返回 -1。
- * @returns {number}
- */
-function getSurfaceHeight(sw, x, z) {
-  const { X } = SURFACE_SIZE;
-  const xi = Math.floor(x);
-  const zi = Math.floor(z);
-  if (xi < 0 || xi >= SURFACE_SIZE.X || zi < 0 || zi >= SURFACE_SIZE.Z) return -1;
-  return sw.heights[zi * X + xi];
-}
-
-/** 列是否可站立（存在顶面且顶面下有支撑） */
-function isStandable(sw, x, z) {
-  return getSurfaceHeight(sw, x, z) >= 0;
-}
-
-/**
- * 出生点：自世界中心螺旋外扫，取第一个顶面平整（3×3 高差 ≤1）的列。
- * 返回世界坐标（列中心，脚底 = 顶面体素上沿）。
- * @returns {{x:number, y:number, z:number}}
- */
-function findSpawnPoint(sw) {
-  const { X, Z } = SURFACE_SIZE;
-  const cx = X >> 1;
-  const cz = Z >> 1;
-  let best = null;
-  for (let r = 0; r <= 26 && !best; r++) {
-    for (let dz = -r; dz <= r && !best; dz++) {
-      for (let dx = -r; dx <= r && !best; dx++) {
-        if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
-        const x = cx + dx;
-        const z = cz + dz;
-        if (x < 2 || z < 2 || x >= X - 2 || z >= Z - 2) continue;
-        const h0 = getSurfaceHeight(sw, x, z);
-        if (h0 < 2 || h0 > SURFACE_SIZE.Y - 4) continue;
-        // 3×3 邻域平整性：高差 ≤1，保证出生不卡在陡壁
-        let flat = true;
-        for (let qz = -1; qz <= 1 && flat; qz++) {
-          for (let qx = -1; qx <= 1 && flat; qx++) {
-            const h = getSurfaceHeight(sw, x + qx, z + qz);
-            if (h < 0 || Math.abs(h - h0) > 1) flat = false;
-          }
-        }
-        if (flat) best = { x: x + 0.5, y: h0 + 1, z: z + 0.5 };
-      }
-    }
-  }
-  // 兜底：中心列顶面（heights 全空时回落到 y=2 悬空点，理论不可达）
-  if (!best) {
-    const h = getSurfaceHeight(sw, cx, cz);
-    return { x: cx + 0.5, y: (h >= 0 ? h + 1 : 2), z: cz + 0.5 };
-  }
-  return best;
-}
-
-// ———— 寻路（地表 A*） ————
-
-const SQRT2 = Math.SQRT2;
-const PATH_DIRS = [
-  [1, 0, 1], [-1, 0, 1], [0, 1, 1], [0, -1, 1],
-  [1, 1, SQRT2], [1, -1, SQRT2], [-1, 1, SQRT2], [-1, -1, SQRT2],
-];
-
-/**
- * 地表 A* 寻路：2D 栅格 8 向，可通行条件为两侧列均可站立且顶面高差 ≤ climb。
- * 对角移动要求两个正交邻格同样可通行（禁止切角）。
- * 堆序以 (f, node) 双关键字保证确定性。
- * @param {number} sx,sz 起点格坐标    @param {number} tx,tz 终点格坐标
- * @param {{climb?:number, maxIter?:number}} [opts]
- * @returns {Array<{x:number,y:number,z:number}>|null} 世界坐标路径（含起终点）；不可达为 null
- */
-function findPath(sw, sx, sz, tx, tz, opts = {}) {
-  const { X, Z } = SURFACE_SIZE;
-  const climb = opts.climb == null ? 1 : opts.climb;
-  const maxIter = opts.maxIter || 6000;
-  const inb = (v) => Number.isInteger(v) && v >= 0 && v < X;
-  if (!inb(sx) || !inb(sz) || !inb(tx) || !inb(tz) || sz >= Z || tz >= Z) return null;
-  if (!isStandable(sw, sx, sz) || !isStandable(sw, tx, tz)) return null;
-
-  const N = X;
-  const start = sz * N + sx;
-  const goal = tz * N + tx;
-  if (start === goal) return [{ x: sx + 0.5, y: getSurfaceHeight(sw, sx, sz) + 1, z: sz + 0.5 }];
-
-  const gScore = new Float32Array(N * Z).fill(Infinity);
-  const from = new Int32Array(N * Z).fill(-1);
-  const closed = new Uint8Array(N * Z);
-  const heapF = [];
-  const heapN = [];
-
-  const hOf = (x, z) => sw.heights[z * N + x];
-  const heur = (x, z) => {
-    const dx = Math.abs(x - tx);
-    const dz = Math.abs(z - tz);
-    return (dx + dz) + (SQRT2 - 2) * Math.min(dx, dz); // 八向一致启发
-  };
-  const heapPush = (f, node) => {
-    heapF.push(f);
-    heapN.push(node);
-    let i = heapF.length - 1;
-    while (i > 0) {
-      const p = (i - 1) >> 1;
-      if (heapF[p] < heapF[i] || (heapF[p] === heapF[i] && heapN[p] <= heapN[i])) break;
-      const tf = heapF[i]; heapF[i] = heapF[p]; heapF[p] = tf;
-      const tn = heapN[i]; heapN[i] = heapN[p]; heapN[p] = tn;
-      i = p;
-    }
-  };
-  const heapPop = () => {
-    const topN = heapN[0];
-    const lastF = heapF.pop();
-    const lastN = heapN.pop();
-    if (heapF.length > 0) {
-      heapF[0] = lastF;
-      heapN[0] = lastN;
-      let i = 0;
-      for (;;) {
-        const l = i * 2 + 1;
-        const r = l + 1;
-        let m = i;
-        if (l < heapF.length && (heapF[l] < heapF[m] || (heapF[l] === heapF[m] && heapN[l] < heapN[m]))) m = l;
-        if (r < heapF.length && (heapF[r] < heapF[m] || (heapF[r] === heapF[m] && heapN[r] < heapN[m]))) m = r;
-        if (m === i) break;
-        const tf = heapF[i]; heapF[i] = heapF[m]; heapF[m] = tf;
-        const tn = heapN[i]; heapN[i] = heapN[m]; heapN[m] = tn;
-        i = m;
-      }
-    }
-    return topN;
-  };
-
-  gScore[start] = 0;
-  heapPush(heur(sx, sz), start);
-  let iter = 0;
-  let found = false;
-  while (heapF.length > 0 && iter++ < maxIter) {
-    const cur = heapPop();
-    if (cur === goal) { found = true; break; }
-    if (closed[cur]) continue;
-    closed[cur] = 1;
-    const cxp = cur % N;
-    const czp = (cur / N) | 0;
-    const hc = hOf(cxp, czp);
-    for (let d = 0; d < 8; d++) {
-      const nxp = cxp + PATH_DIRS[d][0];
-      const nzp = czp + PATH_DIRS[d][1];
-      if (nxp < 0 || nxp >= N || nzp < 0 || nzp >= Z) continue;
-      const ni = nzp * N + nxp;
-      if (closed[ni]) continue;
-      const hn = hOf(nxp, nzp);
-      if (hn < 0 || Math.abs(hn - hc) > climb) continue;
-      // 对角禁切角：两个正交邻格须可站立且高差同样合规
-      if (d >= 4) {
-        const h1 = hOf(cxp + PATH_DIRS[d][0], czp);
-        const h2 = hOf(cxp, czp + PATH_DIRS[d][1]);
-        if (h1 < 0 || Math.abs(h1 - hc) > climb || h2 < 0 || Math.abs(h2 - hc) > climb) continue;
-      }
-      const ng = gScore[cur] + PATH_DIRS[d][2];
-      if (ng < gScore[ni]) {
-        gScore[ni] = ng;
-        from[ni] = cur;
-        heapPush(ng + heur(nxp, nzp), ni);
-      }
-    }
-  }
-  if (!found) return null;
-  // 回溯（终点 → 起点），输出世界坐标
-  const path = [];
-  let node = goal;
-  while (node !== -1) {
-    const px = node % N;
-    const pz = (node / N) | 0;
-    path.push({ x: px + 0.5, y: hOf(px, pz) + 1, z: pz + 0.5 });
-    node = from[node];
-  }
-  path.reverse();
-  return path;
-}
-
-// ———— 贪心网格化（0fps 算法，AO 感知共面合并） ————
-
-/** 经典 0fps 逐角点 AO：s1/s2 为两侧邻接，c 为对角 */
-function vertexAO(s1, s2, c) {
-  if (s1 && s2) return 0;
-  return 3 - (s1 + s2 + c);
-}
-
-/**
- * 贪心网格化一个 16×16 列区块（y 全高 24）。
- * 算法（Mikola Lysenko / 0fps）：
- *  1. 对 3 个轴向 × 每层切片构建二值截面 mask：键 = ±(材质+1)
- *     （正号 = 法线朝 +轴，负号朝 -轴；相邻体素一对 solid/air 才产生面）；
- *  2. 每个 mask 单元同时计算 4 角点 AO（面外侧 8 邻域占用）；
- *  3. 矩形最大化：沿 u 向扩张 width、沿 w 向扩张 height，
- *     要求键与 4 角 AO 全部一致（AO 不一致处断开合并，避免插值破绽）；
- *  4. 输出四边形按朝向确定三角形绕序，顶点位置为区块原点偏移的世界坐标。
- * 顶点颜色 = 材质基色 × 行星地表色调(surface) × AO 亮度(0.55..1.0)。
- *
- * @param {object} sw surfaceWorld
- * @param {number} cx 区块 X 索引 0..3  @param {number} cz 区块 Z 索引 0..3
- * @returns {{positions:Float32Array, normals:Float32Array, colors:Float32Array,
- *            quadCount:number, triCount:number}}
- */
-function greedyMeshChunk(sw, cx, cz) {
-  const { X, Y, Z, CHUNK } = SURFACE_SIZE;
-  const dims = [CHUNK, Y, CHUNK];
-  const ox = cx * CHUNK;
-  const oz = cz * CHUNK;
-  const prof = CATEGORY_TERRAIN[sw.category] || CATEGORY_TERRAIN.rocky;
-  const tint = prof.tint;
-  const voxels = sw.voxels;
-
-  // 填充读取：区块内直查，越界回世界（世界外为空气）
-  const getPadded = (x, y, z) => {
-    if (x >= 0 && x < CHUNK && z >= 0 && z < CHUNK && y >= 0 && y < Y) {
-      return voxels[(y * Z + (oz + z)) * X + (ox + x)];
-    }
-    return getVoxel(sw, ox + x, y, oz + z);
-  };
-  const solid = (m) => m !== SURFACE_MAT.AIR;
-
-  const positions = [];
-  const normals = [];
-  const colors = [];
-  let quadCount = 0;
-
-  const maskW = Math.max(dims[1], dims[2]);
-  const maskH = Math.max(dims[1], dims[2]);
-  const maskKey = new Int32Array(maskW * maskH);
-  const maskAO = new Uint8Array(maskW * maskH * 4);
-
-  for (let axis = 0; axis < 3; axis++) {
-    const u = (axis + 1) % 3;
-    const w = (axis + 2) % 3;
-    const x = [0, 0, 0];
-    const q = [0, 0, 0];
-    q[axis] = 1;
-    const mw = dims[u];
-    const mh = dims[w];
-
-    for (x[axis] = -1; x[axis] < dims[axis];) {
-      // —— 1. 构建截面 mask（键 + 4 角 AO） ——
-      let n = 0;
-      for (x[w] = 0; x[w] < mh; x[w]++) {
-        for (x[u] = 0; x[u] < mw; x[u]++, n++) {
-          const a = getPadded(x[0], x[1], x[2]);
-          const b = getPadded(x[0] + q[0], x[1] + q[1], x[2] + q[2]);
-          const solidA = solid(a);
-          if (solidA === solid(b)) { maskKey[n] = 0; continue; }
-          const type = solidA ? a : b;
-          maskKey[n] = solidA ? (type + 1) : -(type + 1);
-
-          // AO 采样面：法线一侧的邻接层
-          const faceShift = solidA ? 1 : -1;
-          const bx = x[0] + q[0] * faceShift;
-          const by = x[1] + q[1] * faceShift;
-          const bz = x[2] + q[2] * faceShift;
-          const duX = u === 0 ? 1 : 0;
-          const duY = u === 1 ? 1 : 0;
-          const duZ = u === 2 ? 1 : 0;
-          const dwX = w === 0 ? 1 : 0;
-          const dwY = w === 1 ? 1 : 0;
-          const dwZ = w === 2 ? 1 : 0;
-          const occ = (uu, ww) => (solid(getPadded(
-            bx + duX * uu + dwX * ww,
-            by + duY * uu + dwY * ww,
-            bz + duZ * uu + dwZ * ww,
-          )) ? 1 : 0);
-          const s1u = occ(1, 0);
-          const s1d = occ(-1, 0);
-          const s2u = occ(0, 1);
-          const s2d = occ(0, -1);
-          const cuu = occ(1, 1);
-          const cud = occ(1, -1);
-          const cdu = occ(-1, 1);
-          const cdd = occ(-1, -1);
-          // 角序：(0,0) (1,0) (1,1) (0,1) —— (u,w) 单元局部坐标
-          maskAO[n * 4 + 0] = vertexAO(s1d, s2d, cdd);
-          maskAO[n * 4 + 1] = vertexAO(s1u, s2d, cud);
-          maskAO[n * 4 + 2] = vertexAO(s1u, s2u, cuu);
-          maskAO[n * 4 + 3] = vertexAO(s1d, s2u, cdu);
-        }
-      }
-
-      x[axis]++;
-      if (x[axis] < 0) continue;
-
-      // —— 2. 矩形最大化（键 + AO 全等才合并） ——
-      n = 0;
-      for (let j = 0; j < mh; j++) {
-        for (let i = 0; i < mw;) {
-          const key = maskKey[n];
-          if (key === 0) { i++; n++; continue; }
-          const ao0 = maskAO[n * 4];
-          const ao1 = maskAO[n * 4 + 1];
-          const ao2 = maskAO[n * 4 + 2];
-          const ao3 = maskAO[n * 4 + 3];
-          let width = 1;
-          while (i + width < mw) {
-            const k2 = maskKey[n + width];
-            if (k2 !== key) break;
-            const b2 = (n + width) * 4;
-            if (maskAO[b2] !== ao0 || maskAO[b2 + 1] !== ao1
-              || maskAO[b2 + 2] !== ao2 || maskAO[b2 + 3] !== ao3) break;
-            width++;
-          }
-          let height = 1;
-          outer: while (j + height < mh) {
-            for (let kk = 0; kk < width; kk++) {
-              const i2 = n + kk + height * mw;
-              if (maskKey[i2] !== key) break outer;
-              const b2 = i2 * 4;
-              if (maskAO[b2] !== ao0 || maskAO[b2 + 1] !== ao1
-                || maskAO[b2 + 2] !== ao2 || maskAO[b2 + 3] !== ao3) break outer;
-            }
-            height++;
-          }
-
-          // —— 3. 发射四边形（世界坐标顶点 + AO 烘焙颜色） ——
-          const type = Math.abs(key) - 1;
-          const dirPositive = key > 0;
-          const pos = [0, 0, 0];
-          pos[axis] = x[axis];
-          pos[u] = i;
-          pos[w] = j;
-          const normalIndex = axis === 0 ? (dirPositive ? 0 : 1)
-            : axis === 1 ? (dirPositive ? 2 : 3) : (dirPositive ? 4 : 5);
-          const nxv = NORMALS[normalIndex][0];
-          const nyv = NORMALS[normalIndex][1];
-          const nzv = NORMALS[normalIndex][2];
-
-          const base = MATERIAL_COLORS[type];
-          const aoBright = [0.55 + 0.15 * ao0, 0.55 + 0.15 * ao1, 0.55 + 0.15 * ao2, 0.55 + 0.15 * ao3];
-          // 顶点基色（surface 乘行星色调）
-          const tr = type === SURFACE_MAT.SURFACE ? base[0] * tint[0] : base[0];
-          const tg = type === SURFACE_MAT.SURFACE ? base[1] * tint[1] : base[1];
-          const tb = type === SURFACE_MAT.SURFACE ? base[2] * tint[2] : base[2];
-
-          const corner = (du, dv, aoB) => {
-            const p = [pos[0], pos[1], pos[2]];
-            p[u] += du;
-            p[w] += dv;
-            positions.push(ox + p[0], p[1], oz + p[2]);
-            normals.push(nxv, nyv, nzv);
-            colors.push(tr * aoB, tg * aoB, tb * aoB);
-          };
-          const v00 = [0, 0, aoBright[0]];
-          const v10 = [width, 0, aoBright[1]];
-          const v11 = [width, height, aoBright[2]];
-          const v01 = [0, height, aoBright[3]];
-          const emit = (A, B, C) => { corner(A[0], A[1], A[2]); corner(B[0], B[1], B[2]); corner(C[0], C[1], C[2]); };
-          if (dirPositive) {
-            emit(v00, v10, v11);
-            emit(v00, v11, v01);
-          } else {
-            emit(v00, v11, v10);
-            emit(v00, v01, v11);
-          }
-          quadCount++;
-
-          // 消费区域清零
-          for (let dj = 0; dj < height; dj++) {
-            for (let di = 0; di < width; di++) {
-              maskKey[n + di + dj * mw] = 0;
-            }
-          }
-          i += width;
-          n += width;
-        }
-      }
-    }
-  }
-
-  return {
-    positions: new Float32Array(positions),
-    normals: new Float32Array(normals),
-    colors: new Float32Array(colors),
-    quadCount,
-    triCount: quadCount * 2,
-  };
-}
-
-Object.assign(__exports, { SURFACE_SIZE, SURFACE_MAT, MATERIAL_COLORS, ORE_RESOURCE_BY_MAT, CATEGORY_TERRAIN, hash32, createSimplexNoise, createSurfaceWorld, getVoxel, setVoxel, digVoxel, placeVoxel, ddaRaycast, getSurfaceHeight, isStandable, findSpawnPoint, findPath, greedyMeshChunk });
 
 });
 __register("src/render/meshes/GroundMeshes.js", function (__exports, __require) {
@@ -18587,236 +28410,2434 @@ function buildUnitBox() {
 Object.assign(__exports, { buildExosuitMesh, buildGruntMesh, buildHeavyMesh, buildTurretMesh, buildBossMesh, buildColonistMesh, buildBuildingMesh, buildConveyorBelt, buildUnitBox });
 
 });
-__register("src/render/gl/Mat4.js", function (__exports, __require) {
+__register("src/render/gl/themePayload.js", function (__exports, __require) {
 /**
- * render/gl/Mat4.js — 4x4 列主序矩阵工具（WebGL 约定）
+ * render/gl/themePayload.js — 主题 → 渲染载荷装配器（doc7 TASK-3.2/3.3/3.4）
  *
- * 移植自参考实现 simulation-matrix/common/math/mat4.js，并补全：
- *  - mat4TRS：欧拉角（yaw=Y, pitch=X, roll=Z，合成顺序 R = Ry·Rx·Rz）模型矩阵；
- *  - vec3ApplyMat4 / mat4MulVec4：向量变换。
+ * buildThemePayload(themeId, world, planetId, opts) 产出 PlanetSurfaceScene.setTheme
+ * 消费的一揽子主题载荷（terrain/sky/weather + 顶层 sun/fog 便捷镜像），把 doc6 §4.4
+ * 的九维色板 { base, shadow, highlight, danger, emissive, atmosphere }（sRGB HEX）
+ * 翻译为渲染端 uniform 域（线性色、场域坐标热区、主题特效开关、天空模式、天气）。
  *
- * 零分配约定：所有 out 均由调用方传入 Float32Array(16)（vec3 为 Float32Array(3)），
- * 渲染循环内不产生任何新数组。存储布局：m[col * 4 + row]（列主序）。
+ * 载荷形态（与 PlanetTerrainMesh.setTheme / PlanetAtmosphere.setTheme 同形）：
+ *   {
+ *     themeId,                       // 解析后的主题 id（fallback 时为 null）
+ *     terrain: {
+ *       matColors: [4]×[r,g,b]线性, // 通道 0=base 地表 1=shadow 崖壁 2=highlight 生态 3=danger 道路/脉络
+ *       heatZones: [{x,z,radius,intensity}],   // 场域坐标（permafrost：中央热源塔 + 中继站；opts.heatZones 可覆盖）
+ *       themeFx:   { waterLevel, biolumePulse, lavaEmissive },
+ *       footsteps: [],              // 运行时由视图层填（doc7 §4.1-6 压感涟漪）
+ *       sun: { dir, color }, fog: { color, range },
+ *     },
+ *     sky:   { zenith, horizon, ground, stars, skyMode, auroraStrength?, gasHeight?, dustDensity? },
+ *     weather: { kind, density, wind, boxHalf, boxHeight },
+ *     sun:   { dir, color },   // 顶层镜像（scene 同时下发地形/大气）
+ *     fog:   { color, range }, // 顶层镜像（scene 取作清屏基色）
+ *   }
+ *
+ * 主题特化（doc7 §4.1 七大旗舰）：
+ *   abyssal_ocean      水位 -4、短程水下雾 [18,140]、过滤蓝日光、海洋雪 motes；
+ *   permafrost_furnace 低角度冷日、stars 0.4、snow 0.7、热区默认中央炉塔（场域中心）
+ *                      + 双中继站（cosmeticSeed 确定散布）、whiteout 由运行时加倍密度；
+ *   red_regolith       硬白高日、dust 天空 + 0.35 尘幕、长视距；
+ *   dry_night_polar    0.35 强度暗紫日、stars 1.0、aurora 天空、干燥无雪（纪律红线）；
+ *   sulfur_marsh       病绿日光、gas 天空 uGasHeight≈4.5m（海拔锁定毒气湖）；
+ *   biolume_canopy     青绿日光、spores 0.3、biolumePulse=1（压感涟漪 + 荧光脉络）；
+ *   obsidian_lava      暗橙低日、ash 0.25、lavaEmissive=1（谷底岩浆黑体）。
+ *   扩展钩子（TASK-4.1/4.2）：11 扩展主题全部入表 — cryomethane_sea（水位 -6）、
+ *   glassstorm_barrens（dust）、cloud_giant_atolls（无水/云海甲板/特短视距/大气登陆）、
+ *   magnetar_aurora（强极光）、fractured_moon（真空满星/特长视距/0.25g）等，
+ *   配套 EXPANSION_GAMEPLAY 玩法规则表（landingMode/movementMod/visibilityMod/hazardNote）。
+ *
+ * 色板来源优先级：opts.palette → setThemePaletteSource 注册的外部注册表（D1 的
+ * planetThemes.js 落地后由主代理接线）→ 本文件 FLAGSHIP_PALETTES（doc6 §4.4 最小
+ * 本地映射）→ CATEGORY_PALETTES（themeless 行星按 category 兜底）→ generic 兜底。
+ *
+ * 确定性：world/planet 经 derivePlanetSeeds 派生，太阳方位/热区散布由 cosmeticSeed
+ * 的 mulberry32 子流驱动；全程无 Math.random（任务书 1.5 / lint:static P0）。
+ * 本模块为纯函数集（除可注入的色板源槽位外零状态）；Node 侧可安全 import。
  */
 
-/** 新建单位矩阵（唯一的分配点：仅限初始化阶段调用） */
-function mat4() {
-  const m = new Float32Array(16);
-  m[0] = 1; m[5] = 1; m[10] = 1; m[15] = 1;
-  return m;
+const { derivePlanetSeeds: derivePlanetSeeds } = __require("src/domain/ground/planetSeeds.js");
+
+// ———— 色板（doc6 §4.4 / doc7 §4.0；sRGB HEX，输出前统一转线性） ————
+
+/** 七大旗舰主题最小本地色板（planetThemes.js 落地前的权威兜底；形状与其一致） */
+const FLAGSHIP_PALETTES = {
+  abyssal_ocean: {
+    base: '#087F95', shadow: '#042A46', highlight: '#5DEBDF', danger: '#B77BFF',
+    emissive: '#5DEBDF', atmosphere: '#0A4E68',
+  },
+  permafrost_furnace: {
+    base: '#EAF5FF', shadow: '#466D8A', highlight: '#91BBD1', danger: '#F2A85D',
+    emissive: '#F2A85D', atmosphere: '#BFD3E0',
+  },
+  red_regolith_frontier: {
+    base: '#C66B3B', shadow: '#8B4F36', highlight: '#D4A36A', danger: '#F0C78D',
+    emissive: '#D4A36A', atmosphere: '#E3C39A',
+  },
+  dry_night_polar: {
+    base: '#101421', shadow: '#090C14', highlight: '#D8DCE8', danger: '#77718F',
+    emissive: '#BDA4FF', atmosphere: '#161C2E',
+  },
+  sulfur_marsh: {
+    base: '#1D341B', shadow: '#101E0E', highlight: '#748F2B', danger: '#B7D84C',
+    emissive: '#D9FF76', atmosphere: '#5F6E2E',
+  },
+  biolume_canopy: {
+    base: '#082B3D', shadow: '#041A25', highlight: '#42D8C6', danger: '#007E91',
+    emissive: '#A981FF', atmosphere: '#0E3C4C',
+  },
+  obsidian_lava: {
+    base: '#160F14', shadow: '#0A0709', highlight: '#5B171D', danger: '#E54B24',
+    emissive: '#FFAA3C', atmosphere: '#2A1210',
+  },
+  // —— 扩展主题预置（TASK-4.1/4.2 消费同一条载荷通路；色值与 planetThemes.js
+  //    doc6 §4.4 注册表逐位一致（外部源接线后自动优先于本表） ——
+  cryomethane_sea: {
+    base: '#082B32', shadow: '#031418', highlight: '#56C6C2', danger: '#B8E7E2',
+    emissive: '#B8E7E2', atmosphere: '#167C87',
+  },
+  glassstorm_barrens: {
+    base: '#33262E', shadow: '#15100F', highlight: '#9C735D', danger: '#E2BE93',
+    emissive: '#F5E0BB', atmosphere: '#9C735D',
+  },
+  prism_crystal: {
+    base: '#DCEFF7', shadow: '#5A7484', highlight: '#56CBE5', danger: '#9A83D8',
+    emissive: '#FFB7EC', atmosphere: '#56CBE5',
+  },
+  salt_mirror_desert: {
+    base: '#E8E1CD', shadow: '#8A8270', highlight: '#C7A8A2', danger: '#8B6C88',
+    emissive: '#D9B86C', atmosphere: '#C7A8A2',
+  },
+  tidal_lock_dusk: {
+    base: '#E2A05A', shadow: '#31445F', highlight: '#CDA978', danger: '#CDA06B',
+    emissive: '#80BCD5', atmosphere: '#80BCD5',
+  },
+  cloud_giant_atolls: {
+    base: '#E5A65A', shadow: '#6E4A2E', highlight: '#F2D6AA', danger: '#5D618F',
+    emissive: '#C87E67', atmosphere: '#F2D6AA',
+  },
+  fungal_catacombs: {
+    base: '#160F2C', shadow: '#0A0716', highlight: '#9B4DCA', danger: '#9B4DCA',
+    emissive: '#5AD3A8', atmosphere: '#4B2A71',
+  },
+  ancient_megastructure: {
+    base: '#161F29', shadow: '#0A0F14', highlight: '#6D7F8C', danger: '#6D7F8C',
+    emissive: '#42C3D6', atmosphere: '#42C3D6',
+  },
+  magnetar_aurora: {
+    base: '#091729', shadow: '#040B16', highlight: '#1A3F69', danger: '#6A56C4',
+    emissive: '#B9FFEB', atmosphere: '#6A56C4',
+  },
+  canopy_colossus: {
+    base: '#123D32', shadow: '#081B16', highlight: '#2F8D69', danger: '#2F8D69',
+    emissive: '#F4D979', atmosphere: '#2F8D69',
+  },
+  fractured_moon: {
+    base: '#39414B', shadow: '#181C22', highlight: '#8B7967', danger: '#D99A62',
+    emissive: '#B6C4D9', atmosphere: '#8A98AC',
+  },
+};
+
+/** themeless 行星：按 planet.category 兜底（与 terrainProfiles 8 大类对齐 + generic） */
+const CATEGORY_PALETTES = {
+  rocky: {
+    base: '#8A7F6C', shadow: '#57503F', highlight: '#A99C7E', danger: '#C9B98F',
+    emissive: '#C9B98F', atmosphere: '#B7A98D',
+  },
+  ocean: {
+    base: '#0B5E7A', shadow: '#05304A', highlight: '#3FB7C4', danger: '#7FB6A2',
+    emissive: '#3FB7C4', atmosphere: '#7FB0BE',
+  },
+  ice: {
+    base: '#DDE9F2', shadow: '#7C97AB', highlight: '#BFD4E2', danger: '#9FB8CC',
+    emissive: '#CFE6F5', atmosphere: '#B9CCDA',
+  },
+  desert: {
+    base: '#C69A62', shadow: '#8A6640', highlight: '#E2C089', danger: '#EAD3A0',
+    emissive: '#E2C089', atmosphere: '#DDBE8E',
+  },
+  lava: {
+    base: '#1A1216', shadow: '#0D090B', highlight: '#5B171D', danger: '#E54B24',
+    emissive: '#FFAA3C', atmosphere: '#331615',
+  },
+  toxic: {
+    base: '#24371F', shadow: '#131F10', highlight: '#6E8A2E', danger: '#A9CC4B',
+    emissive: '#CBE76A', atmosphere: '#5E6E33',
+  },
+  artificial: {
+    base: '#5E6870', shadow: '#2B3238', highlight: '#8FA3AE', danger: '#42C3D6',
+    emissive: '#42C3D6', atmosphere: '#6C7A82',
+  },
+  gasGiant: {
+    base: '#C2925C', shadow: '#7A5A44', highlight: '#E5C89A', danger: '#D9B36B',
+    emissive: '#F2D6AA', atmosphere: '#C7A87E',
+  },
+  generic: {
+    base: '#8A7F6C', shadow: '#57503F', highlight: '#A99C7E', danger: '#C9B98F',
+    emissive: '#C9B98F', atmosphere: '#B7A98D',
+  },
+};
+
+/** 无水水位哨兵（PlanetTerrainMesh/PlanetWater 约定：<-90 视为无流体表面） */
+const WATERLEVEL_NONE = -1000.0;
+
+// ———— 主题渲染特化表（doc7 §4.1 实施细则的渲染端投影） ————
+
+const THEME_RENDER = {
+  abyssal_ocean: {
+    waterLevel: -4,
+    fogRange: [18, 140],
+    sky: { skyMode: 0, stars: 0 },
+    sun: { az: 0.9, el: 0.85, color: [0.32, 0.52, 0.62] },
+    weather: { kind: 'motes', density: 0.15, wind: [0.5, 0.3] },
+    heat: false,
+  },
+  permafrost_furnace: {
+    waterLevel: WATERLEVEL_NONE,
+    fogRange: [30, 260],
+    sky: { skyMode: 0, stars: 0.4 },
+    sun: { az: 2.2, el: 0.3, color: [0.66, 0.78, 0.92] },
+    weather: { kind: 'snow', density: 0.7, wind: [3.4, 1.2] },
+    heat: true,
+  },
+  red_regolith_frontier: {
+    waterLevel: WATERLEVEL_NONE,
+    fogRange: [70, 480],
+    sky: { skyMode: 3, stars: 0, dustDensity: 0.55 },
+    sun: { az: 5.4, el: 1.05, color: [1.28, 1.22, 1.1] },
+    weather: { kind: 'dust', density: 0.35, wind: [2.6, 0.7] },
+    heat: false,
+  },
+  dry_night_polar: {
+    waterLevel: WATERLEVEL_NONE,
+    fogRange: [40, 300],
+    sky: { skyMode: 1, stars: 1.0, auroraStrength: 1.0 },
+    sun: { az: 1.4, el: 0.45, color: [0.3, 0.25, 0.44] },
+    weather: { kind: 'motes', density: 0.15, wind: [0.4, 0.2] },
+    heat: false,
+  },
+  sulfur_marsh: {
+    waterLevel: WATERLEVEL_NONE,
+    fogRange: [24, 180],
+    sky: { skyMode: 2, stars: 0, gasHeightM: 4.5 },
+    sun: { az: 3.6, el: 0.55, color: [0.44, 0.52, 0.22] },
+    weather: { kind: 'ash', density: 0.15, wind: [0.8, 0.4] },
+    heat: false,
+  },
+  biolume_canopy: {
+    waterLevel: WATERLEVEL_NONE,
+    fogRange: [45, 320],
+    sky: { skyMode: 0, stars: 0 },
+    sun: { az: 0.3, el: 0.72, color: [0.34, 0.58, 0.55] },
+    weather: { kind: 'spores', density: 0.3, wind: [0.5, 0.35] },
+    heat: false,
+  },
+  obsidian_lava: {
+    waterLevel: WATERLEVEL_NONE,
+    fogRange: [36, 240],
+    sky: { skyMode: 0, stars: 0 },
+    sun: { az: 4.4, el: 0.38, color: [0.58, 0.32, 0.16] },
+    weather: { kind: 'ash', density: 0.25, wind: [1.4, 0.5] },
+    heat: false,
+  },
+  cryomethane_sea: {
+    waterLevel: -6,
+    fogRange: [16, 120],
+    sky: { skyMode: 0, stars: 0 },
+    sun: { az: 1.9, el: 0.62, color: [0.3, 0.48, 0.55] },
+    weather: { kind: 'motes', density: 0.15, wind: [0.6, 0.3] },
+    heat: false,
+  },
+  glassstorm_barrens: {
+    waterLevel: WATERLEVEL_NONE,
+    fogRange: [50, 340],
+    sky: { skyMode: 3, stars: 0, dustDensity: 0.7 },
+    sun: { az: 5.9, el: 0.92, color: [1.1, 1.02, 0.88] },
+    weather: { kind: 'dust', density: 0.5, wind: [3.8, 0.9] },
+    heat: false,
+  },
+  // —— 扩展主题渲染特化（doc6 §4.5.8-4.5.18 / doc7 §4.0 矩阵，TASK-4.1/4.2） ——
+  prism_crystal: {
+    waterLevel: WATERLEVEL_NONE,
+    fogRange: [60, 420],
+    sky: { skyMode: 0, stars: 0 },
+    sun: { az: 2.8, el: 1.0, color: [1.15, 1.2, 1.26] },   // 冷白高日，晨昏折射光带
+    weather: { kind: 'motes', density: 0.18, wind: [0.5, 0.3] },
+    heat: false,
+  },
+  salt_mirror_desert: {
+    waterLevel: WATERLEVEL_NONE,
+    fogRange: [80, 520],                                    // 极简空旷：天地镜像长视距
+    sky: { skyMode: 3, stars: 0, dustDensity: 0.25 },       // 浅粉薄尘
+    sun: { az: 5.0, el: 1.15, color: [1.35, 1.28, 1.12] },  // 强反光过曝风险由 haze 压制
+    weather: { kind: 'dust', density: 0.2, wind: [1.6, 0.5] },
+    heat: false,
+  },
+  tidal_lock_dusk: {
+    waterLevel: WATERLEVEL_NONE,
+    fogRange: [40, 300],
+    sky: { skyMode: 0, stars: 0.25 },                       // 暮光带：昼金夜蓝交汇，夜侧微星
+    sun: { az: 3.14, el: 0.12, color: [1.35, 0.95, 0.55] }, // 永昼侧贴地平线灼金低日
+    weather: { kind: 'motes', density: 0.15, wind: [1.0, 0.4] }, // 晨昏环带terminator风
+    heat: false,
+  },
+  cloud_giant_atolls: {
+    waterLevel: WATERLEVEL_NONE,                            // 无水体：地表切片即云海甲板
+    fogRange: [24, 130],                                    // 云层深度感 → 特短视距
+    sky: { skyMode: 2, stars: 0, gasHeightM: 10.0 },        // 云瀑雾带（气巨专属高度层）
+    sun: { az: 2.6, el: 0.75, color: [1.05, 0.88, 0.66] },  // 云金漫射日光
+    weather: { kind: 'dust', density: 0.75, wind: [5.2, 1.6] }, // 风暴墙高速旋转流
+    heat: false,
+  },
+  fungal_catacombs: {
+    waterLevel: WATERLEVEL_NONE,
+    fogRange: [20, 150],                                    // 菌盖层层遮蔽：近距雾
+    sky: { skyMode: 2, stars: 0, gasHeightM: 6.0 },         // 孢子紫浓雾（高度锁定雾层）
+    sun: { az: 1.2, el: 0.5, color: [0.42, 0.3, 0.55] },    // 菌褐紫幽光
+    weather: { kind: 'spores', density: 0.5, wind: [0.4, 0.3] }, // 孢子雨
+    heat: false,
+  },
+  ancient_megastructure: {
+    waterLevel: WATERLEVEL_NONE,
+    fogRange: [70, 460],
+    sky: { skyMode: 0, stars: 0 },
+    sun: { az: 0.4, el: 0.85, color: [0.95, 1.0, 1.08] },   // 受控排空大气：冷白金工日光
+    weather: { kind: 'motes', density: 0.12, wind: [0.4, 0.2] },
+    heat: false,
+  },
+  magnetar_aurora: {
+    waterLevel: WATERLEVEL_NONE,
+    fogRange: [45, 340],
+    sky: { skyMode: 1, stars: 0.9, auroraStrength: 1.5 },   // 强极光幕帘 + 周期磁暴脉冲
+    sun: { az: 4.0, el: 0.35, color: [0.22, 0.28, 0.42] },  // 极夜深蓝微光
+    weather: { kind: 'motes', density: 0.2, wind: [0.9, 0.4] }, // 电离粒子漂移
+    heat: false,
+  },
+  canopy_colossus: {
+    waterLevel: WATERLEVEL_NONE,
+    fogRange: [40, 280],
+    sky: { skyMode: 0, stars: 0 },
+    sun: { az: 0.3, el: 0.68, color: [0.5, 0.66, 0.4] },    // 湿绿林冠过滤日光
+    weather: { kind: 'spores', density: 0.35, wind: [0.7, 0.4] }, // 孢子金/上升气流
+    heat: false,
+  },
+  fractured_moon: {
+    waterLevel: WATERLEVEL_NONE,
+    fogRange: [200, 900],                                   // 真空：极低雾密度 → 特长视距
+    sky: { skyMode: 0, stars: 1.0 },                        // 无大气：天幕满星 + 碎环
+    sun: { az: 4.8, el: 0.5, color: [0.9, 0.72, 0.5] },     // 残阳橙低照度（母星反照）
+    weather: { kind: 'motes', density: 0.05, wind: [0.2, 0.1] }, // 仅微陨石尘埃火花
+    heat: false,
+  },
+};
+
+/** themeless 行星渲染兜底（按 category；generic 为最终回退） */
+const CATEGORY_RENDER = {
+  rocky:     { waterLevel: WATERLEVEL_NONE, fogRange: [60, 420], sky: { skyMode: 0, stars: 0 }, sun: { az: 0.7, el: 0.8, color: [1.0, 0.96, 0.84] }, weather: { kind: 'motes', density: 0.15, wind: [0.6, 0.3] }, heat: false },
+  ocean:     { waterLevel: -4,              fogRange: [26, 180], sky: { skyMode: 0, stars: 0 }, sun: { az: 0.7, el: 0.8, color: [0.55, 0.68, 0.75] }, weather: { kind: 'motes', density: 0.15, wind: [0.5, 0.3] }, heat: false },
+  ice:       { waterLevel: WATERLEVEL_NONE, fogRange: [40, 300], sky: { skyMode: 0, stars: 0 }, sun: { az: 2.0, el: 0.5, color: [0.82, 0.88, 0.98] }, weather: { kind: 'snow', density: 0.35, wind: [1.8, 0.6] }, heat: false },
+  desert:    { waterLevel: WATERLEVEL_NONE, fogRange: [70, 480], sky: { skyMode: 0, stars: 0 }, sun: { az: 5.2, el: 1.0, color: [1.2, 1.12, 0.95] }, weather: { kind: 'dust', density: 0.25, wind: [2.2, 0.6] }, heat: false },
+  lava:      { waterLevel: WATERLEVEL_NONE, fogRange: [36, 240], sky: { skyMode: 0, stars: 0 }, sun: { az: 4.2, el: 0.45, color: [0.62, 0.36, 0.2] }, weather: { kind: 'ash', density: 0.25, wind: [1.2, 0.5] }, heat: false, lavaEmissive: 1 },
+  toxic:     { waterLevel: WATERLEVEL_NONE, fogRange: [28, 190], sky: { skyMode: 2, stars: 0, gasHeightM: 3.5 }, sun: { az: 3.4, el: 0.6, color: [0.5, 0.55, 0.3] }, weather: { kind: 'ash', density: 0.15, wind: [0.8, 0.4] }, heat: false },
+  artificial:{ waterLevel: WATERLEVEL_NONE, fogRange: [70, 420], sky: { skyMode: 0, stars: 0 }, sun: { az: 1.1, el: 0.75, color: [1.0, 0.98, 0.92] }, weather: { kind: 'motes', density: 0.15, wind: [0.4, 0.2] }, heat: false },
+  gasGiant:  { waterLevel: WATERLEVEL_NONE, fogRange: [80, 520], sky: { skyMode: 0, stars: 0 }, sun: { az: 2.6, el: 0.7, color: [1.05, 0.9, 0.7] }, weather: { kind: 'motes', density: 0.15, wind: [1.0, 0.4] }, heat: false },
+  generic:   { waterLevel: WATERLEVEL_NONE, fogRange: [60, 420], sky: { skyMode: 0, stars: 0 }, sun: { az: 0.7, el: 0.8, color: [1.0, 0.96, 0.84] }, weather: { kind: 'motes', density: 0.15, wind: [0.6, 0.3] }, heat: false },
+};
+
+/**
+ * 扩展主题 GamePlay 规则表（doc6 §4.5.8-4.5.18 / doc7 §4.0 矩阵列九"危险与行动规则"，
+ * TASK-4.1/4.2；GroundView 接线消费）。与渲染配置同文件共置，便于主题身份整体评审。
+ *
+ * 字段约定：
+ *   landingMode   'surface' 常规地表登陆 | 'atmospheric' 高空浮台/探针模式
+ *                 （cloud_giant_atolls = 'atmospheric'，严禁普通地表登陆 — doc6 §4.5.12）
+ *   movementMod   移动修正：gravityScale 重力倍率（fractured_moon 0.25g 低重力）；
+ *                 windPush 风向推力倍率（glassstorm 顺逆风移速差异）
+ *   visibilityMod 可视距离倍率（雾/风暴/毒雾主题 <1，真空 >1；渲染 fogRange 的玩法镜像）
+ *   hazardNote    主题环境危险中文摘要（简报页展示）
+ */
+const EXPANSION_GAMEPLAY = {
+  prism_crystal: {
+    landingMode: 'surface',
+    movementMod: {},
+    visibilityMod: 0.9,
+    hazardNote: '大型晶体干扰无线电与罗盘读数，折射光路需谐振校准导航',
+  },
+  salt_mirror_desert: {
+    landingMode: 'surface',
+    movementMod: {},
+    visibilityMod: 0.8,
+    hazardNote: '强反光造成光学测距误差，盐壳下暗藏塌陷卤水腔',
+  },
+  cryomethane_sea: {
+    landingMode: 'surface',
+    movementMod: {},
+    visibilityMod: 0.75,
+    hazardNote: '薄冰承重随机断裂，低温持续衰减外骨骼与船体性能',
+  },
+  tidal_lock_dusk: {
+    landingMode: 'surface',
+    movementMod: {},
+    visibilityMod: 1.0,
+    hazardNote: '昼侧灼热夜侧深寒，跨温区行动必须沿暮光带狭长走廊布局',
+  },
+  cloud_giant_atolls: {
+    landingMode: 'atmospheric',
+    movementMod: {},
+    visibilityMod: 0.55,
+    hazardNote: '严禁普通地表登陆：仅限高空浮台/气球探针/轨道无人机，风暴墙周期性撕毁浮台锚链',
+  },
+  fungal_catacombs: {
+    landingMode: 'surface',
+    movementMod: {},
+    visibilityMod: 0.7,
+    hazardNote: '孢子浓雾需过滤通风，巨菌盖崩落会封闭通道',
+  },
+  ancient_megastructure: {
+    landingMode: 'surface',
+    movementMod: {},
+    visibilityMod: 1.0,
+    hazardNote: '古代哨卫机甲与协议锁仍在线，能源脊短路电弧伤人',
+  },
+  glassstorm_barrens: {
+    landingMode: 'surface',
+    movementMod: { windPush: 1.0 },
+    visibilityMod: 0.6,
+    hazardNote: '高速碎玻璃风暴磨蚀装备，顺风逆风移速差异显著',
+  },
+  magnetar_aurora: {
+    landingMode: 'surface',
+    movementMod: {},
+    visibilityMod: 0.95,
+    hazardNote: '磁暴脉冲峰值期电子护盾与喷气背包静默，依托避雷屏蔽塔窗口行动',
+  },
+  canopy_colossus: {
+    landingMode: 'surface',
+    movementMod: {},
+    visibilityMod: 0.85,
+    hazardNote: '林冠掠食者沿树冠巡逻，垂直落差坠落即死',
+  },
+  fractured_moon: {
+    landingMode: 'surface',
+    movementMod: { gravityScale: 0.25 },
+    visibilityMod: 1.2,
+    hazardNote: '0.25g 低重力跳跃过冲，真空无声音警示仅骨传导',
+  },
+};
+
+// ———— 工具 ————————————————
+
+/** FNV-1a 32 位字符串摘要（本地确定性；与 planetSeeds 的 hash32 语义对齐） */
+function fnv32(v) {
+  const s = String(v);
+  let acc = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    acc ^= s.charCodeAt(i);
+    acc = Math.imul(acc, 0x01000193);
+  }
+  return acc >>> 0;
 }
 
-/** out = 单位矩阵 */
-function mat4Identity(out) {
-  out.fill(0);
-  out[0] = 1; out[5] = 1; out[10] = 1; out[15] = 1;
-  return out;
+/** mulberry32 确定性子流（cosmeticSeed → 太阳抖动/热区散布；无 Math.random） */
+function mulberry32(a) {
+  let s = a >>> 0;
+  return function next() {
+    s = (s + 0x6D2B79F5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
-/** out = a * b（列主序；语义为先施加 b 再施加 a） */
-function mat4Multiply(out, a, b) {
-  const a00 = a[0], a01 = a[1], a02 = a[2], a03 = a[3];
-  const a10 = a[4], a11 = a[5], a12 = a[6], a13 = a[7];
-  const a20 = a[8], a21 = a[9], a22 = a[10], a23 = a[11];
-  const a30 = a[12], a31 = a[13], a32 = a[14], a33 = a[15];
-  for (let i = 0; i < 4; i++) {
-    const b0 = b[i * 4], b1 = b[i * 4 + 1], b2 = b[i * 4 + 2], b3 = b[i * 4 + 3];
-    out[i * 4] = b0 * a00 + b1 * a10 + b2 * a20 + b3 * a30;
-    out[i * 4 + 1] = b0 * a01 + b1 * a11 + b2 * a21 + b3 * a31;
-    out[i * 4 + 2] = b0 * a02 + b1 * a12 + b2 * a22 + b3 * a32;
-    out[i * 4 + 3] = b0 * a03 + b1 * a13 + b2 * a23 + b3 * a33;
+/**
+ * sRGB HEX → 线性 RGB（doc6 §4.4：Shader 需正确转换到线性空间；标准 sRGB EOTF）。
+ * @param {string} hex '#RRGGBB'（'#' 可省略） @returns {[number,number,number]} 线性 [r,g,b]（非法输入回退黑色）
+ */
+function srgbToLinear(hex) {
+  const h = String(hex == null ? '' : hex).replace('#', '').trim();
+  if (!/^[0-9a-fA-F]{6}$/.test(h)) return [0, 0, 0];
+  const out = [];
+  for (let i = 0; i < 3; i++) {
+    const c = parseInt(h.slice(i * 2, i * 2 + 2), 16) / 255;
+    out.push(c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
   }
   return out;
 }
 
-/** 透视投影矩阵（fovy 为竖直视场角，弧度） */
-function mat4Perspective(out, fovyRad, aspect, near, far) {
-  const f = 1 / Math.tan(fovyRad / 2);
-  out.fill(0);
-  out[0] = f / aspect;
-  out[5] = f;
-  out[10] = (far + near) / (near - far);
-  out[11] = -1;
-  out[14] = (2 * far * near) / (near - far);
-  return out;
+function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+function mix3(a, b, t) {
+  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+}
+function scale3(a, k) { return [a[0] * k, a[1] * k, a[2] * k]; }
+function norm3(v) {
+  const l = Math.hypot(v[0], v[1], v[2]) || 1;
+  return [v[0] / l, v[1] / l, v[2] / l];
 }
 
-/** 正交投影矩阵 */
-function mat4Ortho(out, left, right, bottom, top, near, far) {
-  out.fill(0);
-  out[0] = 2 / (right - left);
-  out[5] = 2 / (top - bottom);
-  out[10] = -2 / (far - near);
-  out[12] = -(right + left) / (right - left);
-  out[13] = -(top + bottom) / (top - bottom);
-  out[14] = -(far + near) / (far - near);
-  out[15] = 1;
-  return out;
+// ———— 色板解析 ————————————————
+
+/** 外部色板源槽位（D1 planetThemes.js 落地后由主代理注入；fn(themeId) → palette|null） */
+let externalPaletteSource = null;
+
+/**
+ * 注册外部主题色板源（集成点：planetThemes.js 就绪后
+ * `setThemePaletteSource((id) => planetThemes[id]?.palette ?? null)`）。
+ * @param {((themeId:string)=>object|null)|null} fn
+ */
+function setThemePaletteSource(fn) {
+  externalPaletteSource = typeof fn === 'function' ? fn : null;
 }
 
-/** 视图矩阵：相机位于 eye，看向 center，up 为世界上方向（右手系） */
-function mat4LookAt(out, eye, center, up) {
-  let zx = eye[0] - center[0];
-  let zy = eye[1] - center[1];
-  let zz = eye[2] - center[2];
-  let len = Math.sqrt(zx * zx + zy * zy + zz * zz);
-  if (len === 0) { zx = 0; zy = 0; zz = 1; len = 1; }
-  zx /= len; zy /= len; zz /= len;
-  let xx = up[1] * zz - up[2] * zy;
-  let xy = up[2] * zx - up[0] * zz;
-  let xz = up[0] * zy - up[1] * zx;
-  len = Math.sqrt(xx * xx + xy * xy + xz * xz);
-  if (len === 0) { xx = 1; xy = 0; xz = 0; } else { xx /= len; xy /= len; xz /= len; }
-  const yx = zy * xz - zz * xy;
-  const yy = zz * xx - zx * xz;
-  const yz = zx * xy - zy * xx;
-  out[0] = xx; out[1] = yx; out[2] = zx; out[3] = 0;
-  out[4] = xy; out[5] = yy; out[6] = zy; out[7] = 0;
-  out[8] = xz; out[9] = yz; out[10] = zz; out[11] = 0;
-  out[12] = -(xx * eye[0] + xy * eye[1] + xz * eye[2]);
-  out[13] = -(yx * eye[0] + yy * eye[1] + yz * eye[2]);
-  out[14] = -(zx * eye[0] + zy * eye[1] + zz * eye[2]);
-  out[15] = 1;
-  return out;
+/** 色板查表：opts.palette → 外部源 → 旗舰本地表 → category 兜底 → generic */
+function resolvePalette(themeId, category, opts) {
+  if (opts && opts.palette) return opts.palette;
+  if (themeId && externalPaletteSource) {
+    const ext = externalPaletteSource(themeId);
+    if (ext) return ext;
+  }
+  if (themeId && FLAGSHIP_PALETTES[themeId]) return FLAGSHIP_PALETTES[themeId];
+  if (category && CATEGORY_PALETTES[category]) return CATEGORY_PALETTES[category];
+  return CATEGORY_PALETTES.generic;
 }
 
-/** 一般 4x4 求逆（伴随展开法）。奇异矩阵返回 null。 */
-function mat4Invert(out, m) {
-  const a00 = m[0], a01 = m[1], a02 = m[2], a03 = m[3];
-  const a10 = m[4], a11 = m[5], a12 = m[6], a13 = m[7];
-  const a20 = m[8], a21 = m[9], a22 = m[10], a23 = m[11];
-  const a30 = m[12], a31 = m[13], a32 = m[14], a33 = m[15];
-
-  const b00 = a00 * a11 - a01 * a10;
-  const b01 = a00 * a12 - a02 * a10;
-  const b02 = a00 * a13 - a03 * a10;
-  const b03 = a01 * a12 - a02 * a11;
-  const b04 = a01 * a13 - a03 * a11;
-  const b05 = a02 * a13 - a03 * a12;
-  const b06 = a20 * a31 - a21 * a30;
-  const b07 = a20 * a32 - a22 * a30;
-  const b08 = a20 * a33 - a23 * a30;
-  const b09 = a21 * a32 - a22 * a31;
-  const b10 = a21 * a33 - a23 * a31;
-  const b11 = a22 * a33 - a23 * a32;
-
-  let det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
-  if (!det) return null;
-  det = 1.0 / det;
-
-  out[0] = (a11 * b11 - a12 * b10 + a13 * b09) * det;
-  out[1] = (a02 * b10 - a01 * b11 - a03 * b09) * det;
-  out[2] = (a31 * b05 - a32 * b04 + a33 * b03) * det;
-  out[3] = (a22 * b04 - a21 * b05 - a23 * b03) * det;
-  out[4] = (a12 * b08 - a10 * b11 - a13 * b07) * det;
-  out[5] = (a00 * b11 - a02 * b08 + a03 * b07) * det;
-  out[6] = (a32 * b02 - a30 * b05 - a33 * b01) * det;
-  out[7] = (a20 * b05 - a22 * b02 + a23 * b01) * det;
-  out[8] = (a10 * b10 - a11 * b08 + a13 * b06) * det;
-  out[9] = (a01 * b08 - a00 * b10 - a03 * b06) * det;
-  out[10] = (a30 * b04 - a31 * b02 + a33 * b00) * det;
-  out[11] = (a21 * b02 - a20 * b04 - a23 * b00) * det;
-  out[12] = (a11 * b07 - a10 * b09 - a12 * b06) * det;
-  out[13] = (a00 * b09 - a01 * b07 + a02 * b06) * det;
-  out[14] = (a31 * b01 - a30 * b03 - a32 * b00) * det;
-  out[15] = (a20 * b03 - a21 * b01 + a22 * b00) * det;
-  return out;
+/** 渲染特化查表：旗舰表 → category 兜底 → generic */
+function resolveRenderConfig(themeId, category) {
+  if (themeId && THEME_RENDER[themeId]) return THEME_RENDER[themeId];
+  if (category && CATEGORY_RENDER[category]) return CATEGORY_RENDER[category];
+  return CATEGORY_RENDER.generic;
 }
 
-/** 平移矩阵（覆盖 out，非右乘叠加） */
-function mat4Translate(out, x, y, z) {
-  mat4Identity(out);
-  out[12] = x; out[13] = y; out[14] = z;
-  return out;
+/** 行星类别解析：opts.category 显式 → world 实体档案 → null（generic 兜底） */
+function resolveCategory(world, planetId, opts) {
+  if (opts && opts.category) return String(opts.category);
+  const planets = world && world.entities && world.entities.planets;
+  const p = planets ? planets[planetId] : null;
+  return p && p.category ? String(p.category) : null;
 }
 
-/** 缩放矩阵（覆盖 out） */
-function mat4Scale(out, x, y, z) {
-  mat4Identity(out);
-  out[0] = x; out[5] = y; out[10] = z;
-  return out;
+// ———— 载荷装配 ————————————————
+
+/**
+ * 构建 PlanetSurfaceScene.setTheme 主题载荷（详见文件头形态注释）。
+ * @param {string|null} themeId 主题 id（doc6 §4.4；null/未知 → category/generic 兜底）
+ * @param {{seed:number}|null} world 世界实体（只读取 seed；null 视为 seed 0）
+ * @param {string|number|null} planetId 行星 id（参与子流派生）
+ * @param {{
+ *   palette?:object,                    // 色板覆盖（{base,shadow,highlight,danger,emissive,atmosphere}）
+ *   category?:string,                   // 类别覆盖（themeless 兜底解析用）
+ *   heatZones?:Array<{x:number,z:number,radius:number,intensity:number}>, // 覆盖默认热区（任务蓝图驱动）
+ *   heatCenter?:[number,number],        // 默认热区中心（场域坐标；缺省 [0,0] = 场域中心）
+ *   sunDir?:[number,number,number],     // 太阳方向覆盖（绕过确定性抖动）
+ *   fogRange?:[number,number],          // 雾距覆盖
+ * }} [opts]
+ * @returns {object} 主题载荷（纯数据、可 JSON 序列化、逐位确定）
+ */
+function buildThemePayload(themeId, world, planetId, opts = {}) {
+  const o = opts || {};
+  const seeds = derivePlanetSeeds(world || { seed: 0 }, planetId == null ? 'unknown' : planetId);
+  const category = resolveCategory(world, planetId, o);
+  const palette = resolvePalette(themeId, category, o);
+  const cfg = resolveRenderConfig(themeId, category);
+  const rng = mulberry32((seeds.cosmeticSeed ^ fnv32(themeId == null ? `cat:${category}` : themeId)) >>> 0);
+
+  // —— 太阳：主题基准方位/仰角 + cosmeticSeed 确定性抖动（纯视觉相位） ——
+  const az = cfg.sun.az + (rng() - 0.5) * 0.7;
+  const el = Math.max(0.08, cfg.sun.el + (rng() - 0.5) * 0.2);
+  const dir = o.sunDir ? norm3(o.sunDir)
+    : norm3([Math.cos(el) * Math.sin(az), Math.sin(el), Math.cos(el) * Math.cos(az)]);
+  const sun = { dir, color: cfg.sun.color.slice() };
+
+  // —— 线性色板 → 4 通道材质色 + 天空三段 + 雾 ——
+  const base = srgbToLinear(palette.base);
+  const shadow = srgbToLinear(palette.shadow);
+  const highlight = srgbToLinear(palette.highlight);
+  const danger = srgbToLinear(palette.danger);
+  const atmosphere = srgbToLinear(palette.atmosphere);
+  const matColors = [base, shadow, highlight, danger];
+  const sky = {
+    zenith: atmosphere,
+    horizon: mix3(atmosphere, highlight, 0.32),
+    ground: scale3(shadow, 0.6),
+    stars: cfg.sky.stars,
+    skyMode: cfg.sky.skyMode,
+  };
+  if (cfg.sky.skyMode === 1) sky.auroraStrength = cfg.sky.auroraStrength != null ? cfg.sky.auroraStrength : 1.0;
+  if (cfg.sky.skyMode === 2) sky.gasHeight = cfg.sky.gasHeightM != null ? cfg.sky.gasHeightM : 4.5;
+  if (cfg.sky.skyMode === 3) sky.dustDensity = cfg.sky.dustDensity != null ? cfg.sky.dustDensity : 0.5;
+
+  const fog = {
+    color: atmosphere,
+    range: (Array.isArray(o.fogRange) && o.fogRange.length >= 2) ? [o.fogRange[0], o.fogRange[1]] : cfg.fogRange.slice(),
+  };
+
+  // —— 主题特效开关（doc7 §8.2 uThemeFx） ——
+  const themeFx = {
+    waterLevel: Number.isFinite(cfg.waterLevel) ? cfg.waterLevel : WATERLEVEL_NONE,
+    biolumePulse: themeId === 'biolume_canopy' ? 1 : 0,
+    lavaEmissive: (themeId === 'obsidian_lava' || cfg.lavaEmissive === 1) ? 1 : 0,
+  };
+
+  // —— 热区（permafrost 旗舰）：opts.heatZones 覆盖 > 默认中央炉塔 + 双中继站 ——
+  let heatZones = [];
+  if (Array.isArray(o.heatZones)) {
+    for (const hz of o.heatZones) {
+      if (hz && Number.isFinite(hz.x) && Number.isFinite(hz.z) && hz.radius > 0) {
+        heatZones.push({ x: hz.x, z: hz.z, radius: hz.radius, intensity: Number.isFinite(hz.intensity) ? hz.intensity : 1.0 });
+      }
+    }
+  } else if (cfg.heat) {
+    const cx = Array.isArray(o.heatCenter) && Number.isFinite(o.heatCenter[0]) ? o.heatCenter[0] : 0;
+    const cz = Array.isArray(o.heatCenter) && Number.isFinite(o.heatCenter[1]) ? o.heatCenter[1] : 0;
+    const a0 = rng() * Math.PI * 2;
+    heatZones = [
+      { x: cx, z: cz, radius: 34, intensity: 1.0 },                                  // 中央热源塔（12m 地标同位）
+      { x: cx + Math.cos(a0) * 78, z: cz + Math.sin(a0) * 78, radius: 16, intensity: 0.65 },          // 加热中继站 ×2
+      { x: cx + Math.cos(a0 + 2.4) * 78, z: cz + Math.sin(a0 + 2.4) * 78, radius: 16, intensity: 0.65 },
+    ];
+  }
+
+  const weather = {
+    kind: cfg.weather.kind,
+    density: cfg.weather.density,
+    wind: cfg.weather.wind.slice(),
+    boxHalf: 72.0,
+    boxHeight: 40.0,
+  };
+
+  return {
+    themeId: themeId && FLAGSHIP_PALETTES[themeId] ? themeId : (themeId || null),
+    terrain: {
+      matColors,
+      heatZones,
+      themeFx,
+      footsteps: [],
+      sun,
+      fog,
+    },
+    sky,
+    weather,
+    sun,
+    fog,
+  };
 }
 
-/** 绕 X 轴旋转矩阵（弧度，右手系；覆盖 out） */
-function mat4RotateX(out, rad) {
-  mat4Identity(out);
-  const c = Math.cos(rad), s = Math.sin(rad);
-  out[5] = c; out[6] = s; out[9] = -s; out[10] = c;
-  return out;
+Object.assign(__exports, { FLAGSHIP_PALETTES, CATEGORY_PALETTES, WATERLEVEL_NONE, EXPANSION_GAMEPLAY, srgbToLinear, setThemePaletteSource, buildThemePayload });
+
+});
+__register("src/render/gl/PlanetSurfaceScene.js", function (__exports, __require) {
+/**
+ * render/gl/PlanetSurfaceScene.js — 行星地表场景编排器（doc7 TASK-1.3，Phase 1 切片）
+ *
+ * 帧流水线（与 PlanetSurface3D 的状态隔离纪律一致，doc7 §2.2 / doc6 §3.2-3.3）：
+ *   post.beginScene（防御性冗余清屏；清屏唯一所有者仍是 PostProcessor 8 步契约）
+ *     → PlanetAtmosphere.drawSky（关深度天空，1 dc）
+ *     → PlanetTerrainMesh.sync + draw（不透明地形，逐可见 Chunk 1 dc，≤64）
+ *     → 对象占位 pass（actors.boxes/chars/decals —— Phase 1 为 null 安全空操作，
+ *       后续对象 pass 波次在此接入真实实例化绘制）
+ *     → PlanetAtmosphere.drawWeather（加性粒子，≤1 dc）
+ *
+ * sceneData 契约（全部字段可选，缺省安全跳过）：
+ *   {
+ *     time: 秒, dt: 秒,
+ *     camera: { yaw, pitch, dist, target:[x,y,z] }     // 轨道相机（target 缺省场地中心）
+ *           | { eye:[x,y,z], fwd:[x,y,z] , target? }   // 或直给眼位/朝向
+ *     actors: { boxes:[], chars:[], decals:[] },        // 可选；本切片空数组安全跳过
+ *     theme:  { terrain:{...}, sky:{...}, weather:{...} }, // 与 setTheme 同形（引用变更才下发）
+ *     sun:    { dir:[x,y,z], color:[r,g,b] },           // 可选覆盖（同时下发地形/大气）
+ *     fog:    { color:[r,g,b], range:[near,far] },      // 可选覆盖（地形 + 清屏基色）
+ *   }
+ * opts: { time?, dt? }
+ *
+ * 消费方式（后续 GroundView 接入，本类不自绑 GroundView）：
+ *   import { PlanetSurfaceScene, buildDebugScene } from '.../PlanetSurfaceScene.js';
+ *   const scene = new PlanetSurfaceScene(canvasManager);   // 或 buildDebugScene(...)
+ *   scene.mount(field, planetInfo);                        // field 来自 terrainField
+ *   const stats = scene.draw(gl, w, h, sceneData, opts);   // 每帧
+ *   scene.destroy();                                       // 卸载（TERRAIN-08 清册零泄漏）
+ *
+ * stats API（getStats()）：{ drawCalls, chunksVisible, triangles, meshRebuilds,
+ *   frameMs, chunksTotal, objectsQueued, debugMode } —— frameMs 为 30 帧滚动 EMA。
+ *
+ * 约束：顶层不触碰 document/window（Node 侧可安全 import，模块级零 DOM/WebGL）；
+ * 全程确定性（无 Math.random）；不注册 window 诊断钩子（避免与 PlanetSurface3D 的
+ * __vfSurfaceDebug 冲突，诊断接入由视图层决定）；上下文恢复经 rebuild() 重建内部
+ * 渲染器（供 CanvasManager.onGLStateChange 的视图侧钩子调用）。
+ */
+
+const { mat4: mat4, mat4Multiply: mat4Multiply, mat4Perspective: mat4Perspective, mat4LookAt: mat4LookAt, mat4Invert: mat4Invert } = __require("src/render/gl/Mat4.js");
+const { PlanetTerrainMesh: PlanetTerrainMesh } = __require("src/render/gl/PlanetTerrainMesh.js");
+const { PlanetAtmosphere: PlanetAtmosphere } = __require("src/render/gl/PlanetAtmosphere.js");
+const { buildTerrainField: buildTerrainField } = __require("src/domain/ground/terrainField.js");
+
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
 }
 
-/** 绕 Y 轴旋转矩阵（弧度，右手系；覆盖 out） */
-function mat4RotateY(out, rad) {
-  mat4Identity(out);
-  const c = Math.cos(rad), s = Math.sin(rad);
-  out[0] = c; out[2] = -s; out[8] = s; out[10] = c;
-  return out;
-}
+class PlanetSurfaceScene {
+  /**
+   * @param {object} canvasManager CanvasManager 实例（消费其 glc/post/tier/hasGL）
+   * @param {{tier?:number, planetRadiusMeters?:number}} [opts]
+   */
+  constructor(canvasManager, opts = {}) {
+    if (!canvasManager) throw new Error('[PlanetSurfaceScene] 需要 CanvasManager 实例');
+    this._cm = canvasManager;
+    this.tier = opts.tier != null ? opts.tier : (canvasManager.tier != null ? canvasManager.tier : 1);
+    this._destroyed = false;
+    this._inited = false;
 
-/** 绕 Z 轴旋转矩阵（弧度，右手系；覆盖 out） */
-function mat4RotateZ(out, rad) {
-  mat4Identity(out);
-  const c = Math.cos(rad), s = Math.sin(rad);
-  out[0] = c; out[1] = s; out[4] = -s; out[5] = c;
-  return out;
+    // tier≥3 或无 GL：整体惰性（draw 返回空 stats，不抛错）
+    const glc = canvasManager.glc;
+    const canGL = !!(glc && glc.gl) && canvasManager.hasGL !== false && this.tier < 3;
+
+    this._field = null;
+    this._lastThemeRef = null;
+    this._planetInfo = null;
+    this._fogColor = [0.62, 0.65, 0.70];
+    this._fogRange = [60.0, 420.0];
+
+    this._terrain = null;
+    this._atmosphere = null;
+    if (canGL) {
+      this._terrain = new PlanetTerrainMesh(glc, this.tier);
+      this._atmosphere = new PlanetAtmosphere(glc, this.tier);
+      if (opts.planetRadiusMeters) this._terrain.setPlanetRadius(opts.planetRadiusMeters);
+    }
+
+    // —— 相机/矩阵草稿（零分配：渲染循环内不新建矩阵） ——
+    this.camera = { eye: [0, 0, 0], target: [0, 0, 0], yaw: 0.8, pitch: 0.5, dist: 60 };
+    this._m = { proj: mat4(), view: mat4(), vp: mat4(), invVp: mat4() };
+
+    this._stats = {
+      drawCalls: 0, chunksVisible: 0, triangles: 0, meshRebuilds: 0,
+      frameMs: 0, chunksTotal: 0, objectsQueued: 0, debugMode: 0,
+    };
+    this._actorQueued = 0;
+    this._lastFrameT = -1;
+  }
+
+  // ———— 挂载 / 主题 ————————————————
+
+  /**
+   * 绑定 terrainField 字段实体并应用行星主题。
+   * @param {object} field terrainField.createTerrainField(world, planetId) 的返回实体
+   * @param {object} [planetInfo] { visualRadiusMeters?, theme?: {terrain, sky, weather} }
+   * @returns {PlanetSurfaceScene} this
+   */
+  mount(field, planetInfo) {
+    if (this._destroyed) throw new Error('[PlanetSurfaceScene] 已销毁，不可再 mount');
+    if (!field || !Array.isArray(field.chunks) || field.chunks.length === 0) {
+      throw new Error('[PlanetSurfaceScene] mount 需要 terrainField 字段实体（含 chunks）');
+    }
+    this._field = field;
+    this._planetInfo = planetInfo || null;
+    this._stats.chunksTotal = field.chunks.length;
+    const pi = this._planetInfo;
+    if (pi && pi.visualRadiusMeters && this._terrain) {
+      this._terrain.setPlanetRadius(pi.visualRadiusMeters);
+    }
+    this.setTheme(pi && pi.theme ? pi.theme : {});
+    this._inited = true;
+    return this;
+  }
+
+  /**
+   * 主题下发（缺省字段保留现值）：
+   *  terrain : PlanetTerrainMesh.setTheme 同形（matColors/heatZones/themeFx/footsteps/fog/sun）
+   *  sky     : PlanetAtmosphere.setTheme 同形（zenith/horizon/ground/stars/skyMode/...）
+   *  weather : { kind, density, wind, boxHalf, boxHeight }
+   *  sun/fog : 顶层便捷覆盖（同时作用于地形与大气）
+   * @param {object} [theme]
+   */
+  setTheme(theme) {
+    const t = theme || {};
+    if (this._terrain) {
+      const tt = t.terrain || {};
+      this._terrain.setTheme({
+        matColors: tt.matColors,
+        heatZones: tt.heatZones,
+        themeFx: tt.themeFx,
+        footsteps: tt.footsteps,
+        sun: t.sun || tt.sun,
+        fog: t.fog || tt.fog,
+      });
+    }
+    if (this._atmosphere) {
+      this._atmosphere.setTheme({
+        sky: t.sky,
+        weather: t.weather,
+        sun: t.sun || (t.sky && t.sky.sun),
+        fog: t.fog,
+      });
+    }
+    if (t.fog) {
+      if (Array.isArray(t.fog.color) && t.fog.color.length >= 3) {
+        this._fogColor = [t.fog.color[0], t.fog.color[1], t.fog.color[2]];
+      }
+      if (Array.isArray(t.fog.range) && t.fog.range.length >= 2) {
+        this._fogRange = [t.fog.range[0], t.fog.range[1]];
+      }
+    } else if (this._terrain) {
+      this._fogColor = this._terrain.getFogColor().slice();
+      this._fogRange = this._terrain.getFogRange().slice();
+    }
+    this._lastThemeRef = null; // 强制下一帧重新合并 sceneData.theme
+  }
+
+  /** 视觉行星半径（米）透传（默认 1800，doc7 曲率公式） */
+  setPlanetRadius(r) {
+    if (this._terrain) this._terrain.setPlanetRadius(r);
+  }
+
+  /**
+   * 世界平移透传（场域 → 视图空间）：GroundView 集成中地形场域 512m 中心
+   * (256,256) 需对齐体素空间 (32,32) → offset (-224,0,-224)。相机/对象 pass
+   * 全部留在视图空间；热区/脚步主题载荷仍按场域坐标下发（渲染器内部平移）。
+   * @param {Array<number>} o [x,y,z]
+   * @returns {PlanetSurfaceScene} this
+   */
+  setWorldOffset(o) {
+    if (this._terrain) this._terrain.setWorldOffset(o);
+    return this;
+  }
+
+  /** 地形背面剔除开关透传（默认 true；诊断对照视图用） */
+  setCullEnabled(enabled) {
+    if (this._terrain) this._terrain.setCullEnabled(enabled);
+  }
+
+  /**
+   * 地形诊断模式透传（0=正式 1=unlit_nocull 2=法线+1m格线 3=绕序审计；
+   * 模式 1/3 渲染器侧临时关剔除）。真线框（gl.LINES 覆盖层）属后续诊断波次，
+   * 模式 2 的黄色 1m 格线即 wireframe_normal 档既定呈现。
+   * @param {number} mode 0..3 @returns {number} 实际生效模式
+   */
+  setDebugMode(mode) {
+    const m = this._terrain ? this._terrain.setDebugMode(mode) : 0;
+    this._stats.debugMode = m;
+    return m;
+  }
+
+  getDebugMode() { return this._terrain ? this._terrain.getDebugMode() : 0; }
+
+  /** 内部渲染器访问（诊断/测试用；勿在渲染循环外持有） */
+  get terrainRenderer() { return this._terrain; }
+  get atmosphereRenderer() { return this._atmosphere; }
+
+  // ———— 帧绘制 ————————————————
+
+  /**
+   * 绘制一帧地表场景。内部先 post.beginScene（防御性冗余清屏——清屏唯一所有者
+   * 仍为 PostProcessor.beginScene 8 步契约，doc7 §2.2 允许的冗余防御），随后
+   * 天空 → 地形 → 对象占位 → 天气。
+   * @param {WebGL2RenderingContext} gl
+   * @param {number} w 物理像素宽 @param {number} h 物理像素高
+   * @param {object} [sceneData] 见文件头契约
+   * @param {{time?:number, dt?:number}} [opts]
+   * @returns {object} stats 快照（getStats 同形）
+   */
+  draw(gl, w, h, sceneData, opts = {}) {
+    const st = this._stats;
+    if (this._destroyed || !this._inited || !this._field) return this.getStats();
+    if (!this._terrain || !this._atmosphere) return this.getStats(); // tier≥3 惰性
+    if (!gl || gl.isContextLost()) return this.getStats();
+    const rd = sceneData || {};
+    const time = rd.time != null ? rd.time : (opts.time || 0);
+    let dc = 0;
+    const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
+
+    // —— HDR 编码基准（PostProcessor RGBA8 模拟模式：场景预除 hdrRange 存储） ——
+    const post = this._cm ? this._cm.post : null;
+    const hdr = (post && post.hdrSimulated) ? 1.0 / Math.max(1e-3, post.hdrRange) : 1.0;
+
+    // —— 主题（sceneData.theme 引用变更才全量合并；sun/fog 便捷覆盖逐帧合并） ——
+    if (rd.theme && rd.theme !== this._lastThemeRef) {
+      this.setTheme(rd.theme);
+      this._lastThemeRef = rd.theme;
+    }
+    if (rd.sun) this.setSunOnly(rd.sun);
+    if (rd.fog) this.setFogOnly(rd.fog);
+
+    // —— 相机 ——
+    const cam = this._updateCamera(rd.camera, w, h, this._field);
+
+    // —— 0. 场景 FBO 绑定 + 主题地平线色防御清屏 ——
+    if (post && this.tier < 3) {
+      post.beginScene([this._fogColor[0], this._fogColor[1], this._fogColor[2], 1.0]);
+    }
+
+    // —— 1. 天空（pass 状态隔离由 PlanetAtmosphere 自持） ——
+    dc += this._atmosphere.drawSky(gl, { invVp: cam.invVp, eye: cam.eye, time, hdr });
+
+    // —— 2. 地形：增量同步（脏重建 + LOD + geomorph）→ 视锥剔除绘制 ——
+    this._terrain.sync(this._field, cam.eye, { time });
+    const tr = this._terrain.draw(gl, { vp: cam.vp, eye: cam.eye, time, hdr });
+    dc += tr.drawCalls;
+
+    // —— 3. 对象占位 pass（Phase 1 切片：空数组/未提供时安全跳过，0 dc；
+    //      实例化绘制由后续对象 pass 波次在此接入） ——
+    dc += this._drawActorPlaceholders(gl, rd.actors);
+
+    // —— 4. 天气粒子（地形之后、深度测试遮挡、加性；密度 0 时不产生 dc） ——
+    dc += this._atmosphere.drawWeather(gl, {
+      vp: cam.vp, view: cam.view, eye: cam.eye, time, hdr,
+    });
+
+    // —— stats（frameMs：30 帧滚动 EMA） ——
+    st.drawCalls = dc;
+    st.chunksVisible = tr.chunksVisible;
+    st.triangles = tr.triangles;
+    st.meshRebuilds = this._terrain.stats.meshRebuilds;
+    st.objectsQueued = this._actorQueued;
+    if (t0 > 0) {
+      const ms = (typeof performance !== 'undefined' && performance.now) ? performance.now() - t0 : 0;
+      st.frameMs = this._lastFrameT < 0 ? ms : st.frameMs + (ms - st.frameMs) * 0.1;
+      this._lastFrameT = t0;
+    }
+    return this.getStats();
+  }
+
+  /** 逐帧 sun 覆盖（引用无关，直接合并） */
+  setSunOnly(sun) {
+    const payload = { sun };
+    if (this._terrain) this._terrain.setTheme(payload);
+    if (this._atmosphere) this._atmosphere.setTheme(payload);
+  }
+
+  /** 逐帧 fog 覆盖（引用无关，直接合并） */
+  setFogOnly(fog) {
+    const payload = { fog };
+    if (this._terrain) this._terrain.setTheme(payload);
+    if (this._atmosphere) this._atmosphere.setTheme({ fog });
+    if (Array.isArray(fog.color) && fog.color.length >= 3) {
+      this._fogColor = [fog.color[0], fog.color[1], fog.color[2]];
+    }
+    if (Array.isArray(fog.range) && fog.range.length >= 2) {
+      this._fogRange = [fog.range[0], fog.range[1]];
+    }
+  }
+
+  /**
+   * 轨道相机：yaw/pitch/dist/target → eye；或 sceneData.camera.eye/fwd 直给。
+   * 透视 fov 1.05rad、near 0.1、far 1600（512m 场地 + 曲率地平线余量）。
+   */
+  _updateCamera(camData, w, h, field) {
+    const c = camData || {};
+    const m = this._m;
+    const half = field && field.sizeMeters ? field.sizeMeters / 2 : 256;
+    const eye = this.camera.eye;
+    const target = this.camera.target;
+
+    if (Array.isArray(c.eye) && c.eye.length >= 3) {
+      eye[0] = c.eye[0]; eye[1] = c.eye[1]; eye[2] = c.eye[2];
+      if (Array.isArray(c.target) && c.target.length >= 3) {
+        target[0] = c.target[0]; target[1] = c.target[1]; target[2] = c.target[2];
+      } else if (Array.isArray(c.fwd) && c.fwd.length >= 3) {
+        const len = Math.hypot(c.fwd[0], c.fwd[1], c.fwd[2]) || 1;
+        target[0] = eye[0] + c.fwd[0] / len * 10;
+        target[1] = eye[1] + c.fwd[1] / len * 10;
+        target[2] = eye[2] + c.fwd[2] / len * 10;
+      } else {
+        target[0] = eye[0]; target[1] = eye[1] - 1; target[2] = eye[2];
+      }
+    } else {
+      // 轨道：与 PlanetSurface3D 同式的 yaw/pitch 约定（eye = target + dir*dist）
+      if (Array.isArray(c.target) && c.target.length >= 3) {
+        target[0] = c.target[0]; target[1] = c.target[1]; target[2] = c.target[2];
+      } else {
+        target[0] = half; target[1] = 6; target[2] = half;
+      }
+      const yaw = c.yaw != null ? c.yaw : 0.8;
+      const pitch = clamp(c.pitch != null ? c.pitch : 0.5, 0.02, 1.50);
+      const dist = clamp(c.dist != null ? c.dist : half, 1.5, 620);
+      const cp = Math.cos(pitch);
+      eye[0] = target[0] + Math.sin(yaw) * cp * dist;
+      eye[1] = target[1] + Math.sin(pitch) * dist;
+      eye[2] = target[2] + Math.cos(yaw) * cp * dist;
+      this.camera.yaw = yaw;
+      this.camera.pitch = pitch;
+      this.camera.dist = dist;
+    }
+
+    mat4Perspective(m.proj, 1.05, Math.max(1, w) / Math.max(1, h), 0.1, 1600);
+    mat4LookAt(m.view, eye, target, [0, 1, 0]);
+    mat4Multiply(m.vp, m.proj, m.view);
+    if (!mat4Invert(m.invVp, m.vp)) m.invVp.fill(0); // 奇异防御（天空反投影有 w 保护）
+    return { eye, target, vp: m.vp, view: m.view, invVp: m.invVp };
+  }
+
+  /**
+   * 对象占位 pass（Phase 1 切片）：null 安全清点 actors.boxes/chars/decals，
+   * 不产生 draw call —— 真实实例化绘制（单位盒/角色/贴花）由后续对象 pass
+   * 波次在本钩子处接入，帧流水线顺序已预留（地形之后、天气之前）。
+   * @returns {number} 本 pass draw call 数（恒 0）
+   */
+  _drawActorPlaceholders(gl, actors) {
+    const a = actors || {};
+    const boxes = Array.isArray(a.boxes) ? a.boxes : [];
+    const chars = Array.isArray(a.chars) ? a.chars : [];
+    const decals = Array.isArray(a.decals) ? a.decals : [];
+    this._actorQueued = boxes.length + chars.length + decals.length;
+    void gl;
+    return 0;
+  }
+
+  // ———— 上下文恢复 ————
+
+  /**
+   * 上下文恢复（webglcontextrestored）后重建内部渲染器并重放主题
+   * （供视图侧 CanvasManager.onGLStateChange 钩子调用；字段实体无需重挂载，
+   * Chunk GPU 缓存随渲染器重建，下一帧 sync 自动全量重建）。
+   * @returns {boolean} 是否成功重建
+   */
+  rebuild() {
+    if (this._destroyed) return false;
+    const cm = this._cm;
+    const glc = cm ? cm.glc : null;
+    if (!glc || !glc.gl || (cm.hasGL === false) || this.tier >= 3) return false;
+    if (this._terrain) { try { this._terrain.destroy(); } catch (_) { /* 失效句柄安全 */ } }
+    if (this._atmosphere) { try { this._atmosphere.destroy(); } catch (_) { /* 同上 */ } }
+    this._terrain = new PlanetTerrainMesh(glc, this.tier);
+    this._atmosphere = new PlanetAtmosphere(glc, this.tier);
+    if (this._planetInfo && this._planetInfo.visualRadiusMeters) {
+      this._terrain.setPlanetRadius(this._planetInfo.visualRadiusMeters);
+    }
+    this.setTheme(this._planetInfo && this._planetInfo.theme ? this._planetInfo.theme : {});
+    return true;
+  }
+
+  // ———— 统计 / 生命周期 ————
+
+  /** stats 快照（新增键向后兼容） */
+  getStats() {
+    const st = this._stats;
+    return {
+      drawCalls: st.drawCalls,
+      chunksVisible: st.chunksVisible,
+      triangles: st.triangles,
+      meshRebuilds: st.meshRebuilds,
+      frameMs: Math.round(st.frameMs * 100) / 100,
+      chunksTotal: st.chunksTotal,
+      objectsQueued: st.objectsQueued || 0,
+      debugMode: st.debugMode,
+    };
+  }
+
+  /** 释放内部渲染器持有的全部 GL 资源（glc.destroy() 仍会兜底清册回收） */
+  destroy() {
+    if (this._destroyed) return;
+    this._destroyed = true;
+    if (this._terrain) { try { this._terrain.destroy(); } catch (_) { /* 失效句柄安全 */ } }
+    if (this._atmosphere) { try { this._atmosphere.destroy(); } catch (_) { /* 同上 */ } }
+    this._terrain = null;
+    this._atmosphere = null;
+    this._field = null;
+    this._inited = false;
+  }
 }
 
 /**
- * 欧拉合成模型矩阵：out = T(t) · Ry(ry) · Rx(rx) · Rz(rz) · S(s)
- * 约定：ry = yaw（偏航，绕 Y），rx = pitch（俯仰，绕 X），rz = roll（翻滚，绕 Z），
- * 旋转合成顺序为 R = Ry·Rx·Rz（先 roll，再 pitch，最后 yaw）。
- * 解析展开一次写就，避免中间矩阵与临时分配。
+ * 调试场景工厂（gl-gate 式验证用；不触碰 GroundView）：
+ * 经 terrainField.js 创建并全量构建字段（buildTerrainField），挂载到新场景。
+ * @param {object} canvasManager CanvasManager 实例
+ * @param {object} world 主世界实体（种子来源；与 createTerrainField 契约一致）
+ * @param {string|number} planetId
+ * @param {{field?:object, planetInfo?:object, tier?:number}} [opts]
+ *   opts.field 直通 createTerrainField 的 opts（seed 覆盖等）
+ * @returns {PlanetSurfaceScene} 已挂载字段的主题场景（scene._field 可取字段实体）
  */
-function mat4TRS(out, tx, ty, tz, rx, ry, rz, s) {
-  const cx = Math.cos(rx), sx = Math.sin(rx);
-  const cy = Math.cos(ry), sy = Math.sin(ry);
-  const cz = Math.cos(rz), sz = Math.sin(rz);
-
-  // R = Ry·Rx·Rz 的三个列向量（展开自 (cy·cz + sy·sx·sz) 等解析式）
-  out[0] = (cy * cz + sy * sx * sz) * s;   // 列 0 行 0：R·e_x.x
-  out[1] = cx * sz * s;                    // 列 0 行 1
-  out[2] = (-sy * cz + cy * sx * sz) * s;  // 列 0 行 2
-  out[3] = 0;
-  out[4] = (-cy * sz + sy * sx * cz) * s;  // 列 1 行 0：R·e_y.x
-  out[5] = cx * cz * s;                    // 列 1 行 1
-  out[6] = (sy * sz + cy * sx * cz) * s;   // 列 1 行 2
-  out[7] = 0;
-  out[8] = sy * cx * s;                    // 列 2 行 0：R·e_z.x
-  out[9] = -sx * s;                        // 列 2 行 1
-  out[10] = cy * cx * s;                   // 列 2 行 2
-  out[11] = 0;
-  out[12] = tx;                            // 列 3：平移
-  out[13] = ty;
-  out[14] = tz;
-  out[15] = 1;
-  return out;
+function buildDebugScene(canvasManager, world, planetId, opts = {}) {
+  const field = buildTerrainField(world, planetId, opts.field || {});
+  const scene = new PlanetSurfaceScene(canvasManager, { tier: opts.tier });
+  scene.mount(field, opts.planetInfo || null);
+  return scene;
 }
 
+Object.assign(__exports, { PlanetSurfaceScene, buildDebugScene });
+
+});
+__register("src/render/gl/PlanetAtmosphere.js", function (__exports, __require) {
 /**
- * 用 4x4 矩阵变换三维点/向量（隐含 w=1）并做透视除法（w=0 时按 1 处理）。
- * out 为 Float32Array(3)，允许 out === v。
+ * render/gl/PlanetAtmosphere.js — 行星地表天空穹顶 + 天气粒子渲染器（doc7 TASK-1.3）
+ *
+ * 天空（单程序 + uSkyMode 主题开关，避免着色器爆炸）：
+ *  - 全屏三角反投影（inverse-VPP）解析渐变：zenith/horizon/ground 三段 + 太阳圆盘
+ *    （高光晕双幂次）+ 无大气确定性星空（与 PlanetSurface3D 同式）；
+ *  - uSkyMode=0 clear：纯渐变；
+ *  - uSkyMode=1 aurora（dry_night_polar 极夜干燥极地）：地平线附近紫罗兰光幕，
+ *    噪声调制的竖向帘幕 + 慢速相位射线；
+ *  - uSkyMode=2 gas（sulfur_marsh 硫雾沼泽）：仰角低于 uGasHeight 的天空被噪声
+ *    调制的黄绿毒气色调浸染（高度锁定体积感的近似）；
+ *  - uSkyMode=3 dust（dust storm）：侧向拉伸噪声条纹（水平缓慢滚动）+ 近地平线
+ *    尘幕，密度由 uModeParams.z 控制。
+ * 天气粒子（≤512 实例化软圆点四边形，加性）：
+ *  - 雪 / 灰烬 / 孢子 / 尘埃在相机周围盒域内随风向漂移；位置完全由
+ *    hash(gl_InstanceID) + time 确定（wrap 取模，无随机数、无 CPU 粒子池）；
+ *    密度>0 时才追加 1 次 draw call（drawArraysInstanced，gl_InstanceID 驱动）。
+ *
+ * 状态隔离（doc6 §3.2-3.3 / doc7 §2.2）：
+ *  - 天空 pass 显式关 DEPTH_TEST + depthMask(false) + 关 BLEND + 关 CULL_FACE
+ *    （单一全屏三角形无背面概念），结束恢复深度基线；
+ *  - 天气粒子：BLEND(SRC_ALPHA, ONE) 加性、depthMask(false)、开深度测试被地形
+ *    遮挡、关剔除，结束恢复。
+ *
+ * 约束：顶层不触碰 document/window（Node 侧可安全 import）；全程确定性；
+ * GLSL 为手写 GLSL ES 3.0（#version 行由 GLCore 自动前置）；tier≥3 惰性。
  */
-function vec3ApplyMat4(out, m, v) {
-  const x = v[0], y = v[1], z = v[2];
-  const w = m[3] * x + m[7] * y + m[11] * z + m[15];
-  const inv = w !== 0 ? 1 / w : 1;
-  out[0] = (m[0] * x + m[4] * y + m[8] * z + m[12]) * inv;
-  out[1] = (m[1] * x + m[5] * y + m[9] * z + m[13]) * inv;
-  out[2] = (m[2] * x + m[6] * y + m[10] * z + m[14]) * inv;
-  return out;
+
+// ———— GLSL ————————————————
+
+const SKY_VS = `
+layout(location = 0) in vec3 aPos;
+out vec2 vXY;
+void main() {
+  vXY = aPos.xy;
+  gl_Position = vec4(aPos.xy, 0.99999, 1.0);
+}`;
+
+const SKY_FS = `
+precision highp float;
+in vec2 vXY;
+uniform mat4 uInvVP;
+uniform vec3 uCamPos;
+uniform vec3 uZenith;
+uniform vec3 uHorizon;
+uniform vec3 uGround;
+uniform vec3 uSunDir;
+uniform vec3 uSunColor;
+uniform float uStars;
+uniform float uTime;
+uniform float uHdr;
+uniform int uSkyMode;      /* 0=clear 1=aurora 2=gas 3=dust */
+uniform vec3 uModeParams;  /* x=auroraStrength y=gasHeight(仰角阈值) z=dustDensity */
+out vec4 fragColor;
+float hash12(vec2 p) {
+  vec3 p3 = fract(vec3(p.x, p.y, p.x) * 0.1031);
+  p3 += dot(p3, p3.yzx + 31.32);
+  return fract((p3.x + p3.y) * p3.z);
+}
+float hash13(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.zyx + 31.32);
+  return fract((p.x + p.y) * p.z);
+}
+/* 2D value noise（f*f*(3-2f) 平滑） */
+float vnoise2(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  float a = hash12(i);
+  float b = hash12(i + vec2(1.0, 0.0));
+  float c = hash12(i + vec2(0.0, 1.0));
+  float d = hash12(i + vec2(1.0, 1.0));
+  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+void main() {
+  vec4 p4 = uInvVP * vec4(vXY, 0.5, 1.0);
+  /* 反投影分母非零保护（防 Inf/NaN 残留场景 FBO 被 bloom 逐帧放大） */
+  float pw = abs(p4.w) < 1e-6 ? (p4.w >= 0.0 ? 1e-6 : -1e-6) : p4.w;
+  vec3 dir = normalize(p4.xyz / pw - uCamPos);
+  float up = dir.y;
+  vec3 col = mix(uHorizon, uZenith, pow(clamp(up, 0.0, 1.0), 0.55));
+  col = mix(col, uGround, smoothstep(0.0, -0.30, up));
+  float s = max(dot(dir, uSunDir), 0.0);
+  col += uSunColor * (pow(max(s, 1e-6), 800.0) * 3.2 + pow(max(s, 1e-6), 20.0) * 0.20);
+  if (uStars > 0.5 && up > 0.02) {
+    vec3 sp = floor(dir * 220.0);
+    float st = hash13(sp);
+    col += vec3(1.1, 1.15, 1.25) * step(0.9975, st) * (0.55 + 0.45 * sin(uTime * 2.0 + st * 40.0));
+  }
+  /* 方位角近似（条带域内稳定；极点附近由 band 权重压制） */
+  float az = dir.x / (abs(dir.z) + 0.45);
+  if (uSkyMode == 1) {
+    /* 极夜紫罗兰光幕：地平线以上条带内噪声帘幕 + 慢速射线 */
+    float band = smoothstep(0.02, 0.16, up) * smoothstep(0.80, 0.30, up);
+    float curtain = vnoise2(vec2(az * 2.4 + uTime * 0.035, up * 2.6 - uTime * 0.012));
+    curtain = pow(clamp(curtain * 1.35, 0.0, 1.0), 2.2);
+    float ray = 0.55 + 0.45 * sin(uTime * 0.6 + az * 7.0 + curtain * 5.0);
+    col += vec3(0.44, 0.18, 0.86) * band * curtain * ray * uModeParams.x * 1.5;
+    col += vec3(0.16, 0.55, 0.52) * band * curtain * curtain * uModeParams.x * 0.5;
+  } else if (uSkyMode == 2) {
+    /* 硫雾低地：仰角低于 uGasHeight 的天空被黄绿毒气浸染（噪声翻滚） */
+    float g = smoothstep(uModeParams.y + 0.10, uModeParams.y - 0.04, up);
+    float churn = vnoise2(vec2(az * 3.0 + uTime * 0.05, up * 5.0 + uTime * 0.03));
+    vec3 gasCol = mix(vec3(0.24, 0.42, 0.12), vec3(0.55, 0.78, 0.22), churn);
+    col = mix(col, gasCol, g * (0.45 + 0.35 * churn));
+  } else if (uSkyMode == 3) {
+    /* 尘暴：侧向条纹（水平滚动）+ 近地平线尘幕，密度 uModeParams.z */
+    float dens = clamp(uModeParams.z, 0.0, 1.0);
+    float streak = vnoise2(vec2(az * 1.1 - uTime * 0.22, up * 9.0));
+    streak = pow(streak, 2.0);
+    float band = smoothstep(-0.05, 0.35, up) * smoothstep(0.9, 0.2, up);
+    col = mix(col, mix(col, vec3(0.62, 0.47, 0.30), streak), dens * band * (0.35 + 0.65 * streak));
+    col = mix(col, vec3(0.55, 0.42, 0.28), dens * smoothstep(0.12, -0.2, up) * 0.6);
+  }
+  fragColor = vec4(col * uHdr, 1.0);
+}`;
+
+/** 天气粒子：实例 ID 哈希确定性漂移（盒域 wrap），相机基向量公告板 */
+const WEATHER_VS = `
+layout(location = 0) in vec2 aPos; /* 单位四边形角点 [-0.5,0.5]（TRIANGLE_STRIP） */
+uniform mat4 uVP;
+uniform vec3 uCamPos;
+uniform vec3 uBox;      /* x=z 半径（米）, y=高度（米）, z 保留 */
+uniform vec2 uWind;
+uniform float uTime;
+uniform float uFall;    /* 带符号归一化沉降速率（箱高/秒；负值上升，如孢子） */
+uniform float uSize;    /* 基准尺寸（米） */
+uniform vec3 uRight;
+uniform vec3 uUp;
+out vec2 vUv;
+out float vA;
+float hash11(float n) {
+  float p = fract(n * 0.1031);
+  p *= p + 33.33;
+  p *= p + p;
+  return fract(p);
+}
+void main() {
+  float id = float(gl_InstanceID);
+  float h1 = hash11(id * 1.37 + 0.11);
+  float h2 = hash11(id * 2.71 + 0.53);
+  float h3 = hash11(id * 3.77 + 0.29);
+  float h4 = hash11(id * 5.13 + 0.87);
+  float drift = 0.7 + h2 * 0.6;
+  float span = uBox.x * 2.0;
+  float px = uCamPos.x + mod(h1 * span + uWind.x * uTime * drift, span) - uBox.x;
+  float pz = uCamPos.z + mod(h3 * span + uWind.y * uTime * drift, span) - uBox.x;
+  float tt = fract(h4 + uTime * uFall * drift); /* 0..1 生命周期相位（wrap） */
+  float py = uCamPos.y + uBox.y * 0.55 - tt * uBox.y;
+  vec3 w = vec3(px, py, pz) + (uRight * aPos.x + uUp * aPos.y) * uSize * (0.7 + h2 * 0.6);
+  vUv = aPos;
+  /* 盒域上下边界淡入淡出，隐藏 wrap 跳变 */
+  vA = smoothstep(0.0, 0.08, tt) * smoothstep(1.0, 0.92, tt);
+  gl_Position = uVP * vec4(w, 1.0);
+}`;
+
+const WEATHER_FS = `
+precision highp float;
+in vec2 vUv;
+in float vA;
+uniform vec3 uColor;
+uniform float uAlpha;
+uniform float uHdr;
+out vec4 fragColor;
+void main() {
+  float m = smoothstep(0.5, 0.12, length(vUv));
+  float a = vA * uAlpha * m;
+  if (a < 0.004) discard;
+  fragColor = vec4(uColor * uHdr, a);
+}`;
+
+// ———— 天气类型表（确定性；颜色线性域） ————————
+
+const WEATHER_KINDS = {
+  snow:   { color: [0.92, 0.96, 1.00], fall: 0.10, size: 0.10, alpha: 0.55 },
+  ash:    { color: [0.60, 0.55, 0.52], fall: 0.06, size: 0.14, alpha: 0.50 },
+  spores: { color: [0.30, 0.95, 0.80], fall: -0.05, size: 0.08, alpha: 0.65 },
+  spore:  { color: [0.30, 0.95, 0.80], fall: -0.05, size: 0.08, alpha: 0.65 },
+  dust:   { color: [0.78, 0.64, 0.42], fall: 0.03, size: 0.12, alpha: 0.45 },
+  motes:  { color: [0.42, 0.90, 0.95], fall: 0.02, size: 0.06, alpha: 0.40 },
+};
+
+const WEATHER_CAP = 512;
+
+// ———— 渲染器 ————————————————
+
+function locMap(gl, prog, names) {
+  const m = {};
+  for (const n of names) m[n] = gl.getUniformLocation(prog, n);
+  return m;
 }
 
-/** 用 4x4 矩阵变换四维向量（完整分量，含 w 行），允许 out === v。 */
-function mat4MulVec4(out, m, v) {
-  const x = v[0], y = v[1], z = v[2], w = v[3];
-  out[0] = m[0] * x + m[4] * y + m[8] * z + m[12] * w;
-  out[1] = m[1] * x + m[5] * y + m[9] * z + m[13] * w;
-  out[2] = m[2] * x + m[6] * y + m[10] * z + m[14] * w;
-  out[3] = m[3] * x + m[7] * y + m[11] * z + m[15] * w;
-  return out;
+class PlanetAtmosphere {
+  /**
+   * @param {import('./GLCore.js').GLContext} glc GLContext 实例
+   * @param {number} tier 渲染层级 1|2|3（tier≥3 惰性；1 时粒子密度减半）
+   */
+  constructor(glc, tier = 1) {
+    if (!glc || !glc.gl) throw new Error('[PlanetAtmosphere] 需要 GLContext 实例');
+    this.glc = glc;
+    this.gl = glc.gl;
+    this.tier = tier;
+    this._destroyed = false;
+    this.stats = { drawCalls: 0, weatherCount: 0 };
+    const gl = this.gl;
+
+    this.progSky = glc.createProgram(SKY_VS, SKY_FS, { label: 'atmosphere:sky', attributes: { aPos: 0 } });
+    this.progWeather = glc.createProgram(WEATHER_VS, WEATHER_FS, { label: 'atmosphere:weather', attributes: { aPos: 0 } });
+    this._uSky = locMap(gl, this.progSky, [
+      'uInvVP', 'uCamPos', 'uZenith', 'uHorizon', 'uGround', 'uSunDir', 'uSunColor',
+      'uStars', 'uTime', 'uHdr', 'uSkyMode', 'uModeParams',
+    ]);
+    this._uWx = locMap(gl, this.progWeather, [
+      'uVP', 'uCamPos', 'uBox', 'uWind', 'uTime', 'uFall', 'uSize', 'uRight', 'uUp',
+      'uColor', 'uAlpha', 'uHdr',
+    ]);
+
+    // —— 天空全屏三角（与 PlanetSurface3D 同式） ——
+    // 注意：raw gl.createBuffer 不接受数据参数（GLCore.createBuffer 才会同时
+    // bufferData），此处必须显式 bindBuffer + bufferData，否则三角顶点为空。
+    this._skyVao = glc.createVAO((g) => {
+      const buf = g.createBuffer();
+      g.bindBuffer(g.ARRAY_BUFFER, buf);
+      g.bufferData(g.ARRAY_BUFFER, new Float32Array([-1, -1, 0, 3, -1, 0, -1, 3, 0]), g.STATIC_DRAW);
+      g.enableVertexAttribArray(0);
+      g.vertexAttribPointer(0, 3, g.FLOAT, false, 0, 0);
+    });
+    // —— 天气粒子四边形（GLCore 单位条带四边形：aPos vec2 × 4） ——
+    this._wxVao = glc.createFullscreenVAO();
+
+    // —— 主题载荷（setTheme 合并；默认晴空） ——
+    this._zenith = [0.30, 0.42, 0.62];
+    this._horizon = [0.72, 0.66, 0.55];
+    this._ground = [0.36, 0.33, 0.28];
+    this._stars = 0.0;
+    this._skyMode = 0;
+    this._modeParams = [1.0, 0.12, 0.5]; // aurora 强度 / gas 高度仰角 / dust 密度
+    this._sunDir = [0.42, 0.78, 0.32];
+    this._sunColor = [1.0, 0.96, 0.84];
+    this._weather = {
+      kind: 'snow',
+      density: 0.0,          // 0..1（0 = 无天气粒子）
+      wind: [0.6, 0.2],
+      boxHalf: 72.0,         // 相机周围盒域半宽
+      boxHeight: 40.0,
+    };
+  }
+
+  /**
+   * 主题合并（缺省保留现值）：
+   *  sky    : { zenith, horizon, ground, stars(0/1), skyMode(0..3),
+   *             auroraStrength, gasHeight, dustDensity }
+   *  sun    : { dir, color }
+   *  weather: { kind('snow'|'ash'|'spores'|'dust'|'motes'), density(0..1),
+   *             wind:[x,z], boxHalf, boxHeight }
+   * @param {object} [theme]
+   */
+  setTheme(theme) {
+    const t = theme || {};
+    const sky = t.sky || t;
+    if (Array.isArray(sky.zenith) && sky.zenith.length >= 3) {
+      this._zenith = [sky.zenith[0], sky.zenith[1], sky.zenith[2]];
+    }
+    if (Array.isArray(sky.horizon) && sky.horizon.length >= 3) {
+      this._horizon = [sky.horizon[0], sky.horizon[1], sky.horizon[2]];
+    }
+    if (Array.isArray(sky.ground) && sky.ground.length >= 3) {
+      this._ground = [sky.ground[0], sky.ground[1], sky.ground[2]];
+    }
+    if (sky.stars != null) this._stars = sky.stars ? 1.0 : 0.0;
+    if (sky.skyMode != null) {
+      const m = Math.round(Number(sky.skyMode));
+      this._skyMode = m >= 0 && m <= 3 ? m : 0;
+    }
+    if (sky.auroraStrength != null) this._modeParams[0] = sky.auroraStrength;
+    if (sky.gasHeight != null) this._modeParams[1] = sky.gasHeight;
+    if (sky.dustDensity != null) this._modeParams[2] = sky.dustDensity;
+    if (t.sun) {
+      if (Array.isArray(t.sun.dir) && t.sun.dir.length >= 3) {
+        const d = t.sun.dir;
+        const len = Math.hypot(d[0], d[1], d[2]) || 1;
+        this._sunDir = [d[0] / len, d[1] / len, d[2] / len];
+      }
+      if (Array.isArray(t.sun.color) && t.sun.color.length >= 3) {
+        this._sunColor = [t.sun.color[0], t.sun.color[1], t.sun.color[2]];
+      }
+    }
+    if (t.weather) {
+      const w = t.weather;
+      if (w.kind != null && WEATHER_KINDS[w.kind]) this._weather.kind = w.kind;
+      if (w.density != null) this._weather.density = Math.min(1, Math.max(0, Number(w.density) || 0));
+      if (Array.isArray(w.wind) && w.wind.length >= 2) this._weather.wind = [w.wind[0], w.wind[1]];
+      if (w.boxHalf != null) this._weather.boxHalf = Math.max(16, Number(w.boxHalf) || 72);
+      if (w.boxHeight != null) this._weather.boxHeight = Math.max(8, Number(w.boxHeight) || 40);
+    }
+  }
+
+  /** 当前天空基色（场景层取地平线色作 beginScene 清屏基色） */
+  getHorizonColor() { return this._horizon; }
+
+  // ———— 绘制 ————————————————
+
+  /**
+   * 天空 pass（1 次 draw call）。调用方应在场景 FBO 内、任何不透明几何之前调用。
+   * 状态隔离：关深度/不写深度/关混合/关剔除；结束恢复深度基线（LEQUAL + 写深度）。
+   * @param {WebGL2RenderingContext} gl
+   * @param {{invVp:Float32Array, eye:Array<number>, time:number, hdr:number}} view
+   */
+  drawSky(gl, view) {
+    if (this._destroyed || this.tier >= 3 || !gl || gl.isContextLost()) return 0;
+    const v = view || {};
+    if (!v.invVp) return 0;
+    const u = this._uSky;
+    const eye = v.eye || [0, 0, 0];
+
+    gl.disable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+    gl.disable(gl.BLEND);
+    gl.disable(gl.CULL_FACE);
+    gl.useProgram(this.progSky);
+    gl.uniformMatrix4fv(u.uInvVP, false, v.invVp);
+    gl.uniform3f(u.uCamPos, eye[0], eye[1], eye[2]);
+    gl.uniform3fv(u.uZenith, this._zenith);
+    gl.uniform3fv(u.uHorizon, this._horizon);
+    gl.uniform3fv(u.uGround, this._ground);
+    gl.uniform3fv(u.uSunDir, this._sunDir);
+    gl.uniform3fv(u.uSunColor, this._sunColor);
+    gl.uniform1f(u.uStars, this._stars);
+    gl.uniform1f(u.uTime, v.time || 0);
+    gl.uniform1f(u.uHdr, v.hdr != null ? v.hdr : 1.0);
+    gl.uniform1i(u.uSkyMode, this._skyMode);
+    gl.uniform3fv(u.uModeParams, this._modeParams);
+    gl.bindVertexArray(this._skyVao);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.bindVertexArray(null);
+    // 恢复深度基线（混合/剔除由后续 pass 自行声明）
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LEQUAL);
+    gl.depthMask(true);
+    this.stats.drawCalls = 1;
+    return 1;
+  }
+
+  /**
+   * 天气粒子 pass（密度>0 时 1 次 draw call，否则 0）。
+   * BLEND(SRC_ALPHA, ONE) 加性、深度测试开启（被地形遮挡）、不写深度、关剔除。
+   * @param {WebGL2RenderingContext} gl
+   * @param {{vp:Float32Array, view:Float32Array, eye:Array<number>, time:number, hdr:number}} view
+   * @returns {number} 实际 draw call 数
+   */
+  drawWeather(gl, view) {
+    if (this._destroyed || this.tier >= 3 || !gl || gl.isContextLost()) return 0;
+    const w = this._weather;
+    if (!(w.density > 0.001)) return 0;
+    const v = view || {};
+    if (!v.vp || !v.view) return 0;
+
+    // 密度 → 实例数（tier 1 减半，tier 2 ×0.75；上限 512）
+    const tierK = this.tier <= 1 ? 0.5 : (this.tier === 2 ? 0.75 : 1.0);
+    const count = Math.min(WEATHER_CAP, Math.round(w.density * WEATHER_CAP * tierK));
+    if (count <= 0) return 0;
+
+    const kind = WEATHER_KINDS[w.kind] || WEATHER_KINDS.snow;
+    // 列主序视图矩阵的行向量 = 相机基（右/上），公告板对齐
+    const right = [v.view[0], v.view[4], v.view[8]];
+    const up = [v.view[1], v.view[5], v.view[9]];
+    const eye = v.eye || [0, 0, 0];
+
+    gl.useProgram(this.progWeather);
+    const u = this._uWx;
+    gl.uniformMatrix4fv(u.uVP, false, v.vp);
+    gl.uniform3f(u.uCamPos, eye[0], eye[1], eye[2]);
+    gl.uniform3f(u.uBox, w.boxHalf, w.boxHeight, 0.0);
+    gl.uniform2f(u.uWind, w.wind[0], w.wind[1]);
+    gl.uniform1f(u.uTime, v.time || 0);
+    gl.uniform1f(u.uFall, kind.fall);
+    gl.uniform1f(u.uSize, kind.size);
+    gl.uniform3f(u.uRight, right[0], right[1], right[2]);
+    gl.uniform3f(u.uUp, up[0], up[1], up[2]);
+    gl.uniform3fv(u.uColor, kind.color);
+    gl.uniform1f(u.uAlpha, kind.alpha);
+    gl.uniform1f(u.uHdr, v.hdr != null ? v.hdr : 1.0);
+
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+    gl.depthMask(false);
+    gl.disable(gl.CULL_FACE);
+    gl.bindVertexArray(this._wxVao);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
+    gl.bindVertexArray(null);
+    gl.disable(gl.BLEND);
+    gl.depthMask(true);
+    this.stats.weatherCount = count;
+    return 1;
+  }
+
+  // ———— 生命周期 ————
+
+  /** 释放全部 GL 资源（glc.destroy() 仍会兜底清册回收） */
+  destroy() {
+    if (this._destroyed) return;
+    this._destroyed = true;
+    const gl = this.gl;
+    if (!gl) return;
+    if (this._skyVao) gl.deleteVertexArray(this._skyVao);
+    if (this._wxVao) gl.deleteVertexArray(this._wxVao);
+    if (this.progSky) gl.deleteProgram(this.progSky);
+    if (this.progWeather) gl.deleteProgram(this.progWeather);
+    this._skyVao = null;
+    this._wxVao = null;
+    this.progSky = null;
+    this.progWeather = null;
+  }
 }
 
-Object.assign(__exports, { mat4, mat4Identity, mat4Multiply, mat4Perspective, mat4Ortho, mat4LookAt, mat4Invert, mat4Translate, mat4Scale, mat4RotateX, mat4RotateY, mat4RotateZ, mat4TRS, vec3ApplyMat4, mat4MulVec4 });
+Object.assign(__exports, { PlanetAtmosphere });
+
+});
+__register("src/render/gl/PlanetTerrainMesh.js", function (__exports, __require) {
+/**
+ * render/gl/PlanetTerrainMesh.js — 3 级 LOD 分块连续地形渲染器（doc7 §8.2 / TASK-1.3）
+ *
+ * 消费 src/domain/ground/terrainField.js 的连续三角网格字段（field 契约见该文件）：
+ *  - 8×8 = 64 个 64m×64m Chunk，每 Chunk 源数据 65×65 顶点（1m 步距）；
+ *  - sync(field, camPos, opts) 按相机水平距离选 LOD：<96m → LOD0（65×65 原样），
+ *    96–192m → LOD1（隔 2 取 1，33×33），≥192m → LOD2（隔 4 取 1，17×17）；
+ *  - 仅当 (lod 变化 || chunk.dirty || meshRevision 变化) 时重建该 Chunk 的 GPU
+ *    缓冲；字段侧脏标记触发 buildTriangulatedChunkMesh 增量重建（TERRAIN-06）；
+ *  - LOD 接缝闭合（TERRAIN-04 零裂缝）三重保障：
+ *      1. 共享边界采样点精确一致 —— 粗 LOD 顶点是细网格每隔 k 取样的子集（64 可被
+ *         2/4 整除），共享边界顶点两侧取自同一 evalPoint 采样，高度逐位相同；
+ *      2. 垂直裙边（skirt）—— 每 Chunk 四周附加 3.0m 向下裙边条带（复制边界顶点、
+ *         y-3.0、同法线/权重/morph，三角形按外向 CCW 生成），T 形接缝残差被裙边
+ *         从常规俯视角遮挡；裙边顶点参与 geomorph，与顶面保持贴合；
+ *      3. Geomorph —— 顶点属性 aMorph（= 2k 粗格双线性高度 − 细格高度，按距 Chunk
+ *         边缘 16m 渐变带衰减后烘焙）× 逐 Chunk uniform uMorphT（别名 uMorphLerp）
+ *         在 LOD 切换 / 邻居变粗时 0.4s 确定性缓动；共享边上 band=1 且粗格双线性
+ *         退化为精确线性插值，morphT=1 时细边顶点精确落在粗边折面上，T 形接缝闭合。
+ *  - 视锥剔除：由 VP 构造 6 平面，Chunk AABB（含裙边 / morph / 曲率下沉余量）
+ *    完全在某平面外侧即整块跳过；
+ *  - 着色器：doc7 §8.2 TERRAIN_MESH_VS/FS 全特性（行星曲率 y-=distSq/(2R)、
+ *    热区融雪凹陷 0.32m*积雪权重、4 通道材质、软硬边法线 smoothstep(0.82,0.55)、
+ *    岩层理、热区辉光、生物荧光 + 脚步涟漪、岩浆黑体自发光、水下双波焦散 +
+ *    RGB 波长吸收、距离雾、dbg==2 法线+1m 格线 / dbg==3 绕序审计）。
+ *  - draw call 预算：地形 ≤64（视锥剔除后通常 ≤ ~30，由场景层再叠加天空/天气）。
+ *
+ * 约束：顶层不触碰 document/window（Node 侧可安全 import）；全程确定性（无
+ * Math.random）；GLSL 为手写 GLSL ES 3.0（#version 行由 GLCore.createProgram
+ * 自动前置）；tier≥3 时整体惰性（sync/draw 全部安全空操作）；上下文丢失安全
+ * （isContextLost 时跳过，destroy 对失效句柄删除为空操作）。
+ */
+
+const { buildTriangulatedChunkMesh: buildTriangulatedChunkMesh } = __require("src/domain/ground/terrainField.js");
+
+// ———— 常量 ————————————————
+
+/** LOD 距离阈值（相机到 Chunk AABB 最近点的水平距离，米） */
+const LOD0_MAX_DIST = 96.0;
+const LOD1_MAX_DIST = 192.0;
+/** 垂直裙边深度（doc7 §2.5 / specs 6 §2.5：3.0m 向下裙边） */
+const SKIRT_DEPTH_M = 3.0;
+/** Geomorph 渐变带宽度（距 Chunk 边缘 16m 内参与 morph） */
+const GEOMORPH_BAND_M = 16.0;
+/** Geomorph 缓动时长（秒；确定性，由 time 驱动） */
+const GEOMORPH_DURATION_S = 0.4;
+/** 视觉行星半径默认值（doc7：uPlanetCurveInv2R = 1/(2*1800)） */
+const DEFAULT_PLANET_RADIUS_M = 1800.0;
+
+// ———— GLSL ————————————————
+
+const TERRAIN_MESH_VS = `
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec4 aWeights; // 归一化 Uint8/255 → [0,1]
+layout(location = 3) in vec2 aAux;     // (temp, moisture)
+layout(location = 4) in float aMorph;  // geomorph 高度差（已烘焙 16m 边缘带）
+uniform mat4 uVP;
+uniform vec3 uCamPos;
+uniform vec3 uWorldOffset;       // 场域 → 世界平移（GroundView 集成：(-224,0,-224) 对齐体素空间）
+uniform float uPlanetCurveInv2R; // 1.0 / (2.0 * R)，默认 1.0/(2.0*1800.0)
+uniform int uHeatZoneCount;
+uniform vec4 uHeatZones[8];      // (x, z, radius, intensity)
+uniform float uMorphT;           // 逐 Chunk geomorph 插值 [0,1]（uMorphLerp）
+out vec3 vWorldPos;
+out vec3 vNormal;
+out vec4 vWeights;
+out vec2 vAux;
+out float vHeatField;
+void main() {
+  vec3 worldPos = aPos + uWorldOffset;
+  /* Frostpunk 热区累积：核心（<=0.6r）全额，0.6r→r 平滑衰减 */
+  float heat = 0.0;
+  for (int i = 0; i < 8; i++) {
+    if (i >= uHeatZoneCount) break;
+    vec4 hz = uHeatZones[i];
+    heat += hz.w * (1.0 - smoothstep(hz.z * 0.60, hz.z, distance(worldPos.xz, hz.xy)));
+  }
+  heat = clamp(heat, 0.0, 1.0);
+  /* 融雪凹陷：0.32m，按材质通道 0（积雪）权重缩放 */
+  worldPos.y -= heat * 0.32 * aWeights.x;
+  /* Geomorph：LOD 切换 / 邻居变粗时向粗格形态缓动（共享边上精确闭合 T 缝） */
+  worldPos.y += aMorph * uMorphT;
+  /* DSP 行星曲率：y -= distSq / (2R)，远方沿星球弧度下沉没入地平线 */
+  vec2 dCam = worldPos.xz - uCamPos.xz;
+  float distSq = dot(dCam, dCam);
+  vec3 curvedPos = vec3(worldPos.x, worldPos.y - distSq * uPlanetCurveInv2R, worldPos.z);
+  vWorldPos = worldPos; /* 未弯曲世界坐标（雾 / 水下 / 格线均用平直空间） */
+  vNormal = aNormal;
+  vWeights = aWeights;
+  vAux = aAux;
+  vHeatField = heat;
+  gl_Position = uVP * vec4(curvedPos, 1.0);
+}`;
+
+const TERRAIN_MESH_FS = `
+precision highp float;
+in vec3 vWorldPos;
+in vec3 vNormal;
+in vec4 vWeights;
+in float vHeatField;
+uniform vec3 uCamPos;
+uniform vec3 uSunDir;
+uniform vec3 uSunColor;
+uniform vec3 uFogColor;
+uniform vec2 uFogRange;
+uniform float uTime;
+uniform float uHdr; /* 真 HDR=1.0；RGBA8 模拟模式=1/hdrRange（PostProcessor 约定） */
+uniform vec3 uMatCol0;
+uniform vec3 uMatCol1;
+uniform vec3 uMatCol2;
+uniform vec3 uMatCol3;
+uniform vec4 uThemeFx;      /* x=waterLevel y=biolumePulse z=lavaEmissive w=debugMode */
+uniform vec4 uFootsteps[8]; /* (x, z, triggerTime, strength) */
+out vec4 fragColor;
+
+float hash31(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.yzx + 31.32);
+  return fract((p.x + p.y) * p.z);
+}
+/* 三线性插值 value noise（f*f*(3-2f) 平滑） */
+float noise3D(vec3 p) {
+  vec3 i = floor(p);
+  vec3 f = fract(p);
+  vec3 u = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(mix(hash31(i), hash31(i + vec3(1.0, 0.0, 0.0)), u.x),
+        mix(hash31(i + vec3(0.0, 1.0, 0.0)), hash31(i + vec3(1.0, 1.0, 0.0)), u.x), u.y),
+    mix(mix(hash31(i + vec3(0.0, 0.0, 1.0)), hash31(i + vec3(1.0, 0.0, 1.0)), u.x),
+        mix(hash31(i + vec3(0.0, 1.0, 1.0)), hash31(i + vec3(1.0, 1.0, 1.0)), u.x), u.y),
+    u.z);
+}
+
+void main() {
+  int dbg = int(uThemeFx.w + 0.5);
+  vec2 xz = vWorldPos.xz;
+  float y = vWorldPos.y;
+
+  /* 4 通道材质权重归一 */
+  float wTotal = vWeights.x + vWeights.y + vWeights.z + vWeights.w;
+  vec4 w = vWeights / max(wTotal, 1e-4);
+
+  /* 岩层理 + 4 通道混合 */
+  float detailXZ = noise3D(vec3(xz.x * 0.8, 0.0, xz.y * 0.8));
+  float strata = 0.82 + 0.36 * sin(y * 2.6 + detailXZ * 2.2);
+  vec3 baseCol = uMatCol0 * (0.88 + 0.24 * detailXZ);
+  if (vHeatField > 0.01) {
+    /* 热区湿润冻土 */
+    baseCol = mix(baseCol, vec3(0.14, 0.10, 0.08), smoothstep(0.15, 0.65, vHeatField));
+  }
+  vec3 cliffCol = uMatCol1 * strata;
+  vec3 biomeCol = uMatCol2 * (0.85 + 0.30 * noise3D(vWorldPos * 1.4));
+  vec3 roadCol = uMatCol3;
+  vec3 albedo = baseCol * w.x + cliffCol * w.y + biomeCol * w.z + roadCol * w.w;
+
+  /* ———— 诊断分支（doc7 §2.2 三档 / §8.2） ———— */
+  if (dbg == 3) {
+    /* 绕序审计：gl_FrontFacing 正面翠绿 / 背面洋红（渲染器侧需临时关剔除） */
+    fragColor = gl_FrontFacing ? vec4(0.1, 0.9, 0.3, 1.0) : vec4(1.0, 0.0, 0.8, 1.0);
+    return;
+  }
+  if (dbg == 1) {
+    /* unlit_nocull：无光照纯反照率（剔除由渲染器侧临时关闭） */
+    fragColor = vec4(albedo, 1.0);
+    return;
+  }
+  if (dbg == 2) {
+    /* 法线 RGB + 1m 世界格线（黄，权重 0.6） */
+    vec3 dbgCol = normalize(vNormal) * 0.5 + 0.5;
+    vec3 fw = abs(fract(vWorldPos) - 0.5);
+    float line = max(smoothstep(0.02, 0.06, fw.x),
+                     max(smoothstep(0.02, 0.06, fw.y), smoothstep(0.02, 0.06, fw.z)));
+    dbgCol = mix(dbgCol, vec3(1.0, 0.9, 0.2), line * 0.6);
+    fragColor = vec4(dbgCol, 1.0);
+    return;
+  }
+
+  /* 软硬边法线：陡崖（smoothN.y 越低越硬）向屏幕空间导数平面法线混合 */
+  vec3 smoothN = normalize(vNormal);
+  vec3 flatN = normalize(cross(dFdx(vWorldPos), dFdy(vWorldPos)));
+  float hardBlend = smoothstep(0.82, 0.55, smoothN.y);
+  vec3 N = normalize(mix(smoothN, flatN, hardBlend * 0.65));
+
+  float ndl = max(dot(N, uSunDir), 0.0);
+  float hemi = 0.38 + 0.24 * (N.y * 0.5 + 0.5);
+  vec3 lit = albedo * (uSunColor * ndl * 0.82 + hemi);
+  /* 热区辉光 */
+  lit += albedo * vec3(1.85, 0.82, 0.24) * vHeatField * 0.95;
+
+  /* ———— 生物荧光（Avatar 压感生态） ———— */
+  if (uThemeFx.y > 0.5) {
+    float pulse = 0.55 + 0.45 * sin(length(xz) * 0.35 - uTime * 2.2);
+    float bioVein = smoothstep(0.62, 0.88, noise3D(vWorldPos * 1.9)) * w.z;
+    lit += uMatCol3 * bioVein * pulse * 1.6;
+    /* 脚步压感荧光涟漪：3.5s 内 4.2m/s 扩散的高斯环 */
+    for (int i = 0; i < 8; i++) {
+      vec4 fp = uFootsteps[i];
+      float age = uTime - fp.z;
+      if (fp.w > 0.01 && age >= 0.0 && age < 3.5) {
+        float dFoot = distance(xz, fp.xy);
+        float rRing = age * 4.2;
+        float dd = dFoot - rRing;
+        /* 高斯环：(dFoot-rRing)^2 显式平方（pow 负底数在 GLSL 中未定义） */
+        float ring = exp(-dd * dd / 0.20) * exp(-age * 1.1) * fp.w;
+        lit += vec3(0.26, 0.95, 0.82) * ring * 2.2;
+      }
+    }
+  }
+
+  /* ———— 黑曜熔海裂隙黑体自发光 ———— */
+  if (uThemeFx.z > 0.5 && y < -1.5) {
+    float flow = noise3D(vec3(xz.x * 0.55 + uTime * 0.35, y, xz.y * 0.55));
+    float crack = smoothstep(0.42, 0.78, flow);
+    vec3 lavaCol = mix(vec3(0.90, 0.16, 0.04), vec3(2.80, 1.35, 0.22), crack);
+    lit = mix(lit, lavaCol, smoothstep(-1.5, -3.2, y));
+  }
+
+  /* ———— AquaMan 水下双波焦散 + RGB 波长吸收 ———— */
+  float waterLv = uThemeFx.x;
+  if (waterLv > -90.0 && y < waterLv) {
+    float depth = waterLv - y;
+    vec2 uv1 = xz * 0.38 + vec2(uTime * 0.18, uTime * 0.11);
+    vec2 uv2 = xz * 0.42 - vec2(uTime * 0.14, uTime * 0.19);
+    float c1 = abs(sin(uv1.x * 3.14159) * cos(uv1.y * 3.14159));
+    float c2 = abs(sin(uv2.x * 3.14159) * cos(uv2.y * 3.14159));
+    float caustic = pow(1.0 - min(c1, c2), 4.0) * exp(-depth * 0.08) * ndl;
+    lit += vec3(0.25, 0.92, 0.88) * caustic * 1.35;
+    lit *= exp(-depth * vec3(0.12, 0.038, 0.014)); /* 红衰减最快，蓝青穿透最深 */
+  }
+
+  /* ———— 距离雾 ———— */
+  float fog = smoothstep(uFogRange.x, uFogRange.y, distance(vWorldPos, uCamPos));
+  fragColor = vec4(mix(lit, uFogColor, fog) * uHdr, 1.0);
+}`;
+
+// ———— 工具 ————————————————
+
+/** 缓存程序 uniform 位置表 */
+function locMap(gl, prog, names) {
+  const m = {};
+  for (const n of names) m[n] = gl.getUniformLocation(prog, n);
+  return m;
+}
+
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
+// ———— 渲染器 ————————————————
+
+class PlanetTerrainMesh {
+  /**
+   * @param {import('./GLCore.js').GLContext} glc GLContext 实例（CanvasManager.glc）
+   * @param {number} tier 渲染层级 1|2|3（tier≥3 整体惰性：sync/draw 安全空操作）
+   */
+  constructor(glc, tier = 1) {
+    if (!glc || !glc.gl) throw new Error('[PlanetTerrainMesh] 需要 GLContext 实例');
+    this.glc = glc;
+    this.gl = glc.gl;
+    this.tier = tier;
+    this._destroyed = false;
+
+    this.stats = { triangles: 0, drawCalls: 0, chunksVisible: 0, meshRebuilds: 0 };
+
+    // —— 诊断：0=正式 1=unlit_nocull 2=wireframe_normal 3=winding_audit ——
+    // cullEnabled 为公开字段（默认 true；网格已验证 CCW，诊断 1/3 渲染器侧临时关闭）
+    this.cullEnabled = true;
+    this._debugMode = 0;
+
+    // —— 主题 uniform 载荷（setTheme 增量合并；渲染循环内零分配） ——
+    this._matCols = [
+      [0.78, 0.80, 0.86], // 通道 0：积雪 / 基岩表
+      [0.34, 0.31, 0.28], // 通道 1：崖壁（×岩层理）
+      [0.28, 0.42, 0.22], // 通道 2：生物群系表
+      [0.44, 0.40, 0.36], // 通道 3：道路 / 荧光脉络色源
+    ];
+    this._heatZones = new Float32Array(32);
+    this._heatZoneCount = 0;
+    this._themeFx = new Float32Array([-1000.0, 0.0, 0.0, 0.0]); // 水位默认关闭（<-90 视为无水）
+    this._footsteps = new Float32Array(32);
+    this._fogColor = [0.62, 0.65, 0.70];
+    this._fogRange = [60.0, 420.0];
+    this._sunDir = [0.42, 0.78, 0.32];
+    this._sunColor = [1.0, 0.96, 0.84];
+    this._curveInv2R = 1.0 / (2.0 * DEFAULT_PLANET_RADIUS_M);
+    this._time = 0;
+
+    // —— 程序（与 PlanetSurface3D 一致：构造期建立，GLCore 自动前置 #version） ——
+    const gl = this.gl;
+    this.progTerrain = glc.createProgram(TERRAIN_MESH_VS, TERRAIN_MESH_FS, {
+      label: 'terrain:mesh',
+      attributes: { aPos: 0, aNormal: 1, aWeights: 2, aAux: 3, aMorph: 4 },
+    });
+    this._u = locMap(gl, this.progTerrain, [
+      'uVP', 'uCamPos', 'uWorldOffset', 'uPlanetCurveInv2R', 'uHeatZoneCount', 'uHeatZones', 'uMorphT',
+      'uSunDir', 'uSunColor', 'uFogColor', 'uFogRange', 'uTime', 'uHdr',
+      'uMatCol0', 'uMatCol1', 'uMatCol2', 'uMatCol3', 'uThemeFx', 'uFootsteps',
+    ]);
+
+    // —— 逐 Chunk GPU 缓存（sync 惰性填充；下标 = cx*4096+cz 不可靠（外部数组序），
+    // 用 Map：key = cx*4096+cz） ——
+    this._entries = new Map(); // key → { lod, meshRevision, vao, vboMain, vboW, vboMor, ibo, indexCount, aabb, morphTarget, morphFlipAt, morphT }
+
+    // —— 视锥 6 平面草稿（零分配；相机与 VP 由场景层每帧下发） ——
+    this._frustum = new Float32Array(24);
+    // —— 世界平移（场域 → 视图空间；GroundView 集成用 (-224,0,-224) 对齐体素空间） ——
+    this._worldOffset = [0, 0, 0];
+  }
+
+  /**
+   * 世界平移：顶点着色器 worldPos = aPos + uWorldOffset，视锥 AABB 与热区/
+   * 脚步 uniform 同步平移（热区/脚步仍以场域坐标下发）。
+   * GroundView 集成：offset (-224,0,-224) → 场域中心 (256,256) 对齐体素 (32,32)。
+   * @param {Array<number>} o [x,y,z]
+   */
+  setWorldOffset(o) {
+    if (Array.isArray(o) && o.length >= 3 && o.every(Number.isFinite)) {
+      this._worldOffset = [o[0], o[1], o[2]];
+    }
+  }
+
+  // —— 主题 / 配置 API ————————————————
+
+  /**
+   * 主题 uniform 合并（缺省字段保留现值）：
+   *  matColors : [4]×vec3 linear        —— 4 通道材质基色
+   *  heatZones : [{x,z,radius,intensity}]（≤8，radius<=0 的项忽略）
+   *  themeFx   : { waterLevel, biolumePulse, lavaEmissive }（debugMode 走 setDebugMode）
+   *  footsteps : [8]×{x,z,time,strength} 或 [x,z,time,s] 四元组（不足补零）
+   *  fog       : { color:[r,g,b], range:[near,far] }
+   *  sun       : { dir:[x,y,z], color:[r,g,b] }（dir 自动归一化）
+   * @param {object} [theme]
+   */
+  setTheme(theme) {
+    const t = theme || {};
+    if (Array.isArray(t.matColors)) {
+      for (let i = 0; i < 4 && i < t.matColors.length; i++) {
+        const c = t.matColors[i];
+        if (Array.isArray(c) && c.length >= 3) {
+          this._matCols[i][0] = c[0]; this._matCols[i][1] = c[1]; this._matCols[i][2] = c[2];
+        }
+      }
+    }
+    if (Array.isArray(t.heatZones)) {
+      this._heatZones.fill(0);
+      let n = 0;
+      for (const hz of t.heatZones) {
+        if (n >= 8) break;
+        if (!hz || !(hz.radius > 0.01) || !(Math.abs(hz.intensity || 0) > 1e-3)) continue;
+        const o = n * 4;
+        this._heatZones[o] = hz.x || 0;
+        this._heatZones[o + 1] = hz.z || 0;
+        this._heatZones[o + 2] = hz.radius;
+        this._heatZones[o + 3] = hz.intensity || 0;
+        n++;
+      }
+      this._heatZoneCount = n;
+    }
+    const fx = t.themeFx;
+    if (fx) {
+      if (fx.waterLevel != null) this._themeFx[0] = fx.waterLevel;
+      if (fx.biolumePulse != null) this._themeFx[1] = fx.biolumePulse;
+      if (fx.lavaEmissive != null) this._themeFx[2] = fx.lavaEmissive;
+    }
+    if (Array.isArray(t.footsteps)) {
+      this._footsteps.fill(0);
+      for (let i = 0; i < 8 && i < t.footsteps.length; i++) {
+        const f = t.footsteps[i];
+        if (!f) continue;
+        const o = i * 4;
+        if (Array.isArray(f)) {
+          this._footsteps[o] = f[0] || 0; this._footsteps[o + 1] = f[1] || 0;
+          this._footsteps[o + 2] = f[2] || 0; this._footsteps[o + 3] = f[3] || 0;
+        } else {
+          this._footsteps[o] = f.x || 0; this._footsteps[o + 1] = f.z || 0;
+          this._footsteps[o + 2] = f.time != null ? f.time : 0;
+          this._footsteps[o + 3] = f.strength || 0;
+        }
+      }
+    }
+    if (t.fog) {
+      if (Array.isArray(t.fog.color) && t.fog.color.length >= 3) {
+        this._fogColor = [t.fog.color[0], t.fog.color[1], t.fog.color[2]];
+      }
+      if (Array.isArray(t.fog.range) && t.fog.range.length >= 2) {
+        this._fogRange = [t.fog.range[0], t.fog.range[1]];
+      }
+    }
+    if (t.sun) {
+      if (Array.isArray(t.sun.dir) && t.sun.dir.length >= 3) {
+        const d = t.sun.dir;
+        const len = Math.hypot(d[0], d[1], d[2]) || 1;
+        this._sunDir = [d[0] / len, d[1] / len, d[2] / len];
+      }
+      if (Array.isArray(t.sun.color) && t.sun.color.length >= 3) {
+        this._sunColor = [t.sun.color[0], t.sun.color[1], t.sun.color[2]];
+      }
+    }
+  }
+
+  /** 视觉行星半径（米）→ uPlanetCurveInv2R = 1/(2R) */
+  setPlanetRadius(r) {
+    const rad = Number(r);
+    if (Number.isFinite(rad) && rad > 1) this._curveInv2R = 1.0 / (2.0 * rad);
+  }
+
+  /**
+   * 地表诊断模式（与 PlanetSurface3D F3 三档对齐）：
+   *  0=正式  1=unlit_nocull（渲染器侧临时关剔除）  2=法线+1m 格线  3=绕序审计（临时关剔除）
+   * 注：真线框（gl.LINES 覆盖层）属后续诊断波次；模式 2 的 1m 黄色格线即
+   * wireframe_normal 档的既定呈现。
+   * @param {number} mode 0..3（越界回退 0） @returns {number} 实际生效模式
+   */
+  setDebugMode(mode) {
+    const n = Math.round(Number(mode));
+    this._debugMode = n >= 0 && n <= 3 && Number.isFinite(n) ? n : 0;
+    return this._debugMode;
+  }
+
+  getDebugMode() { return this._debugMode; }
+
+  /**
+   * 背面剔除开关（默认 true；网格 CCW 已验证，诊断对照视图可临时关闭）。
+   * 亦可直接读写公开字段 cullEnabled（与 PlanetSurface3D 同约定）。
+   * @param {boolean} enabled
+   */
+  setCullEnabled(enabled) {
+    this.cullEnabled = !!enabled;
+  }
+
+  /** 主题雾色 / 雾距（场景层取其作 beginScene 清屏基色与统计） */
+  getFogColor() { return this._fogColor; }
+  getFogRange() { return this._fogRange; }
+
+  // ———— CPU 侧：LOD 决策 + GPU 缓冲构建 ————————————————
+
+  /**
+   * 逐帧同步：字段脏重建（增量）→ LOD 决策 → 受影响 Chunk 重建 GPU 缓冲 →
+   * geomorph 状态推进。仅在需要时产生 CPU/GPU 开销，可每帧安全调用。
+   * @param {object} field terrainField.createTerrainField 的返回实体
+   * @param {Array<number>} camPos 相机世界坐标 [x,y,z]
+   * @param {{time?:number}} [opts]
+   */
+  sync(field, camPos, opts = {}) {
+    if (this._destroyed || this.tier >= 3 || !field || !Array.isArray(field.chunks)) return;
+    const time = opts.time || 0;
+    this._time = time;
+    const wo = this._worldOffset;
+    // 相机给到的是视图（平移后）空间坐标；LOD 距离按场域坐标求值（field = view - wo）
+    const cx0 = camPos ? camPos[0] - wo[0] : 0;
+    const cz0 = camPos ? camPos[2] - wo[2] : 0;
+
+    let rebuilds = 0;
+    // —— pass 1：字段网格增量重建 + LOD 决策 + GPU 缓冲按需重建（本帧 LOD 快照） ——
+    const lodNow = new Map(); // key → 本帧 LOD（pass 2 邻居判定用，免受遍历序影响）
+    for (const ch of field.chunks) {
+      if (!ch) continue;
+      const key = ch.cx * 4096 + ch.cz;
+
+      // —— 1. 字段网格增量重建（仅脏 Chunk；TERRAIN-06） ——
+      const vs = ch.vertices;
+      const needFieldBuild = !!(ch.dirty
+        || ch.meshRevision !== ch.sourceRevision
+        || !vs || !vs.position || vs.position.length === 0);
+      if (needFieldBuild) {
+        buildTriangulatedChunkMesh(ch, field.evalPoint);
+        rebuilds++;
+      }
+
+      // —— 2. LOD 决策（水平距离 → Chunk AABB 最近点） ——
+      const b = ch.bounds;
+      const nx = clamp(cx0, b.minX, b.maxX);
+      const nz = clamp(cz0, b.minZ, b.maxZ);
+      const dist = Math.hypot(cx0 - nx, cz0 - nz);
+      const lod = dist < LOD0_MAX_DIST ? 0 : (dist < LOD1_MAX_DIST ? 1 : 2);
+
+      // —— 3. GPU 缓冲按需重建 ——
+      let ent = this._entries.get(key);
+      if (!ent || ent.lod !== lod) {
+        const prevLod = ent ? ent.lod : lod;
+        if (ent) this._freeEntry(key);
+        ent = this._buildChunkGpu(ch, lod);
+        if (!ent) continue;
+        ent.lod = lod;
+        if (lod < prevLod) {
+          // 变细（相机逼近）：新网格从粗形态(aMorph 全额)缓动显化到细形态
+          ent.morphT = 1;
+          ent.morphTarget = 0;
+          ent.morphFrom = 1;
+          ent.morphFlipAt = time;
+        } else {
+          // 变粗（远离）：aMorph 目标为更低一级粗格，无平滑可用（pop 由裙边+距离
+          // 遮蔽）；首次构建同路径。稳态 0，交由邻居状态机按需抬升。
+          ent.morphT = 0;
+          ent.morphTarget = 0;
+          ent.morphFrom = 0;
+          ent.morphFlipAt = time - GEOMORPH_DURATION_S;
+        }
+        this._entries.set(key, ent);
+        rebuilds++;
+      } else if (ent.meshRevision !== ch.meshRevision) {
+        // 内容编辑：同 LOD 重传，无 morph 瞬态（新旧形态采样一致）
+        const keepT = ent.morphT;
+        this._freeEntry(key);
+        ent = this._buildChunkGpu(ch, lod);
+        if (!ent) { this._entries.delete(key); continue; }
+        ent.lod = lod;
+        ent.morphT = keepT;
+        ent.morphFrom = keepT;
+        ent.morphTarget = keepT;
+        ent.morphFlipAt = time - GEOMORPH_DURATION_S;
+        this._entries.set(key, ent);
+        rebuilds++;
+      }
+      lodNow.set(key, lod);
+    }
+
+    // —— pass 2：Geomorph 状态机（from→target 线性缓动 0.4s，time 驱动确定性）：
+    //      邻居（按本帧 LOD 快照判定）更粗时 target=1 —— 共享边 T 缝精确闭合驻留；
+    //      邻居回细后 target=0 恢复全细节。 ——
+    for (const ch of field.chunks) {
+      if (!ch) continue;
+      const key = ch.cx * 4096 + ch.cz;
+      const ent = this._entries.get(key);
+      if (!ent) continue;
+      let hasCoarser = false;
+      if (ent.lod < 2) {
+        const nbLod = [lodNow.get((ch.cx + 1) * 4096 + ch.cz), lodNow.get((ch.cx - 1) * 4096 + ch.cz),
+          lodNow.get(ch.cx * 4096 + (ch.cz + 1)), lodNow.get(ch.cx * 4096 + (ch.cz - 1))];
+        for (const nl of nbLod) {
+          if (nl != null && nl > ent.lod) { hasCoarser = true; break; }
+        }
+      }
+      const wantT = hasCoarser ? 1 : 0;
+      if (wantT !== ent.morphTarget) {
+        ent.morphFrom = ent.morphT;
+        ent.morphTarget = wantT;
+        ent.morphFlipAt = time;
+      }
+      const mt = clamp((time - ent.morphFlipAt) / GEOMORPH_DURATION_S, 0, 1);
+      ent.morphT = ent.morphFrom + (ent.morphTarget - ent.morphFrom) * mt;
+    }
+
+    if (rebuilds > 0) this.stats.meshRebuilds += rebuilds;
+  }
+
+  /** 释放单个 Chunk 的 GPU 缓存（对失效句柄删除为空操作，上下文丢失安全） */
+  _freeEntry(key) {
+    const gl = this.gl;
+    const ent = this._entries.get(key);
+    if (!ent) return;
+    if (ent.vboMain) gl.deleteBuffer(ent.vboMain);
+    if (ent.vboW) gl.deleteBuffer(ent.vboW);
+    if (ent.vboMor) gl.deleteBuffer(ent.vboMor);
+    if (ent.ibo) gl.deleteBuffer(ent.ibo);
+    if (ent.vao) gl.deleteVertexArray(ent.vao);
+    this._entries.delete(key);
+  }
+
+  /**
+   * 由 Chunk 源数据（65×65）构建某 LOD 的交错顶点 + 权重 + morph + 索引并上传。
+   * 布局：主网格 nd×nd 顶 + 4 边裙边（每边 nd 顶 × 2：top/bottom 交错）。
+   * 顶点交错 [x,y,z, nx,ny,nz, aux0,aux1]（stride 8 float）；
+   * 权重 Uint8×4（normalized）；morph float×1；索引 Uint32（WebGL2 核心）。
+   * @returns {object|null} entry（源数据不足时 null）
+   */
+  _buildChunkGpu(chunk, lod) {
+    const gl = this.gl;
+    const glc = this.glc;
+    const N = chunk.gridSize || 65;
+    const k = 1 << lod;                  // 1 / 2 / 4
+    const nd = ((N - 1) / k | 0) + 1;    // 65 / 33 / 17
+    const vs = chunk.vertices;
+    if (!vs || !vs.position || vs.position.length < N * N * 3) return null;
+    const pos = vs.position;
+    const nor = vs.normal;
+    const wgt = vs.materialWeights;
+    const aux = vs.aux;
+    const b = chunk.bounds;
+    const stepM = (b.maxX - b.minX) / (N - 1); // 数据格步距（米）
+
+    const vc = nd * nd;
+    const totalV = vc + 8 * nd;          // 4 边 × nd 顶 × (top+bottom)
+    const main = new Float32Array(totalV * 8);
+    const wb = new Uint8Array(totalV * 4);
+    const mor = new Float32Array(totalV);
+
+    const lattice = 2 * k;               // geomorph 目标粗格（低一级 LOD 的采样距）
+    const band = GEOMORPH_BAND_M;
+    let minX = Infinity; let minY = Infinity; let minZ = Infinity;
+    let maxX = -Infinity; let maxY = -Infinity; let maxZ = -Infinity;
+
+    /** 数据格高度（非有限防御归零，TERRAIN-01 精神） */
+    const yAt = (I, J) => {
+      const y = pos[(J * N + I) * 3 + 1];
+      return Number.isFinite(y) ? y : 0.0;
+    };
+
+    for (let jj = 0; jj < nd; jj++) {
+      for (let ii = 0; ii < nd; ii++) {
+        const I = ii * k;
+        const J = jj * k;
+        const src = J * N + I;
+        const o = (jj * nd + ii) * 8;
+        const y = yAt(I, J);
+        main[o] = pos[src * 3];
+        main[o + 1] = y;
+        main[o + 2] = pos[src * 3 + 2];
+        // 法线缺省回退朝上（字段侧缺失时仍可渲染）
+        let nx = 0; let ny = 1; let nz = 0;
+        if (nor && nor.length >= src * 3 + 3) {
+          nx = Number.isFinite(nor[src * 3]) ? nor[src * 3] : 0;
+          ny = Number.isFinite(nor[src * 3 + 1]) ? nor[src * 3 + 1] : 1;
+          nz = Number.isFinite(nor[src * 3 + 2]) ? nor[src * 3 + 2] : 0;
+        }
+        main[o + 3] = nx; main[o + 4] = ny; main[o + 5] = nz;
+        if (aux && aux.length >= src * 2 + 2) {
+          main[o + 6] = aux[src * 2];
+          main[o + 7] = aux[src * 2 + 1];
+        } else {
+          main[o + 6] = 0.5; main[o + 7] = 0.0;
+        }
+        const wo = src * 4;
+        for (let c = 0; c < 4; c++) {
+          wb[(jj * nd + ii) * 4 + c] = wgt && wgt.length >= wo + 4 ? wgt[wo + c] : 0;
+        }
+
+        // —— geomorph 高度差：2k 粗格双线性（共享边上退化为精确线性插值） ——
+        const i0 = I - (I % lattice);
+        const j0 = J - (J % lattice);
+        const i1 = Math.min(i0 + lattice, N - 1);
+        const j1 = Math.min(j0 + lattice, N - 1);
+        const fx = (I - i0) / lattice;
+        const fz = (J - j0) / lattice;
+        const yA = yAt(i0, j0);
+        const yB = yAt(i1, j0);
+        const yC = yAt(i0, j1);
+        const yD = yAt(i1, j1);
+        const south = yA + (yB - yA) * fx;
+        const north = yC + (yD - yC) * fx;
+        const coarseY = south + (north - south) * fz;
+        const dEdge = Math.min(I, J, N - 1 - I, N - 1 - J) * stepM;
+        const bandK = Math.max(0.0, 1.0 - dEdge / band);
+        mor[jj * nd + ii] = (coarseY - y) * bandK;
+
+        if (main[o] < minX) minX = main[o];
+        if (y > maxY) maxY = y;
+        if (main[o + 2] > maxZ) maxZ = main[o + 2];
+        if (main[o] > maxX) maxX = main[o];
+        if (y < minY) minY = y;
+        if (main[o + 2] < minZ) minZ = main[o + 2];
+      }
+    }
+
+    // —— 裙边顶点：复制边界顶点（同法线/权重/morph），y-3.0，top/bottom 交错 ——
+    const edgeSrc = [
+      (q) => q,                          // S：J=0 行，ii 升序，外向 (0,0,-1)
+      (q) => (nd - 1) * nd + q,          // N：J=nd-1 行，外向 (0,0,1)
+      (q) => q * nd,                     // W：I=0 列，jj 升序，外向 (-1,0,0)
+      (q) => q * nd + (nd - 1),          // E：I=nd-1 列，外向 (1,0,0)
+    ];
+    for (let e = 0; e < 4; e++) {
+      const base = vc + e * 2 * nd;
+      for (let q = 0; q < nd; q++) {
+        const m = edgeSrc[e](q);
+        const dstT = base + q * 2;
+        const dstB = dstT + 1;
+        for (let f = 0; f < 8; f++) main[dstT * 8 + f] = main[m * 8 + f];
+        main[dstB * 8] = main[m * 8];
+        main[dstB * 8 + 1] = main[m * 8 + 1] - SKIRT_DEPTH_M;
+        main[dstB * 8 + 2] = main[m * 8 + 2];
+        main[dstB * 8 + 3] = main[m * 8 + 3];
+        main[dstB * 8 + 4] = main[m * 8 + 4];
+        main[dstB * 8 + 5] = main[m * 8 + 5];
+        main[dstB * 8 + 6] = main[m * 8 + 6];
+        main[dstB * 8 + 7] = main[m * 8 + 7];
+        for (let c = 0; c < 4; c++) wb[dstT * 4 + c] = wb[m * 4 + c];
+        for (let c = 0; c < 4; c++) wb[dstB * 4 + c] = wb[m * 4 + c];
+        mor[dstT] = mor[m];
+        mor[dstB] = mor[m];
+        if (main[dstB * 8 + 1] < minY) minY = main[dstB * 8 + 1];
+      }
+    }
+
+    // —— 索引：曲率自适应对角线（与 terrainField §8.1 同式，数据格 (I0+J0) 棋盘） ——
+    const cellCount = (nd - 1) * (nd - 1);
+    const skirtTri = 4 * (nd - 1);
+    const indices = new Uint32Array((cellCount * 2 + skirtTri) * 3);
+    let ti = 0;
+    for (let jj = 0; jj < nd - 1; jj++) {
+      for (let ii = 0; ii < nd - 1; ii++) {
+        const v00 = jj * nd + ii;
+        const v10 = v00 + 1;
+        const v01 = v00 + nd;
+        const v11 = v01 + 1;
+        const I0 = ii * k;
+        const J0 = jj * k;
+        const checkerboardBias = (((I0 + J0) & 1) === 0 ? -0.02 : 0.02);
+        const y00 = main[v00 * 8 + 1];
+        const y10 = main[v10 * 8 + 1];
+        const y01 = main[v01 * 8 + 1];
+        const y11 = main[v11 * 8 + 1];
+        const diffDiagA = Math.abs(y00 - y11) + checkerboardBias;
+        const diffDiagB = Math.abs(y10 - y01);
+        if (diffDiagA <= diffDiagB) {
+          indices[ti] = v00; indices[ti + 1] = v01; indices[ti + 2] = v11;
+          indices[ti + 3] = v00; indices[ti + 4] = v11; indices[ti + 5] = v10;
+        } else {
+          indices[ti] = v00; indices[ti + 1] = v01; indices[ti + 2] = v10;
+          indices[ti + 3] = v10; indices[ti + 4] = v01; indices[ti + 5] = v11;
+        }
+        ti += 6;
+      }
+    }
+
+    // —— 裙边索引：每段外向 CCW（以首段叉积与外向的符号确定整边绕序并翻转） ——
+    const outward = [[0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]];
+    for (let e = 0; e < 4; e++) {
+      const base = vc + e * 2 * nd;
+      const ow = outward[e];
+      const a = base;                    // top0
+      const bq = base + 2;               // top1
+      const c = base + 3;                // bottom1
+      const e1x = main[bq * 8] - main[a * 8];
+      const e1y = main[bq * 8 + 1] - main[a * 8 + 1];
+      const e1z = main[bq * 8 + 2] - main[a * 8 + 2];
+      const e2x = main[c * 8] - main[a * 8];
+      const e2y = main[c * 8 + 1] - main[a * 8 + 1];
+      const e2z = main[c * 8 + 2] - main[a * 8 + 2];
+      const gnx = e1y * e2z - e1z * e2y;
+      const gny = e1z * e2x - e1x * e2z;
+      const gnz = e1x * e2y - e1y * e2x;
+      const flip = (gnx * ow[0] + gny * ow[1] + gnz * ow[2]) < 0;
+      for (let q = 0; q < nd - 1; q++) {
+        const ta = base + q * 2;
+        const tb = ta + 2;
+        const ba = ta + 1;
+        const bb = tb + 1;
+        if (!flip) {
+          indices[ti] = ta; indices[ti + 1] = tb; indices[ti + 2] = bb;
+          indices[ti + 3] = ta; indices[ti + 4] = bb; indices[ti + 5] = ba;
+        } else {
+          indices[ti] = ta; indices[ti + 1] = bb; indices[ti + 2] = tb;
+          indices[ti + 3] = ta; indices[ti + 4] = ba; indices[ti + 5] = bb;
+        }
+        ti += 6;
+      }
+    }
+
+    // —— 上传 + VAO（位置/法线/aux 交错 float；权重 Uint8 归一化；morph float） ——
+    const vboMain = glc.createBuffer(main);
+    const vboW = glc.createBuffer(wb);
+    const vboMor = glc.createBuffer(mor);
+    // 索引缓冲必须直接经 ELEMENT_ARRAY_BUFFER 目标上传：本机 ANGLE 实现中，
+    // 经 ARRAY_BUFFER 上传过的 buffer 再绑 ELEMENT_ARRAY_BUFFER 会被静默丢弃
+    // （bindBuffer 不报错但 VAO 记录为空 → drawElements INVALID_OPERATION 零输出）。
+    const ibo = gl.createBuffer();
+    this.glc._tracked.buffers.push(ibo);
+    const vao = glc.createVAO((g) => {
+      g.bindBuffer(g.ARRAY_BUFFER, vboMain);
+      g.enableVertexAttribArray(0);
+      g.vertexAttribPointer(0, 3, g.FLOAT, false, 32, 0);
+      g.enableVertexAttribArray(1);
+      g.vertexAttribPointer(1, 3, g.FLOAT, false, 32, 12);
+      g.enableVertexAttribArray(3);
+      g.vertexAttribPointer(3, 2, g.FLOAT, false, 32, 24);
+      g.bindBuffer(g.ARRAY_BUFFER, vboW);
+      g.enableVertexAttribArray(2);
+      g.vertexAttribPointer(2, 4, g.UNSIGNED_BYTE, true, 4, 0);
+      g.bindBuffer(g.ARRAY_BUFFER, vboMor);
+      g.enableVertexAttribArray(4);
+      g.vertexAttribPointer(4, 1, g.FLOAT, false, 4, 0);
+      // 先脱离 ARRAY 绑定点再挂 ELEMENT，并直接经 ELEMENT 目标上传索引数据
+      // （本机 ANGLE：经 ARRAY 上传过的 buffer 绑 ELEMENT 会被静默丢弃）
+      g.bindBuffer(g.ARRAY_BUFFER, null);
+      g.bindBuffer(g.ELEMENT_ARRAY_BUFFER, ibo);
+      g.bufferData(g.ELEMENT_ARRAY_BUFFER, indices, g.STATIC_DRAW);
+    });
+    gl.bindVertexArray(null);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+    // —— AABB（含裙边 + morph + 曲率下沉余量；只放宽不收紧，剔除安全） ——
+    const aabb = [
+      minX - 2.0, minY - 28.0, minZ - 2.0,
+      maxX + 2.0, maxY + 6.0, maxZ + 2.0,
+    ];
+
+    return {
+      lod, meshRevision: chunk.meshRevision, vao, vboMain, vboW, vboMor, ibo,
+      indexCount: indices.length, aabb,
+      morphTarget: 0, morphFrom: 0, morphFlipAt: -1e9, morphT: 0,
+    };
+  }
+
+  // ———— 视锥剔除 ————————————————
+
+  /** 由列主序 VP 提取 6 平面（left/right/bottom/top/near/far = row3±rowi） */
+  _computeFrustum(vp) {
+    const f = this._frustum;
+    for (let p = 0; p < 6; p++) {
+      const s = (p & 1) !== 0 ? -1 : 1;
+      const r = p >> 1;
+      f[p * 4] = vp[3] + s * vp[r];
+      f[p * 4 + 1] = vp[7] + s * vp[4 + r];
+      f[p * 4 + 2] = vp[11] + s * vp[8 + r];
+      f[p * 4 + 3] = vp[15] + s * vp[12 + r];
+    }
+    return f;
+  }
+
+  /** AABB 完全在某平面外侧（正顶点 dot < 0）→ 剔除 */
+  _aabbOutside(f, aabb) {
+    for (let p = 0; p < 6; p++) {
+      const a = f[p * 4];
+      const b = f[p * 4 + 1];
+      const c = f[p * 4 + 2];
+      const d = f[p * 4 + 3];
+      const px = a >= 0 ? aabb[3] : aabb[0];
+      const py = b >= 0 ? aabb[4] : aabb[1];
+      const pz = c >= 0 ? aabb[5] : aabb[2];
+      if (a * px + b * py + c * pz + d < 0) return true;
+    }
+    return false;
+  }
+
+  // ———— 帧绘制 ————————————————
+
+  /**
+   * 绘制全部视锥内 Chunk（每可见 Chunk 1 次 drawElements）。
+   * @param {WebGL2RenderingContext} gl
+   * @param {{vp:Float32Array, eye:Array<number>, time:number, hdr:number}} view
+   * @returns {{drawCalls:number, chunksVisible:number, triangles:number}}
+   */
+  draw(gl, view) {
+    const out = { drawCalls: 0, chunksVisible: 0, triangles: 0 };
+    if (this._destroyed || this.tier >= 3 || !gl || gl.isContextLost()) return out;
+    const v = view || {};
+    const vp = v.vp;
+    const eye = v.eye || [0, 0, 0];
+    const time = v.time || 0;
+    const hdr = v.hdr != null ? v.hdr : 1.0;
+    if (!vp) return out;
+
+    gl.useProgram(this.progTerrain);
+    const u = this._u;
+    const wo = this._worldOffset;
+    gl.uniformMatrix4fv(u.uVP, false, vp);
+    gl.uniform3f(u.uCamPos, eye[0], eye[1], eye[2]);
+    gl.uniform3f(u.uWorldOffset, wo[0], wo[1], wo[2]);
+    gl.uniform1f(u.uPlanetCurveInv2R, this._curveInv2R);
+    gl.uniform1i(u.uHeatZoneCount, this._heatZoneCount);
+    if (wo[0] || wo[2]) {
+      // 主题热区/脚步涟漪以场域坐标定义（doc7 §8.2）；世界平移后同步平移上传
+      const hz = this._heatZones;
+      const hzShift = new Float32Array(hz.length);
+      for (let i = 0; i < hz.length; i += 4) {
+        hzShift[i] = hz[i] + wo[0];
+        hzShift[i + 1] = hz[i + 1] + wo[2];
+        hzShift[i + 2] = hz[i + 2];
+        hzShift[i + 3] = hz[i + 3];
+      }
+      gl.uniform4fv(u.uHeatZones, hzShift);
+      const fs = this._footsteps;
+      const fsShift = new Float32Array(fs.length);
+      for (let i = 0; i < fs.length; i += 4) {
+        fsShift[i] = fs[i] + wo[0];
+        fsShift[i + 1] = fs[i + 1] + wo[2];
+        fsShift[i + 2] = fs[i + 2];
+        fsShift[i + 3] = fs[i + 3];
+      }
+      gl.uniform4fv(u.uFootsteps, fsShift);
+    } else {
+      gl.uniform4fv(u.uHeatZones, this._heatZones);
+      gl.uniform4fv(u.uFootsteps, this._footsteps);
+    }
+    gl.uniform3fv(u.uSunDir, this._sunDir);
+    gl.uniform3fv(u.uSunColor, this._sunColor);
+    gl.uniform3fv(u.uFogColor, this._fogColor);
+    gl.uniform2f(u.uFogRange, this._fogRange[0], this._fogRange[1]);
+    gl.uniform1f(u.uTime, time);
+    gl.uniform1f(u.uHdr, hdr);
+    const mc = this._matCols;
+    gl.uniform3f(u.uMatCol0, mc[0][0], mc[0][1], mc[0][2]);
+    gl.uniform3f(u.uMatCol1, mc[1][0], mc[1][1], mc[1][2]);
+    gl.uniform3f(u.uMatCol2, mc[2][0], mc[2][1], mc[2][2]);
+    gl.uniform3f(u.uMatCol3, mc[3][0], mc[3][1], mc[3][2]);
+    const fx = this._themeFx;
+    gl.uniform4f(u.uThemeFx, fx[0], fx[1], fx[2], this._debugMode);
+    // uFootsteps 已在上方随 uHeatZones 一并上传（含世界平移同步）
+
+    // —— 不透明基线（TERRAIN-02：CCW + BACK 剔除；诊断 1/3 渲染器侧临时关闭） ——
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LEQUAL);
+    gl.depthMask(true);
+    gl.frontFace(gl.CCW);
+    const cullOpaque = this.cullEnabled && this._debugMode !== 1 && this._debugMode !== 3;
+    if (cullOpaque) {
+      gl.enable(gl.CULL_FACE);
+      gl.cullFace(gl.BACK);
+    } else {
+      gl.disable(gl.CULL_FACE);
+    }
+
+    const frustum = this._computeFrustum(vp);
+    const woff = this._worldOffset;
+    const offAabb = (woff[0] || woff[1] || woff[2])
+      ? [0, 0, 0, 0, 0, 0]
+      : null;
+    let dc = 0;
+    let visible = 0;
+    let tris = 0;
+    for (const ent of this._entries.values()) {
+      if (!ent || !ent.vao) continue;
+      if (offAabb) {
+        // 场域坐标 AABB → 视图（平移后）空间再做剔除：worldPos = aPos + wo
+        offAabb[0] = ent.aabb[0] + woff[0];
+        offAabb[1] = ent.aabb[1] + woff[1];
+        offAabb[2] = ent.aabb[2] + woff[2];
+        offAabb[3] = ent.aabb[3] + woff[0];
+        offAabb[4] = ent.aabb[4] + woff[1];
+        offAabb[5] = ent.aabb[5] + woff[2];
+        if (this._aabbOutside(frustum, offAabb)) continue;
+      } else if (this._aabbOutside(frustum, ent.aabb)) {
+        continue;
+      }
+      gl.bindVertexArray(ent.vao);
+      gl.uniform1f(u.uMorphT, ent.morphT);
+      gl.drawElements(gl.TRIANGLES, ent.indexCount, gl.UNSIGNED_INT, 0);
+      dc++;
+      visible++;
+      tris += ent.indexCount / 3;
+    }
+    gl.bindVertexArray(null);
+
+    out.drawCalls = dc;
+    out.chunksVisible = visible;
+    out.triangles = tris;
+    this.stats.drawCalls = dc;
+    this.stats.chunksVisible = visible;
+    this.stats.triangles = tris;
+    return out;
+  }
+
+  // —— 生命周期 ————
+
+  /** 释放全部 GL 资源（glc.destroy() 仍会兜底清册回收） */
+  destroy() {
+    if (this._destroyed) return;
+    this._destroyed = true;
+    const gl = this.gl;
+    if (!gl) return;
+    for (const key of Array.from(this._entries.keys())) this._freeEntry(key);
+    this._entries.clear();
+    if (this.progTerrain) gl.deleteProgram(this.progTerrain);
+    this.progTerrain = null;
+  }
+}
+
+Object.assign(__exports, { LOD0_MAX_DIST, LOD1_MAX_DIST, SKIRT_DEPTH_M, GEOMORPH_BAND_M, GEOMORPH_DURATION_S, DEFAULT_PLANET_RADIUS_M, PlanetTerrainMesh });
 
 });
 __register("src/render/gl/PlanetSurface3D.js", function (__exports, __require) {
@@ -18841,6 +30862,22 @@ __register("src/render/gl/PlanetSurface3D.js", function (__exports, __require) {
  *
  * draw() 恰好 ≤ 8 次 draw call（预算 15）；HUD（血条/技能栏/目标信息）由
  * 调用方在 2D 层绘制，本类不触碰 DOM。
+ *
+ * Pass 状态隔离与诊断（doc7 §2.2 修复 3 / doc6 §3.2-3.3）：
+ *  - 场景 FBO 清屏唯一所有者为 PostProcessor.beginScene()（8 步契约）；draw() 首部
+ *    保留主题地平线色的双保险清屏（允许冗余防御，不构成第二所有者）；
+ *  - 天空 pass 显式关 DEPTH_TEST/depthMask(false)/关 BLEND/关 CULL_FACE；不透明
+ *    地形/建筑/actor/角色 pass 显式开 DEPTH_TEST(LEQUAL)/depthMask(true)/
+ *    frontFace(CCW)，并按 cullEnabled 开 CULL_FACE+BACK（greedyMeshChunk 与
+ *    GroundMeshes 均已验证 CCW-外向绕序）；贴花/特效/粒子透明 pass 关剔除、
+ *    BLEND 按材质声明、depthMask(false)，结束恢复；
+ *  - 三档地表诊断模式（setDebugMode / 循环 / getGLStateSnapshot）：
+ *    0=正式  1=unlit_nocull（无光照纯色+临时关剔除）  2=wireframe_normal（法线
+ *    RGB + 1m 世界格线）  3=winding_audit（gl_FrontFacing 正面翠绿/背面洋红，
+ *    需关剔除观察背面）。绝不以永久关闭剔除掩盖绕序问题；
+ *  - init() 注册 window.__vfSurfaceDebug（setDebugMode/cycleDebugMode/getSnapshot/
+ *    renderer），destroy() 注销 —— 诊断面板（DiagnosticsView）与 glGateTest 经此
+ *    钩子操作【当前挂载】的地表渲染器；本类不绑定键盘（F3 循环由视图层决定）。
  *
  * renderData 契约（全部字段可选，缺省安全跳过）：
  *   character : { x, y, z, yaw, state('idle'|'run'|'attack'|'dig'|'hurt'),
@@ -18944,12 +30981,15 @@ float hash13(vec3 p) {
 }
 void main() {
   vec4 p4 = uInvVP * vec4(vXY, 0.5, 1.0);
-  vec3 dir = normalize(p4.xyz / p4.w - uCamPos);
+  /* 反投影分母非零保护：p4.w → 0 时除法产生 Inf/NaN，天空输出异常值残留在场景
+   * FBO 中被辉光金字塔逐帧放大（doc7 §2.2 修复 3 / doc6 §3.2） */
+  float pw = abs(p4.w) < 1e-6 ? (p4.w >= 0.0 ? 1e-6 : -1e-6) : p4.w;
+  vec3 dir = normalize(p4.xyz / pw - uCamPos);
   float up = dir.y;
   vec3 col = mix(uHorizon, uZenith, pow(clamp(up, 0.0, 1.0), 0.55));
   col = mix(col, uGround, smoothstep(0.0, -0.30, up));
   float s = max(dot(dir, uSunDir), 0.0);
-  col += uSunColor * (pow(s, 800.0) * 3.2 + pow(s, 20.0) * 0.20);
+  col += uSunColor * (pow(max(s, 1e-6), 800.0) * 3.2 + pow(max(s, 1e-6), 20.0) * 0.20);
   if (uStars > 0.5 && up > 0.02) {
     vec3 sp = floor(dir * 220.0);
     float st = hash13(sp);
@@ -18983,8 +31023,31 @@ uniform vec3 uSunColor;
 uniform vec3 uCamPos;
 uniform vec3 uFogColor;
 uniform vec2 uFogRange;
+uniform float uDebugMode; // 0=正式 1=unlit_nocull 2=wireframe_normal 3=winding_audit
 out vec4 fragColor;
 void main() {
+  /* 三档诊断模式（doc7 §2.2 / doc6 §3.3 B）：
+   *  1 无剔除 Unlit：纯色无光照，验证顶点在视锥内（剔除由渲染器侧临时关闭）；
+   *  2 线框与法线：法线 RGB + 1m 世界格线，排查法线翻转/退化三角形/接缝；
+   *  3 绕序审计：gl_FrontFacing 正面翠绿 / 背面洋红（剔除必须关闭才能看到背面） */
+  if (uDebugMode > 0.5) {
+    if (uDebugMode > 2.5) {
+      fragColor = gl_FrontFacing ? vec4(0.1, 0.9, 0.3, 1.0) : vec4(1.0, 0.0, 0.8, 1.0);
+      return;
+    }
+    vec3 dbg;
+    if (uDebugMode < 1.5) {
+      dbg = vC; // 无光照材质纯色
+    } else {
+      dbg = normalize(vN) * 0.5 + 0.5;
+      vec3 fw = abs(fract(vW) - 0.5);
+      float line = max(smoothstep(0.02, 0.06, fw.x),
+                       max(smoothstep(0.02, 0.06, fw.y), smoothstep(0.02, 0.06, fw.z)));
+      dbg = mix(dbg, vec3(1.0, 0.9, 0.2), line * 0.6); // 1m 世界格线（黄）
+    }
+    fragColor = vec4(dbg, 1.0);
+    return;
+  }
   vec3 N = normalize(vN);
   float diff = max(dot(N, uSunDir), 0.0);
   float hemi = 0.44 + 0.18 * (N.y * 0.5 + 0.5);
@@ -19189,6 +31252,28 @@ function hash01(n) {
   return h / 4294967296;
 }
 
+/** GL 枚举值 → 可读名（诊断快照用；未收录值回退 0x 十六进制串） */
+const GL_ENUM_NAMES = new Map([
+  [0x0000, 'ZERO'], [0x0001, 'ONE'],
+  [0x0200, 'NEVER'], [0x0201, 'LESS'], [0x0202, 'EQUAL'], [0x0203, 'LEQUAL'],
+  [0x0204, 'GREATER'], [0x0205, 'NOTEQUAL'], [0x0206, 'GEQUAL'], [0x0207, 'ALWAYS'],
+  [0x0404, 'FRONT'], [0x0405, 'BACK'], [0x0406, 'FRONT_AND_BACK'],
+  [0x0408, 'FRONT_AND_BACK'],
+  [0x2300, 'CW'], [0x2301, 'CCW'],
+  [0x0300, 'SRC_ALPHA'], [0x0301, 'ONE_MINUS_SRC_ALPHA'],
+  [0x0302, 'SRC_COLOR'], [0x0303, 'ONE_MINUS_SRC_COLOR'],
+  [0x0306, 'DST_ALPHA'], [0x0307, 'ONE_MINUS_DST_ALPHA'],
+  [0x0308, 'DST_COLOR'], [0x0309, 'ONE_MINUS_DST_COLOR'],
+  [0x8006, 'FUNC_ADD'], [0x8009, 'FUNC_SUBTRACT'], [0x800a, 'FUNC_REVERSE_SUBTRACT'],
+  [0x0500, 'INVALID_ENUM'], [0x0501, 'INVALID_VALUE'], [0x0502, 'INVALID_OPERATION'],
+  [0x0503, 'STACK_OVERFLOW'], [0x0504, 'STACK_UNDERFLOW'], [0x0505, 'OUT_OF_MEMORY'],
+  [0x0506, 'INVALID_FRAMEBUFFER_OPERATION'], [0x9242, 'CONTEXT_LOST_WEBGL'],
+]);
+/** 查枚举名；未收录回退 0x 十六进制串 */
+function glEnumName(v) {
+  return GL_ENUM_NAMES.has(v) ? GL_ENUM_NAMES.get(v) : '0x' + Number(v).toString(16);
+}
+
 /** 外骨骼部件枢轴（局部坐标，与 GroundMeshes.buildExosuitMesh 部件布局一致） */
 const EXO_PIVOTS = {
   head: [0, 1.38, 0],
@@ -19215,6 +31300,12 @@ class PlanetSurface3D {
     this.sw = null;                 // init(sceneWorld) 后持有体素世界
     this.pickDist = 7.5;            // DDA 拾取距离（体素）
     this.stats = { triangles: 0, drawCalls: 0, chunkRebuilds: 0 };
+    // —— 地表诊断：0=off 1=unlit_nocull 2=wireframe_normal 3=winding_audit ——
+    // cullEnabled：正式模式背面剔除开关（默认 true —— greedyMeshChunk 已验证
+    // 全部 6 向面 CCW-外向；诊断模式 1/3 下强制临时关闭，结束自动恢复）。
+    // 公开字段：诊断侧可直接置 false 复现"无剔除"对照视图（不得以永久关闭掩盖绕序问题）
+    this._debugMode = 0;
+    this.cullEnabled = true;
 
     this._destroyed = false;
     this._inited = false;
@@ -19222,6 +31313,10 @@ class PlanetSurface3D {
     this._vh = 1;
     this._springDist = -1;          // 弹簧臂当前臂长（首帧吸附）
     this._spawnSeq = 0;             // 挖掘粒子批次序号（确定性初速源）
+    // 场景化集成（doc7 TASK-1.2/1.4）：地形/天空/天气改由 PlanetSurfaceScene 绘制，
+    // 本渲染器经 setExternalCamera() 进入「对象独占」模式 —— 仅绘制
+    // 箱体/actor/角色七部件/贴花/特效/挖掘粒子，相机与 VP 由调用方直供。
+    this._extCam = null;
 
     // —— GL 资源（init 建立程序；其余缓冲随 init/destroy 管理） ——
     const glc2 = this.glc;
@@ -19236,7 +31331,7 @@ class PlanetSurface3D {
     const gl = this.gl;
     this._u = {
       sky: locMap(gl, this.progSky, ['uInvVP', 'uCamPos', 'uZenith', 'uHorizon', 'uGround', 'uSunDir', 'uSunColor', 'uStars', 'uTime']),
-      terrain: locMap(gl, this.progTerrain, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange']),
+      terrain: locMap(gl, this.progTerrain, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange', 'uDebugMode']),
       box: locMap(gl, this.progBox, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange']),
       actor: locMap(gl, this.progActor, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange']),
       char: locMap(gl, this.progChar, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange']),
@@ -19396,6 +31491,17 @@ class PlanetSurface3D {
 
     // —— 天空 / 光照：按行星档案求值一次 ——
     this._evalEnvironment();
+
+    // —— 诊断钩子：注册到 window（DiagnosticsView / glGateTest / DevTools 经此
+    // 操作当前挂载的地表渲染器；destroy 注销）。键盘不在此绑定 —— F3 循环归视图层。
+    if (typeof window !== 'undefined') {
+      window.__vfSurfaceDebug = {
+        renderer: this,
+        setDebugMode: (m) => this.setDebugMode(m),
+        cycleDebugMode: () => this.cycleDebugMode(),
+        getSnapshot: () => this.getGLStateSnapshot(),
+      };
+    }
 
     gl.bindVertexArray(null);
     return this;
@@ -19607,6 +31713,37 @@ class PlanetSurface3D {
   // —— 相机 ————————————————
 
   /**
+   * 外部相机直供（对象独占模式）：GroundView 场景化集成中，地形/天空由
+   * PlanetSurfaceScene 绘制并权威持有弹簧臂相机；本渲染器仅承担对象 pass，
+   * eye/target/vp 逐帧由调用方下发（与场景同源同空间，均为米制单位）。
+   * 传 null eye 恢复内置弹簧臂相机。
+   * @param {Array<number>|null} eye 眼位 [x,y,z]
+   * @param {Array<number>} [target] 视点 [x,y,z]（无 vp 时用于重建 view）
+   * @param {Float32Array|Array<number>} [vp] 外部 VP 矩阵（16）
+   */
+  setExternalCamera(eye, target, vp) {
+    if (!eye) {
+      this._extCam = null;
+      return;
+    }
+    this._extCam = {
+      eye: [eye[0], eye[1], eye[2]],
+      target: target ? [target[0], target[1], target[2]] : null,
+      vp: vp || null,
+    };
+  }
+
+  /**
+   * 对象独占开关（无外部相机时的场景化模式）：跳过内置相机/清屏/天空/地形，
+   * 仅绘制对象 pass；VP 由每帧 setExternalCamera 下发（GroundView 集成约定：
+   * _initGL 先开 objectOnly，_renderFrame 逐帧先 setExternalCamera 再 draw）。
+   * @param {boolean} on
+   */
+  setObjectOnly(on) {
+    this._objectOnly = !!on;
+  }
+
+  /**
    * 第三人称弹簧臂相机：目标 = 角色胸口，轨道 (yaw/pitch/dist)，
    * 从目标向眼位做 DDA，命中地形即收臂防穿模。
    */
@@ -19696,6 +31833,112 @@ class PlanetSurface3D {
     return hit;
   }
 
+  // —— 地表诊断 API（doc7 §2.2 三档诊断 / doc6 §3.3 证据链） ————————
+
+  /**
+   * 设置地表诊断渲染模式（不绑定键盘，视图层/诊断面板经 window.__vfSurfaceDebug 调用）。
+   *  0 = 正式渲染（按 cullEnabled 剔除）
+   *  1 = unlit_nocull：无光照纯色，临时关 CULL_FACE（验证顶点在视锥内）
+   *  2 = wireframe_normal：法线 RGB + 1m 世界格线（剔除保持开启，暴露正面消失破洞）
+   *  3 = winding_audit：gl_FrontFacing 正面翠绿 (0.1,0.9,0.3) / 背面洋红 (1.0,0.0,0.8)，
+   *      临时关 CULL_FACE（否则背面被剔除永远看不到洋红）
+   * @param {number} mode 0..3（越界回退 0）
+   * @returns {number} 实际生效的模式
+   */
+  setDebugMode(mode) {
+    const n = Math.round(Number(mode));
+    this._debugMode = n >= 0 && n <= 3 && Number.isFinite(n) ? n : 0;
+    return this._debugMode;
+  }
+
+  /** 循环诊断模式 0→1→2→3→0，返回新模式 */
+  cycleDebugMode() {
+    return this.setDebugMode((this._debugMode + 1) % 4);
+  }
+
+  /**
+   * GL 状态运行时快照（JSON-able；doc6 §3.3 A 证据链 / doc7 §3.4 诊断 JSON）。
+   * 采集当前绑定 FBO 的附件类型/尺寸、viewport/scissor、剔除与深度状态、混合状态、
+   * getError，以及地形顶点/三角形数、区块数与 drawCalls。
+   * @returns {object} 可直接 JSON.stringify 的快照
+   */
+  getGLStateSnapshot() {
+    const gl = this.gl;
+    const snap = {
+      generatedAt: new Date().toISOString(),
+      browser: null,
+      gpu: null,
+      viewport: null,
+      drawingBuffer: null,
+      sceneTarget: { width: this._vw, height: this._vh }, // draw() 收到的场景目标物理尺寸
+      boundFbo: { bound: false, colorAttachment: null, depthAttachment: null },
+      state: {},
+      glError: null,
+      terrain: {
+        vertCount: this._terr ? this._terr.vertCount : 0,
+        triCount: this.stats.triangles,
+      },
+      chunks: this._chunkMesh ? this._chunkMesh.length : 0,
+      drawCalls: this.stats.drawCalls,
+      debugMode: this._debugMode,
+      cullEnabled: this.cullEnabled,
+    };
+    if (!gl) return snap;
+    if (typeof navigator !== 'undefined' && navigator.userAgent) snap.browser = navigator.userAgent;
+    // GPU 渲染器字符串（WEBGL_debug_renderer_info 不可用时置 null）
+    try {
+      const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+      if (dbg) snap.gpu = gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL);
+    } catch (_) { /* 快照不因探测失败而中断 */ }
+
+    const enumName = glEnumName;
+    const boolOf = (v) => !!v;
+    const bound = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+    if (bound) {
+      snap.boundFbo.bound = true;
+      const describe = (attach) => {
+        try {
+          const type = gl.getFramebufferAttachmentParameter(gl.FRAMEBUFFER, attach, gl.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE);
+          if (type === gl.TEXTURE) return { type: 'texture' };
+          if (type === gl.RENDERBUFFER) {
+            const rbo = gl.getFramebufferAttachmentParameter(gl.FRAMEBUFFER, attach, gl.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME);
+            const prev = gl.getParameter(gl.RENDERBUFFER_BINDING);
+            gl.bindRenderbuffer(gl.RENDERBUFFER, rbo);
+            const size = {
+              type: 'renderbuffer',
+              width: gl.getRenderbufferParameter(gl.RENDERBUFFER, gl.RENDERBUFFER_WIDTH),
+              height: gl.getRenderbufferParameter(gl.RENDERBUFFER, gl.RENDERBUFFER_HEIGHT),
+            };
+            gl.bindRenderbuffer(gl.RENDERBUFFER, prev);
+            return size;
+          }
+          return null;
+        } catch (_) { return null; }
+      };
+      snap.boundFbo.colorAttachment = describe(gl.COLOR_ATTACHMENT0);
+      snap.boundFbo.depthAttachment = describe(gl.DEPTH_ATTACHMENT);
+    }
+    snap.viewport = Array.from(gl.getParameter(gl.VIEWPORT));
+    snap.drawingBuffer = { width: gl.drawingBufferWidth, height: gl.drawingBufferHeight };
+    snap.state = {
+      scissorTest: boolOf(gl.isEnabled(gl.SCISSOR_TEST)),
+      scissorBox: Array.from(gl.getParameter(gl.SCISSOR_BOX)),
+      cullFace: boolOf(gl.isEnabled(gl.CULL_FACE)),
+      cullFaceMode: enumName(gl.getParameter(gl.CULL_FACE_MODE)),
+      frontFace: enumName(gl.getParameter(gl.FRONT_FACE)),
+      depthTest: boolOf(gl.isEnabled(gl.DEPTH_TEST)),
+      depthFunc: enumName(gl.getParameter(gl.DEPTH_FUNC)),
+      depthMask: boolOf(gl.getParameter(gl.DEPTH_WRITEMASK)),
+      colorMask: Array.from(gl.getParameter(gl.COLOR_WRITEMASK), boolOf),
+      blend: boolOf(gl.isEnabled(gl.BLEND)),
+      blendSrcRgb: enumName(gl.getParameter(gl.BLEND_SRC_RGB)),
+      blendDstRgb: enumName(gl.getParameter(gl.BLEND_DST_RGB)),
+      blendEquationRgb: enumName(gl.getParameter(gl.BLEND_EQUATION_RGB)),
+    };
+    snap.glError = enumName(gl.getError());
+    return snap;
+  }
+
   // —— 帧绘制 ————————————————
 
   /**
@@ -19712,45 +31955,98 @@ class PlanetSurface3D {
     const tier = this.tier;
     let dc = 0;
 
-    this._updateCamera(w, h, rd, opts);
     const m = this._m;
-    const eye = this.camera.eye;
+    let eye;
 
-    // —— 0. 天空（无深度写入；覆盖全屏故无需清色） ——
-    gl.clear(gl.DEPTH_BUFFER_BIT);
-    gl.disable(gl.DEPTH_TEST);
-    gl.depthMask(false);
-    gl.useProgram(this.progSky);
-    const uSky = this._u.sky;
-    gl.uniformMatrix4fv(uSky.uInvVP, false, mat4Invert(m.invVp, m.vp));
-    gl.uniform3f(uSky.uCamPos, eye[0], eye[1], eye[2]);
-    gl.uniform3fv(uSky.uZenith, this._sky.zenith);
-    gl.uniform3fv(uSky.uHorizon, this._sky.horizon);
-    gl.uniform3fv(uSky.uGround, this._sky.ground);
-    gl.uniform3fv(uSky.uSunDir, this._sunDir);
-    gl.uniform3fv(uSky.uSunColor, this._sunColor);
-    gl.uniform1f(uSky.uStars, this._sky.stars);
-    gl.uniform1f(uSky.uTime, time);
-    gl.bindVertexArray(this._skyVao);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-    dc++;
-    gl.depthMask(true);
+    if (this._objectOnly || this._extCam) {
+      // —— 对象独占模式（场景化集成 TASK-1.2/1.4）：外部相机/VP；不清屏、
+      //    不绘天空与地形 —— 清屏唯一所有者仍是 PostProcessor 8 步契约，
+      //    场景绘制权威在 PlanetSurfaceScene。 ——
+      eye = this.camera.eye;
+      if (this._extCam) {
+        eye[0] = this._extCam.eye[0];
+        eye[1] = this._extCam.eye[1];
+        eye[2] = this._extCam.eye[2];
+        if (this._extCam.target) {
+          this.camera.target[0] = this._extCam.target[0];
+          this.camera.target[1] = this._extCam.target[1];
+          this.camera.target[2] = this._extCam.target[2];
+        }
+        if (this._extCam.vp) {
+          m.vp.set(this._extCam.vp);
+        } else if (this._extCam.target) {
+          mat4Perspective(m.proj, 1.05, w / Math.max(1, h), 0.1, 1600);
+          mat4LookAt(m.view, eye, this._extCam.target, [0, 1, 0]);
+          mat4Multiply(m.vp, m.proj, m.view);
+        }
+      }
+      this._vw = w;
+      this._vh = h;
+    } else {
+      this._updateCamera(w, h, rd, opts);
+      eye = this.camera.eye;
+
+      // —— 0. 双保险清屏（主题地平线色 + 深度） ——
+      // 场景 FBO 清屏唯一所有者是 PostProcessor.beginScene()（8 步契约）；此处为
+      // doc7 §2.2 允许的冗余防御：地表视图自带正确主题色，任何前序状态偏差
+      // （colorMask/scissor/blend 残留）也不至于依赖"天空恰好覆盖所有像素"。
+      // 场景 FBO 已挂 DEPTH_COMPONENT24（TASK-0.1），gl.clear(DEPTH) 自此真实生效。
+      const horizon = this._sky.horizon;
+      gl.clearColor(horizon[0], horizon[1], horizon[2], 1.0);
+      gl.clearDepth(1.0);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+      // —— 1. 天空（pass 状态隔离：关深度/不写深度/关混合/关剔除） ——
+      gl.disable(gl.DEPTH_TEST);
+      gl.depthMask(false);
+      gl.disable(gl.BLEND);
+      gl.disable(gl.CULL_FACE);
+      gl.useProgram(this.progSky);
+      const uSky = this._u.sky;
+      gl.uniformMatrix4fv(uSky.uInvVP, false, mat4Invert(m.invVp, m.vp));
+      gl.uniform3f(uSky.uCamPos, eye[0], eye[1], eye[2]);
+      gl.uniform3fv(uSky.uZenith, this._sky.zenith);
+      gl.uniform3fv(uSky.uHorizon, this._sky.horizon);
+      gl.uniform3fv(uSky.uGround, this._sky.ground);
+      gl.uniform3fv(uSky.uSunDir, this._sunDir);
+      gl.uniform3fv(uSky.uSunColor, this._sunColor);
+      gl.uniform1f(uSky.uStars, this._sky.stars);
+      gl.uniform1f(uSky.uTime, time);
+      gl.bindVertexArray(this._skyVao);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      dc++;
+
+      // —— 2. 地形（单缓冲单 draw call） ——
+      if (this._terr.vertCount > 0) {
+        gl.useProgram(this.progTerrain);
+        const u = this._u.terrain;
+        gl.uniformMatrix4fv(u.uVP, false, m.vp);
+        gl.uniform3fv(u.uSunDir, this._sunDir);
+        gl.uniform3fv(u.uSunColor, this._sunColor);
+        gl.uniform3f(u.uCamPos, eye[0], eye[1], eye[2]);
+        gl.uniform3fv(u.uFogColor, this._fogColor);
+        gl.uniform2f(u.uFogRange, this._fogRange[0], this._fogRange[1]);
+        gl.uniform1f(u.uDebugMode, this._debugMode);
+        gl.bindVertexArray(this._terr.vao);
+        gl.drawArrays(gl.TRIANGLES, 0, this._terr.vertCount);
+        dc++;
+      }
+    }
+
+    // —— 不透明状态基线（对象 pass 共用；进入 pass 前显式声明） ——
     gl.enable(gl.DEPTH_TEST);
     gl.depthFunc(gl.LEQUAL);
-
-    // —— 1. 地形（单缓冲单 draw call） ——
-    if (this._terr.vertCount > 0) {
-      gl.useProgram(this.progTerrain);
-      const u = this._u.terrain;
-      gl.uniformMatrix4fv(u.uVP, false, m.vp);
-      gl.uniform3fv(u.uSunDir, this._sunDir);
-      gl.uniform3fv(u.uSunColor, this._sunColor);
-      gl.uniform3f(u.uCamPos, eye[0], eye[1], eye[2]);
-      gl.uniform3fv(u.uFogColor, this._fogColor);
-      gl.uniform2f(u.uFogRange, this._fogRange[0], this._fogRange[1]);
-      gl.bindVertexArray(this._terr.vao);
-      gl.drawArrays(gl.TRIANGLES, 0, this._terr.vertCount);
-      dc++;
+    gl.depthMask(true);
+    gl.frontFace(gl.CCW);
+    // 剔除仅在绕序已验证时开启：greedyMeshChunk 全部 6 向面与 GroundMeshes 单位盒
+    // 均为 CCW-外向（TERRAIN-02）。诊断模式 1（无剔除 Unlit）与 3（绕序审计，需
+    // 看到背面染洋红）强制临时关闭；模式 2 保持开启以暴露"正面消失破洞"。
+    const cullOpaque = this.cullEnabled && this._debugMode !== 1 && this._debugMode !== 3;
+    if (cullOpaque) {
+      gl.enable(gl.CULL_FACE);
+      gl.cullFace(gl.BACK);
+    } else {
+      gl.disable(gl.CULL_FACE);
     }
 
     // —— 2. 建筑货箱实例（单位盒） ——
@@ -19805,10 +32101,11 @@ class PlanetSurface3D {
       dc++;
     }
 
-    // —— 5. AoE 预警贴花（α 混合，深度不写） ——
+    // —— 5. AoE 预警贴花（α 混合，深度不写；贴花圆盘三角形朝 -Y，双面绘制关剔除） ——
     this._buildDecals(rd, time);
     if (this._decal.count > 0) {
       this._uploadDynamic(this._decal, this._decalArr);
+      gl.disable(gl.CULL_FACE); // 透明贴花/缎带按材质策略双面（doc6 §3.3 C）
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       gl.depthMask(false);
@@ -19823,10 +32120,11 @@ class PlanetSurface3D {
       gl.depthMask(true);
     }
 
-    // —— 6. 刀光带 / 光束（加性，深度不写） ——
+    // —— 6. 刀光带 / 光束（加性，深度不写；正反两面都可见 → 关剔除） ——
     this._buildFx(rd, eye);
     if (this._fx.count > 0) {
       this._uploadDynamic(this._fx, this._fxArr);
+      gl.disable(gl.CULL_FACE);
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
       gl.depthMask(false);
@@ -19841,10 +32139,11 @@ class PlanetSurface3D {
       gl.depthMask(true);
     }
 
-    // —— 7. 挖掘粒子（加性点精灵） ——
+    // —— 7. 挖掘粒子（加性点精灵；POINTS 不受剔除影响，状态隔离保持显式） ——
     this._updateParticles(rd, opts.dt != null ? opts.dt : 1 / 30, tier);
     if (this._pool.n > 0) {
       const n = this._packParticles(tier);
+      gl.disable(gl.CULL_FACE);
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
       gl.depthMask(false);
@@ -20273,6 +32572,11 @@ class PlanetSurface3D {
   destroy() {
     if (this._destroyed) return;
     this._destroyed = true;
+    // 注销诊断钩子（仅当仍指向本实例——防误清新实例的钩子）
+    if (typeof window !== 'undefined' && window.__vfSurfaceDebug
+      && window.__vfSurfaceDebug.renderer === this) {
+      window.__vfSurfaceDebug = null;
+    }
     const gl = this.gl;
     if (!gl) return;
     const delBuf = (b) => { if (b) gl.deleteBuffer(b); };
@@ -20301,1250 +32605,6 @@ class PlanetSurface3D {
 }
 
 Object.assign(__exports, { PlanetSurface3D });
-
-});
-__register("src/render/CanvasManager.js", function (__exports, __require) {
-/**
- * render/CanvasManager.js — 画布生命周期管理器（任务书 2.5 渲染基建 / R2 升级）
- *
- * 职责：
- *  - 在给定容器内创建包裹 div（class "vf-view-canvas"，复用 styles.css 的绝对定位布局），
- *    并搭建三层画布：
- *      底层 glCanvas —— WebGL2（GL 场景 + HDR Bloom 后处理输出）；
- *      顶层 hudCanvas —— 2D 画布（透明背景，仅画 HUD 文字/指示框），pointer-events:none，
- *                        不改变事件目标（鼠标事件仍落在 glCanvas 上，由调用方绑定）；
- *    两层绝对定位重合（zIndex 显式分层）。无 WebGL2 时只保留 2D 画布（行为与旧版一致）。
- *  - 处理 devicePixelRatio（上限 2.0），ResizeObserver 监听容器尺寸并同步三层物理像素，
- *    触发 onResize 回调并同步 PostProcessor 的渲染目标尺寸。
- *  - WebGL 上下文丢失（webglcontextlost）：preventDefault + 标记 glDegraded +
- *    隐藏 glCanvas（以 opacity:0 隐藏而非 display:none —— 保持事件目标不变，
- *    调用方已绑定在 glCanvas 上的交互在退化期间继续工作；2D 兜底照常绘制）；
- *    上下文恢复（webglcontextrestored）：自动重建 PostProcessor/GL 资源（rebuild 钩子，
- *    视图层可经 onGLStateChange 感知并重挂网格），失败则维持 2D 兜底，不抛错不白屏。
- *
- * 既有公开 API（100% 兼容，调用方无感知）：
- *  attach(container) → this；ctx / width / height / dpr / canvas；
- *  beginFrame()（HUD 2D setTransform(dpr,0,0,dpr,0,0)）；onResize(cb) → 注销函数；dispose()。
- * 新增（增量）：gl / glc / post / hasGL / glDegraded / tier；
- *  beginGLFrame() / endGLFrame(opts) / setTier(t) / onGLStateChange(cb) / rebuild()。
- *
- * 约束：顶层不触碰 document/window，仅类方法内部访问 DOM，可在 Node 侧安全 import。
- */
-
-const { GLContext: GLContext } = __require("src/render/gl/GLCore.js");
-const { PostProcessor: PostProcessor } = __require("src/render/gl/PostProcessor.js");
-
-class CanvasManager {
-  constructor() {
-    // —— 既有公开 API 字段 ——
-    /** @type {HTMLCanvasElement|null} 事件目标画布（有 GL 时为底层 glCanvas，无 GL 时为 2D 画布）。
-     *  hudCanvas 带 pointer-events:none 永不成为事件目标，调用方绑定在 canvas 上的
-     *  鼠标事件因此保持与旧版完全一致的行为。 */
-    this.canvas = null;
-    /** @type {CanvasRenderingContext2D|null} HUD 2D 上下文（顶层 hudCanvas） */
-    this.ctx = null;
-    /** CSS 逻辑像素宽度 */
-    this.width = 0;
-    /** CSS 逻辑像素高度 */
-    this.height = 0;
-    /** 实际使用的 devicePixelRatio（上限 2.0） */
-    this.dpr = 1;
-
-    // —— R2 新增公开字段 ——
-    /** @type {HTMLCanvasElement|null} 底层 WebGL2 画布（无 GL 时为 null） */
-    this.glCanvas = null;
-    /** @type {HTMLCanvasElement|null} 顶层 2D HUD 画布 */
-    this.hudCanvas = null;
-    /** @type {WebGL2RenderingContext|null} */
-    this.gl = null;
-    /** @type {GLContext|null} GL 封装（托管资源清册） */
-    this.glc = null;
-    /** @type {PostProcessor|null} HDR Bloom 后处理管线 */
-    this.post = null;
-    /** 是否持有可用 WebGL2（false 时为纯 2D，行为与旧版一致） */
-    this.hasGL = false;
-    /** GL 上下文丢失/重建失败标记（true 时调用方可退回 this.ctx 画基础图形） */
-    this.glDegraded = false;
-    /** 渲染层级：1=完整管线；2=降级管线；3=纯 2D（GL 短路），经 setTier 调整 */
-    this.tier = 1;
-
-    this._wrap = null;           // 包裹 div（.vf-view-canvas）
-    this._observer = null;       // ResizeObserver 实例
-    this._resizeCbs = new Set(); // 尺寸变化回调集合
-    this._glStateCbs = new Set();// GL 状态变化回调集合（参数 degraded:boolean）
-    this._onMeasure = null;      // 绑定后的观察回调
-    this._onWinResize = null;    // window resize 兜底（捕捉 dpr 变化）
-    this._onGLLost = null;       // webglcontextlost 监听
-    this._onGLRestored = null;   // webglcontextrestored 监听
-  }
-
-  /**
-   * 在容器内创建三层画布并开始观察尺寸。
-   * @param {HTMLElement} container 容器元素（通常为 .vf-view-body 或其子容器）
-   * @returns {CanvasManager} 返回自身，便于链式调用
-   */
-  attach(container) {
-    if (!container) throw new Error('[CanvasManager] attach 需要容器元素');
-    // 包裹层复用 styles.css 中 .vf-view-canvas { position:absolute; inset:0 }
-    const wrap = document.createElement('div');
-    wrap.className = 'vf-view-canvas';
-    const hudCanvas = document.createElement('canvas');
-    const glCanvas = document.createElement('canvas');
-
-    // —— 尝试取得 WebGL2（画布无需先入 DOM 即可 getContext）——
-    let gl = null;
-    try {
-      gl = this._tryGetGL(glCanvas);
-    } catch (e) {
-      gl = null;
-    }
-
-    if (gl) {
-      // GL 管线初始化失败（如着色器编译异常）同样退化为纯 2D
-      try {
-        this.gl = gl;
-        this.glc = GLContext.fromExisting(glCanvas, gl);
-        this.post = new PostProcessor(this.glc);
-        this.hasGL = true;
-      } catch (e) {
-        console.error('[CanvasManager] GL 管线初始化失败，退化为纯 2D:', e);
-        try { if (this.glc) this.glc.destroy(); } catch (_) { /* 忽略销毁异常 */ }
-        this.gl = null;
-        this.glc = null;
-        this.post = null;
-        this.hasGL = false;
-      }
-    }
-
-    if (this.hasGL) {
-      // 底层：WebGL2 画布（接收鼠标事件，zIndex 0）
-      this._applyCanvasStyle(glCanvas, 0);
-      wrap.appendChild(glCanvas);
-      this.glCanvas = glCanvas;
-      this.canvas = glCanvas;
-      this._bindGLLifecycle(glCanvas);
-      // 顶层 HUD 画布透明且不拦截事件：事件目标保持为 glCanvas
-      hudCanvas.style.pointerEvents = 'none';
-    } else {
-      // 无 GL：2D 画布保持默认事件目标（与旧版行为一致）
-      hudCanvas.style.pointerEvents = '';
-    }
-
-    // 顶层：HUD 2D 画布（透明背景，仅画文字/指示框，zIndex 1）
-    this._applyCanvasStyle(hudCanvas, 1);
-    wrap.appendChild(hudCanvas);
-    this.hudCanvas = hudCanvas;
-    this.ctx = hudCanvas.getContext('2d');
-    this._wrap = wrap;
-    container.appendChild(wrap);
-
-    // 首次测量并应用尺寸（内部会同步 post.resize）
-    this._measure();
-
-    // 尺寸观察：容器尺寸变化 → 重新测量
-    this._onMeasure = () => this._measure();
-    if (typeof ResizeObserver !== 'undefined') {
-      this._observer = new ResizeObserver(this._onMeasure);
-      this._observer.observe(wrap);
-    }
-    // window resize 兜底：跨屏拖动 / 浏览器缩放导致的 dpr 变化不会触发 ResizeObserver
-    if (typeof window !== 'undefined') {
-      this._onWinResize = () => this._measure();
-      window.addEventListener('resize', this._onWinResize);
-    }
-    return this;
-  }
-
-  /**
-   * 注册尺寸变化回调（参数为 CSS 逻辑像素宽高）。
-   * @param {(w:number,h:number)=>void} cb 回调
-   * @returns {()=>void} 注销函数
-   */
-  onResize(cb) {
-    if (typeof cb !== 'function') return () => {};
-    this._resizeCbs.add(cb);
-    return () => this._resizeCbs.delete(cb);
-  }
-
-  /**
-   * 注册 GL 状态变化回调（可选；参数 degraded:boolean）。
-   * 上下文丢失/恢复/重建失败时触发，视图层可借此重挂 GL 网格或提示降级。
-   * @param {(degraded:boolean)=>void} cb 回调
-   * @returns {()=>void} 注销函数
-   */
-  onGLStateChange(cb) {
-    if (typeof cb !== 'function') return () => {};
-    this._glStateCbs.add(cb);
-    return () => this._glStateCbs.delete(cb);
-  }
-
-  /** 每帧渲染前调用：把 HUD 2D 上下文变换重置为 dpr 缩放（逻辑像素坐标系） */
-  beginFrame() {
-    if (!this.ctx) return;
-    this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    this.ctx.clearRect(0, 0, this.width, this.height);
-  }
-
-  /**
-   * 开始 GL 帧（有 GL 且 tier<3 时）：设置 viewport 到物理像素并绑定场景 FBO。
-   * @returns {{fbo:Object, width:number, height:number}|null} 场景目标信息；无 GL/降级/目标未就绪时为 null
-   */
-  beginGLFrame() {
-    if (!this.hasGL || !this.post || this.glDegraded || this.tier >= 3) return null;
-    const glCanvas = this.glCanvas;
-    this.gl.viewport(0, 0, glCanvas.width, glCanvas.height);
-    return this.post.beginScene();
-  }
-
-  /**
-   * 结束 GL 帧：执行 HDR Bloom 后处理并合成到默认帧缓冲。
-   * @param {{bloom?:number, exposure?:number, time?:number}} [opts] 透传 post.endScene
-   */
-  endGLFrame(opts) {
-    if (!this.hasGL || !this.post || this.glDegraded || this.tier >= 3) return;
-    this.post.endScene(opts);
-  }
-
-  /**
-   * 设置渲染层级（同步本管理器与 PostProcessor）。
-   * 1=完整管线；2=降级管线（2 级金字塔）；3=纯 2D（GL 调用全部短路）。
-   * @param {number} t
-   * @returns {number} 实际生效层级
-   */
-  setTier(t) {
-    if (this.post) {
-      this.tier = this.post.setTier(t);
-      return this.tier;
-    }
-    const n = Math.round(Number(t));
-    this.tier = Number.isFinite(n) ? Math.min(3, Math.max(1, n)) : 1;
-    return this.tier;
-  }
-
-  /**
-   * 重建 GL 管线资源（rebuild 钩子）：
-   *  - webglcontextrestored 后自动调用；视图层亦可手动触发；
-   *  - 重建 PostProcessor 的程序/VAO/FBO（尺寸沿用当前物理像素），视图层可监听
-   *    onGLStateChange(false) 重挂自身网格/几何；
-   *  - 任何异常都收敛为降级状态：不抛错、不白屏（HUD 2D 兜底照常）。
-   * @returns {boolean} 是否重建成功
-   */
-  rebuild() {
-    if (!this.hasGL || !this.post || !this.glc) return false;
-    try {
-      this.glc.resetTracking();          // 旧句柄已随上下文失效，清空清册防膨胀
-      this.post.rebuild();               // 重建程序 / VAO / 场景与金字塔目标
-      if (this.glCanvas) {
-        this.glCanvas.style.opacity = '';            // 恢复 GL 画面
-        this.glCanvas.style.display = '';
-      }
-      if (this.hudCanvas) this.hudCanvas.style.pointerEvents = 'none'; // 事件目标交还 glCanvas
-      this.glDegraded = false;
-      this._syncGLSize();                // 视口与目标尺寸对齐当前物理像素
-      this._fireGLStateChange(false);
-      return true;
-    } catch (e) {
-      console.error('[CanvasManager] GL 上下文恢复重建失败，保持 2D 兜底:', e);
-      this._enterDegraded();
-      return false;
-    }
-  }
-
-  /** 释放：断开观察者、移除监听、销毁 GL 管线并移除画布节点 */
-  dispose() {
-    if (this._observer) {
-      this._observer.disconnect();
-      this._observer = null;
-    }
-    if (this._onWinResize) {
-      window.removeEventListener('resize', this._onWinResize);
-      this._onWinResize = null;
-    }
-    if (this.glCanvas && this._onGLLost) {
-      this.glCanvas.removeEventListener('webglcontextlost', this._onGLLost);
-      this.glCanvas.removeEventListener('webglcontextrestored', this._onGLRestored);
-      this._onGLLost = null;
-      this._onGLRestored = null;
-    }
-    this._resizeCbs.clear();
-    this._glStateCbs.clear();
-    // GL 资源回收：post 先释放自身目标，glc 统一回收清册并经 lose_context 丢弃上下文
-    if (this.post) {
-      try { this.post.destroy(); } catch (e) { console.error('[CanvasManager] post.destroy 异常:', e); }
-      this.post = null;
-    }
-    if (this.glc) {
-      try { this.glc.destroy(); } catch (e) { console.error('[CanvasManager] glc.destroy 异常:', e); }
-      this.glc = null;
-    }
-    this.gl = null;
-    this.hasGL = false;
-    this.glDegraded = false;
-    if (this._wrap && this._wrap.parentNode) this._wrap.parentNode.removeChild(this._wrap);
-    this._wrap = null;
-    this.canvas = null;
-    this.ctx = null;
-    this.glCanvas = null;
-    this.hudCanvas = null;
-  }
-
-  // —— 内部实现 ——————————————————————————————————————————————
-
-  /** 请求 webgl2 上下文（属性固定：不透明 + 抗锯齿 + 深度 + 高性能偏好） */
-  _tryGetGL(canvas) {
-    return canvas.getContext('webgl2', {
-      antialias: true,
-      alpha: false,
-      depth: true,
-      powerPreference: 'high-performance',
-    });
-  }
-
-  /** 三层画布共用的绝对定位样式（styles.css 仅约定 display:block，定位在此补齐） */
-  _applyCanvasStyle(canvas, z) {
-    canvas.style.position = 'absolute';
-    canvas.style.inset = '0';
-    canvas.style.width = '100%';
-    canvas.style.height = '100%';
-    canvas.style.zIndex = String(z);
-  }
-
-  /** 绑定 WebGL 上下文丢失/恢复监听 */
-  _bindGLLifecycle(glCanvas) {
-    this._onGLLost = (e) => {
-      // 必须 preventDefault，否则浏览器不会派发 webglcontextrestored
-      e.preventDefault();
-      console.warn('[CanvasManager] WebGL 上下文丢失，切换 2D 兜底');
-      this._enterDegraded();
-    };
-    this._onGLRestored = () => {
-      this.rebuild(); // 失败时 rebuild 内部已自行降级，不会抛错
-    };
-    glCanvas.addEventListener('webglcontextlost', this._onGLLost);
-    glCanvas.addEventListener('webglcontextrestored', this._onGLRestored);
-  }
-
-  /** 进入 GL 降级态：隐藏 glCanvas 画面、放开 HUD 事件、广播 degraded=true */
-  _enterDegraded() {
-    this.glDegraded = true;
-    if (this.glCanvas) {
-      // 以 opacity:0 隐藏而非 display:none：保持 glCanvas 为事件目标，
-      // 调用方已绑定的交互（拖拽/单击/滚轮）在退化期间继续工作
-      this.glCanvas.style.opacity = '0';
-    }
-    if (this.hudCanvas) this.hudCanvas.style.pointerEvents = ''; // 2D 兜底期间接收事件
-    this._fireGLStateChange(true);
-  }
-
-  /** 广播 GL 状态变化（快照遍历，允许回调内注销自身） */
-  _fireGLStateChange(degraded) {
-    for (const cb of [...this._glStateCbs]) {
-      try {
-        cb(degraded);
-      } catch (e) {
-        console.error('[CanvasManager] onGLStateChange 回调异常:', e);
-      }
-    }
-  }
-
-  /** 按当前逻辑尺寸 + dpr 同步 glCanvas 物理像素与 post 渲染目标 */
-  _syncGLSize() {
-    if (!this.hasGL || !this.post) return;
-    const pw = Math.max(1, Math.round(this.width * this.dpr));
-    const ph = Math.max(1, Math.round(this.height * this.dpr));
-    if (this.glCanvas) {
-      this.glCanvas.width = pw;
-      this.glCanvas.height = ph;
-    }
-    this.post.resize(pw, ph);
-  }
-
-  /**
-   * 测量容器尺寸并同步三层画布物理像素与 post 目标；
-   * 尺寸与 dpr 均未变化时跳过，避免 ResizeObserver 抖动导致的无谓重置。
-   */
-  _measure() {
-    if (!this._wrap || !this.hudCanvas) return;
-    const rect = this._wrap.getBoundingClientRect();
-    const w = Math.max(1, Math.round(rect.width));
-    const h = Math.max(1, Math.round(rect.height));
-    const rawDpr = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;
-    const dpr = Math.min(2.0, rawDpr); // 上限 2.0：高分屏下控制填充率
-    if (w === this.width && h === this.height && dpr === this.dpr) return;
-
-    this.width = w;
-    this.height = h;
-    this.dpr = dpr;
-    const pw = Math.round(w * dpr);
-    const ph = Math.round(h * dpr);
-    this.hudCanvas.width = pw;
-    this.hudCanvas.height = ph;
-    this._syncGLSize();
-
-    // 通知回调（快照遍历，允许回调内注销自身）
-    for (const cb of [...this._resizeCbs]) {
-      try {
-        cb(this.width, this.height);
-      } catch (e) {
-        console.error('[CanvasManager] onResize 回调异常:', e);
-      }
-    }
-  }
-}
-
-Object.assign(__exports, { CanvasManager });
-
-});
-__register("src/render/gl/PostProcessor.js", function (__exports, __require) {
-/**
- * render/gl/PostProcessor.js — HDR Bloom 后处理管线（VOID FRONTIER 渲染底座 R2）
- *
- * 管线（tier 1，物理像素分辨率）：
- *  1. beginScene() 绑定场景浮点 FBO（RGBA16F；无浮点渲染能力时回退 RGBA8 模拟），
- *     调用方在其中渲染 HDR 场景（颜色可 >1，模拟模式下须先除以 hdrRange 预缩放）；
- *  2. endScene()：
- *     a) 软膝盖高亮提取（threshold 0.85 / knee 0.55，smoothstep 软过渡）+ 半分辨率降采样；
- *     b) 4 级金字塔（1/2、1/4、1/8、1/16），每级水平+垂直 9-tap 可分离高斯模糊；
- *     c) 自底向上 3x3 tent 双线性上采样，加法混合（ONE, ONE）逐级累加辉光；
- *     d) 全屏合成：scene + bloomStrength×glow → Narkowicz ACES 色调映射 → sRGB 伽马
- *        → 抖动去色带 → 写默认帧缓冲。
- *
- * 降级：
- *  - floatOk=false（RGBA8 回退）：scene/glow 以 hdrRange（默认 4）预除编码存储，
- *    合成时乘回再曝光；hdrSimulated=true 标记；
- *  - tier=2：金字塔砍半为 2 级，particleScale=0.5 供调用方做粒子减量提示；
- *  - tier=3：调用方整体跳过 GL（Canvas 2D 退化），beginScene/endScene 直接短路。
- *
- * 约束：顶层不触碰 document/window（纯 JS，可在 Node 侧安全 import）；所有 GLSL
- * 均为手写 GLSL ES 3.0 字符串（#version 行由 GLCore 统一前置），不拼接外部库。
- */
-
-/** RGBA8 模拟 HDR 时的编码基准亮度：存储值 = HDR 值 / hdrRange（钳在 [0,1]） */
-const HDR_SIM_BASE = 4.0;
-/** 软膝盖高亮提取参数（HDR 亮度域） */
-const BRIGHT_THRESHOLD = 0.85;
-const BRIGHT_KNEE = 0.55;
-/** tier 1 完整金字塔级数；tier 2 减为 2 级 */
-const PYRAMID_LEVELS_FULL = 4;
-const PYRAMID_LEVELS_LOW = 2;
-
-// —— GLSL ES 3.0 着色器（手写字符串，#version 由 GLCore.createProgram 前置） ——
-
-/** 全屏四边形顶点着色器：aPos [-1..1] → vUv [0..1] */
-const VERT_QUAD = `
-precision highp float;
-layout(location = 0) in vec2 aPos;
-out vec2 vUv;
-void main() {
-  vUv = aPos * 0.5 + 0.5;
-  gl_Position = vec4(aPos, 0.0, 1.0);
-}
-`;
-
-/** 高亮提取 + 2x2 盒式降采样：软膝盖 smoothstep(t-k, t+k, luma) * luma 风格 */
-const FRAG_BRIGHT = `
-precision highp float;
-in vec2 vUv;
-out vec4 fragColor;
-uniform sampler2D uTexture;
-uniform vec2 uSrcTexel;   // 1/源纹理尺寸（2x2 盒式降采样半 texel 偏移）
-uniform float uThreshold; // 软膝盖阈值
-uniform float uKnee;      // 膝盖半宽
-void main() {
-  vec2 o = uSrcTexel * 0.5;
-  vec3 c = texture(uTexture, vUv + vec2(-o.x, -o.y)).rgb
-         + texture(uTexture, vUv + vec2( o.x, -o.y)).rgb
-         + texture(uTexture, vUv + vec2(-o.x,  o.y)).rgb
-         + texture(uTexture, vUv + vec2( o.x,  o.y)).rgb;
-  c *= 0.25;
-  float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
-  float w = smoothstep(uThreshold - uKnee, uThreshold + uKnee, luma);
-  fragColor = vec4(c * w, 1.0);
-}
-`;
-
-/** 9-tap 可分离高斯模糊（单方向；uDir = texel × 方向 × 步长） */
-const FRAG_BLUR = `
-precision highp float;
-in vec2 vUv;
-out vec4 fragColor;
-uniform sampler2D uTexture;
-uniform vec2 uDir;
-void main() {
-  vec3 acc = texture(uTexture, vUv).rgb * 0.22702703;
-  acc += texture(uTexture, vUv + uDir        ).rgb * 0.19459459;
-  acc += texture(uTexture, vUv - uDir        ).rgb * 0.19459459;
-  acc += texture(uTexture, vUv + uDir * 2.0  ).rgb * 0.12162162;
-  acc += texture(uTexture, vUv - uDir * 2.0  ).rgb * 0.12162162;
-  acc += texture(uTexture, vUv + uDir * 3.0  ).rgb * 0.05405405;
-  acc += texture(uTexture, vUv - uDir * 3.0  ).rgb * 0.05405405;
-  acc += texture(uTexture, vUv + uDir * 4.0  ).rgb * 0.01621622;
-  acc += texture(uTexture, vUv - uDir * 4.0  ).rgb * 0.01621622;
-  fragColor = vec4(acc, 1.0);
-}
-`;
-
-/**
- * 3x3 tent 双线性上采样（权重和为 1）。
- * uSrcTexel = 0 时退化为逐点拷贝（兼作金字塔降采样链的拷贝 pass）。
- */
-const FRAG_UPSAMPLE = `
-precision highp float;
-in vec2 vUv;
-out vec4 fragColor;
-uniform sampler2D uTexture;
-uniform vec2 uSrcTexel;
-void main() {
-  vec2 t = uSrcTexel;
-  vec3 acc = vec3(0.0);
-  acc += texture(uTexture, vUv + vec2(-t.x, -t.y)).rgb * 1.0;
-  acc += texture(uTexture, vUv + vec2( 0.0, -t.y)).rgb * 2.0;
-  acc += texture(uTexture, vUv + vec2( t.x, -t.y)).rgb * 1.0;
-  acc += texture(uTexture, vUv + vec2(-t.x,  0.0)).rgb * 2.0;
-  acc += texture(uTexture, vUv                  ).rgb * 4.0;
-  acc += texture(uTexture, vUv + vec2( t.x,  0.0)).rgb * 2.0;
-  acc += texture(uTexture, vUv + vec2(-t.x,  t.y)).rgb * 1.0;
-  acc += texture(uTexture, vUv + vec2( 0.0,  t.y)).rgb * 2.0;
-  acc += texture(uTexture, vUv + vec2( t.x,  t.y)).rgb * 1.0;
-  fragColor = vec4(acc / 16.0, 1.0);
-}
-`;
-
-/** 全屏合成：scene + bloom×glow → ACES(Narkowicz) → sRGB 伽马 → 抖动去色带 */
-const FRAG_COMPOSITE = `
-precision highp float;
-in vec2 vUv;
-out vec4 fragColor;
-uniform sampler2D uScene;
-uniform sampler2D uGlow;
-uniform float uBloom;    // 辉光强度
-uniform float uExposure; // 曝光
-uniform float uHdrRange; // 1.0=真 HDR；RGBA8 模拟时为编码基准（存储值已预除）
-uniform float uTime;     // 抖动相位（秒）
-vec3 aces(vec3 x) {
-  return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
-}
-float hash12(vec2 p) {
-  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-  p3 += dot(p3, p3.yzx + 33.33);
-  return fract((p3.x + p3.y) * p3.z);
-}
-void main() {
-  vec3 hdr = texture(uScene, vUv).rgb * uHdrRange;
-  vec3 glow = texture(uGlow, vUv).rgb * uHdrRange;
-  vec3 c = hdr + uBloom * glow;
-  c *= uExposure;
-  c = aces(c);
-  c = pow(c, vec3(1.0 / 2.2)); // sRGB 伽马
-  // 确定性时间抖动（±1/255）消除伽马后暗部色带；不使用随机数
-  float d = (hash12(gl_FragCoord.xy + vec2(uTime * 60.0, uTime * 47.0)) - 0.5) / 255.0;
-  fragColor = vec4(c + d, 1.0);
-}
-`;
-
-class PostProcessor {
-  /**
-   * @param {import('./GLCore.js').GLContext} glc GLContext 实例
-   */
-  constructor(glc) {
-    if (!glc || !glc.gl) throw new Error('[PostProcessor] 需要 GLContext 实例');
-    this.glc = glc;
-    this.gl = glc.gl;
-    /** 渲染层级：1=完整 4 级；2=2 级金字塔（管线降级）；3=调用方跳过 GL（本类短路） */
-    this.tier = 1;
-    /** 物理像素尺寸（resize 后有效；构造时尚未建立目标） */
-    this.width = 0;
-    this.height = 0;
-    /** RGBA8 模拟 HDR 标记（scene 目标实际格式决定，见 _buildTargets） */
-    this.hdrSimulated = !glc.floatOk;
-    /** HDR 编码基准：1.0=真 HDR；模拟模式下 scene 内容须先除以该值写入 */
-    this.hdrRange = this.hdrSimulated ? HDR_SIM_BASE : 1.0;
-    /** 粒子减量提示（仅管线降级提示）：tier1=1.0 / tier2=0.5 / tier3=0.0 */
-    this.particleScale = 1.0;
-
-    this._progBright = null;
-    this._progBlur = null;
-    this._progUp = null;
-    this._progComp = null;
-    this._quadVao = null;
-    this._scene = null;   // { texture, fbo, width, height, float }
-    this._levels = [];    // 金字塔：[{ a, b, width, height }]，a 为主缓冲，b 为模糊中转
-    this._u = { bright: null, blur: null, up: null, comp: null };
-
-    // 尺寸无关资源：程序 + 全屏 VAO（目标缓冲等 resize 建立后再分配）
-    this._buildPrograms();
-    this._quadVao = glc.createFullscreenVAO();
-  }
-
-  /** 场景目标是否就绪（resize 之后为 true） */
-  get ready() {
-    return !!this._scene;
-  }
-
-  /**
-   * 设置渲染层级。
-   *  1 = 完整 4 级金字塔；2 = 2 级金字塔 + 粒子减量提示（仅管线降级）；
-   *  3 = 调用方直接跳过 GL（Canvas 2D 退化），beginScene/endScene 直接短路。
-   * @param {number} t
-   * @returns {number} 实际生效的层级
-   */
-  setTier(t) {
-    const n = Math.round(Number(t));
-    const v = Number.isFinite(n) ? Math.min(3, Math.max(1, n)) : 1;
-    if (v === this.tier) return this.tier;
-    this.tier = v;
-    this.particleScale = v === 1 ? 1.0 : v === 2 ? 0.5 : 0.0;
-    // 层级数变化影响金字塔级数 → 按当前尺寸重建目标
-    if (this.width > 0 && this.height > 0) this._buildTargets();
-    return this.tier;
-  }
-
-  /**
-   * 重建全部渲染目标（窗口/画布尺寸变化时调用）。
-   * 场景 FBO 与金字塔均按物理像素尺寸分配；尺寸未变且目标已就绪时跳过。
-   * @param {number} width 物理像素宽
-   * @param {number} height 物理像素高
-   */
-  resize(width, height) {
-    const w = Math.max(1, Math.round(Number(width) || 1));
-    const h = Math.max(1, Math.round(Number(height) || 1));
-    if (w === this.width && h === this.height && this._scene) return;
-    this.width = w;
-    this.height = h;
-    this._buildTargets();
-  }
-
-  /**
-   * 开始场景 pass：绑定场景 FBO 并返回其信息；调用方负责 clear 与场景绘制。
-   * tier>=3 或目标未就绪时返回 null（调用方应整体跳过 GL）。
-   * @returns {{fbo:WebGLFramebuffer, width:number, height:number}|null}
-   */
-  beginScene() {
-    if (this.tier >= 3 || !this._scene) return null;
-    const gl = this.gl;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this._scene.fbo);
-    gl.viewport(0, 0, this._scene.width, this._scene.height);
-    return { fbo: this._scene.fbo, width: this._scene.width, height: this._scene.height };
-  }
-
-  /**
-   * 结束场景 pass：执行 亮度提取 → 高斯金字塔 → 上采样累加 → ACES 合成，
-   * 最终写默认帧缓冲。
-   * @param {{bloom?:number, exposure?:number, time?:number}} [opts]
-   *        bloom 辉光强度（默认 1）、exposure 曝光（默认 1）、time 秒（抖动相位）
-   */
-  endScene(opts = {}) {
-    if (this.tier >= 3) return; // Canvas 2D 退化：直接跳过
-    const levels = this._levels;
-    if (!this._scene || !levels.length) return;
-
-    const gl = this.gl;
-    const bloom = this._num(opts.bloom, 1.0);
-    const exposure = this._num(opts.exposure, 1.0);
-    const time = this._num(opts.time, 0.0);
-
-    // 后处理全屏 pass 不需要深度；混合默认关闭（累加阶段单独开启）
-    gl.disable(gl.DEPTH_TEST);
-    gl.disable(gl.BLEND);
-
-    // —— 1. 软膝盖高亮提取 + 降采样到 1/2 分辨率 → levels[0].a ——
-    this._pass(this._progBright, levels[0].a, () => {
-      this._bindTex(0, this._scene.texture, this._u.bright.tex);
-      gl.uniform2f(this._u.bright.srcTexel, 1 / this._scene.width, 1 / this._scene.height);
-      // 模拟模式下场景已预除 hdrRange，阈值/膝宽同步缩放，保持 HDR 域语义一致
-      gl.uniform1f(this._u.bright.threshold, this.hdrSimulated ? BRIGHT_THRESHOLD / this.hdrRange : BRIGHT_THRESHOLD);
-      gl.uniform1f(this._u.bright.knee, this.hdrSimulated ? BRIGHT_KNEE / this.hdrRange : BRIGHT_KNEE);
-    });
-
-    // —— 2. level0 水平 + 垂直高斯模糊 ——
-    this._blurLevel(0);
-
-    // —— 3. 逐级降采样拷贝 + 模糊（1/4、1/8、1/16）——
-    for (let i = 1; i < levels.length; i++) {
-      const src = levels[i - 1].a;
-      this._pass(this._progUp, levels[i].a, () => {
-        this._bindTex(0, src.texture, this._u.up.tex);
-        gl.uniform2f(this._u.up.srcTexel, 0.0, 0.0); // 零 texel → 等价逐点拷贝
-      });
-      this._blurLevel(i);
-    }
-
-    // —— 4. 自底向上 tent 上采样，加法混合逐级累加辉光 ——
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.ONE, gl.ONE);
-    for (let i = levels.length - 1; i >= 1; i--) {
-      const src = levels[i].a;
-      this._pass(this._progUp, levels[i - 1].a, () => {
-        this._bindTex(0, src.texture, this._u.up.tex);
-        gl.uniform2f(this._u.up.srcTexel, 1 / src.width, 1 / src.height);
-      });
-    }
-    gl.disable(gl.BLEND);
-
-    // —— 5. 全屏合成到默认帧缓冲（ACES + 伽马 + 抖动）——
-    this._pass(this._progComp, null, () => {
-      this._bindTex(0, this._scene.texture, this._u.comp.scene);
-      this._bindTex(1, levels[0].a.texture, this._u.comp.glow);
-      gl.uniform1f(this._u.comp.bloom, bloom);
-      gl.uniform1f(this._u.comp.exposure, exposure);
-      gl.uniform1f(this._u.comp.hdrRange, this.hdrRange);
-      gl.uniform1f(this._u.comp.time, time);
-    });
-
-    // —— 还原共享状态，避免污染调用方后续 GL 绘制 ——
-    gl.bindVertexArray(null);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, null);
-  }
-
-  /**
-   * 上下文恢复后重建全部 GPU 资源（程序 / VAO / 目标缓冲）。
-   * 旧句柄随上下文失效，对其的删除调用为安全空操作。
-   */
-  rebuild() {
-    this._releaseTargets();
-    this._releasePrograms();
-    this._buildPrograms();
-    this._quadVao = this.glc.createFullscreenVAO();
-    if (this.width > 0 && this.height > 0) {
-      this._buildTargets();
-    } else {
-      this._scene = null;
-      this._levels = [];
-    }
-  }
-
-  /** 释放本类创建的全部登记资源（glc.destroy() 会再次幂等清理） */
-  destroy() {
-    this._releaseTargets();
-    this._releasePrograms();
-    this._quadVao = null;
-    this._scene = null;
-    this._levels = [];
-  }
-
-  // —— 内部实现 ——————————————————————————————————————————————
-
-  /** 数字参数兜底：非法值回退默认 */
-  _num(v, dft) {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : dft;
-  }
-
-  /** 编译 4 个后处理程序并缓存 uniform 位置 */
-  _buildPrograms() {
-    const glc = this.glc;
-    const loc = (prog, name) => glc.gl.getUniformLocation(prog, name);
-
-    this._progBright = glc.createProgram(VERT_QUAD, FRAG_BRIGHT, { label: 'post.bright' });
-    this._u.bright = {
-      tex: loc(this._progBright, 'uTexture'),
-      srcTexel: loc(this._progBright, 'uSrcTexel'),
-      threshold: loc(this._progBright, 'uThreshold'),
-      knee: loc(this._progBright, 'uKnee'),
-    };
-
-    this._progBlur = glc.createProgram(VERT_QUAD, FRAG_BLUR, { label: 'post.blur' });
-    this._u.blur = {
-      tex: loc(this._progBlur, 'uTexture'),
-      dir: loc(this._progBlur, 'uDir'),
-    };
-
-    this._progUp = glc.createProgram(VERT_QUAD, FRAG_UPSAMPLE, { label: 'post.upsample' });
-    this._u.up = {
-      tex: loc(this._progUp, 'uTexture'),
-      srcTexel: loc(this._progUp, 'uSrcTexel'),
-    };
-
-    this._progComp = glc.createProgram(VERT_QUAD, FRAG_COMPOSITE, { label: 'post.composite' });
-    this._u.comp = {
-      scene: loc(this._progComp, 'uScene'),
-      glow: loc(this._progComp, 'uGlow'),
-      bloom: loc(this._progComp, 'uBloom'),
-      exposure: loc(this._progComp, 'uExposure'),
-      hdrRange: loc(this._progComp, 'uHdrRange'),
-      time: loc(this._progComp, 'uTime'),
-    };
-  }
-
-  /** 重建场景 FBO 与辉光金字塔（调用前须先释放旧目标） */
-  _buildTargets() {
-    this._releaseTargets();
-    const glc = this.glc;
-    const w = this.width;
-    const h = this.height;
-
-    // 场景浮点目标（floatOk=false 或 FBO 不完整时 GLCore 内部回退 RGBA8）
-    this._scene = glc.createFloatTarget(w, h, { linear: true });
-    // 以场景目标的实际格式为准刷新模拟标记（floatOk=true 但驱动回退的极端情况）
-    this.hdrSimulated = !this._scene.float;
-    this.hdrRange = this.hdrSimulated ? HDR_SIM_BASE : 1.0;
-
-    // 辉光金字塔：1/2、1/4、1/8、1/16（tier 2 时仅前 2 级），每级 a/b 两个缓冲
-    const n = this.tier === 2 ? PYRAMID_LEVELS_LOW : PYRAMID_LEVELS_FULL;
-    this._levels = [];
-    for (let i = 0; i < n; i++) {
-      const lw = Math.max(1, w >> (i + 1));
-      const lh = Math.max(1, h >> (i + 1));
-      this._levels.push({
-        a: glc.createFloatTarget(lw, lh, { linear: true }),
-        b: glc.createFloatTarget(lw, lh, { linear: true }),
-        width: lw,
-        height: lh,
-      });
-    }
-  }
-
-  /** 对第 i 级执行水平 → 垂直 9-tap 可分离高斯模糊（结果写回 a） */
-  _blurLevel(i) {
-    const gl = this.gl;
-    const lv = this._levels[i];
-    const tx = 1 / lv.width;
-    const ty = 1 / lv.height;
-    // 水平：a → b
-    this._pass(this._progBlur, lv.b, () => {
-      this._bindTex(0, lv.a.texture, this._u.blur.tex);
-      gl.uniform2f(this._u.blur.dir, tx, 0.0);
-    });
-    // 垂直：b → a
-    this._pass(this._progBlur, lv.a, () => {
-      this._bindTex(0, lv.b.texture, this._u.blur.tex);
-      gl.uniform2f(this._u.blur.dir, 0.0, ty);
-    });
-  }
-
-  /**
-   * 执行一次全屏 pass。
-   * @param {WebGLProgram} prog 程序
-   * @param {Object} u uniform 位置表
-   * @param {{fbo:WebGLFramebuffer, width:number, height:number}|null} target 目标（null = 默认帧缓冲）
-   * @param {Function} setUniforms uniform/纹理装配回调
-   */
-  _pass(prog, target, setUniforms) {
-    const gl = this.gl;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
-    gl.viewport(0, 0, target ? target.width : this.width, target ? target.height : this.height);
-    gl.useProgram(prog);
-    gl.bindVertexArray(this._quadVao);
-    setUniforms();
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-  }
-
-  /** 绑定纹理单元并设置 sampler uniform */
-  _bindTex(unit, tex, loc) {
-    const gl = this.gl;
-    gl.activeTexture(gl.TEXTURE0 + unit);
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    if (loc) gl.uniform1i(loc, unit);
-  }
-
-  /** 释放场景与金字塔目标（对已失效句柄的删除为空操作，可安全重复调用） */
-  _releaseTargets() {
-    const gl = this.gl;
-    if (!gl) return;
-    if (this._scene) {
-      gl.deleteFramebuffer(this._scene.fbo);
-      gl.deleteTexture(this._scene.texture);
-      this._scene = null;
-    }
-    for (const lv of this._levels) {
-      gl.deleteFramebuffer(lv.a.fbo);
-      gl.deleteTexture(lv.a.texture);
-      gl.deleteFramebuffer(lv.b.fbo);
-      gl.deleteTexture(lv.b.texture);
-    }
-    this._levels = [];
-  }
-
-  /** 释放 4 个后处理程序 */
-  _releasePrograms() {
-    const gl = this.gl;
-    if (!gl) return;
-    if (this._progBright) { gl.deleteProgram(this._progBright); this._progBright = null; }
-    if (this._progBlur) { gl.deleteProgram(this._progBlur); this._progBlur = null; }
-    if (this._progUp) { gl.deleteProgram(this._progUp); this._progUp = null; }
-    if (this._progComp) { gl.deleteProgram(this._progComp); this._progComp = null; }
-    if (this._quadVao) { gl.deleteVertexArray(this._quadVao); this._quadVao = null; }
-    this._u = { bright: null, blur: null, up: null, comp: null };
-  }
-}
-
-Object.assign(__exports, { PostProcessor });
-
-});
-__register("src/render/gl/GLCore.js", function (__exports, __require) {
-/**
- * render/gl/GLCore.js — 轻量 WebGL 2.0 上下文封装（VOID FRONTIER 渲染底座）
- *
- * 以参考实现 simulation-matrix/common/engine/gl.js 为基础升级：
- *  - 构造时探测 EXT_color_buffer_float（floatOk，决定 HDR 管线能否落到 RGBA16F）
- *    与 MAX_TEXTURE_SIZE（maxTextureSize，供贴图/目标尺寸钳制）；
- *  - createProgram 支持 { label } 标签化错误报告；保留 _tracked 资源清册，
- *    destroy() 统一回收并经 WEBGL_lose_context 主动丢弃上下文（防 iframe/切页泄漏）；
- *  - createFloatTarget：单附件 RGBA16F（floatOk=false 时回退 RGBA8 并标记）FBO，
- *    线性采样，检查 FRAMEBUFFER_COMPLETE，登记清册；
- *  - createFullscreenVAO：单位四边形（aPos vec2，[-1..1]，TRIANGLE_STRIP 4 顶点），
- *    供全屏后处理 pass 复用；
- *  - 静态工厂 fromExisting(canvas, gl)：复用调用方已取得的 gl 上下文
- *    （CanvasManager 先自行 getContext 以决定是否退化，再交给本封装托管）。
- *
- * 约束：顶层不触碰 document/window（纯 JS，可在 Node 侧安全 import）；
- * 所有 GL 调用仅发生在持有真实上下文的方法内部。
- */
-
-const GLSL_VERSION = '#version 300 es\n';
-
-function buildContextAttrs(opts) {
-  return {
-    antialias: opts.antialias !== false,
-    alpha: !!opts.alpha,
-    depth: opts.depth !== false,
-    powerPreference: opts.powerPreference || 'high-performance',
-  };
-}
-
-class GLContext {
-  /**
-   * 常规构造：自行向 canvas 请求 webgl2 上下文，失败即抛错。
-   * @param {HTMLCanvasElement} canvas
-   * @param {{antialias?:boolean, alpha?:boolean, depth?:boolean, powerPreference?:string}} [opts]
-   */
-  constructor(canvas, opts = {}) {
-    const gl = canvas.getContext('webgl2', buildContextAttrs(opts));
-    if (!gl) throw new Error('WebGL 2.0 is not available in this environment');
-    this._init(canvas, gl, opts);
-  }
-
-  /**
-   * 静态工厂：复用调用方已取得的 gl 上下文（不再重复 getContext）。
-   * 典型用法：CanvasManager 先自行 getContext 决定降级路径，再交给本封装托管。
-   * @param {HTMLCanvasElement} canvas
-   * @param {WebGL2RenderingContext} gl 已取得的 webgl2 上下文（不可为空）
-   * @returns {GLContext}
-   */
-  static fromExisting(canvas, gl) {
-    if (!gl) throw new Error('[GLContext] fromExisting 需要已创建的 WebGL2 上下文');
-    const inst = Object.create(GLContext.prototype);
-    inst._init(canvas, gl, {});
-    return inst;
-  }
-
-  /** 内部共享初始化（构造与 fromExisting 共用） */
-  _init(canvas, gl, opts) {
-    this.canvas = canvas;
-    this.gl = gl;
-    // HDR 能力探测：能否渲染到浮点颜色附件（RGBA16F 等）
-    this.floatOk = !!gl.getExtension('EXT_color_buffer_float');
-    // 线性过滤 32 位浮点纹理需要独立扩展（16F 为 WebGL2 核心可过滤格式）
-    this.floatLinearOk = !!gl.getExtension('OES_texture_float_linear');
-    this.loseContextExt = gl.getExtension('WEBGL_lose_context');
-    this.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
-    this._tracked = { programs: [], buffers: [], vaos: [], textures: [], fbos: [] };
-    this.errorCount = 0;
-    void opts; // 预留：后续如需按 opts 差异化初始化在此扩展
-    // 调试模式（window.__GL_THROW_ON_ERROR）：包装全部 gl 方法（原型链完整
-    // 遍历），调用后立即 getError，非 NO_ERROR 即抛出带方法名的错误。
-    if (typeof window !== 'undefined' && window.__GL_THROW_ON_ERROR) {
-      let proto = Object.getPrototypeOf(gl);
-      let count = 0;
-      while (proto && proto !== Object.prototype) {
-        for (const name of Object.getOwnPropertyNames(proto)) {
-          if (name === 'constructor' || typeof gl[name] !== 'function') continue;
-          // getError 自引用会导致无限递归； getContext 不可重入 —— 排除
-          if (name === 'getError' || name === 'getContext') continue;
-          const orig = gl[name].bind(gl);
-          const wrapped = (...a) => {
-            const r = orig(...a);
-            const err = gl.getError();
-            if (err !== gl.NO_ERROR) {
-              const args = a.slice(0, 4).map((v) => (typeof v === 'number' ? v : (v && v.length !== undefined ? 'arr/' + v.length : String(v)))).join(',');
-              throw new Error(`[GL_DEBUG] gl.${name} → 0x${err.toString(16)} (${args})`);
-            }
-            return r;
-          };
-          try {
-            Object.defineProperty(gl, name, { value: wrapped, writable: true, configurable: true });
-            count++;
-          } catch { /* 不可包装的方法跳过 */ }
-        }
-        proto = Object.getPrototypeOf(proto);
-      }
-      this.debugWrapped = count;
-    }
-  }
-
-  get isLost() {
-    return !this.gl || this.gl.isContextLost();
-  }
-
-  /** 检查并抛出 GL 错误（开发期防呆；错误计数供诊断） */
-  checkError(where) {
-    const gl = this.gl;
-    const err = gl.getError();
-    if (err !== gl.NO_ERROR) {
-      this.errorCount++;
-      throw new Error(`WebGL error 0x${err.toString(16)} at ${where}`);
-    }
-  }
-
-  /** 编译单个着色器，失败抛出带 label 的信息日志 */
-  compileShader(type, source, label = 'shader') {
-    const gl = this.gl;
-    const sh = gl.createShader(type);
-    gl.shaderSource(sh, source);
-    gl.compileShader(sh);
-    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
-      const log = gl.getShaderInfoLog(sh);
-      gl.deleteShader(sh);
-      throw new Error(`${label} compile failed: ${log}`);
-    }
-    return sh;
-  }
-
-  /**
-   * 编译并链接程序（自动前置 GLSL ES 3.00 版本行）。
-   * @param {string} vsSource 顶点着色器源码（不含 #version 行）
-   * @param {string} fsSource 片元着色器源码（不含 #version 行）
-   * @param {{label?:string, attributes?:Object<string,number>}} [opts]
-   * @returns {WebGLProgram}
-   */
-  createProgram(vsSource, fsSource, { label = 'program', attributes = {} } = {}) {
-    const gl = this.gl;
-    const vs = this.compileShader(gl.VERTEX_SHADER, GLSL_VERSION + vsSource, `${label}:vertex`);
-    const fs = this.compileShader(gl.FRAGMENT_SHADER, GLSL_VERSION + fsSource, `${label}:fragment`);
-    const prog = gl.createProgram();
-    gl.attachShader(prog, vs);
-    gl.attachShader(prog, fs);
-    for (const [name, loc] of Object.entries(attributes)) {
-      gl.bindAttribLocation(prog, loc, name);
-    }
-    gl.linkProgram(prog);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-      const log = gl.getProgramInfoLog(prog);
-      gl.deleteProgram(prog);
-      throw new Error(`${label} link failed: ${log}`);
-    }
-    gl.deleteShader(vs);
-    gl.deleteShader(fs);
-    this._tracked.programs.push(prog);
-    return prog;
-  }
-
-  /** 创建并上传数据的 VBO（登记清册） */
-  createBuffer(data, usage = this.gl.STATIC_DRAW) {
-    const gl = this.gl;
-    const buf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-    gl.bufferData(gl.ARRAY_BUFFER, data, usage);
-    this._tracked.buffers.push(buf);
-    return buf;
-  }
-
-  /** 创建 VAO 并在 setup(gl) 回调内完成属性装配（登记清册） */
-  createVAO(setup) {
-    const gl = this.gl;
-    const vao = gl.createVertexArray();
-    gl.bindVertexArray(vao);
-    setup(gl);
-    gl.bindVertexArray(null);
-    this._tracked.vaos.push(vao);
-    return vao;
-  }
-
-  /**
-   * 创建 2D 纹理（默认 RGBA8/NEAREST/CLAMP_TO_EDGE）。
-   * @returns {{texture:WebGLTexture, width:number, height:number}}
-   */
-  createTexture2D(width, height, pixels, { internalFormat = null, format = null, type = null, filter = null, wrap = null } = {}) {
-    const gl = this.gl;
-    const tex = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0,
-      internalFormat || gl.RGBA, width, height, 0,
-      format || gl.RGBA, type || gl.UNSIGNED_BYTE, pixels);
-    const filt = filter || gl.NEAREST;
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filt);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filt);
-    const wr = wrap || gl.CLAMP_TO_EDGE;
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wr);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wr);
-    this._tracked.textures.push(tex);
-    return { texture: tex, width, height };
-  }
-
-  /** 上传 2D 纹理数组（TEXTURE_2D_ARRAY），layers 为同尺寸 ImageData/canvas 列表 */
-  createTextureArray(width, height, layers, { filter = null } = {}) {
-    const gl = this.gl;
-    const tex = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
-    gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.RGBA8, width, height, layers.length, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-    for (let i = 0; i < layers.length; i++) {
-      gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, i, width, height, 1, gl.RGBA, gl.UNSIGNED_BYTE, layers[i]);
-    }
-    const filt = filter || gl.NEAREST;
-    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, filt);
-    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, filt);
-    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.REPEAT);
-    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.REPEAT);
-    this._tracked.textures.push(tex);
-    return { texture: tex, width, height, depth: layers.length };
-  }
-
-  /**
-   * 创建单附件浮点渲染目标（HDR 管线用）。
-   *  - floatOk=true：RGBA16F + HALF_FLOAT；若驱动仍报 FBO 不完整则自动回退 RGBA8；
-   *  - floatOk=false：直接 RGBA8 + UNSIGNED_BYTE（由 PostProcessor 做 HDR 模拟）。
-   * @param {number} width
-   * @param {number} height
-   * @param {{linear?:boolean}} [opts] 采样过滤（默认 LINEAR，供降/升采样双线性）
-   * @returns {{texture:WebGLTexture, fbo:WebGLFramebuffer, width:number, height:number, float:boolean}}
-   */
-  createFloatTarget(width, height, { linear = true } = {}) {
-    const gl = this.gl;
-    const make = (floatMode) => {
-      const tex = gl.createTexture();
-      gl.bindTexture(gl.TEXTURE_2D, tex);
-      if (floatMode) {
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, width, height, 0, gl.RGBA, gl.HALF_FLOAT, null);
-      } else {
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-      }
-      const filt = linear ? gl.LINEAR : gl.NEAREST;
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filt);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filt);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      const fbo = gl.createFramebuffer();
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-      const complete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      return { tex, fbo, complete };
-    };
-
-    let res = make(this.floatOk);
-    let float = this.floatOk;
-    if (!res.complete && this.floatOk) {
-      // 驱动/实现不支持渲染到 RGBA16F：降级 RGBA8（float 标记为 false）
-      gl.deleteTexture(res.tex);
-      gl.deleteFramebuffer(res.fbo);
-      res = make(false);
-      float = false;
-    }
-    if (!res.complete) {
-      gl.deleteTexture(res.tex);
-      gl.deleteFramebuffer(res.fbo);
-      throw new Error(`float target FBO incomplete (${width}x${height})`);
-    }
-    this._tracked.textures.push(res.tex);
-    this._tracked.fbos.push(res.fbo);
-    return { texture: res.tex, fbo: res.fbo, width, height, float };
-  }
-
-  /**
-   * 创建全屏四边形 VAO：aPos（location=0，vec2，[-1..1]），TRIANGLE_STRIP 共 4 顶点。
-   * 全屏后处理 pass 复用同一 VAO，配合 drawArrays(gl.TRIANGLE_STRIP, 0, 4) 绘制。
-   * @returns {WebGLVertexArrayObject}
-   */
-  createFullscreenVAO() {
-    const gl = this.gl;
-    const vao = gl.createVertexArray();
-    gl.bindVertexArray(vao);
-    const buf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-    // 顶点顺序：左下 → 右下 → 左上 → 右上（TRIANGLE_STRIP 成整屏四边形）
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
-    gl.enableVertexAttribArray(0);
-    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-    gl.bindVertexArray(null);
-    gl.bindBuffer(gl.ARRAY_BUFFER, null);
-    this._tracked.buffers.push(buf);
-    this._tracked.vaos.push(vao);
-    return vao;
-  }
-
-  /**
-   * 双 FBO ping-pong（GPU 模拟类 pass 用；登记清册）。
-   * @returns {{read:Object, write:Object, swap:Function, width:number, height:number}}
-   */
-  createPingPongFBOs(width, height, { internalFormat = null, type = null } = {}) {
-    const gl = this.gl;
-    const make = () => {
-      const tex = gl.createTexture();
-      gl.bindTexture(gl.TEXTURE_2D, tex);
-      gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat || gl.RGBA32F, width, height, 0, gl.RGBA, type || gl.FLOAT, null);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      const fbo = gl.createFramebuffer();
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
-        throw new Error('ping-pong FBO incomplete');
-      }
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      this._tracked.textures.push(tex);
-      this._tracked.fbos.push(fbo);
-      return { texture: tex, fbo };
-    };
-    const a = make();
-    const b = make();
-    return {
-      read: a,
-      write: b,
-      swap() { const t = this.read; this.read = this.write; this.write = t; },
-      width, height,
-    };
-  }
-
-  /**
-   * 上下文恢复（webglcontextrestored）后调用：旧句柄已全部失效，
-   * 清空清册但不做删除调用（对失效句柄的删除本为空操作，清空可防清册无限膨胀）。
-   */
-  resetTracking() {
-    this._tracked = { programs: [], buffers: [], vaos: [], textures: [], fbos: [] };
-    this.errorCount = 0;
-    // 调试钩子：window.__GL_TRACE 时包装全部 gl 方法，记录最后 N 次调用（含参数摘要）
-    if (typeof window !== 'undefined' && window.__GL_TRACE) {
-      this.traceLog = [];
-      for (const name of Object.getOwnPropertyNames(Object.getPrototypeOf(gl)).concat(Object.keys(gl))) {
-        if (typeof gl[name] !== 'function') continue;
-        const orig = gl[name].bind(gl);
-        gl[name] = (...a) => {
-          try {
-            this.traceLog.push(name + ' ' + a.slice(0, 4).map((v) => typeof v === 'number' ? v : (v && v.length !== undefined ? ('arr:' + (v.length)) : String(v))).join(','));
-            if (this.traceLog.length > 40) this.traceLog.shift();
-          } catch { /* 追踪不影响主流程 */ }
-          return orig(...a);
-        };
-      }
-    }
-  }
-
-  /** 销毁全部登记资源，并经 WEBGL_lose_context 主动丢弃上下文 */
-  destroy() {
-    const gl = this.gl;
-    if (!gl) return;
-    for (const p of this._tracked.programs) gl.deleteProgram(p);
-    for (const b of this._tracked.buffers) gl.deleteBuffer(b);
-    for (const v of this._tracked.vaos) gl.deleteVertexArray(v);
-    for (const t of this._tracked.textures) gl.deleteTexture(t);
-    for (const f of this._tracked.fbos) gl.deleteFramebuffer(f);
-    this._tracked = { programs: [], buffers: [], vaos: [], textures: [], fbos: [] };
-    if (this.loseContextExt) this.loseContextExt.loseContext();
-  }
-}
-
-/** 实例化绘制助手：绑定 VAO 后按 instanceCount 批量绘制 */
-function drawInstanced(gl, vao, count, instanceCount, mode = gl.TRIANGLES) {
-  gl.bindVertexArray(vao);
-  gl.drawArraysInstanced(mode, 0, count, instanceCount);
-  gl.bindVertexArray(null);
-}
-
-Object.assign(__exports, { GLSL_VERSION, GLContext, drawInstanced });
 
 });
 __register("src/ui/components/index.js", function (__exports, __require) {
@@ -24333,852 +35393,6 @@ class BattleRenderer {
 Object.assign(__exports, { BattleRenderer });
 
 });
-__register("src/render/gl/Battle3D.js", function (__exports, __require) {
-/**
- * render/gl/Battle3D.js — 战术战斗 GL 资源构建与绘制（返工 Phase R4）
- *
- * 消费 BattleRenderer 传入的 battleView 数据（CPU 确定性坐标），将逻辑
- * 坐标 (x∈0..1000, y∈0..320) 映射至三维战术空间并绘制：
- *   三维舰体网格（12 船体，阵营色 Phong）+ 尾焰等离子锥 + 菲涅尔蜂窝
- *   护盾壳层（受击闪白）+ 相机对齐光束带 + 导弹光点尾迹 + 跃迁漏斗。
- * 动画时间仅作视觉 uniform，绝不触碰 world 状态。
- */
-
-const { mat4: mat4, mat4Identity: mat4Identity, mat4Multiply: mat4Multiply, mat4Perspective: mat4Perspective, mat4LookAt: mat4LookAt, mat4Invert: mat4Invert, mat4TRS: mat4TRS, vec3ApplyMat4: vec3ApplyMat4 } = __require("src/render/gl/Mat4.js");
-const { buildHullMesh: buildHullMesh } = __require("src/render/meshes/ShipMeshes.js");
-
-/** 逻辑坐标 → 世界坐标（x 纵深为战列线，z 为横向展开） */
-function logicalToWorld(x, y, out = [0, 0, 0]) {
-  out[0] = (y - 160) * 0.03;   // 逻辑纵向 → 世界 Z（战场纵深）
-  out[1] = 0;                  // 战列基准面
-  out[2] = (x - 500) * 0.022;  // 逻辑横向 → 世界 X
-  return out;
-}
-
-const SHIP_VS = `
-in vec3 aPos;
-in vec3 aNormal;
-uniform mat4 uMVP;
-uniform mat4 uModel;
-uniform mat3 uNormalMat;
-out vec3 vNormal;
-out vec3 vWorldPos;
-void main() {
-  vec4 wp = uModel * vec4(aPos, 1.0);
-  vWorldPos = wp.xyz;
-  vNormal = uNormalMat * aNormal;
-  gl_Position = uMVP * wp;
-}`;
-
-const SHIP_FS = `
-precision highp float;
-in vec3 vNormal;
-in vec3 vWorldPos;
-uniform vec3 uColor;
-uniform vec3 uCamPos;
-uniform float uFlash;   // 受击闪白 0..1
-out vec4 fragColor;
-void main() {
-  vec3 N = normalize(vNormal);
-  vec3 L = normalize(vec3(0.4, 1.0, 0.55));
-  vec3 V = normalize(uCamPos - vWorldPos);
-  float diff = max(dot(N, L), 0.0) * 0.75 + 0.25;
-  vec3 H = normalize(L + V);
-  float spec = pow(max(dot(N, H), 0.0), 42.0) * 0.9;
-  vec3 col = uColor * diff + vec3(1.0, 1.0, 1.05) * spec;
-  // 阵营灯带：沿舰体边缘（世界 y 接近甲板高度）发暖光
-  float stripe = smoothstep(0.015, 0.0, abs(vWorldPos.y - 0.05));
-  col += uColor * stripe * 0.9;
-  col = mix(col, vec3(2.2, 2.3, 2.6), uFlash);
-  fragColor = vec4(col, 1.0);
-}`;
-
-const THRUST_VS = `
-in vec3 aPos;
-uniform mat4 uMVP;
-void main() { gl_Position = uMVP * vec4(aPos, 1.0); }`;
-
-const THRUST_FS = `
-precision highp float;
-uniform vec3 uColor;
-uniform float uIntensity;
-out vec4 fragColor;
-void main() { fragColor = vec4(uColor * uIntensity, 1.0); }`;
-
-const SHIELD_VS = `
-in vec3 aPos;
-uniform mat4 uMVP;
-uniform mat4 uModel;
-out vec3 vLocal;
-out vec3 vWorldPos;
-void main() {
-  vLocal = aPos;
-  vec4 wp = uModel * vec4(aPos * 1.6, 1.0); // 包络放大
-  vWorldPos = wp.xyz;
-  gl_Position = uMVP * wp;
-}`;
-
-const SHIELD_FS = `
-precision highp float;
-in vec3 vLocal;
-in vec3 vWorldPos;
-uniform vec3 uColor;
-uniform vec3 uCamPos;
-uniform float uPower;    // 护盾比 0..1
-uniform float uFlash;    // 受击闪白 0..1
-uniform float uHex;      // 1=蜂窝细节（tier1），0=素壳
-out vec4 fragColor;
-void main() {
-  vec3 N = normalize(vLocal);
-  vec3 V = normalize(uCamPos - vWorldPos);
-  float fres = pow(1.0 - abs(dot(N, V)), 2.4);
-  float hex = 1.0;
-  if (uHex > 0.5) {
-    // 蜂窝六边形网格（局部坐标平面投影近似）
-    vec2 p = vLocal.xz * 14.0 + vLocal.yx * 5.0;
-    vec2 g = vec2(1.7320508 * p.x, p.y + 0.8660254 * abs(mod(p.x, 2.0) - 1.0));
-    vec2 f = abs(fract(g) - 0.5);
-    hex = smoothstep(0.42, 0.5, max(f.x, f.y)) * 0.8 + 0.2;
-  }
-  float a = fres * (0.25 + uPower * 0.5) * hex + uFlash * 0.55;
-  vec3 col = uColor * (1.6 + uFlash * 2.5) + vec3(0.6) * uFlash;
-  fragColor = vec4(col * a, clamp(a, 0.0, 0.85));
-}`;
-
-const QUAD_VS = `
-in vec3 aPos;
-in vec2 aUV;
-uniform mat4 uMVP;
-out vec2 vUV;
-void main() {
-  vUV = aUV;
-  gl_Position = uMVP * vec4(aPos, 1.0);
-}`;
-
-const BEAM_FS = `
-precision highp float;
-in vec2 vUV;             // u: 沿光束 0..1；v: 横向 -1..1
-uniform vec3 uColor;
-uniform float uTime;
-out vec4 fragColor;
-void main() {
-  float core = exp(-vUV.y * vUV.y * 9.0);
-  float glow = exp(-vUV.y * vUV.y * 2.2) * 0.5;
-  float pulse = 0.85 + 0.15 * sin(uTime * 40.0 + vUV.x * 30.0);
-  vec3 col = vec3(2.6, 2.7, 3.0) * core + uColor * glow;
-  float endFade = smoothstep(0.0, 0.06, vUV.x) * smoothstep(1.0, 0.94, vUV.x);
-  fragColor = vec4(col * pulse * endFade, clamp(core + glow, 0.0, 0.9) * endFade);
-}`;
-
-const GLOW_FS = `
-precision highp float;
-in vec2 vUV;             // -1..1
-uniform vec3 uColor;
-uniform float uIntensity;
-out vec4 fragColor;
-void main() {
-  float d = exp(-dot(vUV, vUV) * 4.5);
-  fragColor = vec4(uColor * d * uIntensity, d * 0.8);
-}`;
-
-const WARP_FS = `
-precision highp float;
-in vec2 vUV;             // -1..1（锥面展开）
-uniform float uCharge;   // 0..1 蓄能比
-out vec4 fragColor;
-void main() {
-  // 不断坍缩聚焦的蓝紫色切伦科夫空间扭曲漏斗
-  float rings = fract(vUV.x * 3.0 - uCharge * 6.0);
-  float ring = smoothstep(0.0, 0.25, rings) * smoothstep(0.75, 0.5, rings);
-  float body = exp(-abs(vUV.y) * 3.5) * (0.4 + uCharge);
-  vec3 col = mix(vec3(0.4, 0.9, 3.2), vec3(1.6, 0.5, 3.4), vUV.x);
-  float a = (body * (0.5 + ring) ) * uCharge;
-  fragColor = vec4(col * a * 2.4, clamp(a, 0.0, 0.9));
-}`;
-
-const BG_VS = `
-in vec3 aPos;
-out vec2 vXY;
-void main() { vXY = aPos.xy; gl_Position = vec4(aPos.xy, 0.9999, 1.0); }`;
-
-const BG_FS = `
-precision highp float;
-in vec2 vXY;
-uniform float uTime;
-uniform float uHue;
-out vec4 fragColor;
-/* 确定性哈希与 3D fBm 星云背景（返工 R3 规范：5 八度 + 域扭曲） */
-float hash21(vec2 p) {
-  p = fract(p * vec2(234.34, 435.345));
-  p += dot(p, p + 34.23);
-  return fract(p.x * p.y);
-}
-float noise2D(vec2 p) {
-  vec2 i = floor(p), f = fract(p);
-  f = f * f * (3.0 - 2.0 * f);
-  return mix(mix(hash21(i), hash21(i + vec2(1, 0)), f.x),
-             mix(hash21(i + vec2(0, 1)), hash21(i + vec2(1, 1)), f.x), f.y);
-}
-float fbm(vec2 p) {
-  float v = 0.0, a = 0.5;
-  for (int i = 0; i < 5; i++) { v += a * noise2D(p); p = p * 2.03 + vec2(11.3, 7.7); a *= 0.5; }
-  return v;
-}
-void main() {
-  vec3 col = vec3(0.010, 0.014, 0.024);
-  vec2 q = vXY * 2.4 + vec2(uTime * 0.004, 0.0);
-  float warp = fbm(q);
-  float neb = fbm(q + warp * 1.4 + uHue * 7.0);
-  vec3 nebA = vec3(0.30, 0.10, 0.42);
-  vec3 nebB = vec3(0.05, 0.22, 0.38);
-  col += mix(nebA, nebB, uHue) * pow(max(neb - 0.42, 0.0), 1.6) * 1.15;
-  // 远景恒星
-  vec2 sp = vXY * 160.0;
-  float star = pow(hash21(floor(sp)), 40.0) * smoothstep(0.5, 0.05, length(fract(sp) - 0.5));
-  col += vec3(1.5, 1.6, 1.9) * star;
-  fragColor = vec4(col, 1.0);
-}`;
-
-/** 相机基（每帧由 BattleRenderer 计算传入） */
-function makeCamera(aspect) {
-  const proj = mat4();
-  const view = mat4();
-  const vp = mat4();
-  return { proj, view, vp, aspect };
-}
-
-class Battle3D {
-  /**
-   * @param glc GLContext 实例（CanvasManager.glc）
-   * @param tier LOD 档位 1|2
-   */
-  constructor(glc, tier = 1) {
-    this.glc = glc;
-    this.tier = tier;
-    this._buildResources();
-    this._unitCache = new Map();   // shipId → { prevShield, flashUntil }
-    this._scratch = {
-      mvp: mat4(), model: mat4(), view2: mat4(), tmp: mat4(),
-      proj: mat4(), view: mat4(),
-      camPos: [0, 0, 0], inv: mat4(),
-    };
-  }
-
-  _buildResources() {
-    const glc = this.glc;
-    const gl = glc.gl;
-    this.progShip = glc.createProgram(SHIP_VS, SHIP_FS, { label: 'battle:ship' });
-    this.progShield = glc.createProgram(SHIELD_VS, SHIELD_FS, { label: 'battle:shield' });
-    this.progFlat = glc.createProgram(THRUST_VS, THRUST_FS, { label: 'battle:flat' });
-    this.progQuad = glc.createProgram(QUAD_VS, BEAM_FS, { label: 'battle:beam', attributes: { aPos: 0, aUV: 1 } });
-    this.progGlow = glc.createProgram(QUAD_VS, GLOW_FS, { label: 'battle:glow', attributes: { aPos: 0, aUV: 1 } });
-    this.progWarp = glc.createProgram(QUAD_VS, WARP_FS, { label: 'battle:warp', attributes: { aPos: 0, aUV: 1 } });
-    this.progBg = glc.createProgram(BG_VS, BG_FS, { label: 'battle:bg', attributes: { aPos: 0 } });
-
-    // 单位四边形（光束/光斑/漏斗通用，aPos xy 平面 + aUV）
-    const quad = new Float32Array([
-      -1, -1, 0, 0, 1,
-      1, -1, 0, 1, 1,
-      1, 1, 0, 1, 0,
-      -1, -1, 0, 0, 1,
-      1, 1, 0, 1, 0,
-      -1, 1, 0, 0, 0,
-    ]);
-    this.quadBuf = glc.createBuffer(quad);
-    this.quadVAO = glc.createVAO((g) => {
-      g.bindBuffer(g.ARRAY_BUFFER, this.quadBuf);
-      g.enableVertexAttribArray(0);
-      g.vertexAttribPointer(0, 3, g.FLOAT, false, 20, 0);
-      g.enableVertexAttribArray(1);
-      g.vertexAttribPointer(1, 2, g.FLOAT, false, 20, 12);
-    });
-
-    // 背景全屏三角形
-    this.bgBuf = glc.createBuffer(new Float32Array([-1, -1, 0, 3, -1, 0, -1, 3, 0]));
-    this.bgVAO = glc.createVAO((g) => {
-      g.bindBuffer(g.ARRAY_BUFFER, this.bgBuf);
-      g.enableVertexAttribArray(0);
-      g.vertexAttribPointer(0, 3, g.FLOAT, false, 0, 0);
-    });
-
-    // 船体网格 → VAO（含位置/法线）
-    this.hullVAOs = new Map();
-    for (const hullId of ['hull_scout', 'hull_interceptor', 'hull_frigate', 'hull_destroyer',
-      'hull_gun_cruiser', 'hull_aa_cruiser', 'hull_battleship', 'hull_carrier',
-      'hull_industrial', 'hull_miner', 'hull_science', 'hull_supply']) {
-      const mesh = buildHullMesh(hullId);
-      const vboP = glc.createBuffer(mesh.positions);
-      const vboN = glc.createBuffer(mesh.normals);
-      const vao = glc.createVAO((g) => {
-        g.bindBuffer(g.ARRAY_BUFFER, vboP);
-        g.enableVertexAttribArray(0);
-        g.vertexAttribPointer(0, 3, g.FLOAT, false, 0, 0);
-        g.bindBuffer(g.ARRAY_BUFFER, vboN);
-        g.enableVertexAttribArray(1);
-        g.vertexAttribPointer(1, 3, g.FLOAT, false, 0, 0);
-      });
-      this.hullVAOs.set(hullId, { vao, triCount: mesh.triCount });
-    }
-
-    // 护盾球（低模球 5×5 段）
-    const sb = new MeshBuilderLite();
-    sphereTo(sb, 0, 0, 0, 1, 5);
-    const shieldMesh = sb.build();
-    this.shieldVAO = glc.createVAO(((vboP) => (g) => {
-      g.bindBuffer(g.ARRAY_BUFFER, vboP);
-      g.enableVertexAttribArray(0);
-      g.vertexAttribPointer(0, 3, g.FLOAT, false, 0, 0);
-    })(glc.createBuffer(shieldMesh.positions)));
-    this.shieldTriCount = shieldMesh.triCount;
-
-    gl.checkError && glc.checkError('Battle3D.build');
-  }
-
-  /**
-   * 绘制一帧战斗场景（在 cm.beginGLFrame() 之后调用）。
-   * @param data battleView 数据
-   * @param opts { time, camPos, camTarget, tier }
-   */
-  draw(gl, width, height, data, opts) {
-    const s = this._scratch;
-    const time = opts.time || 0;
-    const tier = this.tier;
-
-    // —— 相机 ——
-    mat4Perspective(s.proj, Math.PI / 4, width / Math.max(1, height), 0.1, 120);
-    mat4LookAt(s.view, opts.camPos, opts.camTarget, [0, 1, 0]);
-    mat4Multiply(s.mvp, s.proj, s.view);
-    s.inv.set(s.proj);
-    mat4Invert(s.tmp, s.view);
-
-    // —— 背景（关深度写） ——
-    gl.disable(gl.DEPTH_TEST);
-    gl.useProgram(this.progBg);
-    gl.bindVertexArray(this.bgVAO);
-    gl.uniform1f(gl.getUniformLocation(this.progBg, 'uTime'), time);
-    gl.uniform1f(gl.getUniformLocation(this.progBg, 'uHue'), Math.abs(Math.sin((data.systemId || 'x').split('').reduce((a, c) => a + c.charCodeAt(0), 0))) * 0.8);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-    gl.enable(gl.DEPTH_TEST);
-
-    // —— 舰体 ——
-    gl.enable(gl.DEPTH_TEST);
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    gl.useProgram(this.progShip);
-    const uShipMVP = gl.getUniformLocation(this.progShip, 'uMVP');
-    const uShipModel = gl.getUniformLocation(this.progShip, 'uModel');
-    const uShipColor = gl.getUniformLocation(this.progShip, 'uColor');
-    const uShipFlash = gl.getUniformLocation(this.progShip, 'uFlash');
-    const uCam = gl.getUniformLocation(this.progShip, 'uCamPos');
-    gl.uniform3fv(uCam, opts.camPos);
-
-    const sideColors = {
-      a: [0.31, 0.85, 0.91],
-      b: [0.91, 0.42, 0.38],
-    };
-    if (data.sides) {
-      // 玩家侧按阵营主色；敌侧固定红系（数据里无颜色则用默认）
-    }
-
-    const visible = (data.units || []).filter((u) => !u.destroyed);
-    for (const u of visible) {
-      const w = logicalToWorld(u.x, u.y);
-      // 横滚：按航向角与逻辑朝向的耦合做视觉侧倾（CPU 坐标不改）
-      const bank = Math.sin((u.heading || 0)) * 0.35;
-      mat4TRS(s.model, w[0], w[1], w[2], 0, -(u.heading || 0), bank, 0.9);
-      mat4Multiply(s.mvp, s.view, s.model);
-      mat4Multiply(s.mvp, s.proj, s.mvp);
-
-      const flash = this._flashOf(u);
-      const hullKey = guessHull(u);
-      const hv = this.hullVAOs.get(hullKey) || this.hullVAOs.get('hull_frigate');
-      gl.useProgram(this.progShip);
-      gl.uniformMatrix4fv(uShipMVP, false, s.mvp);
-      gl.uniformMatrix4fv(uShipModel, false, s.model);
-      gl.uniform3fv(uShipColor, sideColors[u.side] || sideColors.a);
-      gl.uniform1f(uShipFlash, flash);
-      gl.bindVertexArray(hv.vao);
-      gl.drawArrays(gl.TRIANGLES, 0, hv.triCount);
-
-      // 尾焰等离子锥（推进中更亮）
-      if (tier <= 2) {
-        const speed = Math.abs(Math.sin(u.heading || 0)) + Math.abs(Math.cos(u.heading || 0));
-        this._drawFlat(gl, s, u, -0.55, 0.16, [1.2, 3.2, 6.5], 0.9 + speed * 0.4, Math.PI / 2);
-      }
-
-      // 菲涅尔蜂窝护盾壳层
-      if ((u.shieldMax || 0) > 0 && u.shield > 0) {
-        gl.useProgram(this.progShield);
-        gl.uniformMatrix4fv(gl.getUniformLocation(this.progShield, 'uMVP'), false, s.mvp);
-        gl.uniformMatrix4fv(gl.getUniformLocation(this.progShield, 'uModel'), false, s.model);
-        gl.uniform3fv(gl.getUniformLocation(this.progShield, 'uColor'), sideColors[u.side] || sideColors.a);
-        gl.uniform3fv(gl.getUniformLocation(this.progShield, 'uCamPos'), opts.camPos);
-        gl.uniform1f(gl.getUniformLocation(this.progShield, 'uPower'), u.shield / Math.max(1, u.shieldMax));
-        gl.uniform1f(gl.getUniformLocation(this.progShield, 'uFlash'), flash);
-        gl.uniform1f(gl.getUniformLocation(this.progShield, 'uHex'), tier === 1 ? 1 : 0);
-        gl.depthMask(false);
-        gl.bindVertexArray(this.shieldVAO);
-        gl.drawArrays(gl.TRIANGLES, 0, this.shieldTriCount);
-        gl.depthMask(true);
-      }
-
-      // 撤退跃迁漏斗
-      if (u.order === 'retreat') {
-        const charge = Math.min(1, (u.retreatCharge || 0) / 25);
-        this._drawQuad(gl, s, u, 0.9, 0.0, 1.2 + charge, 0.8, this.progWarp, { uCharge: charge });
-      }
-    }
-
-    // —— 光束带 / 导弹光点 ——
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE); // 加性
-    gl.depthMask(false);
-    for (const p of data.projectiles || []) {
-      if (p.kind === 'beamFx') {
-        this._drawBeam(gl, s, p, time);
-      } else if (p.kind === 'missile') {
-        const w = logicalToWorld(p.x, p.y);
-        this._drawGlow(gl, s, w, [2.6, 2.2, 1.2], 0.85, 0.5);
-      }
-    }
-    gl.depthMask(true);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-  }
-
-  _drawFlat(gl, s, u, offX, size, color, intensity, rotY) {
-    const w = logicalToWorld(u.x, u.y);
-    const cx = w[0] - Math.cos(0) * 0; // 尾部
-    mat4TRS(s.model, w[0] - 0.55, w[1], w[2], 0, Math.PI / 2, 0, size);
-    mat4Multiply(s.mvp, s.view, s.model);
-    mat4Multiply(s.mvp, s.proj, s.mvp);
-    gl.useProgram(this.progFlat);
-    gl.uniformMatrix4fv(gl.getUniformLocation(this.progFlat, 'uMVP'), false, s.mvp);
-    gl.uniform3fv(gl.getUniformLocation(this.progFlat, 'uColor'), color);
-    gl.uniform1f(gl.getUniformLocation(this.progFlat, 'uIntensity'), intensity);
-    gl.bindVertexArray(this.shieldVAO);
-    gl.drawArrays(gl.TRIANGLES, 0, this.shieldTriCount);
-  }
-
-  _drawBeam(gl, s, p, time) {
-    const a = logicalToWorld(p.x0, p.y0);
-    const b = logicalToWorld(p.x1, p.y1);
-    const mx = (a[0] + b[0]) / 2;
-    const mz = (a[2] + b[2]) / 2;
-    const len = Math.hypot(b[0] - a[0], b[2] - a[2]) || 0.001;
-    const ang = Math.atan2(b[2] - a[2], b[0] - a[0]);
-    mat4TRS(s.model, mx, 0.06, mz, 0, -ang, 0, len * 0.5);
-    mat4Multiply(s.mvp, s.view, s.model);
-    mat4Multiply(s.mvp, s.proj, s.mvp);
-    gl.useProgram(this.progQuad);
-    gl.uniformMatrix4fv(gl.getUniformLocation(this.progQuad, 'uMVP'), false, s.mvp);
-    gl.uniform3fv(gl.getUniformLocation(this.progQuad, 'uColor'), p.side === 'a' ? [0.5, 1.6, 2.8] : [2.8, 0.7, 0.4]);
-    gl.uniform1f(gl.getUniformLocation(this.progQuad, 'uTime'), time);
-    gl.bindVertexArray(this.quadVAO);
-    gl.drawArrays(gl.TRIANGLES, 0, 6);
-  }
-
-  _drawGlow(gl, s, w, color, intensity, size) {
-    mat4TRS(s.model, w[0], 0.08, w[2], 0, 0, 0, size);
-    mat4Multiply(s.mvp, s.view, s.model);
-    mat4Multiply(s.mvp, s.proj, s.mvp);
-    gl.useProgram(this.progGlow);
-    gl.uniformMatrix4fv(gl.getUniformLocation(this.progGlow, 'uMVP'), false, s.mvp);
-    gl.uniform3fv(gl.getUniformLocation(this.progGlow, 'uColor'), color);
-    gl.uniform1f(gl.getUniformLocation(this.progGlow, 'uIntensity'), intensity);
-    gl.bindVertexArray(this.quadVAO);
-    gl.drawArrays(gl.TRIANGLES, 0, 6);
-  }
-
-  _drawQuad(gl, s, u, offX, height, size, alphaFrac, prog, extraUniforms = {}) {
-    const w = logicalToWorld(u.x, u.y);
-    mat4TRS(s.model, w[0] + offX, height, w[2], 0, Math.PI / 2, 0, size);
-    mat4Multiply(s.mvp, s.view, s.model);
-    mat4Multiply(s.mvp, s.proj, s.mvp);
-    gl.useProgram(prog);
-    gl.uniformMatrix4fv(gl.getUniformLocation(prog, 'uMVP'), false, s.mvp);
-    for (const [k, v] of Object.entries(extraUniforms)) {
-      gl.uniform1f(gl.getUniformLocation(prog, k), v);
-    }
-    gl.bindVertexArray(this.quadVAO);
-    gl.drawArrays(gl.TRIANGLES, 0, 6);
-  }
-
-  /** 受击闪白：按护盾/结构下降检测（渲染层视觉缓存，不触碰世界） */
-  _flashOf(u) {
-    const now = performance.now() / 1000;
-    let c = this._unitCache.get(u.shipId);
-    if (!c) {
-      c = { prevShield: u.shield, prevStruct: u.structure, flashUntil: 0 };
-      this._unitCache.set(u.shipId, c);
-    }
-    if (u.shield < c.prevShield - 0.5 || u.structure < c.prevStruct - 0.5) {
-      c.flashUntil = now + 0.35;
-    }
-    c.prevShield = u.shield;
-    c.prevStruct = u.structure;
-    if (u.destroyed) this._unitCache.delete(u.shipId);
-    return Math.max(0, Math.min(1, (c.flashUntil - now) / 0.35));
-  }
-
-  /** 屏幕拾取：把每个存活单位投影到屏幕空间 */
-  buildPickList(gl, width, height, data, opts) {
-    const s = this._scratch;
-    mat4Perspective(s.proj, Math.PI / 4, width / Math.max(1, height), 0.1, 120);
-    mat4LookAt(s.view, opts.camPos, opts.camTarget, [0, 1, 0]);
-    mat4Multiply(s.vp, s.proj, s.view);
-    const list = [];
-    for (const u of data.units || []) {
-      if (u.destroyed) continue;
-      const w = logicalToWorld(u.x, u.y);
-      const out = [0, 0, 0];
-      vec3ApplyMat4(out, s.vp, [w[0], w[1], w[2]]);
-      const sx = (out[0] * 0.5 + 0.5) * width;
-      const sy = (0.5 - out[1] * 0.5) * height;
-      if (out[2] >= 0 && out[2] <= 1) list.push({ shipId: u.shipId, sx, sy });
-    }
-    return list;
-  }
-
-  destroy() {
-    this.glc.destroy();
-  }
-}
-
-/** 极简几何累积器（护盾球专用） */
-class MeshBuilderLite {
-  constructor() {
-    this.positions = [];
-  }
-
-  tri(a, b, c) {
-    this.positions.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
-  }
-
-  build() {
-    return { positions: new Float32Array(this.positions), triCount: this.positions.length / 9 };
-  }
-}
-
-function sphereTo(sb, cx, cy, cz, r, seg) {
-  const at = (i, j) => {
-    const phi = (i / seg) * Math.PI;
-    const theta = (j / seg) * Math.PI * 2;
-    return [
-      cx + r * Math.sin(phi) * Math.cos(theta),
-      cy + r * Math.cos(phi),
-      cz + r * Math.sin(phi) * Math.sin(theta),
-    ];
-  };
-  for (let i = 0; i < seg; i++) {
-    for (let j = 0; j < seg; j++) {
-      sb.tri(at(i, j), at(i + 1, j), at(i + 1, j + 1));
-      sb.tri(at(i, j), at(i + 1, j + 1), at(i, j + 1));
-    }
-  }
-}
-
-/** 由战斗数据推测船体（hullId 未在 battleView 中时按尺寸分级） */
-function guessHull(u) {
-  const ratio = u.structureMax || 100;
-  if (ratio > 1800) return 'hull_battleship';
-  if (ratio > 900) return 'hull_carrier';
-  if (ratio > 500) return 'hull_gun_cruiser';
-  if (ratio > 260) return 'hull_destroyer';
-  if (ratio < 140) return 'hull_scout';
-  return 'hull_frigate';
-}
-
-Object.assign(__exports, { logicalToWorld, makeCamera, Battle3D });
-
-});
-__register("src/render/meshes/ShipMeshes.js", function (__exports, __require) {
-/**
- * render/meshes/ShipMeshes.js — 12 种船体的程序化 3D 网格（返工 Phase R4）
- *
- * 纯代码生成的低多边形硬表面网格（每船体 48..180 三角形），带法线，
- * 局部坐标系：+X 舰首、+Y 上、-Z 右舷；整体长度归一约 1.0，渲染层按
- * 舰种缩放与横滚。阵营涂装灯带与材质槽位由着色器 uniform 处理。
- * 全部确定性生成（无随机）；顶层禁止访问 document/window。
- */
-
-// —— 几何构建器 ————————————————————————————————————————
-
-/** 顶点累积器：push 三角形并自动计算面法线 */
-class MeshBuilder {
-  constructor() {
-    this.positions = [];
-    this.normals = [];
-  }
-
-  tri(ax, ay, az, bx, by, bz, cx, cy, cz) {
-    // 面法线（右手系：b-a × c-a）
-    const ux = bx - ax;
-    const uy = by - ay;
-    const uz = bz - az;
-    const vx = cx - ax;
-    const vy = cy - ay;
-    const vz = cz - az;
-    let nx = uy * vz - uz * vy;
-    let ny = uz * vx - ux * vz;
-    let nz = ux * vy - uy * vx;
-    const len = Math.hypot(nx, ny, nz) || 1;
-    nx /= len;
-    ny /= len;
-    nz /= len;
-    for (const p of [[ax, ay, az], [bx, by, bz], [cx, cy, cz]]) {
-      this.positions.push(p[0], p[1], p[2]);
-      this.normals.push(nx, ny, nz);
-    }
-  }
-
-  /** 轴对齐盒子（中心 cx,cy,cz；半尺寸 hx,hy,hz）→ 12 三角形 */
-  box(cx, cy, cz, hx, hy, hz) {
-    const x0 = cx - hx;
-    const x1 = cx + hx;
-    const y0 = cy - hy;
-    const y1 = cy + hy;
-    const z0 = cz - hz;
-    const z1 = cz + hz;
-    // +X（右舷）
-    this.tri(x1, y0, z1, x1, y0, z0, x1, y1, z0);
-    this.tri(x1, y0, z1, x1, y1, z0, x1, y1, z1);
-    // -X
-    this.tri(x0, y0, z0, x0, y0, z1, x0, y1, z1);
-    this.tri(x0, y0, z0, x0, y1, z1, x0, y1, z0);
-    // +Y（上）
-    this.tri(x0, y1, z1, x1, y1, z1, x1, y1, z0);
-    this.tri(x0, y1, z1, x1, y1, z0, x0, y1, z0);
-    // -Y
-    this.tri(x0, y0, z0, x1, y0, z0, x1, y0, z1);
-    this.tri(x0, y0, z0, x1, y0, z1, x0, y0, z1);
-    // +Z（舰首向 +X 时 z=+ 为一侧舷）
-    this.tri(x0, y0, z1, x1, y0, z1, x1, y1, z1);
-    this.tri(x0, y0, z1, x1, y1, z1, x0, y1, z1);
-    // -Z
-    this.tri(x1, y0, z0, x0, y0, z0, x0, y1, z0);
-    this.tri(x1, y0, z0, x0, y1, z0, x1, y1, z0);
-  }
-
-  /** 楔形舰体：沿 +X 由舰尾(宽 w0) 收窄到舰首(宽 w1)，高 h0→h1，长 len */
-  hullWedge(len, w0, w1, h0, h1, zOff = 0) {
-    const x0 = -len / 2;
-    const x1 = len / 2;
-    // 八顶点
-    const p = [
-      [x0, 0, zOff + w0], [x0, 0, zOff - w0], [x0, h0, zOff], // 尾：右、左、脊
-      [x1, 0, zOff + w1], [x1, 0, zOff - w1], [x1, h1, zOff], // 首
-      [x0, -h0 * 0.35, zOff], [x1, -h1 * 0.35, zOff], // 底龙骨
-    ];
-    // 上甲板两侧
-    this.tri(...p[0], ...p[5], ...p[2]);
-    this.tri(...p[1], ...p[2], ...p[5]);
-    this.tri(...p[1], ...p[5], ...p[4]);
-    this.tri(...p[0], ...p[3], ...p[5]);
-    // 两侧舷
-    this.tri(...p[0], ...p[6], ...p[3]);
-    this.tri(...p[0], ...p[3], ...p[5]);
-    this.tri(...p[1], ...p[4], ...p[7]);
-    this.tri(...p[1], ...p[7], ...p[6]);
-    this.tri(...p[1], ...p[6], ...p[0]);
-    // 底部
-    this.tri(...p[6], ...p[7], ...p[3]);
-    this.tri(...p[6], ...p[3], ...p[0]);
-    // 舰尾封板
-    this.tri(...p[2], ...p[5], ...p[7]);
-    this.tri(...p[2], ...p[7], ...p[6]);
-  }
-
-  /** 四棱锥（炮塔/钻头/鳍尖） */
-  pyramid(cx, baseY, cz, w, h, dir = 1) {
-    const h2 = w / 2;
-    if (dir >= 0) {
-      this.tri(cx - h2, baseY, cz - h2, cx + h2, baseY, cz - h2, cx, baseY + h, cz);
-      this.tri(cx + h2, baseY, cz - h2, cx + h2, baseY, cz + h2, cx, baseY + h, cz);
-      this.tri(cx + h2, baseY, cz + h2, cx - h2, baseY, cz + h2, cx, baseY + h, cz);
-      this.tri(cx - h2, baseY, cz + h2, cx - h2, baseY, cz - h2, cx, baseY + h, cz);
-    } else {
-      this.tri(cx + h2, baseY, cz - h2, cx - h2, baseY, cz - h2, cx, baseY - h, cz);
-      this.tri(cx + h2, baseY, cz + h2, cx + h2, baseY, cz - h2, cx, baseY - h, cz);
-      this.tri(cx - h2, baseY, cz + h2, cx + h2, baseY, cz + h2, cx, baseY - h, cz);
-      this.tri(cx - h2, baseY, cz - h2, cx - h2, baseY, cz + h2, cx, baseY - h, cz);
-    }
-  }
-
-  /** 垂直鳍板（双面三角） */
-  fin(cx, cy, cz, len, h) {
-    this.tri(cx - len / 2, cy, cz, cx + len / 2, cy, cz, cx + len * 0.2, cy + h, cz);
-    this.tri(cx + len / 2, cy, cz, cx - len / 2, cy, cz, cx + len * 0.2, cy - h * 0.4, cz);
-  }
-
-  /** 低多边形球（经纬各 seg 段） */
-  sphere(cx, cy, cz, r, seg = 5) {
-    const at = (i, j) => {
-      const phi = (i / seg) * Math.PI; // 0..π
-      const theta = (j / seg) * Math.PI * 2;
-      return [
-        cx + r * Math.sin(phi) * Math.cos(theta),
-        cy + r * Math.cos(phi),
-        cz + r * Math.sin(phi) * Math.sin(theta),
-      ];
-    };
-    for (let i = 0; i < seg; i++) {
-      for (let j = 0; j < seg; j++) {
-        const a = at(i, j);
-        const b = at(i + 1, j);
-        const c = at(i + 1, j + 1);
-        const d = at(i, j + 1);
-        this.tri(...a, ...b, ...c);
-        this.tri(...a, ...c, ...d);
-      }
-    }
-  }
-
-  build() {
-    return {
-      positions: new Float32Array(this.positions),
-      normals: new Float32Array(this.normals),
-      triCount: this.positions.length / 9,
-    };
-  }
-}
-
-// —— 12 船体定义 ————————————————————————————————————————
-
-const BUILDERS = {
-  // 侦察艇：细长 needle + 大型传感鳍
-  hull_scout(m) {
-    m.hullWedge(1.0, 0.10, 0.04, 0.07, 0.03);
-    m.fin(-0.2, 0.06, 0, 0.34, 0.2);
-    m.sphere(0.28, 0.06, 0, 0.055, 4); // 传感穹顶
-  },
-  // 截击艇：前掠翼楔形
-  hull_interceptor(m) {
-    m.hullWedge(0.8, 0.16, 0.02, 0.06, 0.02);
-    // 前掠双翼（上下双面 + 翼尖配重）
-    m.tri(0.1, 0, 0.05, 0.42, 0, 0.30, 0.16, 0, 0.04);
-    m.tri(-0.1, 0, 0.05, 0.1, 0, 0.05, 0.16, 0, 0.04);
-    m.tri(0.1, 0, -0.05, 0.16, 0, -0.04, 0.42, 0, -0.30);
-    m.tri(-0.1, 0, -0.05, 0.1, 0, -0.05, 0.1, 0, -0.05);
-    m.box(0.30, 0.0, 0.28, 0.05, 0.02, 0.03); // 翼尖配重
-    m.box(0.30, 0.0, -0.28, 0.05, 0.02, 0.03);
-    m.box(-0.1, 0.05, 0, 0.12, 0.04, 0.06); // 座舱
-    m.pyramid(-0.38, 0.03, 0, 0.10, 0.08, -1); // 尾喷锥
-    m.fin(-0.15, 0.06, 0, 0.18, 0.10); // 背鳍
-  },
-  // 护卫舰：均衡舰体 + 小舰桥 + 双推进短舱
-  hull_frigate(m) {
-    m.hullWedge(1.0, 0.18, 0.06, 0.10, 0.04);
-    m.box(-0.05, 0.11, 0, 0.14, 0.05, 0.08); // 舰桥
-    m.box(0.30, 0.03, 0.10, 0.12, 0.035, 0.035); // 右推进短舱
-    m.box(0.30, 0.03, -0.10, 0.12, 0.035, 0.035); // 左推进短舱
-    m.pyramid(0.18, 0.10, 0, 0.08, 0.07); // 前炮座
-    m.fin(-0.34, 0.08, 0, 0.26, 0.16);
-    m.box(-0.44, 0.06, 0, 0.06, 0.06, 0.10); // 尾封板
-  },
-  // 驱逐舰：修长双联前爪
-  hull_destroyer(m) {
-    m.hullWedge(1.15, 0.16, 0.05, 0.09, 0.04);
-    m.box(0.30, 0.0, 0.09, 0.20, 0.03, 0.035); // 右前爪
-    m.box(0.30, 0.0, -0.09, 0.20, 0.03, 0.035);
-    m.box(-0.02, 0.11, 0, 0.16, 0.05, 0.075);
-    m.pyramid(0.16, 0.10, 0, 0.09, 0.09);
-  },
-  // 炮击巡洋舰：厚重舰体 + 主炮塔
-  hull_gun_cruiser(m) {
-    m.hullWedge(1.2, 0.24, 0.08, 0.14, 0.06);
-    m.box(0.0, 0.15, 0, 0.18, 0.06, 0.10);
-    m.pyramid(0.34, 0.12, 0, 0.14, 0.14); // 主炮基座
-    m.box(0.5, 0.17, 0, 0.16, 0.035, 0.035); // 主炮身
-    m.box(-0.34, 0.13, 0, 0.12, 0.05, 0.09);
-  },
-  // 防空巡洋舰：桅杆雷达 + 多联小炮塔
-  hull_aa_cruiser(m) {
-    m.hullWedge(1.1, 0.22, 0.07, 0.12, 0.05);
-    m.box(0.0, 0.14, 0, 0.14, 0.05, 0.09);
-    m.box(-0.02, 0.22, 0, 0.02, 0.09, 0.02); // 桅杆
-    m.box(-0.02, 0.30, 0, 0.10, 0.02, 0.10); // 雷达板
-    m.pyramid(0.30, 0.10, 0.10, 0.07, 0.06);
-    m.pyramid(0.30, 0.10, -0.10, 0.07, 0.06);
-    m.pyramid(-0.2, 0.11, 0.12, 0.06, 0.05);
-    m.pyramid(-0.2, 0.11, -0.12, 0.06, 0.05);
-  },
-  // 战列舰：阶梯重装甲舰桥 + 双主炮塔
-  hull_battleship(m) {
-    m.hullWedge(1.5, 0.32, 0.12, 0.20, 0.09);
-    m.box(-0.1, 0.20, 0, 0.22, 0.07, 0.13); // 一阶舰桥
-    m.box(0.18, 0.24, 0, 0.14, 0.05, 0.10); // 二阶
-    m.box(0.36, 0.27, 0, 0.08, 0.04, 0.07); // 顶部指挥塔
-    m.pyramid(0.52, 0.16, 0, 0.16, 0.16); // A 炮塔
-    m.box(0.72, 0.19, 0, 0.14, 0.04, 0.04); // 主炮身
-    m.pyramid(-0.3, 0.18, 0, 0.14, 0.14); // X 炮塔
-    m.box(-0.48, 0.20, 0, 0.12, 0.035, 0.035);
-    m.box(-0.1, 0.05, 0.18, 0.4, 0.05, 0.04); // 侧装甲带
-    m.box(-0.1, 0.05, -0.18, 0.4, 0.05, 0.04);
-  },
-  // 航母：双体不对称飞行甲板 + 蓝光机库槽
-  hull_carrier(m) {
-    m.hullWedge(1.4, 0.30, 0.10, 0.12, 0.05);
-    m.box(0.1, 0.14, 0.16, 0.55, 0.03, 0.16); // 左偏置飞行甲板
-    m.box(-0.2, 0.10, -0.12, 0.3, 0.05, 0.08); // 右侧岛式建筑
-    m.box(0.35, 0.145, 0.16, 0.2, 0.005, 0.05); // 机库槽（着色器灯带）
-    m.box(0.0, 0.145, 0.16, 0.15, 0.005, 0.05);
-    m.fin(-0.5, 0.10, 0, 0.3, 0.18);
-  },
-  // 工业舰：模块化货舱块
-  hull_industrial(m) {
-    m.hullWedge(0.9, 0.20, 0.08, 0.14, 0.06);
-    m.box(-0.15, 0.12, 0.12, 0.22, 0.09, 0.09);
-    m.box(-0.15, 0.12, -0.12, 0.22, 0.09, 0.09);
-    m.box(0.25, 0.10, 0, 0.14, 0.08, 0.12);
-    m.box(-0.48, 0.08, 0, 0.08, 0.10, 0.14);
-  },
-  // 矿业舰：前部采集钻锥 + 侧挂矿石舱
-  hull_miner(m) {
-    m.hullWedge(0.9, 0.22, 0.10, 0.13, 0.07);
-    m.pyramid(0.62, 0.0, 0, 0.18, 0.26); // 采集钻锥
-    m.box(-0.2, 0.10, 0.14, 0.2, 0.08, 0.07); // 矿石舱
-    m.box(-0.2, 0.10, -0.14, 0.2, 0.08, 0.07);
-    m.box(0.1, 0.13, 0, 0.12, 0.05, 0.08);
-  },
-  // 科学船：大型传感阵列穹顶
-  hull_science(m) {
-    m.hullWedge(1.0, 0.20, 0.06, 0.11, 0.05);
-    m.sphere(0.05, 0.16, 0, 0.11, 5); // 主穹顶
-    m.sphere(-0.3, 0.10, 0.09, 0.05, 4);
-    m.sphere(-0.3, 0.10, -0.09, 0.05, 4);
-    m.fin(-0.35, 0.07, 0, 0.24, 0.14);
-  },
-  // 补给舰：粗胖货舱 + 燃料罐
-  hull_supply(m) {
-    m.hullWedge(1.2, 0.30, 0.12, 0.20, 0.10);
-    m.box(-0.2, 0.16, 0.16, 0.3, 0.07, 0.05); // 燃料罐
-    m.box(-0.2, 0.16, -0.16, 0.3, 0.07, 0.05);
-    m.box(-0.2, 0.16, 0, 0.34, 0.08, 0.09); // 主货舱
-    m.box(0.3, 0.14, 0, 0.1, 0.06, 0.08);
-  },
-};
-
-const meshCache = new Map();
-
-/** 构建并缓存船体网格（渲染层每 GL 上下文再上传 VBO） */
-function buildHullMesh(hullId) {
-  if (meshCache.has(hullId)) return meshCache.get(hullId);
-  const m = new MeshBuilder();
-  const builder = BUILDERS[hullId];
-  if (builder) builder(m);
-  else m.hullWedge(1.0, 0.18, 0.06, 0.10, 0.04); // 兜底：通用护卫舰形
-  const mesh = m.build();
-  meshCache.set(hullId, mesh);
-  return mesh;
-}
-
-/** 全部可用船体 id（12 种） */
-function availableHullIds() {
-  return Object.keys(BUILDERS).sort();
-}
-
-Object.assign(__exports, { buildHullMesh, availableHullIds });
-
-});
 __register("src/app/Router.js", function (__exports, __require) {
 /**
  * app/Router.js — hash 路由（任务书 8.6：#/galaxy 形式，兼容 GitHub Pages 二级路径）
@@ -26222,6 +36436,7 @@ const { colonyDetail: colonyDetail } = __require("src/simulation/ViewModels.js")
 const { BUILDINGS: BUILDINGS } = __require("src/content/buildings.js");
 const { RESOURCES: RESOURCES } = __require("src/content/resources.js");
 const { BAL: BAL } = __require("src/content/constants.js");
+const { storageCapacity: storageCapacity, buildingJobSlots: buildingJobSlots } = __require("src/domain/planets/colony.js");
 
 /** 快照刷新节流间隔（与 App 的 4Hz 快照节奏对齐） */
 const REFRESH_MS = 250;
@@ -26244,6 +36459,23 @@ const BLD_STATE_ZH = {
   starved: ['缺料', 'danger'],
   suspended: ['停摆', 'warn'],
 };
+
+/** 五态 runtimeStatus 诊断 → [彩色圆点+中文, vf-tag 色调]（doc5 §3.8 P2-02 / ECON-02） */
+const RUNTIME_STATUS_ZH = {
+  running: ['● 运行中', 'ok'],
+  understaffed: ['● 劳力短缺', 'warn'],
+  starved_input: ['● 断供', 'danger'],
+  low_power: ['● 电力不足', 'warn'],
+  storage_full: ['● 仓储满溢', 'danger'],
+};
+
+/** 四级流向看板分层（doc5 §3.8：矿脉采掘 → 仓储物流 → 精炼制造 → 船坞/轨道输出） */
+const FLOW_TIERS = [
+  { key: 'mining', title: '① 矿脉采掘', cats: ['mining'], hint: '矿井/气井按矿藏开采原矿，岗位短缺按 η 降产。' },
+  { key: 'storage', title: '② 仓储物流', cats: ['energy'], hint: '原料入殖民地仓储（含供能设施）；满溢将阻塞上游周期启动。' },
+  { key: 'refining', title: '③ 精炼制造', cats: ['refining', 'industry', 'agri', 'science'], hint: '精炼/制造/农业/科研消耗原矿与中间品，输出精炼品与科研数据。' },
+  { key: 'output', title: '④ 船坞/轨道输出', cats: ['admin'], hint: '行政港/交易所承担轨道输出与贸易税收。' },
+];
 
 /** 建筑类别中文（表格列与建造面板分组；键序即展示序） */
 const BLD_CAT_ZH = {
@@ -26570,8 +36802,10 @@ const ColonyView = {
     this._col1.appendChild(pFood);
   },
 
-  /** 第二列：建筑表（行展开配方）+ 建造面板 + 建造队列 */
+  /** 第二列：四级流向看板 + 建筑表（行展开配方）+ 建造面板 + 建造队列 */
   _renderCol2(detail) {
+    this._col2.appendChild(this._flowPanel(detail));
+
     // 概要：能源平衡与槽位
     const pBld = panel({ title: '建筑', dense: true });
     const bal = Number(detail.powerBalance) || 0;
@@ -26592,9 +36826,111 @@ const ColonyView = {
     this._col2.appendChild(this._queuePanel(detail));
   },
 
+  /** 活体殖民地实体（runtimeStatus / jobsFilled 在实体上，ViewModel 只读快照不含） */
+  _liveColony() {
+    const w = this.app && this.app.world;
+    return (w && w.entities && w.entities.colonies && this._colonyId)
+      ? w.entities.colonies[this._colonyId] || null
+      : null;
+  },
+
+  /** 建筑运行状态徽章：五态 runtimeStatus 优先，缺省回退 building state（建造中/停摆） */
+  _runtimeBadge(b) {
+    if (b.runtimeStatus && RUNTIME_STATUS_ZH[b.runtimeStatus]) {
+      const [text, tone] = RUNTIME_STATUS_ZH[b.runtimeStatus];
+      const tip = b.runtimeStatus === 'starved_input' && b.starvedInput
+        ? `断供原料：${resName(b.starvedInput)}` : undefined;
+      return el('span', { class: `vf-tag ${tone}`, title: tip, text });
+    }
+    const [text, tone] = BLD_STATE_ZH[b.state] || [b.state || '—', ''];
+    return el('span', { class: tone ? `vf-tag ${tone}` : 'vf-tag', text });
+  },
+
+  /**
+   * 四级流向看板（doc5 §3.8 P2-01/02）：矿脉采掘 → 仓储物流 → 精炼制造 → 船坞/轨道输出。
+   * 逐建筑 runtimeStatus 徽章 + 仓储容量条 + 瓶颈摘要；面板 id 稳定（UIStateStore 折叠记忆）。
+   */
+  _flowPanel(detail) {
+    const p = panel({ title: '物流流向看板', dense: true, id: 'colony:flow' });
+    const colony = this._liveColony();
+    const buildings = colony && Array.isArray(colony.buildings) ? colony.buildings : [];
+
+    // 顶层流向链
+    p.appendChild(el('div', {
+      class: 'vf-dim vf-small',
+      style: { marginBottom: '4px', letterSpacing: '1px' },
+      text: FLOW_TIERS.map((t) => t.title.replace(/^\S+\s/, '')).join('  ▸  '),
+    }));
+
+    const statusCount = {};
+    for (const tier of FLOW_TIERS) {
+      const sec = el('div', { class: 'vf-col', style: { gap: '2px', marginTop: '4px' } });
+      sec.appendChild(el('div', { class: 'vf-dim vf-small', text: tier.title }));
+
+      if (tier.key === 'storage') {
+        // 仓储物流：原料存量概览 + 容量条（满溢预警）
+        const cap = colony ? storageCapacity(colony) : 0;
+        const stockRows = Object.keys(detail.stock || {})
+          .filter((rid) => (Number(detail.stock[rid]) || 0) > 0)
+          .sort((a, b) => detail.stock[b] - detail.stock[a])
+          .slice(0, 5)
+          .map((rid) => `${resName(rid)} ${fmtQty(detail.stock[rid])}`);
+        sec.appendChild(el('div', {
+          class: 'vf-small',
+          text: stockRows.length ? stockRows.join(' · ') : '仓储为空',
+        }));
+        const peak = Math.max(1, ...Object.keys(detail.stock || {}).map((rid) => Number(detail.stock[rid]) || 0));
+        sec.appendChild(statBar({
+          value: Math.min(peak, cap), max: Math.max(cap, peak, 1),
+          label: `仓储峰值 / 容量 ${cap}`, tone: peak >= cap ? 'danger' : peak >= cap * 0.85 ? 'warn' : null,
+        }));
+      }
+
+      // 本层建筑徽章行
+      const tierBlds = buildings.filter((b) => tier.cats.includes(buildingDef(b.defId)?.category));
+      if (tier.key !== 'storage' && tierBlds.length === 0) {
+        sec.appendChild(el('div', { class: 'vf-faint vf-small', text: '（本层暂无设施）' }));
+      }
+      for (const b of tierBlds) {
+        const def = buildingDef(b.defId);
+        const row = el('div', { class: 'vf-row', style: { gap: '6px' } });
+        row.appendChild(el('span', { class: 'vf-grow vf-small', text: def ? def.nameZh : b.defId }));
+        row.appendChild(el('span', { class: 'vf-faint vf-small vf-mono', text: `${b.jobsFilled ?? 0}/${buildingJobSlots(def)}岗` }));
+        const badge = this._runtimeBadge(b);
+        if (badge && b.runtimeStatus) {
+          statusCount[b.runtimeStatus] = (statusCount[b.runtimeStatus] || 0) + 1;
+        }
+        row.appendChild(badge);
+        sec.appendChild(row);
+      }
+      if (tier.hint && (tierBlds.length > 0 || tier.key === 'storage')) {
+        sec.appendChild(el('div', { class: 'vf-faint vf-small', text: tier.hint }));
+      }
+      p.appendChild(sec);
+    }
+
+    // 瓶颈摘要（ECON-02：阻塞原因一眼可读）
+    const issues = Object.keys(statusCount).filter((k) => k !== 'running');
+    p.appendChild(el('div', {
+      class: issues.length ? 'vf-warn vf-small' : 'vf-ok vf-small',
+      style: { marginTop: '4px' },
+      text: issues.length
+        ? `产能瓶颈：${issues.map((k) => `${RUNTIME_STATUS_ZH[k][0].replace('● ', '')}×${statusCount[k]}`).join('，')}`
+        : '全链路运行中，无阻塞。',
+    }));
+    return p;
+  },
+
   /** 建筑 dataTable + 展开明细行（配方 inputs→outputs） */
   _buildingTable(detail) {
-    const rows = detail.buildings.map((b) => ({ ...b, id: b.index }));
+    const colony = this._liveColony();
+    const rows = detail.buildings.map((b) => ({
+      ...b,
+      id: b.index,
+      runtimeStatus: colony && colony.buildings[b.index] ? colony.buildings[b.index].runtimeStatus : null,
+      starvedInput: colony && colony.buildings[b.index] ? colony.buildings[b.index].starvedInput : null,
+      jobsFilled: colony && colony.buildings[b.index] ? colony.buildings[b.index].jobsFilled : null,
+    }));
     const table = dataTable({
       dense: true,
       rows,
@@ -26610,10 +36946,7 @@ const ColonyView = {
         { key: 'category', label: '类别', render: (r) => BLD_CAT_ZH[r.category] || r.category || '—' },
         {
           key: 'state', label: '状态',
-          render: (r) => {
-            const [text, tone] = BLD_STATE_ZH[r.state] || [r.state || '—', ''];
-            return el('span', { class: tone ? `vf-tag ${tone}` : 'vf-tag', text });
-          },
+          render: (r) => this._runtimeBadge(r),
         },
         {
           key: 'progress', label: '进度',
@@ -26621,7 +36954,15 @@ const ColonyView = {
             ? '—'
             : `${Math.min(100, Math.round((r.progress / r.cycleHours) * 100))}%`,
         },
-        { key: 'jobs', label: '岗位', render: (r) => (r.jobs > 0 ? String(r.jobs) : '—') },
+        {
+          key: 'jobs', label: '岗位',
+          render: (r) => {
+            const def = buildingDef(r.defId);
+            const slots = buildingJobSlots(def);
+            if (r.jobsFilled == null) return slots > 0 ? `—/${slots}` : '—';
+            return `${r.jobsFilled}/${slots}`;
+          },
+        },
         {
           key: 'powerUse', label: '能耗',
           render: (r) => (r.powerGen > 0 ? `+${r.powerGen}` : (r.powerUse ? String(r.powerUse) : '—')),
@@ -26778,12 +37119,18 @@ __register("src/ui/screens/SystemView.js", function (__exports, __require) {
  *       原右侧固定信息列移除，改为 .vf-float-panel 悬浮毛玻璃情报舱：
  *       星系档案 → 行星卡列表 → 在系舰队 → 异常列表。
  *
- * 交互：
+ * 交互（doc5 §2.2 四层操作语法 / §3.5.2）：
  *  - 鼠标左键拖拽：旋转轨道相机（增量传给 SystemRenderer opts.yaw，渲染器内部
  *    俯仰固定，仅水平环绕）；
  *  - 滚轮：数字变焦（画布容器 transform: scale 1.0–2.6，拾取坐标按比例反解）；
  *  - 单击行星 → app.select('planet', id)（全局选中态联动）+ 情报舱行星卡高亮；
  *    单击空白 → 清除选中；「定位」按钮反向联动；
+ *  - 双击行星 → 选中 + System3D 相机指数阻尼聚焦（Orbit Lerp）+ 强制展开
+ *    行星操作舱；双击空白 → 复位聚焦至星系全景；
+ *  - 右键行星 → 抑制原生菜单并弹出 .vf-radial-menu 四向径向快捷指令环
+ *    （轨道扫描 / 建立前哨 / 派遣先遣队登陆 / 设为舰队目标）；
+ *  - 键盘：Escape 三级退避链（关径向菜单 → 取消聚焦 → 返回银河）；
+ *    Enter/Space 对选中天体首次聚焦、二次推进登陆（goto('ground', planetId)）；
  *  - 头部「总览检视」→ app.select('system', id) 打开右侧全局检视器抽屉。
  *
  * 信息分层：恒星/行星情报需调查层级≥2，危险度/资源评级/矿藏需≥3（与 scan.js 语义一致）。
@@ -26799,11 +37146,13 @@ __register("src/ui/screens/SystemView.js", function (__exports, __require) {
 const { el: el, clearEl: clearEl } = __require("src/ui/components/dom.js");
 const { panel: panel, kvList: kvList } = __require("src/ui/components/panels.js");
 const { progressBar: progressBar } = __require("src/ui/components/progress.js");
+const { toast: toast } = __require("src/ui/components/index.js");
 const { L: L } = __require("src/core/i18n.js");
 const { parseHash: parseHash } = __require("src/app/Router.js");
 const { CanvasManager: CanvasManager } = __require("src/render/CanvasManager.js");
 const { SystemRenderer: SystemRenderer } = __require("src/render/SystemRenderer.js");
 const { explorationView: explorationView } = __require("src/simulation/ViewModels.js");
+const { uiState: uiState } = __require("src/ui/state/UIStateStore.js");
 
 /** 调查层级中文名（0–4，与 SnapshotBuilder / Inspector 一致） */
 const SURVEY_LEVELS = ['未接触', '侦测', '分类', '定位', '调查完成'];
@@ -26822,6 +37171,8 @@ const YAW_SPEED = 0.005;
 /** 数字变焦范围（画布容器 transform scale） */
 const ZOOM_MIN = 1;
 const ZOOM_MAX = 2.6;
+/** 未探测天体回波编号（orbitIndex 0..7 → #I..#VIII，doc5 §3.2） */
+const GHOST_NUM = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII'];
 
 /**
  * 常用资源中文名（键 = content/resources.js 资源 id）。
@@ -26861,6 +37212,12 @@ const SystemView = {
     this._yaw = 0;                 // 用户拖拽附加偏航（→ SystemRenderer opts.yaw）
     this._zoom = 1;                // 数字变焦倍率（容器 transform scale）
     this._drag = { active: false, moved: false, startX: 0, startY: 0, lastX: 0, lastY: 0 };
+    this._dossierSigVal = null;    // 情报舱轻量签名（未变动跳过 DOM 重建）
+    this._radial = null;           // 右键径向菜单根节点
+    this._radialOpen = false;
+
+    // —— 瞬态 UI 状态槽（跨快照/重挂载保持选中与聚焦） ——
+    uiState.view('system', { selectedPlanetId: null, focusedPlanetId: null });
 
     root.innerHTML = '';
 
@@ -26875,7 +37232,7 @@ const SystemView = {
     this._titleEl = el('h2', { text: L('ui.system') });
     head.appendChild(this._titleEl);
     head.appendChild(el('span', { class: 'vf-grow' }));
-    head.appendChild(el('span', { class: 'vf-dim vf-small', text: '拖拽旋转 · 滚轮缩放 · 单击行星联动档案' }));
+    head.appendChild(el('span', { class: 'vf-dim vf-small', text: '拖拽旋转 · 滚轮缩放 · 单击选中 · 双击聚焦 · 右键快捷指令' }));
     head.appendChild(el('button', {
       class: 'vf-btn small',
       text: '总览检视',
@@ -26889,7 +37246,10 @@ const SystemView = {
     this._dossier = el('div', { class: 'vf-float-panel' });
     body.appendChild(this._dossier);
 
-    const wrap = el('div', { class: 'vf-view vf-view-immersive' }, [head, body]);
+    // —— 右键径向快捷指令环（.vf-radial-menu，默认隐藏） ——
+    this._radial = el('div', { class: 'vf-radial-menu', hidden: '' });
+
+    const wrap = el('div', { class: 'vf-view vf-view-immersive' }, [head, body, this._radial]);
     root.appendChild(wrap); // 先入文档再建画布：保证 GL 上下文/System3D 在挂载态初始化
 
     this._cm = new CanvasManager().attach(body);
@@ -26922,6 +37282,9 @@ const SystemView = {
     if (route.screen === 'system' && route.param && route.param !== this._systemId) {
       this._systemId = route.param;
       this._selectedPlanetId = null;
+      uiState.view('system').focusedPlanetId = null; // 换星系：聚焦失效
+      this._clearFocus();
+      this._hideRadialMenu();
       this._refreshAll();
       return;
     }
@@ -26954,6 +37317,8 @@ const SystemView = {
     this._data = null;
     this._dossier = null;
     this._titleEl = null;
+    this._radial = null;
+    this._radialOpen = false;
     this._planetCards = new Map();
   },
 
@@ -27001,12 +37366,87 @@ const SystemView = {
       const p = toLocal(e);
       const hit = this._renderer.pick(p.x, p.y);
       this._selectedPlanetId = hit || null;
+      uiState.view('system').selectedPlanetId = this._selectedPlanetId;
       this._highlightPlanetCard(hit);
       if (hit) {
         this.app.select('planet', hit); // 全局选中态联动（检视器不弹抽屉）
       } else {
         this.app.select(null); // 空白处清除选中
       }
+    };
+    // 双击（doc5 §2.2/§3.5.2）：命中行星 → 选中+相机平滑聚焦+展开深层操作舱；
+    // 双击空白 → 复位聚焦至星系全景
+    const dblclick = (e) => {
+      const p = toLocal(e);
+      const hit = this._renderer.pick(p.x, p.y);
+      const v = uiState.view('system');
+      if (hit) {
+        this._selectedPlanetId = hit;
+        v.selectedPlanetId = hit;
+        v.focusedPlanetId = hit;
+        this._highlightPlanetCard(hit);
+        this.app.select('planet', hit);
+        uiState.setPanelOpen(`sys:${this._systemId}:planets`, true);
+        uiState.setPanelOpen(`sys:planet:${hit}`, true);
+        this._dossierSigVal = null; // 强制重建以应用强制展开
+        this._buildDossier();
+        this._focusPlanet(hit);
+      } else {
+        v.focusedPlanetId = null;
+        this._clearFocus();
+      }
+    };
+    // 右键（doc5 §2.2）：抑制原生菜单，命中天体弹出径向快捷指令环
+    const contextmenu = (e) => {
+      e.preventDefault();
+      const p = toLocal(e);
+      const hit = this._renderer.pick(p.x, p.y);
+      if (hit) {
+        this._selectedPlanetId = hit;
+        uiState.view('system').selectedPlanetId = hit;
+        this._highlightPlanetCard(hit);
+        this.app.select('planet', hit);
+        this._showRadialMenu(e.clientX, e.clientY, hit);
+      } else {
+        this._hideRadialMenu();
+      }
+    };
+    // 键盘（doc5 §2.2）：Escape 三级退避链；Enter/Space 对选中天体默认推进
+    const keydown = (e) => {
+      if (!this._mounted) return;
+      const tag = ((e.target && e.target.tagName) || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+      if (e.key === 'Escape') {
+        if (this._radialOpen) { this._hideRadialMenu(); e.preventDefault(); return; } // 1. 关菜单
+        const v = uiState.view('system');
+        if (v.focusedPlanetId) { // 2. 取消聚焦回全景
+          v.focusedPlanetId = null;
+          this._clearFocus();
+          e.preventDefault();
+          return;
+        }
+        this.app.goto('galaxy'); // 3. 返回银河
+        return;
+      }
+      if ((e.key === 'Enter' || e.key === ' ') && this._selectedPlanetId) {
+        e.preventDefault();
+        const v = uiState.view('system');
+        if (v.focusedPlanetId === this._selectedPlanetId) {
+          this.app.goto('ground', this._selectedPlanetId); // 二次推进：登陆行星
+        } else {
+          v.focusedPlanetId = this._selectedPlanetId; // 首次：聚焦 + 展开行星舱
+          uiState.setPanelOpen(`sys:planet:${this._selectedPlanetId}`, true);
+          this._dossierSigVal = null;
+          this._buildDossier();
+          this._focusPlanet(this._selectedPlanetId);
+        }
+      }
+    };
+    // 径向菜单外点击关闭（capture 先于画布选择逻辑）
+    const docClick = (e) => {
+      if (!this._radialOpen) return;
+      if (e.target instanceof Element && e.target.closest('.vf-radial-menu')) return;
+      this._hideRadialMenu();
     };
     const wheel = (e) => {
       e.preventDefault(); // 阻止页面滚动
@@ -27020,17 +37460,123 @@ const SystemView = {
     canvas.style.cursor = 'grab';
     canvas.addEventListener('mousedown', mousedown);
     canvas.addEventListener('click', click);
+    canvas.addEventListener('dblclick', dblclick);
+    canvas.addEventListener('contextmenu', contextmenu);
     canvas.addEventListener('wheel', wheel, { passive: false });
     canvas.addEventListener('mouseleave', mouseleave);
     window.addEventListener('mousemove', mousemove);
     window.addEventListener('mouseup', mouseup);
+    window.addEventListener('keydown', keydown);
+    document.addEventListener('click', docClick, true);
     this._handlers = [
       { target: canvas, type: 'mousedown', fn: mousedown },
       { target: canvas, type: 'click', fn: click },
+      { target: canvas, type: 'dblclick', fn: dblclick },
+      { target: canvas, type: 'contextmenu', fn: contextmenu },
       { target: canvas, type: 'wheel', fn: wheel },
       { target: canvas, type: 'mouseleave', fn: mouseleave },
       { target: window, type: 'mousemove', fn: mousemove },
       { target: window, type: 'mouseup', fn: mouseup },
+      { target: window, type: 'keydown', fn: keydown },
+      { target: document, type: 'click', fn: docClick },
+    ];
+  },
+
+  /** 相机聚焦行星（经 SystemRenderer 持有的 System3D；2D 退化路径安全跳过） */
+  _focusPlanet(planetId) {
+    const s3d = this._renderer && this._renderer._s3d;
+    if (s3d && typeof s3d.setOrbitFocus === 'function') s3d.setOrbitFocus(planetId);
+  },
+
+  /** 取消相机聚焦回星系全景 */
+  _clearFocus() {
+    const s3d = this._renderer && this._renderer._s3d;
+    if (s3d && typeof s3d.clearOrbitFocus === 'function') s3d.clearOrbitFocus();
+  },
+
+  // —— 右键径向快捷指令环（doc5 §3.5.2） ————————————————
+
+  /** 在光标处弹出径向菜单（四项高频空间指令，复用行星卡既有命令路径） */
+  _showRadialMenu(clientX, clientY, planetId) {
+    const menu = this._radial;
+    if (!menu) return;
+    menu.replaceChildren();
+    const items = this._radialItems(planetId);
+    const R = 64;
+    items.forEach((it, i) => {
+      const ang = -Math.PI / 2 + (i / Math.max(1, items.length)) * Math.PI * 2;
+      menu.appendChild(el('button', {
+        class: 'vf-radial-item' + (it.primary ? ' primary' : ''),
+        type: 'button',
+        text: it.label,
+        title: it.title || '',
+        style: {
+          left: `${Math.round(Math.cos(ang) * R)}px`,
+          top: `${Math.round(Math.sin(ang) * R)}px`,
+        },
+        on: {
+          click: (ev) => {
+            ev.stopPropagation();
+            this._hideRadialMenu();
+            it.onClick();
+          },
+        },
+      }));
+    });
+    menu.style.left = `${clientX}px`;
+    menu.style.top = `${clientY}px`;
+    menu.removeAttribute('hidden');
+    this._radialOpen = true;
+  },
+
+  /** 收起径向菜单 */
+  _hideRadialMenu() {
+    this._radialOpen = false;
+    if (this._radial) this._radial.setAttribute('hidden', '');
+  },
+
+  /** 径向菜单四项：轨道扫描 / 建立前哨 / 派遣先遣队登陆 / 设为舰队目标 */
+  _radialItems(planetId) {
+    const app = this.app;
+    const d = this._data;
+    const planet = d ? d.planets.find((p) => p.id === planetId) : null;
+    const lvl = d ? d.system.surveyedLevel : 0;
+    return [
+      {
+        label: '轨道扫描',
+        title: '派遣本系舰队对星系执行扫描',
+        onClick: () => {
+          const fleetId = this._firstInSystemPlayerFleet();
+          if (!fleetId || !this._fleetHasSensor(fleetId)) {
+            toast('轨道扫描需要一支在本星系且编有传感器的舰队', { kind: 'warn' });
+            return;
+          }
+          app.dispatch('IssueScanOrder', { fleetId, targetSystemId: this._systemId });
+        },
+      },
+      {
+        label: '建立前哨',
+        title: '在无主行星建立前哨站（层级≥3 · 宜居度≥20）',
+        onClick: () => {
+          if (!planet) return;
+          if (lvl < 3) { toast('需要调查层级≥3 才能建立前哨', { kind: 'warn' }); return; }
+          if (planet.colonyId) { toast('该行星已有殖民地/前哨', { kind: 'warn' }); return; }
+          if ((planet.habitability ?? 0) < 20) { toast('宜居度过低，无法建立前哨', { kind: 'warn' }); return; }
+          const fleetId = this._firstInSystemPlayerFleet();
+          app.dispatch('FoundOutpost', fleetId ? { planetId, fleetId } : { planetId });
+        },
+      },
+      {
+        label: '派遣先遣队登陆',
+        title: '进入行星地表简报（任务或先遣勘探）',
+        primary: true,
+        onClick: () => app.goto('ground', planetId),
+      },
+      {
+        label: '设为舰队目标',
+        title: '将行星设为舰队航行目标',
+        onClick: () => toast('暂未开放', { kind: 'info' }),
+      },
     ];
   },
 
@@ -27045,12 +37591,33 @@ const SystemView = {
     }
   },
 
-  /** 整体刷新：重建数据包 + 标题 + 悬浮情报舱 */
+  /** 整体刷新：重建数据包 + 标题 + 悬浮情报舱（并恢复跨快照聚焦态） */
   _refreshAll() {
     this._buildData();
     const d = this._data;
     this._titleEl.textContent = d ? `${L('ui.system')} · ${d.system.name}` : L('ui.system');
+    // 恢复 uiState 中的聚焦行星（重挂载/换快照后相机重新对准）
+    const v = uiState.view('system');
+    if (v.focusedPlanetId) {
+      const alive = d && d.planets.some((p) => p.id === v.focusedPlanetId);
+      if (alive) this._focusPlanet(v.focusedPlanetId);
+      else v.focusedPlanetId = null;
+    }
     this._buildDossier();
+  },
+
+  /** 情报舱轻量签名：调查层级 + 行星归属 + 舰队状态 + 异常进度（未变动跳过重建） */
+  _dossierSignature() {
+    const d = this._data;
+    if (!d) return 'null';
+    return [
+      d.system.surveyedLevel,
+      d.system.ownerFactionId || '',
+      d.system.star ? d.system.star.name || '' : '',
+      d.planets.map((p) => `${p.id}:${p.colonyId || 0}`).join(','),
+      d.fleets.map((f) => `${f.id}:${f.status || ''}:${f.shipCount ?? 0}`).join(','),
+      d.anomalies.map((a) => `${a.id}:${a.state || ''}:${a.progress ?? 0}`).join(','),
+    ].join('|');
   },
 
   /** 从 app.world / app.snapshot / ViewModels 只读构建数据包（绝不写世界） */
@@ -27078,6 +37645,7 @@ const SystemView = {
         deposits: { ...(p.deposits || {}) },
         colonyId: p.colonyId || null,
         orbitIndex: p.orbitIndex ?? 0,
+        moons: Array.isArray(p.moons) ? p.moons : null, // doc7 TASK-4.3：3D 伴生卫星 feed
       }));
 
     const snap = this.app.snapshot;
@@ -27094,18 +37662,21 @@ const SystemView = {
         surveyedLevel: lvl,
         dangerRating: sys.dangerRating,
         resourceRating: sys.resourceRating,
+        belts: Array.isArray(sys.belts) ? sys.belts : null, // doc7 TASK-4.3：3D 小行星带 feed
       },
       planets,
       fleets,
       anomalies,
       tick: w.tick,
-      // 渲染器专用轻量投影（舰队附阵营色，供小三角着色）
+      // 渲染器专用轻量投影（舰队附阵营色，供小三角着色；surveyedLevel 供未探测回波）
       render: {
         system: {
           star: { typeId: sys.star ? sys.star.typeId : null },
+          surveyedLevel: lvl,
           planets: planets.map((p) => ({
             id: p.id, name: p.name, category: p.category,
             habitability: p.habitability, colonyId: p.colonyId, orbitIndex: p.orbitIndex,
+            primaryThemeId: p.primaryThemeId || null, // doc7 TASK-3.1：轨道主题视觉 feed
           })),
         },
         fleets: fleets.map((f) => ({
@@ -27119,7 +37690,7 @@ const SystemView = {
     };
   },
 
-  /** 渲染一帧轨道视图（yaw 来自用户拖拽累计） */
+  /** 渲染一帧轨道视图（yaw 来自用户拖拽累计；帧末叠加未探测回波 HUD） */
   _drawFrame() {
     const cm = this._cm;
     const r = this._renderer;
@@ -27140,10 +37711,56 @@ const SystemView = {
       time: performance.now() / 1000, // 仅表现动画，不进模拟
       yaw: this._yaw, // 用户拖拽旋转增量（渲染器俯仰固定，仅水平环绕）
     });
+    this._drawGhostOverlay(cm.ctx, cm.width, cm.height);
   },
 
-  /** 构建悬浮情报舱：档案 → 行星 → 舰队 → 异常 */
+  /**
+   * 未探测天体回波 HUD（doc5 §3.2）：调查层级<2 时对全部天体绘制
+   * 青色虚线扫描框 + `[? 引力回波 #I..#VIII]` 标签（复用渲染器拾取投影）。
+   */
+  _drawGhostOverlay(ctx, w, h) {
+    const d = this._data;
+    if (!ctx || !d || d.system.surveyedLevel >= 2) return;
+    const list = this._renderer && this._renderer._pickList;
+    if (!list || !list.length) return;
+    const orbitOf = new Map();
+    for (const p of d.planets) orbitOf.set(p.id, p.orbitIndex ?? 0);
+    ctx.save();
+    ctx.strokeStyle = 'rgba(79, 216, 232, 0.72)';
+    ctx.setLineDash([5, 4]);
+    ctx.lineWidth = 1.2;
+    ctx.fillStyle = 'rgba(143, 216, 232, 0.95)';
+    ctx.font = '10px "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    for (const e of list) {
+      if (e.x < -40 || e.y < -40 || e.x > w + 40 || e.y > h + 40) continue;
+      const half = Math.max(11, (e.r || 0) + 5);
+      ctx.strokeRect(e.x - half, e.y - half, half * 2, half * 2);
+      const idx = Math.min(GHOST_NUM.length - 1, orbitOf.get(e.id) ?? 0);
+      ctx.fillText(`[? 引力回波 #${GHOST_NUM[idx]}]`, e.x, e.y + half + 4);
+    }
+    ctx.restore();
+  },
+
+  /**
+   * 构建悬浮情报舱：档案 → 行星 → 舰队 → 异常。
+   * doc5 §3.4：重建包裹在 uiState.preserveScrollAndFocus 内（滚动/焦点跨重建保持）；
+   * 轻量签名未实质变动时直接跳过 DOM 替换（任意时钟倍速下折叠态与滚动条绝对稳定）。
+   */
   _buildDossier() {
+    const box = this._dossier;
+    if (!box) return;
+    const sig = this._dossierSignature();
+    if (sig === this._dossierSigVal && box.childElementCount > 0) return; // 未变动：跳过
+    this._dossierSigVal = sig;
+    uiState.preserveScrollAndFocus(`dossier:${this._systemId || 'none'}`, box, () => {
+      this._buildDossierInner();
+    });
+  },
+
+  /** 情报舱实际 DOM 构建（仅在签名变动时执行） */
+  _buildDossierInner() {
     const box = this._dossier;
     if (!box) return;
     clearEl(box);
@@ -27153,12 +37770,13 @@ const SystemView = {
       box.appendChild(el('div', { class: 'vf-faint vf-center mt-3', text: '未找到目标星系 —— 请从银河地图双击进入' }));
       return;
     }
+    const sid = d.system.id;
     const w = this.app.world;
     const sys = d.system;
     const lvl = sys.surveyedLevel;
 
     // 1) 星系档案
-    const file = panel({ title: '星系档案', open: true });
+    const file = panel({ title: '星系档案', open: true, id: `sys:${sid}:dossier` });
     const pairs = [
       ['恒星', lvl >= 2 ? (sys.star.name || '未知') : '未分类'],
       ['归属', sys.ownerFactionId
@@ -27176,13 +37794,13 @@ const SystemView = {
     }
     box.appendChild(file);
 
-    // 2) 行星列表（分类层级后揭示）
+    // 2) 行星列表（分类层级后揭示；未探测天体以引力回波虚影标注）
     if (lvl >= 2) {
-      const list = panel({ title: `行星（${d.planets.length}）`, open: true });
+      const list = panel({ title: `行星（${d.planets.length}）`, open: true, id: `sys:${sid}:planets` });
       for (const p of d.planets) list.appendChild(this._planetCard(p, lvl));
       box.appendChild(list);
     } else {
-      const list = panel({ title: '行星', open: true });
+      const list = panel({ title: '行星', open: true, id: `sys:${sid}:planets` });
       list.appendChild(el('div', { class: 'vf-faint vf-small', text: '完成「分类」层级后揭示行星情报。' }));
       box.appendChild(list);
     }
@@ -27196,10 +37814,11 @@ const SystemView = {
 
   /**
    * 行星卡：名称/类别/宜居度/重力/大气（+层级≥3 时的矿藏）与操作按钮。
+   * 面板稳定键 sys:planet:<pid>（跨快照折叠记忆 + 双击聚焦强制展开，doc5 §3.4/§3.5）。
    * 「建立前哨」条件：调查层级≥3、宜居度≥20、无殖民地（FoundOutpost 命令还需
    * 一支在本星系的己方舰队 —— 无舰队时按钮禁用并给出提示）。
    * 「登陆行星地表」条件：调查层级≥3 且该行星无进行中的地面行动（active 任务）——
-   * 主操作入口直达全 3D 行星地表视图（目标行星经 app._groundTargetPlanet 传给 GroundView）。
+   * 主操作入口以显式路由参数直达地表简报：app.goto('ground', p.id)。
    */
   _planetCard(p, lvl) {
     const app = this.app;
@@ -27210,11 +37829,13 @@ const SystemView = {
       title: p.name,
       open: true,
       dense: true,
+      id: `sys:planet:${p.id}`,
       tools: [{
         label: '定位',
         title: '在轨道图中高亮该行星并设为全局选中',
         onClick: () => {
           this._selectedPlanetId = p.id;
+          uiState.view('system').selectedPlanetId = p.id;
           this._highlightPlanetCard(p.id);
           app.select('planet', p.id);
         },
@@ -27260,12 +37881,11 @@ const SystemView = {
       card.appendChild(el('button', {
         class: 'vf-btn primary mt-1',
         text: '🚀 登陆行星地表',
-        title: '降落小队 / 视察殖民地 — 进入全 3D 行星地表',
+        title: '降落小队 / 视察殖民地 / 先遣勘探 — 进入全 3D 行星地表',
         on: {
           click: () => {
-            // 设置 GroundView 的目标行星
-            app._groundTargetPlanet = p.id;
-            app.goto('ground');
+            // 显式路由参数：GroundView 按 planetId 预选简报目标（doc5 §3.5）
+            app.goto('ground', p.id);
           },
         },
       }));
@@ -27277,7 +37897,7 @@ const SystemView = {
   /** 在系舰队面板：名称/状态 + 扫描本星系 + 对本系 detected 异常的「调查」 */
   _fleetPanel(d) {
     const app = this.app;
-    const p = panel({ title: `在系舰队（${d.fleets.length}）`, open: true });
+    const p = panel({ title: `在系舰队（${d.fleets.length}）`, open: true, id: `sys:${d.system.id}:fleets` });
     if (!d.fleets.length) {
       p.appendChild(el('div', { class: 'vf-faint vf-small', text: '本星系暂无已知舰队。' }));
       return p;
@@ -27316,7 +37936,7 @@ const SystemView = {
 
   /** 异常面板：名称/状态/进度条；resolved 显示奖励摘要 */
   _anomalyPanel(d) {
-    const p = panel({ title: `异常（${d.anomalies.length}）`, open: true });
+    const p = panel({ title: `异常（${d.anomalies.length}）`, open: true, id: `sys:${d.system.id}:anomalies` });
     if (!d.anomalies.length) {
       p.appendChild(el('div', { class: 'vf-faint vf-small', text: '本星系暂无已知异常。' }));
       return p;
@@ -28047,6 +38667,9 @@ __register("src/render/gl/System3D.js", function (__exports, __require) {
  *  - 行星：8 类程序化 3D 球面（同一着色器 uCategory 分支）+ GLOW 大气辉光壳层
  *    （背面剔除 + 正面加性菲涅尔）+ gasGiant 冰晶行星环（倾角 20°，带行星本影遮挡）
  *    + 已殖民行星夜半球金色城市灯火与赤道低轨道发光轨道站环；
+ *  - 伴生卫星（doc7 TASK-4.3）：planet.moons（≤3 颗）复用行星本体程序按 kind 类别
+ *    着色，绕行星公转（orbitPhase + time×orbitSpeed）；小行星带（sys.belts）为
+ *    ≤400 实例的 billboard 碎石环（半透明暗岩色，参数由 belt.id 哈希确定性派生）；
  *  - 轨道：3D 圆环线段（倾角 20° 统一），选中提亮；行星按 orbitIndex 均分角 +
  *    tick/opts.time 缓慢公转（纯视觉）；舰队小三角 billboard（阵营色）停靠环；
  *    未解决异常画淡紫虚线信号弧（外缘）；
@@ -28072,6 +38695,7 @@ const { mat4: mat4, mat4Multiply: mat4Multiply, mat4Perspective: mat4Perspective
 const { STAR_VERT: STAR_VERT, STAR_FRAG: STAR_FRAG, CORONA_VERT: CORONA_VERT, CORONA_FRAG: CORONA_FRAG, PULSAR_VERT: PULSAR_VERT, PULSAR_FRAG: PULSAR_FRAG } = __require("src/render/shaders/StarCoronaShader.js");
 const { BLACKHOLE_VERT: BLACKHOLE_VERT, BLACKHOLE_FRAG: BLACKHOLE_FRAG } = __require("src/render/shaders/BlackHoleShader.js");
 const { GLSL_HASH: GLSL_HASH, GLSL_NOISE: GLSL_NOISE, GLSL_FBM: GLSL_FBM } = __require("src/render/gl/NoiseGLSL.js");
+const { PLANET_THEMES: PLANET_THEMES, srgbToLinear: srgbToLinear } = __require("src/content/planetThemes.js");
 
 /* ========================= 场景常量 ========================= */
 
@@ -28125,17 +38749,111 @@ const PLANET_R = {
 const ORBIT_RGB = [0.31, 0.847, 0.91];
 const ANOMALY_RGB = [0.494, 0.659, 1.0];
 
-/** 类别 → 大气壳（GLOW）参数：[半径倍数, 强度, tint rgb] */
+/** 卫星 kind → PLANET_FS uCategory（doc7 TASK-4.3：复用行星本体程序着色） */
+const MOON_CAT = { barren_moon: 0, ice_moon: 2, volcanic_moon: 5, captured_asteroid: 3 };
+/** 小行星带实例容量上限（doc7 TASK-4.3：≤400 实例）与粒子尺寸（世界单位） */
+const BELT_MAX_INSTANCES = 400;
+const BELT_SIZE_BASE = 0.007;
+const BELT_SIZE_SPAN = 0.011;
+
+/** 类别 → 大气壳（GLOW）参数：[shellScale 半径倍数, 强度, tint rgb]
+ *  （doc5 §3.1 处方 4：壳层缩放收敛于 1.045–1.09，贴体薄壳由片元菲涅尔塑形） */
 const GLOW_STYLE = {
-  rocky: [1.12, 0.55, [0.30, 0.50, 0.85]],
-  ocean: [1.16, 0.95, [0.25, 0.55, 0.95]],
-  ice: [1.10, 0.45, [0.55, 0.75, 0.95]],
-  desert: [1.11, 0.40, [0.78, 0.62, 0.36]],
-  gasGiant: [1.09, 0.45, [0.75, 0.65, 0.45]],
-  lava: [1.09, 0.40, [0.90, 0.30, 0.10]],
-  toxic: [1.30, 1.35, [0.55, 0.75, 0.22]],
-  artificial: [1.08, 0.30, [0.40, 0.70, 0.80]],
+  rocky: [1.05, 0.55, [0.30, 0.50, 0.85]],
+  ocean: [1.06, 0.95, [0.25, 0.55, 0.95]],
+  ice: [1.045, 0.45, [0.55, 0.75, 0.95]],
+  desert: [1.05, 0.40, [0.78, 0.62, 0.36]],
+  gasGiant: [1.09, 0.55, [0.75, 0.65, 0.45]],
+  lava: [1.05, 0.50, [0.90, 0.30, 0.10]],
+  toxic: [1.09, 1.35, [0.55, 0.75, 0.22]],
+  artificial: [1.045, 0.30, [0.40, 0.70, 0.80]],
 };
+
+/* ========================= 主题轨道视觉映射（doc7 TASK-3.1 / THEME-01） ========================= */
+
+/** 主题 id → 轨道视觉参数（render → content 只读引用；主题覆写类别默认值） */
+const THEME_ORBITAL = PLANET_THEMES;
+
+/** 无主题时行星环着色（与 RING_FRAG 旧版硬编码逐值一致，保证回退视觉零漂移） */
+const RING_TINT_DEFAULT = { lo: [0.55, 0.60, 0.66], hi: [0.86, 0.89, 0.93] };
+
+/** 无主题（themeless/旧档）回退参数：uThemeOn=0 时行星着色器不采样主题层 */
+const THEME_BANDS_OFF = Object.freeze({
+  on: 0,
+  themeId: null,
+  bandA: [0.2, 0.2, 0.2],
+  bandB: [0.6, 0.6, 0.6],
+  emitTint: [1.0, 1.0, 1.0],
+  iceCap: 0,
+  clouds: 0,
+  cloudTint: [0.5, 0.5, 0.5],
+  nightLights: 0,
+  glow: null,
+  ringOn: false,
+  ringLo: RING_TINT_DEFAULT.lo,
+  ringHi: RING_TINT_DEFAULT.hi,
+});
+
+function clamp01(v) {
+  return Math.min(1, Math.max(0, v));
+}
+
+function scaleRGB(v, k) {
+  return [v[0] * k, v[1] * k, v[2] * k];
+}
+
+/**
+ * 行星 → 轨道主题 uniforms（doc7 TASK-3.1；THEME-01 轨道盲测识别 / THEME-07 身份恒定）。
+ * 纯函数、无 GL 依赖（Node 侧可测）：
+ *  - planet.primaryThemeId 命中注册表 → 返回主题覆写层（色带/极冠/云带/夜光/环/辉光）；
+ *  - themeless/旧档 → 类别回退（uThemeOn=0，GLOW 走 GLOW_STYLE，环仅气巨默认）。
+ *  - 同主题跨行星：色板取自 paletteLinear 恒定；cloud/night/cap 按行星 id 哈希
+ *    做 ±16% 内确定性微抖动（THEME-07「自然变化但身份恒定」），环显隐按
+ *    ringChance 与 id 哈希滚点。
+ * @param {{id?:string|number, category?:string, primaryThemeId?:string}|null} planet 行星档案
+ */
+function orbitalUniformsFor(planet) {
+  const p = planet || {};
+  const cat = String(p.category || 'rocky');
+  const theme = p.primaryThemeId ? (THEME_ORBITAL[p.primaryThemeId] || null) : null;
+  if (!theme || !theme.orbital) {
+    const st = GLOW_STYLE[cat] || GLOW_STYLE.rocky;
+    return Object.assign({}, THEME_BANDS_OFF, {
+      glow: { shellScale: st[0], power: st[1], tint: st[2] },
+      ringOn: cat === 'gasGiant',
+    });
+  }
+  const o = theme.orbital;
+  const pid = String(p.id || '');
+  const jit = (salt) => (hashSeed(pid + salt) - 0.5) * 2.0; // [-1,1) 确定性
+  const clouds = clamp01(o.cloudCover * (1 + jit('#cloud') * 0.16));
+  const nightLights = clamp01(o.nightLights * (1 + jit('#night') * 0.14));
+  const iceCap = clamp01(o.iceCap * (1 + jit('#cap') * 0.12));
+  const pal = theme.paletteLinear;
+  const glow = o.glow || {};
+  const bands = Array.isArray(o.bandColors) && o.bandColors.length > 0
+    ? o.bandColors : [theme.palette.base];
+  return {
+    on: 1,
+    themeId: theme.id,
+    bandA: pal.base,
+    bandB: pal.highlight,
+    emitTint: pal.emissive,
+    iceCap,
+    clouds,
+    cloudTint: srgbToLinear(o.cloudColor || theme.palette.atmosphere),
+    nightLights,
+    glow: {
+      shellScale: Number.isFinite(glow.shellScale) ? glow.shellScale : 1.05,
+      power: Number.isFinite(glow.power) ? glow.power : 0.5,
+      tint: hexToRGB(glow.tint || theme.palette.atmosphere),
+    },
+    ringOn: cat === 'gasGiant'
+      || (Number(o.ringChance) > 0 && hashSeed(pid + '#ring') < Number(o.ringChance)),
+    ringLo: scaleRGB(hexToRGB(bands[0]), 0.85),
+    ringHi: hexToRGB(bands[bands.length - 1]),
+  };
+}
 
 /* ========================= 自有着色器（GLSL ES 3.0，#version 由 GLCore 前置） ========================= */
 
@@ -28169,6 +38887,15 @@ uniform float uSeed;
 uniform float uTime;
 uniform float uColony;      // 1.0 = 已殖民
 uniform float uHdr;         // HDR 模拟预除系数（真 HDR = 1）
+// —— 主题覆写层（doc7 TASK-3.1/THEME-01：uThemeOn=0 时整层旁路，类别外观原样） ——
+uniform float uThemeOn;     // 1.0 = planet.primaryThemeId 命中主题注册表
+uniform vec3 uBandA;        // 主题基色带（paletteLinear.base）
+uniform vec3 uBandB;        // 主题高光带（paletteLinear.highlight）
+uniform vec3 uEmitTint;     // 主题自发光/夜光色（paletteLinear.emissive）
+uniform float uIceCap;      // 极冠覆盖 0..1
+uniform float uClouds;      // 云带覆盖 0..1
+uniform vec3 uCloudTint;    // 云带色（线性）
+uniform float uNightLights; // 主题夜光强度 0..1
 
 in vec3 vLocal;
 in vec3 vWorld;
@@ -28260,6 +38987,19 @@ void main() {
   float emit;
   surface(p, albedo, spec, emit);
 
+  // —— 主题覆写层：色带 / 极冠 / 云带（保留类别纹理 18% 渗透，主题身份主导） ——
+  if (uThemeOn > 0.5) {
+    float bandN = fbm3D(vec3(p.x * 2.2, p.y * 6.5, p.z * 2.2) + uSeed) * 0.5 + 0.5;
+    albedo = mix(albedo, mix(uBandA, uBandB, bandN), 0.82);
+    float capEdge = 1.0 - uIceCap * 0.52;
+    float cap = smoothstep(capEdge - 0.07, capEdge + 0.07, abs(p.y)) * step(0.015, uIceCap);
+    albedo = mix(albedo, vec3(0.90, 0.94, 0.99), cap);
+    float cl = smoothstep(0.55 - uClouds * 0.36, 0.88 - uClouds * 0.30,
+      fbm3D(vec3(p.x * 2.3, p.y * 5.6, p.z * 2.3)
+        + vec3(uTime * 0.010, 0.0, uTime * 0.006) + uSeed * 1.71));
+    albedo = mix(albedo, uCloudTint, cl * clamp(uClouds, 0.0, 1.0) * 0.88);
+  }
+
   // 昼夜明暗（晨昏线软化）
   vec3 col = albedo * (0.09 + 1.05 * day);
   if (spec > 0.001 && day > 0.0) {
@@ -28269,12 +39009,14 @@ void main() {
   if (uCategory == 5) col += vec3(1.30, 0.40, 0.10) * emit;                    // 岩浆 HDR 自发光
   if (uCategory == 7) col += vec3(0.45, 0.85, 0.95) * emit * (0.30 + 0.90 * night);
 
-  // —— 已殖民：夜半球金色城市灯火（城市群掩码 × worley 灯网点） ——
-  if (uColony > 0.5 && night > 0.02) {
+  // —— 夜半球灯火：已殖民 = 金色城市灯网；主题夜光 = 自发光色调制
+  //    （殖民世界以金色为主，仅混入 35% 主题色；非殖民主题世界按 uNightLights 发光） ——
+  if (night > 0.02 && (uColony > 0.5 || uNightLights > 0.02)) {
     float cluster = smoothstep(-0.15, 0.45, simplex3D(p * 5.5 + uSeed * 3.1));
     float wcell = worley3D(p * 21.0 + uSeed * 9.0);
     float lights = (1.0 - smoothstep(0.06, 0.30, wcell)) * cluster * night;
-    col += vec3(1.35, 1.00, 0.50) * lights * 1.5;
+    float tn = clamp(uNightLights, 0.0, 1.0) * (uColony > 0.5 ? 0.35 : 1.0);
+    col += mix(vec3(1.35, 1.00, 0.50), uEmitTint * 1.7, tn) * lights * 1.5;
   }
 
   // 表面菲涅尔大气边缘（弱；厚大气 toxic 在 GLOW 壳层另行增强）
@@ -28288,7 +39030,13 @@ void main() {
 }
 `;
 
-/** 大气辉光壳层顶点着色器（GLOW 模式：壳层半径由 uRadius 放大） */
+/**
+ * 大气辉光壳层顶点着色器（GLOW 模式：壳层半径由 uRadius 放大）。
+ * 矩阵契约（doc5 §3.1 处方 1/2）：uMVP（P·V·M，M 已含平移 T(C)）只左乘局部坐标
+ * 一次——uModel 仅用于求世界空间 vWorld/vN（光照与视线求值）。
+ * 修复：旧版 gl_Position = uMVP * (uModel * local) 把平移矩阵平方，辉光壳体
+ * 漂移至 2× 轨道半径处。
+ */
 const GLOW_VERT = `
 uniform mat4 uMVP;
 uniform mat4 uModel;
@@ -28297,14 +39045,23 @@ in vec3 aPos;
 out vec3 vN;
 out vec3 vWorld;
 void main() {
-  vec4 w = uModel * vec4(aPos * uRadius, 1.0);
+  vec4 local = vec4(aPos * uRadius, 1.0);
+  vec4 w = uModel * local;
   vWorld = w.xyz;
-  vN = mat3(uModel) * aPos;
-  gl_Position = uMVP * w;
+  vN = normalize(mat3(uModel) * aPos);
+  gl_Position = uMVP * local;
 }
 `;
 
-/** 大气辉光壳层片元：正面加性菲涅尔（背面剔除在管线侧开启） */
+/**
+ * 大气辉光壳层片元（doc5 §3.1 处方 3：瑞利-菲涅尔晨昏线散射）：
+ * 双幂次菲涅尔（外缘 pow(1-ndv,2.4)×0.75 + 内缘 pow(1-ndv,5.0)×0.45）；
+ * 日照相位 dayFactor = smoothstep(-0.22,0.35,ndl)；晨昏线窄带高斯
+ * exp(-pow((ndl-0.02)/0.16,2))×fresnelOuter 以琥珀暖色渲染瑞利红移；
+ * 前向散射 pow(max(dot(-V,L),0),4)×0.35；illumination = 0.12+0.88×dayFactor
+ * + forward×dayFactor；alpha = clamp(fresnel×illumination×uPower,0,1)。
+ * 正面加性（背面剔除在管线侧开启）。
+ */
 const GLOW_FRAG = `precision highp float;
 uniform vec3 uCamPos;
 uniform vec3 uStarPos;
@@ -28318,15 +39075,30 @@ out vec4 fragColor;
 void main() {
   vec3 N = normalize(vN);
   vec3 V = normalize(uCamPos - vWorld);
-  float fres = pow(1.0 - abs(dot(N, V)), 2.6);
+  float ndv = clamp(abs(dot(N, V)), 0.0, 1.0);
+  float fresnelOuter = pow(1.0 - ndv, 2.4) * 0.75;
+  float fresnelInner = pow(1.0 - ndv, 5.0) * 0.45;
+  float fresnel = fresnelOuter + fresnelInner;
   vec3 L = normalize(uStarPos - uCenter);
-  float day = 0.30 + 0.70 * max(dot(normalize(vWorld - uCenter), L), 0.0);
-  float a = fres * day * uPower;
-  fragColor = vec4(uTint * a * uHdr, a);
+  float ndl = dot(normalize(vWorld - uCenter), L);
+  float dayFactor = smoothstep(-0.22, 0.35, ndl);
+  // 晨昏线窄带高斯：暖色琥珀（瑞利红移）
+  float band = exp(-pow((ndl - 0.02) / 0.16, 2.0)) * fresnelOuter;
+  vec3 scatterColor = mix(uTint, vec3(1.0, 0.48, 0.18), clamp(band, 0.0, 1.0) * 0.65);
+  // 前向散射（望相位增亮）
+  float forward = pow(max(dot(-V, L), 0.0), 4.0) * 0.35;
+  float illumination = (0.12 + 0.88 * dayFactor) + forward * dayFactor;
+  float alpha = clamp(fresnel * illumination * uPower, 0.0, 1.0);
+  fragColor = vec4(scatterColor * alpha * uHdr, alpha);
 }
 `;
 
-/** 环面（气态行星环 / 轨道站环）顶点着色器：aPos 为环局部 XZ 平面坐标 */
+/**
+ * 环面（气态行星环 / 轨道站环）顶点着色器：aPos 为环局部 XZ 平面坐标。
+ * 与 GLOW_VERT 同一矩阵契约：uMVP 只左乘局部坐标一次，uModel 仅求 vWorld。
+ * 修复：旧版 gl_Position = uMVP * (uModel * local) 二次左乘模型矩阵，环面
+ * 几何中心同样被平移平方推至 2C。
+ */
 const RING_VERT = `
 uniform mat4 uMVP;
 uniform mat4 uModel;
@@ -28335,9 +39107,10 @@ out vec3 vLocal;
 out vec3 vWorld;
 void main() {
   vLocal = aPos;
-  vec4 w = uModel * vec4(aPos, 1.0);
+  vec4 local = vec4(aPos, 1.0);
+  vec4 w = uModel * local;
   vWorld = w.xyz;
-  gl_Position = uMVP * w;
+  gl_Position = uMVP * local;
 }
 `;
 
@@ -28355,6 +39128,8 @@ uniform float uSeed;
 uniform float uTime;
 uniform int uMode;         // 0=冰晶行星环 1=轨道站环
 uniform float uHdr;
+uniform vec3 uRingLo;      // 环内缘色（mode 0；主题覆写，缺省 = 旧版冰晶灰）
+uniform vec3 uRingHi;      // 环外缘色（mode 0）
 in vec3 vLocal;
 in vec3 vWorld;
 out vec4 fragColor;
@@ -28375,7 +39150,7 @@ void main() {
     float shadow = (proj > 0.0)
       ? mix(0.15, 1.0, smoothstep(uPlanetR * 0.9, uPlanetR * 1.25, perp))
       : 1.0;
-    vec3 ice = mix(vec3(0.55, 0.60, 0.66), vec3(0.86, 0.89, 0.93), n * 0.5 + 0.5);
+    vec3 ice = mix(uRingLo, uRingHi, n * 0.5 + 0.5);
     float alpha = clamp(dens, 0.0, 1.0) * 0.78;
     fragColor = vec4(ice * dens * shadow * uHdr, alpha);
   } else {
@@ -28385,6 +39160,48 @@ void main() {
     vec3 col = vec3(0.55, 0.85, 1.0) * core * beacon * 1.6;
     fragColor = vec4(col * uHdr, core);
   }
+}
+`;
+
+/**
+ * 小行星带顶点着色器（doc7 TASK-4.3）：实例化 billboard 碎石。
+ * aCorner 为基础四边形角点（divisor 0）；aOrbit/aJitter 为每实例轨道参数
+ * （divisor 1，JS 侧由 belt.id 哈希确定性填充）。轨道倾角与行星轨道一致（20°）。
+ */
+const BELT_VERT = `
+uniform mat4 uMVP;
+uniform vec3 uCamRight;
+uniform vec3 uCamUp;
+uniform float uTime;
+uniform float uIncSin;
+uniform float uIncCos;
+in vec2 aCorner;
+in vec4 aOrbit;   // x=轨道世界半径 y=初始相位 z=角速度(rad/s) w=粒子尺寸
+in vec3 aJitter;  // x=径向偏移 y=竖向偏移 z=色调混合 0..1
+out vec2 vUV;
+out float vTone;
+void main() {
+  float ang = aOrbit.y + uTime * aOrbit.z;
+  float r = aOrbit.x + aJitter.x;
+  vec3 c = vec3(cos(ang) * r, aJitter.y - sin(ang) * r * uIncSin, sin(ang) * r * uIncCos);
+  vec3 w = c + uCamRight * (aCorner.x * aOrbit.w) + uCamUp * (aCorner.y * aOrbit.w);
+  vUV = aCorner;
+  vTone = aJitter.z;
+  gl_Position = uMVP * vec4(w, 1.0);
+}
+`;
+
+/** 小行星带片元：软圆斑暗岩色（径向 alpha 衰减，半透明；HDR 预除） */
+const BELT_FRAG = `precision highp float;
+uniform float uHdr;
+in vec2 vUV;
+in float vTone;
+out vec4 fragColor;
+void main() {
+  float d = dot(vUV, vUV);
+  float a = 1.0 - smoothstep(0.18, 1.0, d);
+  vec3 rock = mix(vec3(0.26, 0.22, 0.19), vec3(0.46, 0.40, 0.34), vTone);
+  fragColor = vec4(rock * a * uHdr, a * 0.85);
 }
 `;
 
@@ -28673,6 +39490,10 @@ class System3D {
     /** @type {{entries:Object[], count:number, ...相机缓存}|null} 最近一帧拾取缓存 */
     this.pickData = null;
 
+    // —— 轨道聚焦（doc5 §3.2/P0-01：双击行星平滑推近，指数阻尼插值） ——
+    /** @type {string|null} 当前聚焦行星 id（SystemView 经 setOrbitFocus 设置） */
+    this._focusId = null;
+
     // 舰队动态缓冲数据（pos3 + t1 × 3 顶点）—— 必须先于 _buildResources 分配
     this._fleetData = new Float32Array(FLEET_MAX * 3 * 4);
 
@@ -28700,6 +39521,12 @@ class System3D {
       tmp3: new Float32Array(3),
       bhBasis: new Float32Array(9),
       starSeed: 0.37,
+      // —— 相机轨道插值状态（focusCur/focusTarget + distCur + 帧时钟） ——
+      focusCur: new Float32Array(3),   // 当前注视点（世界）
+      focusTgt: new Float32Array(3),   // 目标注视点
+      distCur: 6.0,                    // 当前相机距离（指数阻尼逼近目标）
+      lastTime: 0,                     // 上一帧 opts.time（dt 计算）
+      camInit: false,                  // 首帧直接贴合目标距离（免上山式开场推拉）
     };
 
     // —— 行星布局缓存（复用对象，避免逐帧分配） ——
@@ -28716,6 +39543,20 @@ class System3D {
     if (v === this.tier) return;
     this.tier = v;
     this._rebuildCoronaTarget(v === 2 ? CORONA_RES_LOW : CORONA_RES_FULL);
+  }
+
+  /**
+   * 相机聚焦行星（doc5 §3.5.2 双击运镜）：注视点逐帧追踪该行星世界坐标，
+   * 距离指数阻尼收敛到 max(0.75, radius×9.5)。id 不在场景时自动回退全景。
+   * @param {string|null} planetId 行星实体 id（null = 取消聚焦回全景）
+   */
+  setOrbitFocus(planetId) {
+    this._focusId = planetId || null;
+  }
+
+  /** 取消聚焦：注视点/距离阻尼回星系全景（原点） */
+  clearOrbitFocus() {
+    this._focusId = null;
   }
 
   /**
@@ -28755,7 +39596,8 @@ class System3D {
     s.starSeed = hashSeed(seedSrc);
 
     // —— 布局与相机 ——
-    this._layout(planets, tick, time, selected);
+    const surveyed = Number((data && data.system && data.system.surveyedLevel) || 0);
+    this._layout(planets, tick, time, selected, surveyed);
     const n = Math.max(1, planets.length);
     const rMax = ORBIT_BASE + Math.max(0, n - 1) * ORBIT_STEP + 0.55;
     const aspect = width / Math.max(1, height);
@@ -28767,15 +39609,55 @@ class System3D {
     const camPitch = isBHCam ? 0.24 : CAM_PITCH;
     // 黑洞：固定世界距离 7.0 → 11.7 RS，保证吸积盘（1.65..6.2 RS）完整入画
     // （修复：camRMax 为未定义标识符，场景半径即上方 rMax —— 原 GL 帧必然抛错退化 2D）
-    const dist = isBHCam ? 4.6 : (rMax / Math.sin(Math.min(halfY, halfX))) * 1.06;
-    const yaw = 0.55 + time * (isBHCam ? 0.008 : 0.02) + (Number(opts.yaw) || 0);
+    const distFit = isBHCam ? 4.6 : (rMax / Math.sin(Math.min(halfY, halfX))) * 1.06;
+
+    // —— 轨道聚焦解析 + 帧率无关指数阻尼插值（doc5 §3.2） ——
+    let hasFoc = false;
+    let focR = 0;
+    if (this._focusId != null) {
+      for (let i = 0; i < this._plCount; i++) {
+        if (this._pl[i].id === this._focusId) {
+          s.focusTgt[0] = this._pl[i].world[0];
+          s.focusTgt[1] = this._pl[i].world[1];
+          s.focusTgt[2] = this._pl[i].world[2];
+          focR = this._pl[i].radius;
+          hasFoc = true;
+          break;
+        }
+      }
+    }
+    if (!hasFoc) {
+      s.focusTgt[0] = 0;
+      s.focusTgt[1] = 0;
+      s.focusTgt[2] = 0;
+    }
+    const targetDist = hasFoc ? Math.max(0.75, focR * 9.5) : distFit;
+    const dt = Math.min(0.1, Math.max(0.001, time - s.lastTime)); // 帧时钟钳制
+    s.lastTime = time;
+    if (!s.camInit) {
+      // 首帧直接贴合（避免每次挂载都从 distCur=6.0 做开场推拉）
+      s.camInit = true;
+      s.distCur = targetDist;
+      s.focusCur[0] = s.focusTgt[0];
+      s.focusCur[1] = s.focusTgt[1];
+      s.focusCur[2] = s.focusTgt[2];
+    } else {
+      const alphaLerp = 1 - Math.exp(-8.5 * dt);
+      s.focusCur[0] += (s.focusTgt[0] - s.focusCur[0]) * alphaLerp;
+      s.focusCur[1] += (s.focusTgt[1] - s.focusCur[1]) * alphaLerp;
+      s.focusCur[2] += (s.focusTgt[2] - s.focusCur[2]) * alphaLerp;
+      s.distCur += (targetDist - s.distCur) * alphaLerp;
+    }
+
+    const dist = s.distCur;
+    const yaw = 0.55 + time * (isBHCam ? 0.008 : 0.015) + (Number(opts.yaw) || 0);
     const cp = Math.cos(camPitch);
     const sp = Math.sin(camPitch);
-    s.eye[0] = dist * cp * Math.sin(yaw);
-    s.eye[1] = dist * sp;
-    s.eye[2] = dist * cp * Math.cos(yaw);
+    s.eye[0] = s.focusCur[0] + dist * cp * Math.sin(yaw);
+    s.eye[1] = s.focusCur[1] + dist * sp;
+    s.eye[2] = s.focusCur[2] + dist * cp * Math.cos(yaw);
     mat4Perspective(s.proj, CAM_FOV, aspect, Math.max(0.02, dist * 0.02), dist + rMax * 8 + 30);
-    mat4LookAt(s.view, s.eye, LOOK_ORIGIN, LOOK_UP);
+    mat4LookAt(s.view, s.eye, s.focusCur, LOOK_UP);
     mat4Multiply(s.vp, s.proj, s.view);
     mat4Multiply(s.vpPick, s.proj, s.view); // 拾取专用 viewProj（s.vp 供各绘制层作草稿）
     // 视图基向量（列主序）：right/up/forward（forward = 观察方向）
@@ -28827,6 +39709,9 @@ class System3D {
     gl.blendFunc(gl.ONE, gl.ONE);
     this._drawRings(gl, 1, sTime);
 
+    // —— 6b. 小行星带（实例化 billboard 碎石环，半透明暗岩色；≤400 实例） ——
+    this._drawBelts(gl, data, sTime);
+
     // —— 7. 舰队三角 billboard（阵营色，α 缩放加性） ——
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
     this._drawFleets(gl, data, tick, time);
@@ -28851,14 +39736,18 @@ class System3D {
 
   // —————————————————————————— 内部：布局与缓存 ——————————————————————————
 
-  /** 行星布局：orbitIndex 均分角 + tick/时间缓慢公转，倾角 20° 统一（复用对象） */
-  _layout(planets, tick, time, selected) {
+  /**
+   * 行星布局：orbitIndex 均分角 + tick/时间缓慢公转，倾角 20° 统一（复用对象）。
+   * @param {number} surveyed 星系调查层级（<2 时天体标记 unknown，供未探测回波）
+   */
+  _layout(planets, tick, time, selected, surveyed = 0) {
     const n = Math.max(1, planets.length);
     this._plCount = planets.length;
     while (this._pl.length < planets.length) {
       this._pl.push({
         id: null, world: new Float32Array(3), radius: 0.1, cat: 0,
         colony: false, selected: false, orbitR: 1, seed: 0, category: 'rocky',
+        unknown: false, ouKey: null, ou: null, moons: [], moonCount: 0,
       });
     }
     for (let i = 0; i < planets.length; i++) {
@@ -28866,7 +39755,10 @@ class System3D {
       const e = this._pl[i];
       const orbit = Math.max(0, Number(p.orbitIndex) || 0);
       const R = ORBIT_BASE + orbit * ORBIT_STEP;
-      const ang = (orbit / n) * TAU + tick * 0.0004 + time * 0.008;
+      // 黄金角轨道相位（doc5 §3.2 处方 1）：galaxyGen 注入的 p.orbitPhase 优先，
+      // 旧档/缺省回退均分角；tick/time 漂移项不变
+      const baseAng = Number.isFinite(p.orbitPhase) ? p.orbitPhase : (orbit / n) * TAU;
+      const ang = baseAng + tick * 0.0004 + time * 0.008;
       const x = Math.cos(ang) * R;
       const z = Math.sin(ang) * R;
       e.id = p.id;
@@ -28880,6 +39772,36 @@ class System3D {
       e.selected = !!selected && selected === p.id;
       e.orbitR = R;
       e.seed = hashSeed(p.id || `p${orbit}`);
+      e.unknown = surveyed < 2; // 未完成「分类」扫描：引力回波虚影（HUD 层绘制标签）
+      // 主题轨道参数（doc7 TASK-3.1）：仅 themeId|category 变化时重算（循环内零分配）
+      const ouKey = String(p.primaryThemeId || '') + '|' + e.category;
+      if (e.ouKey !== ouKey || !e.ou) {
+        e.ouKey = ouKey;
+        e.ou = orbitalUniformsFor(p);
+      }
+      // —— 伴生卫星布局（doc7 TASK-4.3）：≤3 颗，绕行星公转
+      //    （orbitPhase + time×orbitSpeed；orbitRadius 为行星半径倍数） ——
+      const mArr = Array.isArray(p.moons) ? p.moons : null;
+      const mCount = mArr ? Math.min(mArr.length, 4) : 0;
+      while (e.moons.length < mCount) {
+        e.moons.push({ world: new Float32Array(3), radius: 0.02, cat: 0, seed: 0 });
+      }
+      e.moonCount = mCount;
+      for (let m = 0; m < mCount; m++) {
+        const mo = mArr[m] || {};
+        const slot = e.moons[m];
+        const orbR = (Number(mo.orbitRadius) || 1.65) * e.radius;
+        const ma = (Number(mo.orbitPhase) || 0) + time * (Number(mo.orbitSpeed) || 0.5);
+        const mx = Math.cos(ma) * orbR;
+        const mz = Math.sin(ma) * orbR;
+        slot.world[0] = e.world[0] + mx;
+        slot.world[1] = e.world[1] - mz * this._incSin;
+        slot.world[2] = e.world[2] + mz * this._incCos;
+        const rr = Number(mo.radiusRatio);
+        slot.radius = e.radius * (Number.isFinite(rr) ? clamp01(rr) : 0.28);
+        slot.cat = MOON_CAT[mo.kind] != null ? MOON_CAT[mo.kind] : 0;
+        slot.seed = hashSeed(String(mo.id || `${e.id}_m${m}`));
+      }
     }
   }
 
@@ -28951,14 +39873,18 @@ class System3D {
     reg('blit', BLIT_VERT, BLIT_FRAG, { aPos: 0 }, ['uTex']);
     reg('planet', PLANET_VERT, PLANET_FRAG, { aPos: 0, aNormal: 1 },
       ['uMVP', 'uModel', 'uNormalMatrix', 'uCamPos', 'uStarPos', 'uCategory',
-        'uSeed', 'uTime', 'uColony', 'uHdr']);
+        'uSeed', 'uTime', 'uColony', 'uHdr',
+        'uThemeOn', 'uBandA', 'uBandB', 'uEmitTint', 'uIceCap', 'uClouds',
+        'uCloudTint', 'uNightLights']);
     reg('glow', GLOW_VERT, GLOW_FRAG, { aPos: 0 },
       ['uMVP', 'uModel', 'uRadius', 'uCamPos', 'uStarPos', 'uCenter', 'uTint', 'uPower', 'uHdr']);
     reg('ring', RING_VERT, RING_FRAG, { aPos: 0 },
       ['uMVP', 'uModel', 'uStarPos', 'uPlanetPos', 'uPlanetR', 'uInner', 'uOuter',
-        'uSeed', 'uTime', 'uMode', 'uHdr']);
+        'uSeed', 'uTime', 'uMode', 'uHdr', 'uRingLo', 'uRingHi']);
     reg('line', LINE_VERT, LINE_FRAG, { aPos: 0, aT: 1 },
       ['uMVP', 'uColor', 'uDashFreq', 'uTime', 'uHdr']);
+    reg('belt', BELT_VERT, BELT_FRAG, { aCorner: 0, aOrbit: 1, aJitter: 2 },
+      ['uMVP', 'uCamRight', 'uCamUp', 'uTime', 'uIncSin', 'uIncCos', 'uHdr']);
 
     // —— 单位四边形（CORONA/BH/BG/BLIT 共用：aPos vec2，TRIANGLE_STRIP 4 顶点） ——
     this._vaoQuad = glc.createFullscreenVAO();
@@ -29041,6 +39967,26 @@ class System3D {
       g.enableVertexAttribArray(1);
       g.vertexAttribPointer(1, 1, g.FLOAT, false, 16, 12);
     });
+
+    // —— 小行星带（doc7 TASK-4.3）：基础四边形（TRIANGLE_STRIP）+ 每实例轨道参数
+    //    （动态缓冲，belt 签名变化时重填；aOrbit/aJitter 实例步进 divisor 1） ——
+    this._beltData = new Float32Array(BELT_MAX_INSTANCES * 7);
+    this._beltBuf = glc.createBuffer(this._beltData, gl.DYNAMIC_DRAW);
+    const beltCorner = glc.createBuffer(new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]));
+    this._vaoBelt = glc.createVAO((g) => {
+      g.bindBuffer(g.ARRAY_BUFFER, beltCorner);
+      g.enableVertexAttribArray(0);
+      g.vertexAttribPointer(0, 2, g.FLOAT, false, 0, 0);
+      g.bindBuffer(g.ARRAY_BUFFER, this._beltBuf);
+      g.enableVertexAttribArray(1);
+      g.vertexAttribPointer(1, 4, g.FLOAT, false, 28, 0);
+      g.vertexAttribDivisor(1, 1);
+      g.enableVertexAttribArray(2);
+      g.vertexAttribPointer(2, 3, g.FLOAT, false, 28, 16);
+      g.vertexAttribDivisor(2, 1);
+    });
+    this._beltKey = null;
+    this._beltCount = 0;
 
     // —— 日冕离屏目标 ——
     this._rebuildCoronaTarget(this._coronaRes);
@@ -29350,7 +40296,40 @@ class System3D {
       gl.uniform1f(P.u.uSeed, e.seed);
       gl.uniform1f(P.u.uTime, time);
       gl.uniform1f(P.u.uColony, e.colony ? 1.0 : 0.0);
+      // 主题覆写层（themeless 时 uThemeOn=0 → 着色器走类别分支原样）
+      const ou = e.ou || THEME_BANDS_OFF;
+      gl.uniform1f(P.u.uThemeOn, ou.on);
+      if (ou.on > 0.5) {
+        gl.uniform3fv(P.u.uBandA, ou.bandA);
+        gl.uniform3fv(P.u.uBandB, ou.bandB);
+        gl.uniform3fv(P.u.uEmitTint, ou.emitTint);
+        gl.uniform1f(P.u.uIceCap, ou.iceCap);
+        gl.uniform1f(P.u.uClouds, ou.clouds);
+        gl.uniform3fv(P.u.uCloudTint, ou.cloudTint);
+        gl.uniform1f(P.u.uNightLights, ou.nightLights);
+      }
       gl.drawElements(gl.TRIANGLES, this._icoCount, gl.UNSIGNED_SHORT, 0);
+      // —— 伴生卫星（doc7 TASK-4.3）：复用行星本体程序，kind → uCategory 着色；
+      //    独立重置主题/殖民/夜光 uniforms（uThemeOn=0 走类别分支原样） ——
+      for (let m = 0; m < e.moonCount; m++) {
+        const mo = e.moons[m];
+        mat4TRS(s.model, mo.world[0], mo.world[1], mo.world[2],
+          0, time * 0.3 + mo.seed * 9.0, 0, mo.radius);
+        mat4Multiply(s.vm, s.view, s.model);
+        mat4Multiply(s.vp, s.proj, s.vm);
+        s.nm[0] = s.vm[0]; s.nm[1] = s.vm[1]; s.nm[2] = s.vm[2];
+        s.nm[3] = s.vm[4]; s.nm[4] = s.vm[5]; s.nm[5] = s.vm[6];
+        s.nm[6] = s.vm[8]; s.nm[7] = s.vm[9]; s.nm[8] = s.vm[10];
+        gl.uniformMatrix4fv(P.u.uMVP, false, s.vp);
+        gl.uniformMatrix4fv(P.u.uModel, false, s.model);
+        gl.uniformMatrix3fv(P.u.uNormalMatrix, false, s.nm);
+        gl.uniform1i(P.u.uCategory, mo.cat);
+        gl.uniform1f(P.u.uSeed, mo.seed);
+        gl.uniform1f(P.u.uColony, 0.0);
+        gl.uniform1f(P.u.uThemeOn, 0.0);
+        gl.uniform1f(P.u.uNightLights, 0.0);
+        gl.drawElements(gl.TRIANGLES, this._icoCount, gl.UNSIGNED_SHORT, 0);
+      }
     }
   }
 
@@ -29365,16 +40344,30 @@ class System3D {
     gl.bindVertexArray(this._vaoSphere);
     for (let i = 0; i < this._plCount; i++) {
       const e = this._pl[i];
-      const st = GLOW_STYLE[e.category] || GLOW_STYLE.rocky;
+      // 主题大气辉光覆写（doc7 THEME-01）；themeless → 类别默认 GLOW_STYLE
+      const ou = e.ou;
+      let shellScale;
+      let power;
+      let tint;
+      if (ou && ou.glow) {
+        shellScale = ou.glow.shellScale;
+        power = ou.glow.power;
+        tint = ou.glow.tint;
+      } else {
+        const gs = GLOW_STYLE[e.category] || GLOW_STYLE.rocky;
+        shellScale = gs[0];
+        power = gs[1];
+        tint = gs[2];
+      }
       mat4Translate(s.model, e.world[0], e.world[1], e.world[2]);
       mat4Multiply(s.vm, s.view, s.model);
       mat4Multiply(s.vp, s.proj, s.vm);
       gl.uniformMatrix4fv(P.u.uMVP, false, s.vp);
       gl.uniformMatrix4fv(P.u.uModel, false, s.model);
-      gl.uniform1f(P.u.uRadius, e.radius * st[0]);
+      gl.uniform1f(P.u.uRadius, e.radius * shellScale);
       gl.uniform3f(P.u.uCenter, e.world[0], e.world[1], e.world[2]);
-      gl.uniform3fv(P.u.uTint, st[2]);
-      gl.uniform1f(P.u.uPower, st[1]);
+      gl.uniform3fv(P.u.uTint, tint);
+      gl.uniform1f(P.u.uPower, power);
       gl.drawElements(gl.TRIANGLES, this._icoCount, gl.UNSIGNED_SHORT, 0);
     }
   }
@@ -29394,10 +40387,14 @@ class System3D {
     gl.bindVertexArray(mode === 0 ? this._vaoGasRing : this._vaoStationRing);
     for (let i = 0; i < this._plCount; i++) {
       const e = this._pl[i];
-      if (mode === 0 && e.category !== 'gasGiant') continue;
+      const ou = e.ou || THEME_BANDS_OFF;
+      if (mode === 0 && !ou.ringOn) continue;
       if (mode === 1 && !e.colony) continue;
       if (mode === 0) {
         // 冰晶环：T·Rz(20°)·S(planetR·2.7)；内缘 1.5/2.7（局部单位）
+        // 环色随主题覆写（碎环月/机械圣骸/云海浮岛等 ringChance 滚点）；themeless = 旧版冰晶灰
+        gl.uniform3fv(P.u.uRingLo, ou.ringLo);
+        gl.uniform3fv(P.u.uRingHi, ou.ringHi);
         mat4RotateZ(s.mB, ORBIT_INCLINE);
         mat4Translate(s.mD, e.world[0], e.world[1], e.world[2]);
         mat4TRS(s.mA, 0, 0, 0, 0, 0, 0, e.radius * 2.7);
@@ -29419,6 +40416,81 @@ class System3D {
       gl.uniform1f(P.u.uSeed, e.seed);
       gl.uniform1i(P.u.uMode, mode);
       gl.drawArrays(gl.TRIANGLES, 0, mode === 0 ? 96 * 6 : 64 * 6);
+    }
+  }
+
+  /**
+   * 小行星带：实例化 billboard 碎石环（doc7 TASK-4.3；≤400 实例，半透明暗岩色）。
+   * sys.belts 的 orbitRadius 为轨道槽位单位 → 世界半径 = ORBIT_BASE + slot×ORBIT_STEP；
+   * 实例参数由 belt.id 哈希确定性派生（无任何随机源），仅 belt 签名变化时重填缓冲。
+   */
+  _drawBelts(gl, data, time) {
+    const belts = (data && data.system && Array.isArray(data.system.belts))
+      ? data.system.belts : [];
+    if (belts.length === 0) {
+      this._beltCount = 0;
+      return;
+    }
+    let sig = '';
+    for (const b of belts) {
+      sig += `${b && b.id}|${b && b.orbitRadius}|${b && b.density}|${b && b.spread};`;
+    }
+    if (sig !== this._beltKey) {
+      this._beltKey = sig;
+      this._fillBeltInstances(belts);
+    }
+    if (this._beltCount === 0) return;
+    const s = this._s;
+    const P = this._p.belt;
+    mat4Multiply(s.vp, s.proj, s.view);
+    gl.useProgram(P.prog);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); // 前序轨道站环残留加性混合，此处恢复 α 混合
+    gl.bindVertexArray(this._vaoBelt);
+    gl.uniformMatrix4fv(P.u.uMVP, false, s.vp);
+    gl.uniform3fv(P.u.uCamRight, s.right);
+    gl.uniform3fv(P.u.uCamUp, s.up);
+    gl.uniform1f(P.u.uTime, time);
+    gl.uniform1f(P.u.uIncSin, this._incSin);
+    gl.uniform1f(P.u.uIncCos, this._incCos);
+    gl.uniform1f(P.u.uHdr, this._hdr);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this._beltCount);
+  }
+
+  /**
+   * 填充带实例缓冲（确定性）：每带 count = round(60 + density×120)，
+   * 总量钳制 BELT_MAX_INSTANCES；径向/竖向散布由 belt.spread（槽位单位）换算。
+   */
+  _fillBeltInstances(belts) {
+    const fd = this._beltData;
+    let n = 0;
+    for (const b of belts) {
+      if (!b || !Number.isFinite(Number(b.orbitRadius))) continue;
+      const R = ORBIT_BASE + Math.max(0, Number(b.orbitRadius)) * ORBIT_STEP;
+      const spread = Math.max(0.01, Number(b.spread) || 0.12) * ORBIT_STEP;
+      const dens = clamp01(Number(b.density) || 1);
+      const budget = Math.min(BELT_MAX_INSTANCES - n, Math.round(60 + dens * 120));
+      for (let i = 0; i < budget; i++) {
+        const h1 = hashSeed(`${b.id}#r${i}`);
+        const h2 = hashSeed(`${b.id}#p${i}`);
+        const h3 = hashSeed(`${b.id}#y${i}`);
+        const h4 = hashSeed(`${b.id}#s${i}`);
+        const o = n * 7;
+        fd[o] = R;                                          // 轨道世界半径
+        fd[o + 1] = h2 * TAU;                               // 初始相位
+        fd[o + 2] = 0.055 / Math.pow(Math.max(0.4, R), 0.65); // Kepler 近似角速度（内快外慢）
+        fd[o + 3] = BELT_SIZE_BASE + h4 * BELT_SIZE_SPAN;   // 粒子尺寸
+        fd[o + 4] = (h1 - 0.5) * 2.0 * spread;              // 径向偏移
+        fd[o + 5] = (h3 - 0.5) * 2.0 * spread * 0.32;       // 竖向厚度
+        fd[o + 6] = h4;                                     // 色调混合
+        n++;
+      }
+      if (n >= BELT_MAX_INSTANCES) break;
+    }
+    this._beltCount = n;
+    if (n > 0) {
+      const gl = this.gl;
+      gl.bindBuffer(gl.ARRAY_BUFFER, this._beltBuf);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, fd, 0, n * 7);
     }
   }
 
@@ -29492,7 +40564,710 @@ class System3D {
   }
 }
 
-Object.assign(__exports, { System3D });
+Object.assign(__exports, { orbitalUniformsFor, System3D });
+
+});
+__register("src/content/planetThemes.js", function (__exports, __require) {
+/**
+ * content/planetThemes.js — 18 大行星主题注册表（doc6 §4.4/§10.1 / doc7 TASK-3.1）
+ *
+ * 主题是完整的世界身份而非颜色字段（doc6 §4.1）：每条目覆盖九维规范
+ * （轮廓/地貌/材质/色板/光照/天气/地标/玩法/经济）。色板为 sRGB 十六进制
+ * （doc6 §4.4 艺术指导起点），渲染前经 srgbToLinear 转线性空间。
+ *
+ * 红线（doc6 §4.3 / doc7 红线 4）：
+ *  - assignTheme 只消费 derivePlanetSeeds(world, planetId).themeSeed 派生子流，
+ *    绝不读写 world.rng、绝不 Math.random()（保 52/52 与金快照序列）。
+ *  - 主题服从天体物理：categoryConstraints ∩ planet.category 为硬约束
+ *    （例如海洋主题永远不会落在熔岩行星上）。
+ *  - 同星系去重：galaxyGen 传入 per-system takenThemes Set，旗舰主题
+ *    在仍有可用候选时绝不重复出现（doc7 THEME-06）。
+ *
+ * 类别口径：categoryConstraints 使用 galaxyGen.PLANET_CATEGORIES 的 8 个
+ * 类别 id（rocky/ocean/ice/desert/gasGiant/lava/toxic/artificial）；
+ * doc6 §4.4 表中的 "ice_moon" 规范化为 'ice'。
+ */
+
+const { seedFromNumber: seedFromNumber, float: float, int: int, chance: chance } = __require("src/core/rng.js");
+const { derivePlanetSeeds: derivePlanetSeeds } = __require("src/domain/ground/planetSeeds.js");
+
+/** 主题分配算法版本（进存档；语义变更必须递增） */
+const THEME_ASSIGNMENT_VERSION = 1;
+
+/** sRGB hex(#rgb/#rrggbb) → 线性空间 [r,g,b] 浮点（pow 2.2 近似，doc7 §3.2/5）。
+ *  解析失败回退中性灰；导出供测试与渲染侧共用。 */
+function srgbToLinear(hex) {
+  let h = String(hex || '');
+  if (h.startsWith('#')) h = h.slice(1);
+  if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+  const n = parseInt(h, 16);
+  if (!Number.isFinite(n) || h.length !== 6) return [0.5, 0.5, 0.5];
+  const c = [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+  return c.map((v) => Math.pow(v, 2.2));
+}
+
+/** 组装 paletteLinear（模块加载期一次性预计算，运行时零解析开销） */
+function linearize(pal) {
+  return {
+    base: srgbToLinear(pal.base),
+    shadow: srgbToLinear(pal.shadow),
+    highlight: srgbToLinear(pal.highlight),
+    danger: srgbToLinear(pal.danger),
+    emissive: srgbToLinear(pal.emissive),
+    atmosphere: srgbToLinear(pal.atmosphere),
+  };
+}
+
+/* ========================= 18 主题注册表（doc6 §4.4 全表） ========================= */
+
+const PLANET_THEMES = {
+  /* ———— 首批 P3 旗舰七主题（doc7 §4.1） ———— */
+
+  abyssal_ocean: {
+    id: 'abyssal_ocean',
+    version: 1,
+    labelZh: '碧渊海洋',
+    tier: 'flagship',
+    categoryConstraints: ['ocean', 'ice'],
+    palette: {
+      base: '#042A46', shadow: '#021522', highlight: '#5DEBDF',
+      danger: '#E6A34A', emissive: '#B77BFF', atmosphere: '#087F95',
+    },
+    geomorphology: 'ocean_basin_reef_trench',
+    materials: ['abyssal_sediment', 'reef_coral', 'basalt_cliff', 'glow_kelp', 'pearl_alloy'],
+    atmosphereProfile: 'dense_blue_scattering',
+    weatherProfile: 'tidal_storms',
+    landmarkSet: ['reef_dome_ruin', 'tide_spire', 'biolume_kelp_arch'],
+    poiPool: ['subsurface_ocean', 'bio_trace', 'crashed_ship'],
+    gameplayProfile: 'underwater_pressure_expedition',
+    buildingKit: 'abyssal_outpost',
+    audioProfile: 'abyssal_deep_ocean',
+    orbital: {
+      bandColors: ['#087F95', '#042A46', '#5DEBDF'],
+      iceCap: 0.25, cloudCover: 0.55, cloudColor: '#DFF4F2',
+      nightLights: 0.30, ringChance: 0.0,
+      glow: { tint: '#087F95', power: 0.95, shellScale: 1.06 },
+    },
+    hazardMechanism: '水深>8m 进入高压区持续消耗耐压护盾，潮汐窗口每 90 秒升降海平面控制通道开闭',
+    economyHook: '产深海生物质、重氢与耐压材料科技',
+  },
+
+  permafrost_furnace: {
+    id: 'permafrost_furnace',
+    version: 1,
+    labelZh: '永冬炉境',
+    tier: 'flagship',
+    categoryConstraints: ['ice'],
+    palette: {
+      base: '#EAF5FF', shadow: '#14293E', highlight: '#91BBD1',
+      danger: '#466D8A', emissive: '#F2A85D', atmosphere: '#91BBD1',
+    },
+    geomorphology: 'glacial_basin_crevasse',
+    materials: ['snow_ice_white', 'blue_ice_cliff', 'wet_frozen_soil', 'heated_steel'],
+    atmosphereProfile: 'cold_clear_thin',
+    weatherProfile: 'whiteout_blizzards',
+    landmarkSet: ['central_furnace_tower', 'heated_span_bridge', 'buried_outpost'],
+    poiPool: ['subsurface_ocean', 'deep_vein', 'lost_station'],
+    gameplayProfile: 'heat_network_survival',
+    buildingKit: 'thermal_hearth_hold',
+    audioProfile: 'frostwind_hum_embers',
+    orbital: {
+      bandColors: ['#EAF5FF', '#91BBD1', '#466D8A'],
+      iceCap: 0.85, cloudCover: 0.50, cloudColor: '#F2F7FB',
+      nightLights: 0.35, ringChance: 0.0,
+      glow: { tint: '#9FC4E8', power: 0.50, shellScale: 1.05 },
+    },
+    hazardMechanism: '离开热源覆盖圈体温槽下降并冻伤，Whiteout 暴风雪期间热源半径收缩 40%',
+    economyHook: '产富水冰、冷冻基因样本与超导隔热合金科技',
+  },
+
+  red_regolith_frontier: {
+    id: 'red_regolith_frontier',
+    version: 1,
+    labelZh: '赤砾边疆',
+    tier: 'flagship',
+    categoryConstraints: ['desert', 'rocky'],
+    palette: {
+      base: '#C66B3B', shadow: '#5A2E1C', highlight: '#D4A36A',
+      danger: '#8B4F36', emissive: '#F0C78D', atmosphere: '#D4A36A',
+    },
+    geomorphology: 'mesa_canyon_crater_steppe',
+    materials: ['red_regolith', 'sandstone_strata', 'sand_gold_scrub', 'iron_dust'],
+    atmosphereProfile: 'thin_dust_haze',
+    weatherProfile: 'red_dust_storms',
+    landmarkSet: ['sandstone_arch', 'mesa_overlook_platform', 'deepwell_tower'],
+    poiPool: ['crashed_ship', 'deep_vein', 'ancient_ruin'],
+    gameplayProfile: 'frontier_mining_expansion',
+    buildingKit: 'frontier_dome_yard',
+    audioProfile: 'dry_gale_regolith',
+    orbital: {
+      bandColors: ['#C66B3B', '#8B4F36', '#D4A36A'],
+      iceCap: 0.08, cloudCover: 0.12, cloudColor: '#E8C79A',
+      nightLights: 0.05, ringChance: 0.0,
+      glow: { tint: '#D8A15E', power: 0.38, shellScale: 1.05 },
+    },
+    hazardMechanism: '沙尘暴来袭能见度骤降、太阳能出力跌至 15%，户外人员机械受风沙磨损',
+    economyHook: '产铁族金属、硅酸盐与基础工业产能',
+  },
+
+  dry_night_polar: {
+    id: 'dry_night_polar',
+    version: 1,
+    labelZh: '永夜晶荒',
+    tier: 'flagship',
+    categoryConstraints: ['ice', 'rocky'],
+    palette: {
+      base: '#101421', shadow: '#070A12', highlight: '#D8DCE8',
+      danger: '#77718F', emissive: '#BDA4FF', atmosphere: '#77718F',
+    },
+    geomorphology: 'dry_salt_polar',
+    materials: ['dark_frozen_rock', 'moon_white_salt', 'grey_purple_strata', 'violet_beacon'],
+    atmosphereProfile: 'airless_night_static',
+    weatherProfile: 'meteor_nights',
+    landmarkSet: ['salt_polygon_basin', 'radar_beacon_spire', 'aurora_intercept_laser'],
+    poiPool: ['lost_station', 'crashed_ship', 'magnetic_anomaly'],
+    gameplayProfile: 'dark_energy_storage_ops',
+    buildingKit: 'polar_salt_vault',
+    audioProfile: 'polar_silence_hum',
+    orbital: {
+      bandColors: ['#101421', '#77718F', '#D8DCE8'],
+      iceCap: 0.15, cloudCover: 0.03, cloudColor: '#6A6E86',
+      nightLights: 0.12, ringChance: 0.0,
+      glow: { tint: '#BDA4FF', power: 0.75, shellScale: 1.05 },
+    },
+    hazardMechanism: '极夜无光热依赖储能设施，缺大气保护偶发高能陨石坠落需激光网拦截',
+    economyHook: '产工业盐晶、稀有同位素与低温超导元件',
+  },
+
+  sulfur_marsh: {
+    id: 'sulfur_marsh',
+    version: 1,
+    labelZh: '硫雾沼泽',
+    tier: 'flagship',
+    categoryConstraints: ['toxic'],
+    palette: {
+      base: '#1D341B', shadow: '#0B160A', highlight: '#B7D84C',
+      danger: '#B7D84C', emissive: '#D9FF76', atmosphere: '#748F2B',
+    },
+    geomorphology: 'fumarole_acid_terraces',
+    materials: ['charred_rock', 'sulfur_crust', 'acid_pool', 'altered_strata'],
+    atmosphereProfile: 'acid_green_haze',
+    weatherProfile: 'fumarole_gas_jets',
+    landmarkSet: ['giant_fumarole_cone', 'acid_pipe_bridge', 'corroded_drill_rig'],
+    poiPool: ['bio_trace', 'lost_station', 'magnetic_anomaly'],
+    gameplayProfile: 'chemical_hazard_chemistry',
+    buildingKit: 'acid_proof_stilt_base',
+    audioProfile: 'marsh_bubble_hiss',
+    orbital: {
+      bandColors: ['#1D341B', '#748F2B', '#B7D84C'],
+      iceCap: 0.0, cloudCover: 0.70, cloudColor: '#9BB83B',
+      nightLights: 0.06, ringChance: 0.0,
+      glow: { tint: '#8FAE33', power: 1.35, shellScale: 1.09 },
+    },
+    hazardMechanism: '低洼毒气湖持续腐蚀防护层与地基，浓沼气遇明火爆燃',
+    economyHook: '产挥发性气体、硫化物与化工链产物',
+  },
+
+  biolume_canopy: {
+    id: 'biolume_canopy',
+    version: 1,
+    labelZh: '星辉生物圈',
+    tier: 'flagship',
+    categoryConstraints: ['rocky', 'ocean'],
+    palette: {
+      base: '#082B3D', shadow: '#03141E', highlight: '#42D8C6',
+      danger: '#A981FF', emissive: '#42D8C6', atmosphere: '#007E91',
+    },
+    geomorphology: 'biolume_rainforest',
+    materials: ['deep_canopy_floor', 'wet_moss_cliff', 'glow_flora', 'biolume_vein'],
+    atmosphereProfile: 'humid_blue_cyan',
+    weatherProfile: 'biolume_rain_pulses',
+    landmarkSet: ['magnetic_stone_arch', 'soul_willow_tree', 'glow_root_bridge'],
+    poiPool: ['bio_trace', 'subsurface_ocean'],
+    gameplayProfile: 'reactive_ecology_sampling',
+    buildingKit: 'biolume_grove_camp',
+    audioProfile: 'biolume_night_choir',
+    orbital: {
+      bandColors: ['#082B3D', '#007E91', '#42D8C6'],
+      iceCap: 0.05, cloudCover: 0.45, cloudColor: '#A8D8E0',
+      nightLights: 0.50, ringChance: 0.0,
+      glow: { tint: '#3AA8B8', power: 0.70, shellScale: 1.06 },
+    },
+    hazardMechanism: '夜间荧光生态有掠食者语义，压感涟漪会暴露小队行踪',
+    economyHook: '产再生生物质、神经纤维与医疗前体',
+  },
+
+  obsidian_lava: {
+    id: 'obsidian_lava',
+    version: 1,
+    labelZh: '黑曜熔海',
+    tier: 'flagship',
+    categoryConstraints: ['lava'],
+    palette: {
+      base: '#160F14', shadow: '#0A0709', highlight: '#E54B24',
+      danger: '#E54B24', emissive: '#FFAA3C', atmosphere: '#5B171D',
+    },
+    geomorphology: 'obsidian_ridge_lava',
+    materials: ['obsidian_black', 'basalt_hex_strata', 'scoria_red', 'magma_glow'],
+    atmosphereProfile: 'ash_ember_thin',
+    weatherProfile: 'lava_eruption_cycles',
+    landmarkSet: ['obsidian_arch_bridge', 'basalt_hex_pillars', 'lava_geothermal_siphon'],
+    poiPool: ['deep_vein', 'magnetic_anomaly', 'ancient_ruin'],
+    gameplayProfile: 'bridge_route_engineering',
+    buildingKit: 'obsidian_basalt_forge',
+    audioProfile: 'magma_rumble_crack',
+    orbital: {
+      bandColors: ['#160F14', '#5B171D', '#E54B24'],
+      iceCap: 0.0, cloudCover: 0.08, cloudColor: '#3A2226',
+      nightLights: 0.02, ringChance: 0.0,
+      glow: { tint: '#E0561F', power: 0.55, shellScale: 1.05 },
+    },
+    hazardMechanism: '岩浆河谷热辐射防护，拱桥断裂需工程抢修才能通行',
+    economyHook: '产重金属、稀土与耐热装甲',
+  },
+
+  /* ———— 扩展 P4 十一主题（doc7 §4.0 矩阵） ———— */
+
+  prism_crystal: {
+    id: 'prism_crystal',
+    version: 1,
+    labelZh: '棱镜晶原',
+    tier: 'expansion',
+    categoryConstraints: ['rocky', 'ice'],
+    palette: {
+      base: '#DCEFF7', shadow: '#5A7484', highlight: '#56CBE5',
+      danger: '#9A83D8', emissive: '#FFB7EC', atmosphere: '#56CBE5',
+    },
+    geomorphology: 'generic_rocky',
+    materials: ['crystal_quartz', 'prism_strata', 'refraction_sand', 'lattice_road'],
+    atmosphereProfile: 'crystalline_cold_clear',
+    weatherProfile: 'refraction_light_bands',
+    landmarkSet: ['hex_crystal_spire', 'refraction_canyon', 'resonance_relay'],
+    poiPool: ['magnetic_anomaly', 'deep_vein', 'ancient_ruin'],
+    gameplayProfile: 'resonance_optics_ops',
+    buildingKit: 'prism_lattice_works',
+    audioProfile: 'crystal_ring_resonance',
+    orbital: {
+      bandColors: ['#DCEFF7', '#56CBE5', '#9A83D8'],
+      iceCap: 0.30, cloudCover: 0.20, cloudColor: '#EAF6FB',
+      nightLights: 0.15, ringChance: 0.15,
+      glow: { tint: '#8FD8EC', power: 0.60, shellScale: 1.06 },
+    },
+    hazardMechanism: '晶体干扰无线电，折射光路需谐振校准导航',
+    economyHook: '产量子水晶、光学晶体与高能激光组件',
+  },
+
+  salt_mirror_desert: {
+    id: 'salt_mirror_desert',
+    version: 1,
+    labelZh: '镜盐荒原',
+    tier: 'expansion',
+    categoryConstraints: ['desert'],
+    palette: {
+      base: '#E8E1CD', shadow: '#8A8270', highlight: '#C7A8A2',
+      danger: '#8B6C88', emissive: '#D9B86C', atmosphere: '#C7A8A2',
+    },
+    geomorphology: 'generic_desert',
+    materials: ['salt_crust_white', 'pink_dust', 'mirror_brine', 'purple_rock'],
+    atmosphereProfile: 'bright_mirror_haze',
+    weatherProfile: 'salt_mirage_static',
+    landmarkSet: ['mirror_salt_flat', 'brine_extraction_plant', 'lone_inselberg'],
+    poiPool: ['ancient_ruin', 'crashed_ship', 'lost_station'],
+    gameplayProfile: 'brine_solar_concentration',
+    buildingKit: 'mirror_concentrator_array',
+    audioProfile: 'mirror_flat_winds',
+    orbital: {
+      bandColors: ['#E8E1CD', '#C7A8A2', '#D9B86C'],
+      iceCap: 0.05, cloudCover: 0.10, cloudColor: '#F2E9D8',
+      nightLights: 0.04, ringChance: 0.0,
+      glow: { tint: '#E0C9A0', power: 0.40, shellScale: 1.05 },
+    },
+    hazardMechanism: '强反光造成光学测距误差，卤水壳下暗藏塌陷水腔',
+    economyHook: '产轻金属、高能蓄电池与聚光太阳能',
+  },
+
+  cryomethane_sea: {
+    id: 'cryomethane_sea',
+    version: 1,
+    labelZh: '甲烷雾海',
+    tier: 'expansion',
+    categoryConstraints: ['ice', 'ocean'],
+    palette: {
+      base: '#082B32', shadow: '#031418', highlight: '#56C6C2',
+      danger: '#B8E7E2', emissive: '#B8E7E2', atmosphere: '#167C87',
+    },
+    geomorphology: 'generic_ocean',
+    materials: ['methane_ice_coast', 'dark_hydrocarbon_sea', 'frost_rock', 'fog_band'],
+    atmosphereProfile: 'cryo_hydrocarbon_fog',
+    weatherProfile: 'cryo_fog_drifts',
+    landmarkSet: ['methane_floating_platform', 'ice_shelf_harbor', 'cryo_pipeline'],
+    poiPool: ['subsurface_ocean', 'crashed_ship', 'lost_station'],
+    gameplayProfile: 'cryo_hydrocarbon_ops',
+    buildingKit: 'cryo_hull_dock',
+    audioProfile: 'cryosea_fog_drone',
+    orbital: {
+      bandColors: ['#082B32', '#167C87', '#56C6C2'],
+      iceCap: 0.45, cloudCover: 0.50, cloudColor: '#B8E7E2',
+      nightLights: 0.05, ringChance: 0.0,
+      glow: { tint: '#4FA8AC', power: 0.60, shellScale: 1.06 },
+    },
+    hazardMechanism: '薄冰承重随机断裂，低温使外骨骼与船体性能衰减',
+    economyHook: '产液态甲烷燃料、重氢与推进剂',
+  },
+
+  tidal_lock_dusk: {
+    id: 'tidal_lock_dusk',
+    version: 1,
+    labelZh: '晨昏环带',
+    tier: 'expansion',
+    categoryConstraints: ['rocky', 'lava', 'ice'],
+    palette: {
+      base: '#E2A05A', shadow: '#31445F', highlight: '#CDA978',
+      danger: '#CDA06B', emissive: '#80BCD5', atmosphere: '#80BCD5',
+    },
+    geomorphology: 'generic_rocky',
+    materials: ['scorched_regolith', 'twilight_sand', 'night_ice', 'melt_water'],
+    atmosphereProfile: 'banded_twilight_gradient',
+    weatherProfile: 'terminator_winds',
+    landmarkSet: ['terminator_strip_city', 'dual_zone_powerline', 'dusk_farmland'],
+    poiPool: ['ancient_ruin', 'deep_vein', 'subsurface_ocean'],
+    gameplayProfile: 'dual_zone_thermal_logistics',
+    buildingKit: 'dusk_belt_terminus',
+    audioProfile: 'dusk_belt_breeze',
+    orbital: {
+      bandColors: ['#E2A05A', '#CDA978', '#31445F'],
+      iceCap: 0.20, cloudCover: 0.35, cloudColor: '#D9C9A8',
+      nightLights: 0.20, ringChance: 0.0,
+      glow: { tint: '#C8A878', power: 0.55, shellScale: 1.06 },
+    },
+    hazardMechanism: '昼侧灼热夜侧深寒，跨温区输送必须沿暮光带布局',
+    economyHook: '产温差热电与双极特殊矿物',
+  },
+
+  cloud_giant_atolls: {
+    id: 'cloud_giant_atolls',
+    version: 1,
+    labelZh: '云海浮岛',
+    tier: 'expansion',
+    categoryConstraints: ['gasGiant'],
+    palette: {
+      base: '#E5A65A', shadow: '#6E4A2E', highlight: '#F2D6AA',
+      danger: '#5D618F', emissive: '#C87E67', atmosphere: '#F2D6AA',
+    },
+    geomorphology: 'generic_gas_giant',
+    materials: ['cloud_deck', 'storm_strata', 'atoll_hull', 'skyway'],
+    atmosphereProfile: 'deep_storm_layers',
+    weatherProfile: 'storm_wall_rotation',
+    landmarkSet: ['floating_atoll_ring', 'sky_gondola', 'storm_probe_station'],
+    poiPool: ['storm_vortex'],
+    gameplayProfile: 'high_altitude_platform_ops',
+    buildingKit: 'sky_atoll_mooring',
+    audioProfile: 'storm_altitude_roar',
+    orbital: {
+      bandColors: ['#E5A65A', '#C87E67', '#F2D6AA'],
+      iceCap: 0.0, cloudCover: 1.0, cloudColor: '#F2D6AA',
+      nightLights: 0.03, ringChance: 0.55,
+      glow: { tint: '#E0B070', power: 0.60, shellScale: 1.09 },
+    },
+    hazardMechanism: '严禁常规地表登陆，风暴墙周期性撕毁浮台锚链',
+    economyHook: '独占高产氦-3 与氘采集',
+  },
+
+  fungal_catacombs: {
+    id: 'fungal_catacombs',
+    version: 1,
+    labelZh: '菌海深渊',
+    tier: 'expansion',
+    categoryConstraints: ['toxic', 'rocky'],
+    palette: {
+      base: '#160F2C', shadow: '#0A0716', highlight: '#9B4DCA',
+      danger: '#9B4DCA', emissive: '#5AD3A8', atmosphere: '#4B2A71',
+    },
+    geomorphology: 'generic_toxic',
+    materials: ['cave_rock', 'fungal_mat', 'spore_glow', 'mycelium_net'],
+    atmosphereProfile: 'spore_purple_haze',
+    weatherProfile: 'spore_falls',
+    landmarkSet: ['giant_cap_dome', 'spore_falls', 'mycelium_lift'],
+    poiPool: ['bio_trace', 'subsurface_ocean', 'ancient_ruin'],
+    gameplayProfile: 'spore_filter_caving',
+    buildingKit: 'spore_sanctum',
+    audioProfile: 'spore_cave_drip',
+    orbital: {
+      bandColors: ['#160F2C', '#4B2A71', '#9B4DCA'],
+      iceCap: 0.0, cloudCover: 0.55, cloudColor: '#7A5CA0',
+      nightLights: 0.35, ringChance: 0.0,
+      glow: { tint: '#8A5CB8', power: 0.85, shellScale: 1.07 },
+    },
+    hazardMechanism: '孢子浓雾需过滤通风，巨菌盖崩落封闭通道',
+    economyHook: '产特效药物、生物质与菌丝材料',
+  },
+
+  ancient_megastructure: {
+    id: 'ancient_megastructure',
+    version: 1,
+    labelZh: '机械圣骸',
+    tier: 'expansion',
+    categoryConstraints: ['artificial'],
+    palette: {
+      base: '#161F29', shadow: '#0A0F14', highlight: '#6D7F8C',
+      danger: '#6D7F8C', emissive: '#42C3D6', atmosphere: '#42C3D6',
+    },
+    geomorphology: 'generic_artificial',
+    materials: ['hull_plate', 'oxidized_steel', 'energy_conduit', 'relay_alloy'],
+    atmosphereProfile: 'controlled_venting',
+    weatherProfile: 'dormant_vent_cycles',
+    landmarkSet: ['sunken_hex_armor', 'energy_spine_ridge', 'collapsed_turbine_tower'],
+    poiPool: ['ancient_ruin', 'magnetic_anomaly', 'lost_station'],
+    gameplayProfile: 'ancient_grid_reactivation',
+    buildingKit: 'relic_salvage_yard',
+    audioProfile: 'machine_requiem_drone',
+    orbital: {
+      bandColors: ['#161F29', '#6D7F8C', '#42C3D6'],
+      iceCap: 0.0, cloudCover: 0.02, cloudColor: '#3A4A56',
+      nightLights: 0.60, ringChance: 0.35,
+      glow: { tint: '#42C3D6', power: 0.45, shellScale: 1.05 },
+    },
+    hazardMechanism: '古代哨卫机甲与协议锁仍在线，能源脊短路电弧伤人',
+    economyHook: '产远古数据、现成合金与奇异物质',
+  },
+
+  glassstorm_barrens: {
+    id: 'glassstorm_barrens',
+    version: 1,
+    labelZh: '硅晶风暴',
+    tier: 'expansion',
+    categoryConstraints: ['desert', 'rocky'],
+    palette: {
+      base: '#33262E', shadow: '#15100F', highlight: '#9C735D',
+      danger: '#E2BE93', emissive: '#F5E0BB', atmosphere: '#9C735D',
+    },
+    geomorphology: 'generic_desert',
+    materials: ['vitrified_sand', 'silica_ridge', 'glass_dust', 'etched_rock'],
+    atmosphereProfile: 'abrasive_silica_wind',
+    weatherProfile: 'glassstorm_gales',
+    landmarkSet: ['vitrified_dune_field', 'blade_silica_ridge', 'wind_shelter_bunker'],
+    poiPool: ['crashed_ship', 'deep_vein', 'magnetic_anomaly'],
+    gameplayProfile: 'abrasion_storm_tactics',
+    buildingKit: 'glass_etched_bunker',
+    audioProfile: 'glass_sand_barrage',
+    orbital: {
+      bandColors: ['#33262E', '#9C735D', '#E2BE93'],
+      iceCap: 0.0, cloudCover: 0.25, cloudColor: '#D8C4A8',
+      nightLights: 0.03, ringChance: 0.0,
+      glow: { tint: '#C8A888', power: 0.42, shellScale: 1.05 },
+    },
+    hazardMechanism: '高速碎玻璃风暴磨蚀装备，顺风逆风移速差异显著',
+    economyHook: '产高纯光学硅晶与装甲玻璃',
+  },
+
+  magnetar_aurora: {
+    id: 'magnetar_aurora',
+    version: 1,
+    labelZh: '磁暴极光荒原',
+    tier: 'expansion',
+    categoryConstraints: ['rocky', 'artificial'],
+    palette: {
+      base: '#091729', shadow: '#040B16', highlight: '#1A3F69',
+      danger: '#6A56C4', emissive: '#B9FFEB', atmosphere: '#6A56C4',
+    },
+    geomorphology: 'generic_rocky',
+    materials: ['magnetite_hill', 'arc_crack', 'ionized_rock', 'shielded_road'],
+    atmosphereProfile: 'magnetosphere_curtains',
+    weatherProfile: 'periodic_magnetic_pulses',
+    landmarkSet: ['spiral_magnetite_hill', 'lightning_shield_tower', 'arc_rift'],
+    poiPool: ['magnetic_anomaly', 'lost_station', 'ancient_ruin'],
+    gameplayProfile: 'pulse_window_operations',
+    buildingKit: 'faraday_redoubt',
+    audioProfile: 'aurora_pulse_whine',
+    orbital: {
+      bandColors: ['#091729', '#1A3F69', '#6A56C4'],
+      iceCap: 0.12, cloudCover: 0.06, cloudColor: '#2A3A5A',
+      nightLights: 0.10, ringChance: 0.0,
+      glow: { tint: '#6A56C4', power: 0.90, shellScale: 1.06 },
+    },
+    hazardMechanism: '磁暴脉冲峰值期电子护盾与喷气背包静默，需依托屏蔽塔窗口行动',
+    economyHook: '产超导体与磁性矿',
+  },
+
+  canopy_colossus: {
+    id: 'canopy_colossus',
+    version: 1,
+    labelZh: '巨木云冠',
+    tier: 'expansion',
+    categoryConstraints: ['rocky'],
+    palette: {
+      base: '#123D32', shadow: '#081B16', highlight: '#2F8D69',
+      danger: '#2F8D69', emissive: '#F4D979', atmosphere: '#2F8D69',
+    },
+    geomorphology: 'generic_rocky',
+    materials: ['bark_armor', 'canopy_platform', 'root_valley', 'vine_bridge'],
+    atmosphereProfile: 'wet_green_canopy',
+    weatherProfile: 'canopy_updrafts',
+    landmarkSet: ['colossal_canopy_deck', 'vine_suspension_bridge', 'canopy_elevator'],
+    poiPool: ['bio_trace', 'subsurface_ocean', 'ancient_ruin'],
+    gameplayProfile: 'vertical_canopy_logistics',
+    buildingKit: 'canopy_arbor_station',
+    audioProfile: 'canopy_leaf_swell',
+    orbital: {
+      bandColors: ['#123D32', '#2F8D69', '#A9C85B'],
+      iceCap: 0.04, cloudCover: 0.40, cloudColor: '#C8E0C0',
+      nightLights: 0.18, ringChance: 0.0,
+      glow: { tint: '#4FA07A', power: 0.60, shellScale: 1.06 },
+    },
+    hazardMechanism: '林冠掠食者沿树冠巡逻，垂直落差坠落即死',
+    economyHook: '产高强度生物木质复合材料',
+  },
+
+  fractured_moon: {
+    id: 'fractured_moon',
+    version: 1,
+    labelZh: '碎环月',
+    tier: 'expansion',
+    categoryConstraints: ['rocky', 'ice'],
+    palette: {
+      base: '#39414B', shadow: '#181C22', highlight: '#8B7967',
+      danger: '#D99A62', emissive: '#B6C4D9', atmosphere: '#8A98AC',
+    },
+    geomorphology: 'generic_rocky',
+    materials: ['lunar_regolith', 'rubble_slope', 'fracture_ice', 'alloy_wreck'],
+    atmosphereProfile: 'airless_vacuum',
+    weatherProfile: 'micrometeor_showers',
+    landmarkSet: ['great_rift_chasm', 'wreck_field', 'shattered_ring_overhead'],
+    poiPool: ['crashed_ship', 'ancient_ruin', 'lost_station'],
+    gameplayProfile: 'lowg_salvage_ops',
+    buildingKit: 'wreck_orbit_yard',
+    audioProfile: 'vacuum_bone_conduction',
+    orbital: {
+      bandColors: ['#39414B', '#8B7967', '#B6C4D9'],
+      iceCap: 0.10, cloudCover: 0.0, cloudColor: '#888888',
+      nightLights: 0.02, ringChance: 0.85,
+      glow: { tint: '#8A98AC', power: 0.20, shellScale: 1.04 },
+    },
+    hazardMechanism: '0.25g 低重力跳跃过冲，真空中无声音警示只有骨传导',
+    economyHook: '产合金、模块与氦-3',
+  },
+};
+
+// 模块加载期预计算线性色板（paletteLinear 为派生字段，不进存档）
+for (const id of Object.keys(PLANET_THEMES)) {
+  const t = PLANET_THEMES[id];
+  t.paletteLinear = linearize(t.palette);
+}
+
+/* ========================= 查表与分配（纯函数，只读 world.seed） ========================= */
+
+/** 主题 id → 主题条目（未知 id 返回 null） */
+function getTheme(id) {
+  return (id && PLANET_THEMES[id]) || null;
+}
+
+/** 类别 → 兼容主题条目数组（约束交集；确定性顺序 = 注册表键序） */
+function themesForCategory(cat) {
+  const out = [];
+  for (const id of Object.keys(PLANET_THEMES)) {
+    if (PLANET_THEMES[id].categoryConstraints.indexOf(cat) >= 0) out.push(PLANET_THEMES[id]);
+  }
+  return out;
+}
+
+/**
+ * 主题-天体物理相容守卫（doc6 §4.3：主题服从基础天体参数）。
+ * categoryConstraints 是第一道硬约束；此处追加物理参数级守卫。
+ * 全部为「否决式」检查——守卫永不至于清空候选池（每类别至少一个无守卫主题）。
+ */
+function themePhysicsOk(theme, planet) {
+  const water = Number(planet.water) || 0;
+  const hab = Number(planet.habitability) || 0;
+  if ((theme.id === 'abyssal_ocean' || theme.id === 'cryomethane_sea') && water < 30) return false;
+  if ((theme.id === 'biolume_canopy' || theme.id === 'canopy_colossus') && hab < 15) return false;
+  return true;
+}
+
+/**
+ * 次级修饰器池（doc6 §4.6 配对示例：永夜+晶柱、海洋+硫喷口、荒原+远古巨构等）。
+ * id 与主题 id 同名者（prism_crystal/ancient_megastructure/magnetar_aurora）
+ * 表示该主题以次级身份叠加；其余为独立地貌修饰。
+ */
+const SECONDARY_MODIFIERS = [
+  { id: 'sulfur_vents', labelZh: '硫化喷口', categories: ['ocean', 'toxic', 'rocky'] },
+  { id: 'ancient_megastructure', labelZh: '远古巨构残骸', categories: ['rocky', 'desert', 'ice', 'artificial'] },
+  { id: 'prism_crystal', labelZh: '折射晶柱群', categories: ['ice', 'rocky'] },
+  { id: 'glassstorm', labelZh: '硅玻璃风暴带', categories: ['desert', 'rocky'] },
+  { id: 'magnetar_aurora', labelZh: '磁暴极光幕', categories: ['rocky', 'ice', 'ocean', 'artificial'] },
+];
+
+/** 旗舰权重 / 扩展权重（doc6 §4.3 生成权重） */
+const TIER_WEIGHT = { flagship: 3.0, expansion: 1.0 };
+
+/**
+ * 为行星确定性地抽取主主题 + 0-2 个次级修饰器。
+ *
+ * 确定性契约（doc7 红线 4 / SITE-06）：
+ *  - 只消费 derivePlanetSeeds(world, planet.id).themeSeed → seedFromNumber 子流；
+ *    绝不读写 world.rng（主 RNG 消费顺序不受影响）。
+ *  - 纯函数 of (world.seed, planet 字段, star.danger, takenThemes)。
+ *
+ * 同星系去重（doc7 THEME-06）：takenThemes 为 galaxyGen 维护的 per-system
+ * Set；已抽中的旗舰主题在「仍存在其他候选」时被整体移出候选池。
+ *
+ * @param {{seed:number}} world 世界实体（只读 world.seed）
+ * @param {{id:string|number, category:string, water?:number, habitability?:number}} planet 行星档案
+ * @param {{danger?:number}|null} [star] 恒星档案（高危险恒星微幅加权磁暴主题）
+ * @param {Set<string>} [takenThemes] 本星系已分配主题 id（可省略）
+ * @returns {{primaryThemeId:string, secondaryThemeModifiers:string[]}}
+ */
+function assignTheme(world, planet, star, takenThemes) {
+  const seeds = derivePlanetSeeds(world, planet.id);
+  const sub = seedFromNumber(seeds.themeSeed);
+  const cat = String((planet && planet.category) || 'rocky');
+
+  // 1) 类别约束交集（硬约束）
+  let pool = themesForCategory(cat);
+  if (pool.length === 0) pool = [PLANET_THEMES.red_regolith_frontier]; // 兜底（8 类均有覆盖，实际不可达）
+
+  // 2) 物理守卫否决；全灭则回退未守卫池
+  const guarded = pool.filter((t) => themePhysicsOk(t, planet));
+  if (guarded.length > 0) pool = guarded;
+
+  // 3) 同星系旗舰去重：已被抽中的旗舰主题让位（仅当仍有替代候选）
+  if (takenThemes && takenThemes.size > 0 && pool.length > 1) {
+    const alt = pool.filter((t) => !(t.tier === 'flagship' && takenThemes.has(t.id)));
+    if (alt.length > 0) pool = alt;
+  }
+
+  // 4) 加权抽选：旗舰 ×3；高危险恒星（danger≥5）磁暴主题 ×2 微偏置
+  const danger = star && Number.isFinite(star.danger) ? star.danger : 0;
+  let total = 0;
+  const weights = pool.map((t) => {
+    let w = TIER_WEIGHT[t.tier] || 1.0;
+    if (t.id === 'magnetar_aurora' && danger >= 5) w += TIER_WEIGHT.flagship;
+    total += w;
+    return w;
+  });
+  let r = float(sub) * total;
+  let primary = pool[pool.length - 1];
+  for (let i = 0; i < pool.length; i++) {
+    r -= weights[i];
+    if (r <= 0) { primary = pool[i]; break; }
+  }
+
+  // 5) 次级修饰器 0-2 个（与主主题去重；类别相容者中确定性抽选）
+  const modifiers = [];
+  const compatibleMods = SECONDARY_MODIFIERS.filter(
+    (m) => m.categories.indexOf(cat) >= 0 && m.id !== primary.id
+  );
+  if (compatibleMods.length > 0 && chance(sub, 0.34)) {
+    modifiers.push(compatibleMods[int(sub, compatibleMods.length)].id);
+    if (chance(sub, 0.42)) {
+      const rest = compatibleMods.filter((m) => m.id !== modifiers[0]);
+      if (rest.length > 0) modifiers.push(rest[int(sub, rest.length)].id);
+    }
+  }
+
+  return { primaryThemeId: primary.id, secondaryThemeModifiers: modifiers };
+}
+
+Object.assign(__exports, { THEME_ASSIGNMENT_VERSION, srgbToLinear, PLANET_THEMES, getTheme, themesForCategory, SECONDARY_MODIFIERS, assignTheme });
 
 });
 __register("src/render/gl/NoiseGLSL.js", function (__exports, __require) {
@@ -30563,7 +42338,7 @@ const GalaxyView = {
     }
     body.appendChild(layerBox);
 
-    const wrap = el('div', { class: 'vf-view' }, [head, body]);
+    const wrap = el('div', { class: 'vf-view vf-view-immersive' }, [head, body]);
     root.appendChild(wrap);
 
     this._bindEvents();
@@ -30973,2292 +42748,6 @@ class Tutorial {
 Object.assign(__exports, { Tutorial });
 
 });
-__register("src/render/GalaxyRenderer.js", function (__exports, __require) {
-/**
- * render/GalaxyRenderer.js — 银河地图渲染器（R3：WebGL2 全 3D 棒旋星系 + Canvas 2D 退化保护）
- *
- * 职责：
- *  - 三维透视轨道相机：策略坐标 (x,y ∈ 0..1000) 映射世界 (x-500, y-500)*0.02（±10 世界单位），
- *    星系高度 z = hash(systemId)·核球厚度剖面（银心厚、边缘薄，见 Galaxy3D.systemWorldPos）。
- *    相机默认 pitch 55°、yaw 0°，半径 = CAM_R0/zoom（zoom 0.5..4 与旧 2D 语义兼容）；
- *  - 双渲染路径：
- *      GL 路径（cm.hasGL && cm.tier<3 && 快照有效）：cm.beginGLFrame() → 星系盘实例化粒子
- *      → 体积星云全屏 raymarch（uSteps 按 tier 24/14/0）→ 航路/标尺线 → 星系节点/势力环
- *      sprite → 超新星球壳 → cm.endGLFrame()（HDR Bloom + ACES）；
- *      2D 路径 _render2D：webglcontextlost / Tier3 / 无 WebGL 时的退化保护（原 Canvas 2D
- *      实现完整保留，任何 GL 异常都平滑回落，render() 绝不抛错）；
- *  - HUD 文字/指示继续画在 cm.ctx（2D HUD 透明层）：名称标签（surveyedLevel≥1、贪心抽稀）、
- *    选中/悬停圈、势力范围、舰队/殖民/资源/贸易/前线等标记，坐标一律来自 _projCache 投影；
- *  - pick(sx, sy)：把每个可见星系的三维位置经 viewProj 投影回屏幕空间缓存到 _projCache /
- *    _pickList（每帧 render 时更新；交互事件触发相机变化后懒重建），按最近命中
- *    （阈值 max(10, 14/zoom)）返回 systemId；
- *  - 交互：左键平移（沿相机右/基准面投影上向量）、滚轮缩放半径（光标锚定）、
- *    右键/中键拖拽旋转 pitch/yaw（限制 10°..85°）——旋转监听由本渲染器在 init(cm) 时
- *    自行挂载到 cm.canvas（按下期间临时挂 window move/up，松开即卸，不与 GalaxyView 的
- *    左键交互冲突，也不产生跨视图泄漏）。
- *
- * ⚠ 设计令牌同步声明：本文件的色板字面量是 styles.css `:root` 变量的手工副本
- *   （读取 getComputedStyle 每帧开销过高），若调整 styles.css 的变量需同步改这里：
- *   --bg #070b12 / --panel #0e1520 / --line #1d2a3a / --ink #c9d6e3 / --ink-dim #71839a
- *   --ink-faint #46586e / --accent #4fd8e8 / --accent2 #7ea8ff / --warn #e8b04f
- *   --danger #e85f5f / --ok #62d98a
- *
- * 确定性约束：背景星点与星系高度使用固定 hash（禁用随机数）；动画时间只经
- * opts.time 传入 uniform；本渲染器不写任何世界/快照状态、不使用 gl.readPixels。
- */
-
-const { mat4LookAt: mat4LookAt, mat4Perspective: mat4Perspective, mat4Multiply: mat4Multiply, mat4Invert: mat4Invert, mat4Identity: mat4Identity, mat4MulVec4: mat4MulVec4 } = __require("src/render/gl/Mat4.js");
-const { WORLD_SCALE: WORLD_SCALE, systemWorldPos: systemWorldPos, generateSupernovaSeeds: generateSupernovaSeeds, Galaxy3D: Galaxy3D } = __require("src/render/gl/Galaxy3D.js");
-
-/** 与 styles.css 同步的字面量色板（见文件头同步声明） */
-const C = {
-  BG: '#070b12',
-  BG_DEEP: '#0d1626',
-  LINE: '#1d2a3a',
-  INK: '#c9d6e3',
-  INK_DIM: '#71839a',
-  INK_FAINT: '#46586e',
-  ACCENT: '#4fd8e8',
-  ACCENT2: '#7ea8ff',
-  WARN: '#e8b04f',
-  DANGER: '#e85f5f',
-  OK: '#62d98a',
-  NODE_UNSEEN: '#39465a', // 未探索星系的暗灰点
-  LABEL: '#e9f0f7',       // 标签近白色
-};
-
-/** 视图字体（与 styles.css --font 栈一致） */
-const FONT = '"Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif';
-
-/** 恒星类型 → 地图节点本色（与 SystemRenderer 的恒星着色同源） */
-const STAR_COLORS = {
-  yellowDwarf: '#ffd27a',
-  redDwarf: '#ff8a6a',
-  blueGiant: '#9ecbff',
-  whiteDwarf: '#e8f2ff',
-  neutronStar: '#b8e8ff',
-  pulsar: '#b8e8ff',
-  blackHole: '#2a2f3a', // 本体近黑，靠吸积环辨识
-};
-
-/** 恒星类型 → 地图节点基准半径（逻辑像素，随 zoom 轻微缩放） */
-const STAR_SIZES = {
-  yellowDwarf: 3.4,
-  redDwarf: 2.8,
-  blueGiant: 5.0,
-  whiteDwarf: 3.0,
-  neutronStar: 2.8,
-  pulsar: 3.0,
-  blackHole: 3.6,
-};
-
-/** 世界坐标范围（与 galaxyGen 的 W=1000 一致） */
-const WORLD = 1000;
-
-/** 透视相机竖直视场角（弧度） */
-const FOV = 50 * (Math.PI / 180);
-/** zoom=1 时的轨道半径（世界单位）：竖直可见跨度 ≈ 24 世界单位，整盘 20 单位入画 */
-const CAM_R0 = 26;
-/** 相机半径硬钳制（世界单位） */
-const CAM_R_MIN = 3;
-const CAM_R_MAX = 80;
-/** 旋转灵敏度（弧度/像素） */
-const ROT_SPEED = 0.005;
-/** GL 航路透明度（两端 surveyedLevel>=1 亮 / 其余暗） */
-const LANE_A_KNOWN = 0.35;
-const LANE_A_DIM = 0.10;
-/** 垂直投影标尺线透明度 */
-const STALK_A = 0.08;
-/** 超新星球壳基准半径（世界单位；规格“~12”按 0.1 世界单位刻度解读为 1.2，
- *  即银盘半径的 12%，并随 zoom 软压避免近景遮蔽邻星） */
-const SHELL_R_BASE = 1.2;
-/** 星云辐射增益 */
-const NEBULA_GAIN = 0.42;
-
-/** 确定性 hash：f(i) = frac(sin(i*127.1)*43758.5453)，禁用随机数 */
-function hash01(i) {
-  const s = Math.sin(i * 127.1) * 43758.5453;
-  return s - Math.floor(s);
-}
-
-/** hex(#rgb/#rrggbb) → rgba 字符串；解析失败回退灰 */
-function rgba(hex, a) {
-  let h = String(hex || '');
-  if (h.startsWith('#')) h = h.slice(1);
-  if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
-  const n = parseInt(h, 16);
-  if (!Number.isFinite(n) || h.length !== 6) return `rgba(113,131,154,${a})`;
-  const r = (n >> 16) & 255;
-  const g = (n >> 8) & 255;
-  const b = n & 255;
-  return `rgba(${r},${g},${b},${a})`;
-}
-
-/** hex → [r,g,b] 0..1（GL uniform 用）；解析失败回退灰 */
-function hexToRgb(hex) {
-  let h = String(hex || '');
-  if (h.startsWith('#')) h = h.slice(1);
-  if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
-  const n = parseInt(h, 16);
-  if (!Number.isFinite(n) || h.length !== 6) return [113 / 255, 131 / 255, 154 / 255];
-  return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
-}
-
-/** 常用色的 GL float 三元组（模块期解析一次） */
-const ACCENT_RGB = hexToRgb(C.ACCENT);
-const WARN_RGB = hexToRgb(C.WARN);
-const DANGER_RGB = hexToRgb(C.DANGER);
-const INK_RGB = hexToRgb(C.INK);
-const INK_DIM_RGB = hexToRgb(C.INK_DIM);
-const UNSEEN_RGB = hexToRgb(C.NODE_UNSEEN);
-/** 恒星类型 → GL 颜色三元组 */
-const STAR_RGB = {};
-for (const k of Object.keys(STAR_COLORS)) STAR_RGB[k] = hexToRgb(STAR_COLORS[k]);
-
-// —— 模块级 scratch（渲染为同步单线程调用，复用以保证循环内零分配） ——————
-const UP_VEC = new Float32Array([0, 0, 1]);
-const _tView = new Float32Array(16);
-const _tProj = new Float32Array(16);
-const _tVP = new Float32Array(16);
-const _tIVP = new Float32Array(16);
-const _tEye = new Float32Array(3);
-const _tCtr = new Float32Array(3);
-const _v4a = new Float32Array(4);
-const _v4b = new Float32Array(4);
-const _v4c = new Float32Array(4);
-const _v4d = new Float32Array(4);
-const _ptTmp = new Float32Array(2);
-const _ptA = new Float32Array(2);
-const _ptB = new Float32Array(2);
-const _wp3 = new Float32Array(3);
-const _wp3b = new Float32Array(3);
-const _prj2 = new Float32Array(2);
-
-class GalaxyRenderer {
-  constructor() {
-    /** 视图状态：x/y 为基准面中心（策略坐标 0..1000，与相机目标同步），zoom 0.5..4 */
-    this.view = { x: WORLD / 2, y: WORLD / 2, zoom: 1 };
-    /** @type {import('./CanvasManager.js').CanvasManager|null} */
-    this.cm = null;
-    /** 最新快照引用（视图通过 setSnapshot 更新；渲染循环读最新值） */
-    this._snapshot = null;
-    /** 悬停命中的星系 id（视图直接写 renderer._hoverId 或调用 setHover） */
-    this._hoverId = null;
-    this._bgKey = '';    // 背景渐变缓存键（w×h，2D 路径用）
-    this._bgGrad = null; // 背景渐变缓存
-    this._stars = null;  // 程序化静态星点（世界坐标，懒构建一次）
-
-    // —— R3：轨道相机与渲染路径状态 ——
-    /** 相机姿态：pitch/yaw（弧度）；目标点即 view.x/y 映射的基准面点 */
-    this._cam = { pitch: 55 * (Math.PI / 180), yaw: 0 };
-    /** 上一帧实际使用的渲染路径（'gl' | '2d'），供 pick/坐标换算保持一致 */
-    this._mode = '2d';
-    /** GL 资源容器（首次 GL 帧懒构建；构建失败置 _glBroken 走 2D） */
-    this._gl3d = null;
-    this._glBroken = false;
-    this._offGLState = null;
-
-    // 相机矩阵（实例持有，供 render/pick/坐标换算复用）
-    this._mView = new Float32Array(16);
-    this._mProj = new Float32Array(16);
-    this._mVP = new Float32Array(16);
-    this._mIVP = new Float32Array(16);
-    mat4Identity(this._mView);
-    mat4Identity(this._mProj);
-    mat4Identity(this._mVP);
-    mat4Identity(this._mIVP);
-    this._camEye = new Float32Array(3);
-    this._camCtr = new Float32Array(3);
-    this._frameW = 0; // 与 _mVP 配套的视口逻辑尺寸（0 表示矩阵未就绪）
-    this._frameH = 0;
-    /** 相机代次：panBy/zoomAt/旋转递增；_frameVersion 落后即表示实例矩阵过期 */
-    this._camVersion = 0;
-    this._frameVersion = -1;
-
-    // pick 投影缓存（每帧 render 更新；相机变化后置脏懒重建）
-    /** @type {Map<string|number, {id:any, s:object, sx:number, sy:number, vis:boolean}>} */
-    this._projCache = new Map();
-    /** @type {Array<{id:any, s:object, sx:number, sy:number, vis:boolean}>} */
-    this._pickList = [];
-    this._projValid = false;
-    this._projSnap = null;
-
-    // GL 场景动态数据（预分配，每帧覆写）
-    this._spriteData = new Float32Array(1024 * 12);
-    this._spriteCount = 0;
-    this._shellData = new Float32Array(128 * 8);
-    this._shellCount = 0;
-    this._lineData = new Float32Array(6000 * 7);
-    this._lineVerts = 0;
-    this._byId = null;
-    this._facHex = null;
-    this._facRgb = null;
-    this._novaSeeds = null;
-    this._novaSnap = null;
-
-    // 右键/中键旋转拖拽状态（监听器仅拖拽期间存在于 window）
-    this._rot = { active: false, x: 0, y: 0 };
-    this._rotDetach = null;
-  }
-
-  /**
-   * 绑定画布管理器；持有 GL 时注册上下文恢复重建钩子，并挂载右/中键旋转交互。
-   * @param {import('./CanvasManager.js').CanvasManager} canvasManager
-   */
-  init(canvasManager) {
-    this.cm = canvasManager || null;
-    if (this._offGLState) {
-      try { this._offGLState(); } catch (_) { /* 忽略注销异常 */ }
-      this._offGLState = null;
-    }
-    this._detachRot();
-    if (this.cm) {
-      // 上下文恢复（rebuild 成功）后重建本渲染器的 GL 资源；失败收敛为 2D 兜底
-      if (typeof this.cm.onGLStateChange === 'function') {
-        this._offGLState = this.cm.onGLStateChange((degraded) => {
-          if (degraded) return; // 丢失：render 自动走 _render2D
-          this._glBroken = false;
-          if (this._gl3d && this.cm && this.cm.glc) {
-            try {
-              this._gl3d.rebuild(this.cm.glc);
-            } catch (e) {
-              console.error('[GalaxyRenderer] GL 资源重建失败，退回 2D:', e);
-              this._glBroken = true;
-            }
-          }
-        });
-      }
-      // 旋转交互：仅当画布支持事件监听时挂载（桩环境/极简 cm 下静默跳过）
-      if (this.cm.canvas && typeof this.cm.canvas.addEventListener === 'function') {
-        this._attachRot(this.cm.canvas);
-      }
-    }
-    return this;
-  }
-
-  /** 更新渲染用的最新快照引用（不复制、不修改） */
-  setSnapshot(snap) {
-    this._snapshot = snap || null;
-  }
-
-  /** 更新悬停星系 id */
-  setHover(id) {
-    this._hoverId = id || null;
-  }
-
-  // —— 路径判定 ——————————————————————————————————
-
-  /** 当前视口宽（逻辑像素） */
-  _vw() { return this.cm ? this.cm.width : 0; }
-  /** 当前视口高（逻辑像素） */
-  _vh() { return this.cm ? this.cm.height : 0; }
-
-  /** GL 路径可用性（快照有效性由调用方另行判断） */
-  _glActive() {
-    const cm = this.cm;
-    return !!(cm && cm.hasGL && cm.tier < 3 && !cm.glDegraded && !this._glBroken);
-  }
-
-  // —— 视图变换（GL：轨道相机；2D：旧平面映射） ——————————————————
-
-  /**
-   * 屏幕坐标 → 世界（策略）坐标。
-   * GL 路径：经相机矩阵反投影射线与 z=0 基准面求交（单选/移动命令坐标一致）；
-   * 无交点（射线背向/平行）时回退当前目标点。
-   */
-  screenToWorld(sx, sy) {
-    if (this._mode === 'gl') {
-      const p = this._planePointAt(sx, sy, _ptTmp, NaN);
-      if (p) {
-        return { x: p[0] / WORLD_SCALE + 500, y: p[1] / WORLD_SCALE + 500 };
-      }
-      return { x: this.view.x, y: this.view.y };
-    }
-    const z = this.view.zoom;
-    return {
-      x: (sx - this._vw() / 2) / z + this.view.x,
-      y: (sy - this._vh() / 2) / z + this.view.y,
-    };
-  }
-
-  /**
-   * 世界（策略）坐标 → 屏幕坐标（返回 [sx, sy]）。
-   * GL 路径投影基准面点 (wx, wy, 0)；相机矩阵未就绪时退回 2D 公式。
-   */
-  worldToScreen(wx, wy) {
-    if (this._mode === 'gl') {
-      // 相机在渲染帧之间被 pan/zoom/旋转改动过 → 重建实例矩阵，保证交互期坐标一致
-      if (this._frameVersion !== this._camVersion || this._frameW <= 0) {
-        this._computeCamera(this._vw(), this._vh());
-      }
-      if (this._frameW > 0) {
-        this._projectToScreen((wx - 500) * WORLD_SCALE, (wy - 500) * WORLD_SCALE, 0, _prj2);
-        return [_prj2[0], _prj2[1]];
-      }
-    }
-    const z = this.view.zoom;
-    return [
-      (wx - this.view.x) * z + this._vw() / 2,
-      (wy - this.view.y) * z + this._vh() / 2,
-    ];
-  }
-
-  /**
-   * 按屏幕像素平移视图（dx/dy 为屏幕位移）。
-   * GL 路径沿相机右向量与基准面投影上向量移动目标（保持目标在基准面上，
-   * 使 screenToWorld 的射线求交导航稳定）；比例取目标深度处的 世界/像素 系数。
-   */
-  panBy(dx, dy) {
-    if (this._mode === 'gl') {
-      const w = this._vw();
-      const h = this._vh();
-      if (w > 1 && h > 1) {
-        const cam = this._computeCamera(w, h); // 仅为取 世界/像素 系数 k
-        if (cam) {
-          const k = cam.k;
-          const fx = Math.cos(this._cam.yaw);
-          const fy = Math.sin(this._cam.yaw);
-          const rx = -Math.sin(this._cam.yaw);
-          const ry = Math.cos(this._cam.yaw);
-          // 拖拽方向 = 内容跟随光标：目标沿 -右(-dx) 与 屏幕上(=基准面投影 up = -forward)(+dy) 移动
-          const dwx = (-dx * rx - dy * fx) * k;
-          const dwy = (-dx * ry - dy * fy) * k;
-          this.view.x += dwx / WORLD_SCALE;
-          this.view.y += dwy / WORLD_SCALE;
-          this._clampView();
-          this._camVersion++;
-          this._projValid = false;
-          return;
-        }
-      }
-    }
-    const z = this.view.zoom || 1;
-    // 软边界：防止把星图拖丢（世界 0..1000，放宽 ±200）
-    this.view.x = Math.min(WORLD + 200, Math.max(-200, this.view.x - dx / z));
-    this.view.y = Math.min(WORLD + 200, Math.max(-200, this.view.y - dy / z));
-    this._camVersion++;
-    this._projValid = false;
-  }
-
-  /**
-   * 以屏幕点 (sx,sy) 为锚缩放（factor>1 放大），zoom clamp 0.5–4（等比驱动轨道半径）。
-   * GL 路径：缩放前后光标下的基准面交点保持不动（平移目标补偿透视差）。
-   */
-  zoomAt(sx, sy, factor) {
-    if (this._mode === 'gl') {
-      const w = this._vw();
-      const h = this._vh();
-      if (w > 1 && h > 1) {
-        const before = this._planePointAt(sx, sy, _ptA, NaN);
-        const z1 = Math.min(4, Math.max(0.5, (this.view.zoom || 1) * factor));
-        if (before) {
-          const after = this._planePointAt(sx, sy, _ptB, CAM_R0 / z1);
-          if (after) {
-            this.view.x += (before[0] - after[0]) / WORLD_SCALE;
-            this.view.y += (before[1] - after[1]) / WORLD_SCALE;
-          }
-        }
-        this.view.zoom = z1;
-        this._clampView();
-        this._camVersion++;
-        this._projValid = false;
-        return;
-      }
-    }
-    const before = this.screenToWorld(sx, sy); // 光标下的世界点（缩放前后不动）
-    const z = Math.min(4, Math.max(0.5, this.view.zoom * factor));
-    this.view.zoom = z;
-    this.view.x = before.x - (sx - this._vw() / 2) / z;
-    this.view.y = before.y - (sy - this._vh() / 2) / z;
-    this._clampView();
-    this._camVersion++;
-    this._projValid = false;
-  }
-
-  /** 视图中心软边界约束（与旧版一致：策略坐标 -200..1200） */
-  _clampView() {
-    this.view.x = Math.min(WORLD + 200, Math.max(-200, this.view.x));
-    this.view.y = Math.min(WORLD + 200, Math.max(-200, this.view.y));
-  }
-
-  // —— 相机矩阵与拾取投影 ——————————————————————————————————
-
-  /**
-   * 构建轨道相机矩阵组（写入调用方提供的缓冲）。
-   * eye = target + R·(cosP·cosY, cosP·sinY, sinP)，up = +Z（pitch 限幅内不退化）。
-   */
-  _buildCameraInto(w, h, radius, view, proj, vp, ivp, eye, ctr) {
-    const cp = Math.cos(this._cam.pitch);
-    const sp = Math.sin(this._cam.pitch);
-    const cy = Math.cos(this._cam.yaw);
-    const sy = Math.sin(this._cam.yaw);
-    const tx = (this.view.x - 500) * WORLD_SCALE;
-    const ty = (this.view.y - 500) * WORLD_SCALE;
-    eye[0] = tx + radius * cp * cy;
-    eye[1] = ty + radius * cp * sy;
-    eye[2] = radius * sp;
-    ctr[0] = tx;
-    ctr[1] = ty;
-    ctr[2] = 0;
-    mat4LookAt(view, eye, ctr, UP_VEC);
-    mat4Perspective(proj, FOV, Math.max(0.1, w / Math.max(1, h)), 0.1, 400);
-    mat4Multiply(vp, proj, view);
-    if (!mat4Invert(ivp, vp)) mat4Identity(ivp);
-  }
-
-  /**
-   * 计算当前帧相机：填充实例矩阵 _mView/_mProj/_mVP/_mIVP 并记录配套视口尺寸。
-   * @returns {{eye:Float32Array, radius:number, k:number}|null} k = 目标深度处 世界/逻辑像素
-   */
-  _computeCamera(w, h) {
-    if (!(w > 1 && h > 1)) return null;
-    const zoom = this.view.zoom || 1;
-    const radius = Math.min(CAM_R_MAX, Math.max(CAM_R_MIN, CAM_R0 / zoom));
-    this._buildCameraInto(w, h, radius, this._mView, this._mProj, this._mVP, this._mIVP, this._camEye, this._camCtr);
-    this._frameW = w;
-    this._frameH = h;
-    this._frameVersion = this._camVersion;
-    const k = (2 * radius * Math.tan(FOV / 2)) / h;
-    return { eye: this._camEye, radius, k };
-  }
-
-  /**
-   * 屏幕像素 → z=0 基准面交点（世界坐标）。
-   * @param {number} sx 逻辑像素
-   * @param {number} sy 逻辑像素
-   * @param {Float32Array} out (2) 输出
-   * @param {number} radiusOverride NaN=用当前 zoom 半径（缩放锚定预演时传新半径）
-   * @returns {Float32Array|null} out 或 null（视口未就绪 / 射线无交点）
-   */
-  _planePointAt(sx, sy, out, radiusOverride) {
-    const w = this._vw();
-    const h = this._vh();
-    if (!(w > 1 && h > 1)) return null;
-    let radius;
-    if (Number.isFinite(radiusOverride)) {
-      radius = Math.min(CAM_R_MAX, Math.max(CAM_R_MIN, radiusOverride));
-    } else {
-      const zoom = this.view.zoom || 1;
-      radius = Math.min(CAM_R_MAX, Math.max(CAM_R_MIN, CAM_R0 / zoom));
-    }
-    this._buildCameraInto(w, h, radius, _tView, _tProj, _tVP, _tIVP, _tEye, _tCtr);
-    const nx = (sx / w) * 2 - 1;
-    const ny = 1 - (sy / h) * 2;
-    _v4a[0] = nx; _v4a[1] = ny; _v4a[2] = -1; _v4a[3] = 1;
-    _v4b[0] = nx; _v4b[1] = ny; _v4b[2] = 1; _v4b[3] = 1;
-    mat4MulVec4(_v4c, _tIVP, _v4a);
-    mat4MulVec4(_v4d, _tIVP, _v4b);
-    const w0 = _v4c[3];
-    const w1 = _v4d[3];
-    if (!(Math.abs(w0) > 1e-9 && Math.abs(w1) > 1e-9)) return null;
-    const rox = _v4c[0] / w0;
-    const roy = _v4c[1] / w0;
-    const roz = _v4c[2] / w0;
-    const dxx = _v4d[0] / w1 - rox;
-    const dyy = _v4d[1] / w1 - roy;
-    const dzz = _v4d[2] / w1 - roz;
-    if (Math.abs(dzz) < 1e-6) return null;
-    const t = -roz / dzz;
-    if (!(t > 0)) return null;
-    out[0] = rox + dxx * t;
-    out[1] = roy + dyy * t;
-    return out;
-  }
-
-  /**
-   * 世界坐标 → 屏幕逻辑像素（写入 out[0..1]；相机背后返回 -1e5 哨兵）。
-   * @param {number} wx 世界 x
-   * @param {number} wy 世界 y
-   * @param {number} wz 世界 z
-   */
-  _projectToScreen(wx, wy, wz, out) {
-    const m = this._mVP;
-    const cw = m[3] * wx + m[7] * wy + m[11] * wz + m[15];
-    if (cw <= 1e-6) {
-      out[0] = -1e5;
-      out[1] = -1e5;
-      return out;
-    }
-    const cx = (m[0] * wx + m[4] * wy + m[8] * wz + m[12]) / cw;
-    const cy = (m[1] * wx + m[5] * wy + m[9] * wz + m[13]) / cw;
-    out[0] = (cx * 0.5 + 0.5) * this._frameW;
-    out[1] = (0.5 - cy * 0.5) * this._frameH;
-    return out;
-  }
-
-  // —— 命中检测 ——————————————————————————————————
-
-  /**
-   * 屏幕点命中检测：返回命中的星系 id 或 null。
-   * _pickList 由 _updateProjCache 维护（每帧 render 更新；相机变化后懒重建），
-   * 每项为可见星系三维位置经 viewProj 投影的屏幕坐标；命中半径 = max(10, 14/zoom)。
-   */
-  pick(sx, sy) {
-    const snap = this._snapshot;
-    if (!snap || !Array.isArray(snap.systems) || !snap.systems.length) return null;
-    if (!this._projValid || this._projSnap !== snap) {
-      this._updateProjCache(snap, this._vw(), this._vh());
-    }
-    const r = Math.max(10, 14 / (this.view.zoom || 1));
-    let best = null;
-    let bestD = Infinity;
-    for (const e of this._pickList) {
-      if (!e.vis) continue;
-      const d = Math.hypot(e.sx - sx, e.sy - sy);
-      if (d <= r && d < bestD) {
-        best = e.id;
-        bestD = d;
-      }
-    }
-    return best;
-  }
-
-  /**
-   * 重建 pick/HUD 投影缓存：每个星系的三维位置（GL 模式含高度 z）投影到屏幕空间。
-   * render() 每帧调用；panBy/zoomAt/旋转置 _projValid=false 后由 pick 懒重建。
-   */
-  _updateProjCache(snap, w, h) {
-    this._projCache.clear();
-    this._pickList.length = 0;
-    this._projSnap = snap || null;
-    this._projValid = false;
-    if (!snap || !Array.isArray(snap.systems) || !(w > 1) || !(h > 1)) return;
-    const glMode = this._mode === 'gl' && this._glActive();
-    // 总是重算相机：panBy/zoomAt/旋转只置脏不回写实例矩阵，此处统一刷新防拾取漂移
-    if (glMode) this._computeCamera(w, h);
-    for (const s of snap.systems) {
-      let sx;
-      let sy;
-      if (glMode && this._frameW > 0) {
-        systemWorldPos(s, _wp3);
-        this._projectToScreen(_wp3[0], _wp3[1], _wp3[2], _prj2);
-        sx = _prj2[0];
-        sy = _prj2[1];
-      } else {
-        sx = (s.x - this.view.x) * this.view.zoom + w / 2;
-        sy = (s.y - this.view.y) * this.view.zoom + h / 2;
-      }
-      const vis = sx > -80 && sy > -80 && sx < w + 80 && sy < h + 80;
-      const entry = { id: s.id, s, sx, sy, vis };
-      this._projCache.set(s.id, entry);
-      this._pickList.push(entry);
-    }
-    this._projValid = true;
-  }
-
-  // —— 渲染入口 ——————————————————————————————————
-
-  /**
-   * 渲染一帧。
-   * @param {CanvasRenderingContext2D} ctx HUD 2D 上下文（cm.ctx，dpr 变换已由 beginFrame 设定）
-   * @param {number} w 画布逻辑像素宽
-   * @param {number} h 画布逻辑像素高
-   * @param {object} snapshot App 快照（snapshot.systems / fleets / factions / battles）
-   * @param {object} layers 图层开关 { lanes, ownership, claims, resources, danger,
-   *                                 fleets, surveys, colonies, trade, fronts }
-   * @param {object} opts { selectedId, hoverId, playerFactionId, reducedEffects,
-   *                        time(秒，仅动画 uniform), marketSystemIds(Set|Array，trade 层用) }
-   */
-  render(ctx, w, h, snapshot, layers, opts = {}) {
-    const snap = snapshot || this._snapshot;
-    if (snap) this._snapshot = snap;
-    this._w = w;
-    this._h = h;
-
-    const reduced = !!opts.reducedEffects;
-    const t = Number(opts.time) || 0;
-    const L = { lanes: true, ownership: true, claims: false, resources: false, danger: false,
-      fleets: true, surveys: true, colonies: true, trade: false, fronts: true, ...(layers || {}) };
-
-    // 派生共享数据（2D/GL 两条路径共用的查找表）
-    this._byId = snap && Array.isArray(snap.systems) ? new Map(snap.systems.map((s) => [s.id, s])) : null;
-    this._facHex = new Map(((snap && snap.factions) || []).map((f) => [f.id, f.color || C.ACCENT]));
-    this._facRgb = new Map(((snap && snap.factions) || []).map((f) => [f.id, hexToRgb(f.color || C.ACCENT)]));
-
-    // 路径选择：GL（tier<3、有快照）或 2D 退化保护
-    const glTry = this._glActive() && snap && Array.isArray(snap.systems);
-    this._mode = glTry ? 'gl' : '2d';
-    this._updateProjCache(snap, w, h);
-
-    let drewGL = false;
-    if (this._mode === 'gl') {
-      drewGL = this._renderGLFrame(w, h, snap, L, opts, reduced, t);
-    }
-    if (!drewGL) {
-      // GL 不可用（无 WebGL / tier3 / 上下文丢失 / 帧失败）：本帧起走 2D 并重投影缓存
-      this._mode = '2d';
-      this._updateProjCache(snap, w, h);
-      this._render2D(ctx, w, h, snap, L, opts);
-    } else {
-      this._drawHud(ctx, w, h, snap, L, opts, reduced, t);
-    }
-  }
-
-  // —— GL 路径 ————————————————————————————————————————————
-
-  /** 懒构建 GL 资源（失败抛错由调用方捕获并置 _glBroken） */
-  _ensureGL3D() {
-    if (this._gl3d) return this._gl3d;
-    const cm = this.cm;
-    if (!cm || !cm.glc) throw new Error('GLContext 缺失');
-    const g3 = new Galaxy3D();
-    g3.init(cm.glc);
-    this._gl3d = g3;
-    return g3;
-  }
-
-  /** tier → 星系盘粒子档位（40k/15k/6k；cm.post.particleScale 为一致性硬上界） */
-  _particleCountFor() {
-    const cm = this.cm;
-    const tier = cm.tier;
-    const table = tier <= 1 ? 40000 : tier === 2 ? 15000 : 6000;
-    const scale = cm.post ? (cm.post.particleScale ?? 1) : 1;
-    return Math.min(table, Math.round(40000 * Math.max(0, scale)));
-  }
-
-  /**
-   * GL 帧主体：beginGLFrame → 场景 → endGLFrame。返回 false 表示本帧需回退 2D。
-   * 任何 GL 异常都被捕获并置 _glBroken（后续帧走 _render2D），render() 不抛错。
-   */
-  _renderGLFrame(w, h, snap, L, opts, reduced, t) {
-    const cm = this.cm;
-    const post = cm.post;
-    if (!post || !post.ready) return false;
-    const cam = this._computeCamera(w, h);
-    if (!cam) return false;
-    let g3;
-    try {
-      g3 = this._ensureGL3D();
-    } catch (e) {
-      console.error('[GalaxyRenderer] GL 资源构建失败，退回 2D:', e);
-      this._glBroken = true;
-      return false;
-    }
-    let began = false;
-    try {
-      const target = cm.beginGLFrame(); // 绑定场景 FBO + viewport（tier>=3/降级返回 null）
-      if (!target) return false;
-      began = true;
-      const gl = cm.gl;
-
-      // 共享状态：加法混合、深度关（全 additive，绘制顺序不影响合成结果）
-      gl.disable(gl.DEPTH_TEST);
-      gl.enable(gl.BLEND);
-      gl.blendFunc(gl.ONE, gl.ONE);
-      gl.clearColor(0.0275, 0.0431, 0.0706, 1.0); // C.BG #070b12
-      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-
-      const px = this._mProj[0];
-      const py = this._mProj[5];
-
-      // 1) 星系盘：实例化粒子 billboard（一次 drawArraysInstanced）
-      const pcount = this._particleCountFor();
-      if (pcount > 0 && g3.particleCount > 0) {
-        g3.drawDisk(gl, {
-          viewProj: this._mVP,
-          px,
-          py,
-          minSize: cam.k * 0.9,
-          count: Math.min(pcount, g3.particleCount),
-          time: reduced ? 0 : t,
-        });
-      }
-
-      // 2) 体积星云全屏 pass（粒子之后、HUD 之前；uSteps 按 tier 24/14/0）
-      const steps = cm.tier <= 1 ? 24 : cm.tier === 2 ? 14 : 0;
-      if (steps > 0 && !reduced) {
-        g3.drawNebula(gl, {
-          invViewProj: this._mIVP,
-          time: t,
-          steps,
-          gain: NEBULA_GAIN,
-        });
-      }
-
-      // 3) 航路 + 垂直投影标尺线（一次性动态缓冲）
-      this._buildLines(snap, L);
-      if (this._lineVerts > 0) {
-        g3.drawLines(gl, this._lineData, this._lineVerts, { viewProj: this._mVP });
-      }
-
-      // 4) 星系节点 / 归属光晕 / 势力环（billboard 核心 + 环带）
-      this._buildSprites(snap, L, cam);
-      if (this._spriteCount > 0) {
-        g3.drawSprites(gl, this._spriteData, this._spriteCount, { viewProj: this._mVP, px, py });
-      }
-
-      // 5) 超新星球壳（dangerRating>6 / 黑洞 / 脉冲星；additive imposter）
-      this._buildShells(snap);
-      if (this._shellCount > 0) {
-        g3.drawShell(gl, this._shellData, this._shellCount, {
-          view: this._mView,
-          proj: this._mProj,
-          px,
-          py,
-          time: reduced ? 0 : t,
-        });
-      }
-      void opts;
-    } catch (e) {
-      console.error('[GalaxyRenderer] GL 帧绘制失败，退回 2D 路径:', e);
-      this._glBroken = true;
-    }
-    if (!began) return false;
-    try {
-      cm.endGLFrame({ bloom: reduced ? 0.5 : 0.95, exposure: 1.12, time: t });
-    } catch (_) { /* 后处理异常不致命：下一帧按 _glBroken 走 2D */ }
-    return true;
-  }
-
-  /** 航路 + 垂直标尺线几何（写入 _lineData；上限 3000 段，超出截断） */
-  _buildLines(snap, L) {
-    const arr = this._lineData;
-    const cap = arr.length / 7;
-    let v = 0;
-    const pushV = (x, y, z, rgb, a) => {
-      if (v >= cap) return;
-      const o = v * 7;
-      arr[o] = x; arr[o + 1] = y; arr[o + 2] = z;
-      arr[o + 3] = rgb[0]; arr[o + 4] = rgb[1]; arr[o + 5] = rgb[2];
-      arr[o + 6] = a;
-      v++;
-    };
-    const byId = this._byId;
-    if (L.lanes && byId) {
-      for (const s of snap.systems) {
-        systemWorldPos(s, _wp3);
-        const ax = _wp3[0];
-        const ay = _wp3[1];
-        const az = _wp3[2];
-        for (const laneId of s.lanes || []) {
-          if (laneId <= s.id) continue; // 字符串序去重：每条航路只画一次
-          const other = byId.get(laneId);
-          if (!other) continue;
-          systemWorldPos(other, _wp3b);
-          const known = (s.surveyedLevel ?? 0) >= 1 && (other.surveyedLevel ?? 0) >= 1;
-          const a = known ? LANE_A_KNOWN : LANE_A_DIM;
-          pushV(ax, ay, az, ACCENT_RGB, a);
-          pushV(_wp3b[0], _wp3b[1], _wp3b[2], ACCENT_RGB, a);
-        }
-      }
-    }
-    // 垂直投影标尺线：三维位置 → 基准面（z=0）
-    for (const s of snap.systems) {
-      systemWorldPos(s, _wp3);
-      pushV(_wp3[0], _wp3[1], _wp3[2], INK_RGB, STALK_A);
-      pushV(_wp3[0], _wp3[1], 0, INK_RGB, STALK_A);
-    }
-    this._lineVerts = v;
-  }
-
-  /** 星系节点 / 归属光晕 / 势力环实例（写入 _spriteData；尺寸按屏幕像素×k 换算世界单位） */
-  _buildSprites(snap, L, cam) {
-    const arr = this._spriteData;
-    const cap = arr.length / 12;
-    const k = cam.k;
-    const z = this.view.zoom || 1;
-    const sizeK = Math.min(1.5, Math.max(0.8, z));
-    let n = 0;
-    const push = (p3, size, ar, ag, ab, aa, br, bg, bb, ba) => {
-      if (n >= cap) return;
-      const o = n * 12;
-      arr[o] = p3[0]; arr[o + 1] = p3[1]; arr[o + 2] = p3[2];
-      arr[o + 3] = size;
-      arr[o + 4] = ar; arr[o + 5] = ag; arr[o + 6] = ab; arr[o + 7] = aa;
-      arr[o + 8] = br; arr[o + 9] = bg; arr[o + 10] = bb; arr[o + 11] = ba;
-      n++;
-    };
-    for (const s of snap.systems) {
-      systemWorldPos(s, _wp3);
-      const lvl = s.surveyedLevel ?? 0;
-      const typeId = s.star && s.star.typeId;
-      // 归属势力光晕（软高斯薄雾：半径收敛 + 低强度，避免吞没星盘）
-      if (L.ownership && s.ownerFactionId) {
-        const oc = this._facRgb.get(s.ownerFactionId) || ACCENT_RGB;
-        push(_wp3, 11 * k, oc[0] * 0.45, oc[1] * 0.45, oc[2] * 0.45, 0.010, 0, 0, 0, 0);
-      }
-      // 节点核心
-      if (lvl === 0) {
-        // 未探索：暗灰小光斑
-        push(_wp3, 2.2 * sizeK * k * 2.4, UNSEEN_RGB[0], UNSEEN_RGB[1], UNSEEN_RGB[2], 0.5, 0, 0, 0, 0);
-      } else if (typeId === 'blackHole') {
-        // 黑洞：暗核 + 琥珀吸积环
-        push(_wp3, 2.2 * sizeK * k * 2.0, 0.06, 0.07, 0.09, 0.8, 0, 0, 0, 0);
-        push(_wp3, (5.5 * sizeK * k) / 0.75, 0, 0, 0, 0, WARN_RGB[0], WARN_RGB[1], WARN_RGB[2], 0.85);
-      } else {
-        const baseR = (STAR_SIZES[typeId] || 3.2) * sizeK;
-        const sc = STAR_RGB[typeId] || INK_RGB;
-        const inten = lvl >= 4 ? 2.0 : 1.15;
-        push(_wp3, baseR * 2.4 * k, sc[0], sc[1], sc[2], inten, 0, 0, 0, 0);
-        if (lvl >= 4) {
-          // 全亮辉光垫底
-          push(_wp3, baseR * 5.2 * k, sc[0], sc[1], sc[2], 0.16, 0, 0, 0, 0);
-        }
-        if (typeId === 'pulsar' || typeId === 'neutronStar') {
-          // 脉冲星：外围十字光近似（大半径微光斑）
-          push(_wp3, baseR * 4.6 * k, sc[0], sc[1], sc[2], 0.5, 0, 0, 0, 0);
-        }
-      }
-      // 外圈（归属势力色 / 无主灰）
-      const orc = s.ownerFactionId ? (this._facRgb.get(s.ownerFactionId) || ACCENT_RGB) : INK_DIM_RGB;
-      const ringA = lvl === 0 ? 0.28 : 0.9;
-      push(_wp3, (7 * sizeK * k) / 0.75, 0, 0, 0, 0, orc[0], orc[1], orc[2], ringA);
-    }
-    this._spriteCount = n;
-  }
-
-  /** 超新星球壳实例（dangerRating>6 / 黑洞 / 脉冲星；写入 _shellData） */
-  _buildShells(snap) {
-    const arr = this._shellData;
-    const cap = arr.length / 8;
-    if (this._novaSnap !== snap) {
-      this._novaSeeds = generateSupernovaSeeds(snap.systems, WORLD_SCALE);
-      this._novaSnap = snap;
-    }
-    const z = this.view.zoom || 1;
-    const base = SHELL_R_BASE / Math.sqrt(Math.max(0.5, z));
-    let n = 0;
-    for (let i = 0; i < snap.systems.length; i++) {
-      const s = snap.systems[i];
-      const typeId = s.star && s.star.typeId;
-      const danger = s.dangerRating ?? 0;
-      if (danger <= 6 && typeId !== 'blackHole' && typeId !== 'pulsar') continue;
-      const rgb = danger > 6 ? DANGER_RGB : typeId === 'blackHole' ? WARN_RGB : STAR_RGB.pulsar;
-      systemWorldPos(s, _wp3);
-      if (n >= cap) break;
-      const o = n * 8;
-      arr[o] = _wp3[0];
-      arr[o + 1] = _wp3[1];
-      arr[o + 2] = _wp3[2];
-      arr[o + 3] = base;
-      arr[o + 4] = rgb[0];
-      arr[o + 5] = rgb[1];
-      arr[o + 6] = rgb[2];
-      const seeds = this._novaSeeds;
-      arr[o + 7] = seeds && i < seeds.length ? seeds[i] : ((i * 0.618034) % 1);
-      n++;
-    }
-    this._shellCount = n;
-  }
-
-  // —— HUD（2D 透明层；GL 模式下所有坐标来自 _projCache 投影） ————————
-
-  /** GL 模式取星系屏幕坐标：优先 _projCache（三维位置投影），缺省退 worldToScreen */
-  _hudPosFn() {
-    const cache = this._projCache;
-    const self = this;
-    return (s) => {
-      const e = cache.get(s.id);
-      if (e) return [e.sx, e.sy];
-      return self.worldToScreen(s.x, s.y);
-    };
-  }
-
-  /** 构建世界锚定静态星点（一次） */
-  _buildStars() {
-    const stars = [];
-    const N = 260;
-    for (let i = 0; i < N; i++) {
-      stars.push({
-        x: hash01(i) * WORLD,
-        y: hash01(i * 1.37 + 7.31) * WORLD,
-        r: 0.5 + hash01(i * 2.11 + 13.7) * 1.3,
-        a: 0.12 + hash01(i * 3.73 + 29.1) * 0.5,
-      });
-    }
-    this._stars = stars;
-  }
-
-  /** GL 模式背景星点（透明 HUD 上叠画，经矩阵投影保持世界锚定） */
-  _drawHudStars(ctx, w, h) {
-    if (!this._stars) this._buildStars();
-    const m = 60; // 视口外剔除边距
-    for (const st of this._stars) {
-      const p = this.worldToScreen(st.x, st.y);
-      if (p[0] < -m || p[1] < -m || p[0] > w + m || p[1] > h + m) continue;
-      ctx.fillStyle = `rgba(201,214,227,${st.a * 0.8})`;
-      ctx.fillRect(p[0] - st.r / 2, p[1] - st.r / 2, st.r, st.r);
-    }
-  }
-
-  /** GL 模式 HUD：星点 → 势力范围 → 星系标记 → 舰队 → 标签 → 前线 */
-  _drawHud(ctx, w, h, snap, L, opts, reduced, t) {
-    ctx.clearRect(0, 0, w, h);
-    if (this._mode !== 'gl') this._drawHudStars(ctx, w, h);
-    if (!snap || !Array.isArray(snap.systems)) return;
-    const facColor = this._facHex;
-    const posFn = this._hudPosFn();
-    // 势力范围雾效已由 GL 通道的归属光晕承担（HUD 层不再叠加 R=90 渐变圆，
-    // 否则 16 星系渐变叠加会形成吞没星盘的巨型色球）
-    const sizeK = Math.min(1.5, Math.max(0.8, this.view.zoom));
-    for (const s of snap.systems) {
-      const p = posFn(s);
-      const sx = p[0];
-      const sy = p[1];
-      if (sx < -60 || sy < -60 || sx > w + 60 || sy > h + 60) continue;
-      const ownerColor = s.ownerFactionId ? (facColor.get(s.ownerFactionId) || C.ACCENT) : C.INK_DIM;
-      this._drawSystemOverlays(ctx, s, sx, sy, sizeK, ownerColor, facColor, L, opts, reduced, t);
-    }
-    if (L.fleets) this._drawFleets(ctx, snap, facColor, posFn);
-    this._drawLabels(ctx, snap, facColor, posFn);
-    if (L.fronts) this._drawFronts(ctx, snap, reduced, t, posFn);
-  }
-
-  // —— 2D 路径（原实现完整保留：webglcontextlost / Tier3 / 无 WebGL 退化保护） ——
-
-  /**
-   * 2D 渲染一帧（传入已合并默认值的图层开关 L）。
-   * @param {CanvasRenderingContext2D} ctx 2D 上下文
-   */
-  _render2D(ctx, w, h, snap, L, opts) {
-    const reduced = !!opts.reducedEffects;
-    const t = Number(opts.time) || 0;
-    const facColor = this._facHex;
-
-    // 1) 背景深空渐变 + 程序化静态星点
-    this._drawBackground(ctx, w, h);
-
-    if (!snap || !Array.isArray(snap.systems)) return;
-
-    // 2) 航路（两端 surveyedLevel>=1 实线 0.25，否则 0.08）
-    if (L.lanes) this._drawLanes(ctx, snap);
-
-    // 3) 势力范围光晕
-    if (L.ownership) this._drawOwnership(ctx, snap, facColor, reduced, null);
-
-    // 4) 星系节点（含 claims / danger / surveys / colonies / trade 叠加层）
-    this._drawSystems(ctx, snap, this._byId, facColor, L, opts, reduced, t);
-
-    // 5) 舰队图标（同系多队横向偏移）
-    if (L.fleets) this._drawFleets(ctx, snap, facColor, null);
-
-    // 6) 标签（zoom<0.8 时按 y 贪心抽稀）
-    this._drawLabels(ctx, snap, facColor, null);
-
-    // 7) 战争前线（战斗星系脉冲环，置于最上）
-    if (L.fronts) this._drawFronts(ctx, snap, reduced, t, null);
-  }
-
-  /** 背景深空渐变 + 世界锚定的静态星点（2D 路径） */
-  _drawBackground(ctx, w, h) {
-    const key = `${w}x${h}`;
-    if (this._bgKey !== key) {
-      const g = ctx.createRadialGradient(w / 2, h * 0.38, 0, w / 2, h / 2, Math.max(w, h) * 0.78);
-      g.addColorStop(0, C.BG_DEEP);
-      g.addColorStop(1, C.BG);
-      this._bgGrad = g;
-      this._bgKey = key;
-    }
-    ctx.fillStyle = this._bgGrad;
-    ctx.fillRect(0, 0, w, h);
-
-    if (!this._stars) this._buildStars();
-    const m = 60; // 视口外剔除边距
-    for (const st of this._stars) {
-      const [sx, sy] = this.worldToScreen(st.x, st.y);
-      if (sx < -m || sy < -m || sx > w + m || sy > h + m) continue;
-      ctx.fillStyle = `rgba(201,214,227,${st.a})`;
-      ctx.fillRect(sx - st.r / 2, sy - st.r / 2, st.r, st.r);
-    }
-  }
-
-  /** 航路：两端均已侦测(surveyedLevel>=1) → 0.25 实线，否则 0.08（2D 路径） */
-  _drawLanes(ctx, snap) {
-    const byId = this._byId;
-    if (!byId) return;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    let knownPath = false;
-    // 分两批描边，减少状态切换：先画已知（亮），再画未知（暗）
-    const dimSegs = [];
-    for (const s of snap.systems) {
-      for (const laneId of s.lanes || []) {
-        if (laneId <= s.id) continue; // 字符串序去重：每条航路只画一次
-        const other = byId.get(laneId);
-        if (!other) continue;
-        const known = (s.surveyedLevel ?? 0) >= 1 && (other.surveyedLevel ?? 0) >= 1;
-        if (known) {
-          const [ax, ay] = this.worldToScreen(s.x, s.y);
-          const [bx, by2] = this.worldToScreen(other.x, other.y);
-          ctx.moveTo(ax, ay);
-          ctx.lineTo(bx, by2);
-          knownPath = true;
-        } else {
-          dimSegs.push([s.x, s.y, other.x, other.y]);
-        }
-      }
-    }
-    if (knownPath) {
-      ctx.strokeStyle = rgba(C.ACCENT, 0.25);
-      ctx.stroke();
-    }
-    ctx.beginPath();
-    for (const [ax, ay, bx, by2] of dimSegs) {
-      const [x1, y1] = this.worldToScreen(ax, ay);
-      const [x2, y2] = this.worldToScreen(bx, by2);
-      ctx.moveTo(x1, y1);
-      ctx.lineTo(x2, y2);
-    }
-    ctx.strokeStyle = rgba(C.ACCENT, 0.08);
-    ctx.stroke();
-  }
-
-  /** 势力范围：每个有主星系画一层大半径径向渐变（faction.color, alpha 0.05） */
-  _drawOwnership(ctx, snap, facColor, reduced, posFn) {
-    const at = posFn || ((s) => this.worldToScreen(s.x, s.y));
-    const R = 90; // 世界单位半径
-    for (const s of snap.systems) {
-      if (!s.ownerFactionId) continue;
-      const color = facColor.get(s.ownerFactionId) || C.ACCENT;
-      const p = at(s);
-      const sx = p[0];
-      const sy = p[1];
-      const sr = R * this.view.zoom;
-      if (sx < -sr || sy < -sr || sx > this._w + sr || sy > this._h + sr) continue;
-      if (reduced) {
-        // 减少动效：以平涂替代径向渐变
-        ctx.fillStyle = rgba(color, 0.04);
-        ctx.beginPath();
-        ctx.arc(sx, sy, sr, 0, Math.PI * 2);
-        ctx.fill();
-      } else {
-        const g = ctx.createRadialGradient(sx, sy, 0, sx, sy, sr);
-        g.addColorStop(0, rgba(color, 0.05));
-        g.addColorStop(1, rgba(color, 0));
-        ctx.fillStyle = g;
-        ctx.beginPath();
-        ctx.arc(sx, sy, sr, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
-  }
-
-  /**
-   * 星系节点主体（2D 路径）。
-   * surveyedLevel 0 → 暗灰小点（无名字）；1–3 → 按恒星类型的星点（黑洞吸积环 / 脉冲星十字光）；
-   * 4 → 全亮（带辉光）；随后绘制共享叠加层 _drawSystemOverlays。
-   */
-  _drawSystems(ctx, snap, byId, facColor, L, opts, reduced, t) {
-    const z = this.view.zoom;
-    const sizeK = Math.min(1.5, Math.max(0.8, z)); // 节点随缩放的轻微尺寸响应
-    const M = 60; // 视口外剔除边距
-
-    for (const s of snap.systems) {
-      const [sx, sy] = this.worldToScreen(s.x, s.y);
-      if (sx < -M || sy < -M || sx > this._w + M || sy > this._h + M) continue;
-      const lvl = s.surveyedLevel ?? 0;
-      const ownerColor = s.ownerFactionId ? (facColor.get(s.ownerFactionId) || C.ACCENT) : C.INK_DIM;
-
-      // —— 星点本体 ——
-      if (lvl === 0) {
-        // 未探索：暗灰小点，无任何额外信息
-        ctx.fillStyle = C.NODE_UNSEEN;
-        ctx.beginPath();
-        ctx.arc(sx, sy, 2.2 * sizeK, 0, Math.PI * 2);
-        ctx.fill();
-      } else {
-        const typeId = s.star && s.star.typeId;
-        const baseR = (STAR_SIZES[typeId] || 3.2) * sizeK;
-        const color = STAR_COLORS[typeId] || C.INK;
-        if (lvl >= 4) {
-          // 全亮：低配辉光（大半透明圆垫底）
-          ctx.fillStyle = rgba(color, 0.18);
-          ctx.beginPath();
-          ctx.arc(sx, sy, baseR * 2.4, 0, Math.PI * 2);
-          ctx.fill();
-        }
-        if (typeId === 'blackHole') {
-          // 黑洞：暗核 + 吸积环
-          ctx.fillStyle = '#111318';
-          ctx.beginPath();
-          ctx.arc(sx, sy, baseR, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.strokeStyle = rgba(C.WARN, 0.85);
-          ctx.lineWidth = 1.5;
-          ctx.beginPath();
-          ctx.arc(sx, sy, baseR + 1.8, 0, Math.PI * 2);
-          ctx.stroke();
-        } else if (typeId === 'pulsar' || typeId === 'neutronStar') {
-          // 脉冲星：十字光 + 亮核
-          ctx.strokeStyle = rgba(color, 0.65);
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.moveTo(sx - baseR * 3, sy);
-          ctx.lineTo(sx + baseR * 3, sy);
-          ctx.moveTo(sx, sy - baseR * 3);
-          ctx.lineTo(sx, sy + baseR * 3);
-          ctx.stroke();
-          ctx.fillStyle = color;
-          ctx.beginPath();
-          ctx.arc(sx, sy, baseR * 0.9, 0, Math.PI * 2);
-          ctx.fill();
-        } else {
-          ctx.fillStyle = color;
-          ctx.beginPath();
-          ctx.arc(sx, sy, baseR, 0, Math.PI * 2);
-          ctx.fill();
-        }
-      }
-
-      // —— 叠加层（悬停/选中/势力环/信息标记） ——
-      this._drawSystemOverlays(ctx, s, sx, sy, sizeK, ownerColor, facColor, L, opts, reduced, t);
-    }
-  }
-
-  /**
-   * 星系叠加层（2D/GL 共用，坐标由调用方给出）：
-   * 势力环、悬停圈、选中呼吸圈、danger>6 红环、claims/resources/danger/surveys/
-   * colonies/trade 信息标记。
-   */
-  _drawSystemOverlays(ctx, s, sx, sy, sizeK, ownerColor, facColor, L, opts, reduced, t) {
-    void facColor;
-    // —— 外圈（归属势力色 / 无主灰） ——
-    ctx.strokeStyle = rgba(ownerColor, 0.9);
-    ctx.lineWidth = 1.2;
-    ctx.beginPath();
-    ctx.arc(sx, sy, 7 * sizeK, 0, Math.PI * 2);
-    ctx.stroke();
-
-    // —— 悬停圈 ——
-    if (opts.hoverId && opts.hoverId === s.id) {
-      ctx.strokeStyle = rgba(C.INK, 0.55);
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.arc(sx, sy, 9.5 * sizeK, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-
-    // —— 选中：高亮圈 + 呼吸动画（reduced 时静止） ——
-    if (opts.selectedId === s.id) {
-      const pulse = reduced ? 0 : Math.sin(t * 3) * 1.6;
-      ctx.strokeStyle = rgba(C.ACCENT, 0.95);
-      ctx.lineWidth = 1.6;
-      ctx.beginPath();
-      ctx.arc(sx, sy, (11 + pulse) * sizeK, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.strokeStyle = rgba(C.ACCENT, 0.35);
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.arc(sx, sy, (14 + pulse) * sizeK, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-
-    // —— danger > 6：红色细环（常显，不依赖 danger 图层） ——
-    if ((s.dangerRating ?? 0) > 6) {
-      ctx.strokeStyle = rgba(C.DANGER, 0.7);
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.arc(sx, sy, 9 * sizeK, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-
-    // —— 叠加层（按图层开关） ——
-    if (L.claims && s.ownerFactionId) {
-      // 领土主张：势力色虚线边界圈
-      ctx.save();
-      ctx.setLineDash([3, 3]);
-      ctx.strokeStyle = rgba(ownerColor, 0.5);
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.arc(sx, sy, 15 * sizeK, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.restore();
-    }
-    if (L.resources && (s.surveyedLevel ?? 0) >= 1) {
-      // 资源富集：节点下色条 + 评级小字（resourceRating 0..10）
-      const rating = Math.min(10, Math.max(0, s.resourceRating ?? 0));
-      const bw = 14;
-      ctx.fillStyle = rgba(C.LINE, 0.9);
-      ctx.fillRect(sx - bw / 2, sy + 10, bw, 2.5);
-      ctx.fillStyle = rgba(C.OK, 0.35 + rating / 10 * 0.65);
-      ctx.fillRect(sx - bw / 2, sy + 10, bw * (rating / 10), 2.5);
-      ctx.fillStyle = rgba(C.INK_FAINT, 0.95);
-      ctx.font = `8px ${FONT}`;
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'top';
-      ctx.fillText(rating.toFixed(1), sx + bw / 2 + 3, sy + 7.5);
-    }
-    if (L.danger) {
-      // 危险度色环：warn(低) → danger(高)
-      const d = Math.min(10, Math.max(0, s.dangerRating ?? 0));
-      if (d > 0.5) {
-        const col = d <= 4 ? C.WARN : C.DANGER;
-        ctx.strokeStyle = rgba(col, Math.min(0.85, 0.15 + d / 10));
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.arc(sx, sy, 10.5 * sizeK, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-    }
-    if (L.surveys && (s.surveyedLevel ?? 0) >= 1) {
-      // 扫描覆盖：调查层级进度弧（lvl/4 圆周）
-      const lvl = Math.min(4, s.surveyedLevel ?? 0);
-      ctx.strokeStyle = rgba(C.ACCENT, lvl >= 4 ? 0.9 : 0.6);
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.arc(sx, sy, 13 * sizeK, -Math.PI / 2, -Math.PI / 2 + (lvl / 4) * Math.PI * 2);
-      ctx.stroke();
-    }
-    if (L.colonies && (s.colonyCount ?? 0) > 0) {
-      // 殖民状态：白色方旗标记 + 数量
-      ctx.fillStyle = rgba(C.INK, 0.95);
-      ctx.fillRect(sx + 7, sy - 12, 5, 5);
-      ctx.strokeStyle = rgba('#070b12', 0.8);
-      ctx.lineWidth = 1;
-      ctx.strokeRect(sx + 7, sy - 12, 5, 5);
-      if (s.colonyCount > 1) {
-        ctx.fillStyle = rgba(C.INK, 0.9);
-        ctx.font = `8px ${FONT}`;
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'top';
-        ctx.fillText(String(s.colonyCount), sx + 13, sy - 12);
-      }
-    }
-    if (L.trade) {
-      // 贸易流：有市场星系画 ◇（琥珀色菱形轮廓）
-      const markets = opts.marketSystemIds || null;
-      const hasMarket = markets && typeof markets.has === 'function' ? markets.has(s.id) : false;
-      if (hasMarket) {
-        const r = 4;
-        ctx.strokeStyle = rgba(C.WARN, 0.9);
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(sx, sy - 14 - r);
-        ctx.lineTo(sx + r, sy - 14);
-        ctx.lineTo(sx, sy - 14 + r);
-        ctx.lineTo(sx - r, sy - 14);
-        ctx.closePath();
-        ctx.stroke();
-      }
-    }
-  }
-
-  /** 舰队图标：systemId 非空（在系停靠）的舰队画 ▲ 小三角，同系多队横向偏移 */
-  _drawFleets(ctx, snap, facColor, posFn) {
-    const at = posFn || ((s) => this.worldToScreen(s.x, s.y));
-    // 按 systemId 分组（保持确定性顺序）
-    const groups = new Map();
-    for (const f of snap.fleets || []) {
-      if (!f.systemId) continue; // 在途舰队 systemId 为空，不上图
-      if (!groups.has(f.systemId)) groups.set(f.systemId, []);
-      groups.get(f.systemId).push(f);
-    }
-    for (const [systemId, list] of groups) {
-      const sys = (snap.systems || []).find((s) => s.id === systemId);
-      if (!sys) continue;
-      const p = at(sys);
-      const sx = p[0];
-      const sy = p[1];
-      const n = list.length;
-      for (let i = 0; i < n; i++) {
-        const f = list[i];
-        const x = sx + (i - (n - 1) / 2) * 9;
-        const y = sy + 14;
-        const color = facColor.get(f.factionId) || C.ACCENT;
-        ctx.beginPath();
-        ctx.moveTo(x, y - 4);
-        ctx.lineTo(x - 4, y + 3);
-        ctx.lineTo(x + 4, y + 3);
-        ctx.closePath();
-        ctx.fillStyle = rgba(color, 0.95);
-        ctx.fill();
-        ctx.strokeStyle = rgba(C.BG, 0.8); // 深色描边保证与背景分离
-        ctx.lineWidth = 1;
-        ctx.stroke();
-      }
-    }
-  }
-
-  /**
-   * 标签：surveyedLevel>=1 显示名字；zoom<0.8 时按 y 排序做贪心抽稀
-   * （纵向间距 <12px 的后者隐藏）。名字白色 10px，有主星系在名字前加 owner 色点。
-   */
-  _drawLabels(ctx, snap, facColor, posFn) {
-    const at = posFn || ((s) => this.worldToScreen(s.x, s.y));
-    const showAll = this.view.zoom >= 0.8;
-    const candidates = [];
-    for (const s of snap.systems) {
-      if ((s.surveyedLevel ?? 0) < 1) continue; // 未探索无名字
-      const p = at(s);
-      const sx = p[0];
-      const sy = p[1];
-      if (sx < -30 || sy < -16 || sx > this._w + 30 || sy > this._h + 16) continue;
-      candidates.push({ s, sx, sy });
-    }
-    candidates.sort((a, b) => a.sy - b.sy); // 按 y 排序
-
-    ctx.font = `10px ${FONT}`;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    let lastY = -Infinity;
-    for (const c of candidates) {
-      if (!showAll) {
-        // 贪心抽稀：与上一个已显示标签纵向间距 <12px 则隐藏
-        if (c.sy - lastY < 12) continue;
-        lastY = c.sy;
-      }
-      const ownerColor = c.s.ownerFactionId ? (facColor.get(c.s.ownerFactionId) || C.ACCENT) : null;
-      let tx = c.sx + 12;
-      if (ownerColor) {
-        ctx.fillStyle = rgba(ownerColor, 0.95);
-        ctx.beginPath();
-        ctx.arc(c.sx + 8, c.sy, 2, 0, Math.PI * 2);
-        ctx.fill();
-        tx = c.sx + 13;
-      }
-      ctx.fillStyle = rgba(C.LABEL, 0.92);
-      ctx.fillText(String(c.s.name || ''), tx, c.sy);
-    }
-  }
-
-  /** 战争前线：有进行中战斗的星系画红色脉冲环 */
-  _drawFronts(ctx, snap, reduced, t, posFn) {
-    const at = posFn || ((s) => this.worldToScreen(s.x, s.y));
-    const battles = snap.battles || [];
-    const byId = this._byId || new Map((snap.systems || []).map((s) => [s.id, s]));
-    for (const b of battles) {
-      const sys = byId.get(b.systemId);
-      if (!sys) continue;
-      const p = at(sys);
-      const sx = p[0];
-      const sy = p[1];
-      const pulse = reduced ? 0 : Math.sin(t * 4) * 2;
-      ctx.strokeStyle = rgba(C.DANGER, 0.85);
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(sx, sy, 14 + pulse, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.strokeStyle = rgba(C.DANGER, 0.35);
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.arc(sx, sy, 19 + pulse, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-  }
-
-  // —— 右键 / 中键旋转交互（渲染器自持，不触碰 GalaxyView） ————————————
-
-  /**
-   * 在 cm.canvas 上挂载旋转交互：右键/中键按下 → 拖拽旋转 yaw/pitch
-   * （pitch 限制 10°..85°）。GalaxyView 的 mousedown 只处理左键，互不冲突；
-   * window 的 move/up 监听仅在拖拽期间存在（mouseup 即卸），不产生跨视图泄漏；
-   * contextmenu 被抑制以避免右键拖拽弹出菜单。
-   */
-  _attachRot(canvas) {
-    const st = this._rot;
-    const move = (e) => {
-      if (!st.active) return;
-      const dx = e.clientX - st.x;
-      const dy = e.clientY - st.y;
-      st.x = e.clientX;
-      st.y = e.clientY;
-      this._cam.yaw -= dx * ROT_SPEED;
-      this._cam.pitch = Math.min(85 * (Math.PI / 180), Math.max(10 * (Math.PI / 180), this._cam.pitch - dy * ROT_SPEED));
-      this._camVersion++;
-      this._projValid = false;
-    };
-    const up = () => {
-      if (!st.active) return;
-      st.active = false;
-      window.removeEventListener('mousemove', move);
-      window.removeEventListener('mouseup', up);
-    };
-    const down = (e) => {
-      if (st.active) return;
-      if (e.button !== 1 && e.button !== 2) return; // 仅中键/右键
-      if (!this._glActive()) return;                // 纯 2D 下无旋转语义
-      st.active = true;
-      st.x = e.clientX;
-      st.y = e.clientY;
-      window.addEventListener('mousemove', move);
-      window.addEventListener('mouseup', up);
-      e.preventDefault();
-    };
-    const ctxm = (e) => {
-      e.preventDefault(); // 抑制地图上的浏览器右键菜单
-    };
-    canvas.addEventListener('mousedown', down);
-    canvas.addEventListener('contextmenu', ctxm);
-    this._rotDetach = () => {
-      canvas.removeEventListener('mousedown', down);
-      canvas.removeEventListener('contextmenu', ctxm);
-      window.removeEventListener('mousemove', move);
-      window.removeEventListener('mouseup', up);
-      st.active = false;
-    };
-  }
-
-  /** 卸载旋转交互（init 重复调用或更换画布时） */
-  _detachRot() {
-    if (this._rotDetach) {
-      try { this._rotDetach(); } catch (_) { /* 忽略 */ }
-      this._rotDetach = null;
-    }
-  }
-}
-
-Object.assign(__exports, { GalaxyRenderer });
-
-});
-__register("src/render/gl/Galaxy3D.js", function (__exports, __require) {
-/**
- * render/gl/Galaxy3D.js — 银河 3D 场景 GL 资源构建（R3 / WebGL2 全 3D 棒旋星系）
- *
- * 职责：为 GalaxyRenderer 承载全部 WebGL2 资源构建与绘制调用（程序 / VAO / 动态缓冲），
- * 顶层不触碰 document/window/GL（纯 JS + GLSL 字符串，可在 Node 侧安全 import）；
- * 所有 GL 调用只发生在方法内部（持有真实上下文时）。
- *
- * ── 并行模块依赖契约（运行时经非阻塞动态 import 探测，缺席即用本地回退实现） ──
- * 1) ./GalaxyParticles.js（并行工程师交付中）：
- *      generateGalaxyParticles({count, seed, worldScale}) →
- *        { positions: Float32Array(n*3), colors: Float32Array(n*3),
- *          sizes: Float32Array(n),     seeds:  Float32Array(n) }   // 世界坐标
- *      generateSupernovaSeeds(systems, worldScale) → Float32Array(systems.length)
- *    本文件按同签名导出包装函数：外部模块在场且返回形状合法时优先使用，
- *    否则回退到本地确定性实现（sin-hash，禁用随机数），接口不变。
- * 2) ../shaders/NebulaShader.js（并行工程师交付中）：
- *      导出 NEBULA_VERT / NEBULA_FRAG（全屏体积星云）与
- *      SUPERNOVA_VERT / SUPERNOVA_FRAG（超新星球壳 imposter）。
- *    约定与 PostProcessor 一致：GLSL ES 3.0 源码、不含 #version 行（GLCore 前置）。
- *    顶点属性槽位（本文件 VAO 装配基准，真实模块须保持）：
- *      loc0 aCorner vec2（单位四边形 [-1..1]，TRIANGLE_STRIP 4 顶点）
- *      loc1 iPos vec3 / loc2 iRadius float / loc3 iColor vec3 / loc4 iSeed float
- *    uniform：uView、uProj、uProjScale(vec2)、uTime(float)。
- *    外部源码若带 #version 行会被剥除后再编译。
- *
- * ── 程序清单（全部加法混合 ONE/ONE、深度写关闭，绘制顺序不影响结果） ──
- *   galaxy3d.disk    实例化粒子星系盘（40k billboard，径向高斯软斑，HDR>1）
- *   galaxy3d.nebula  全屏体积星云 raymarch（3D fBm 5 八度 + 域扭曲 + 尘埃带消光；
- *                    uSteps 由调用方按 tier 传入 24/14/0，<=0 跳过）
- *   galaxy3d.line    航路 + 垂直投影标尺线（LINES 动态缓冲）
- *   galaxy3d.sprite  星系节点核心 / 归属光晕 / 势力环（核心高斯 + 0.75 半径环带）
- *   galaxy3d.shell   超新星球壳（视图空间射线-球求交 imposter，limb 增亮）
- */
-
-// —— 并行模块探测（非阻塞动态 import） ——
-// 交付模块在场（http 直连模式）即优先采用其导出；缺席/加载失败静默回退本文件内的
-// 本地确定性实现（接口不变）。刻意不用顶层 await：R1 单文件打包器把模块体封装进
-// 同步工厂函数（tests/tools/build-static-bundle.mjs），await 会使 dist 构建失效；
-// 动态 import 不进入其静态依赖图，file:// 单文件模式下探测 404 后同样回退本地。
-let _extParticles = null;
-let _extNebula = null;
-function _probeExternal(spec, assign) {
-  try {
-    import(spec).then(assign, () => { /* 缺席：保持 null → 本地回退 */ });
-  } catch (_) { /* 极老环境无动态 import：仅用本地回退 */ }
-}
-_probeExternal('./GalaxyParticles.js', (m) => { _extParticles = m || null; });
-_probeExternal('../shaders/NebulaShader.js', (m) => { _extNebula = m || null; });
-
-/** 策略坐标 (0..1000) → 世界坐标的缩放系数（±10 世界单位银盘） */
-const WORLD_SCALE = 0.02;
-/** 星系盘粒子生成种子（确定性；世界静态，一次生成） */
-const GALAXY_SEED = 20261103;
-/** 粒子上限（tier 档位在此之内前缀截取绘制） */
-const PARTICLE_MAX = 40000;
-
-// —— 确定性 hash（禁用随机数） ——————————————————————————————
-
-function fract(x) { return x - Math.floor(x); }
-
-/** 带盐/种子的一维 hash（粒子生成用） */
-function hash01s(i, salt, seed) {
-  return fract(Math.sin(i * 127.1 + salt * 311.7 + seed * 0.618034) * 43758.5453);
-}
-
-/** 字符串 → [0,1) 确定性 hash（FNV-1a 混淆），供星系高度剖面 / 超新星相位使用 */
-function hashString01(str) {
-  const s = String(str == null ? '' : str);
-  let h = 2166136261 >>> 0;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619) >>> 0;
-  }
-  return (h >>> 0) / 4294967296;
-}
-
-/**
- * 星系三维位置：策略 (x,y) → 世界 (x-500, y-500)*WORLD_SCALE，
- * 高度 z = hash(systemId)*±核球厚度剖面（银心厚、边缘薄，最大 ±0.56 世界单位）。
- * @param {{id:string|number, x:number, y:number}} s 快照星系
- * @param {Float32Array} [out] 复用输出 (3)
- * @returns {Float32Array} [wx, wy, wz]
- */
-function systemWorldPos(s, out) {
-  const o = out || new Float32Array(3);
-  if (!s) { o[0] = 0; o[1] = 0; o[2] = 0; return o; }
-  const wx = ((Number(s.x) || 0) - 500) * WORLD_SCALE;
-  const wy = ((Number(s.y) || 0) - 500) * WORLD_SCALE;
-  const rn = Math.sqrt(wx * wx + wy * wy) / (500 * WORLD_SCALE);
-  const thick = 0.055 + 0.5 * Math.exp(-Math.max(0, rn) * 2.4);
-  const h01 = hashString01(s.id != null ? String(s.id) : '');
-  o[0] = wx;
-  o[1] = wy;
-  o[2] = (h01 * 2 - 1) * thick;
-  return o;
-}
-
-// —— 粒子 / 种子生成（外部模块优先，本地确定性回退） ——————————————————
-
-/** 本地棒旋星系粒子生成：双主旋臂 + 中央棒 + 核球（核厚缘薄）+ HII 粉斑 */
-function generateGalaxyParticlesLocal(params) {
-  const count = Math.max(0, Math.round(Number(params && params.count) || 0));
-  const worldScale = Number(params && params.worldScale) > 0 ? Number(params.worldScale) : WORLD_SCALE;
-  const seedN = Math.abs(Math.round(Number(params && params.seed) || 0)) % 100000;
-  const R = 500 * worldScale; // 银盘世界半径（策略 0..1000 映射）
-
-  const positions = new Float32Array(count * 3);
-  const colors = new Float32Array(count * 3);
-  const sizes = new Float32Array(count);
-  const seeds = new Float32Array(count);
-
-  for (let i = 0; i < count; i++) {
-    const rr = Math.pow(hash01s(i, 1, seedN), 0.62); // 半径分布：内密外疏
-    const r = rr * R;
-    let x;
-    let y;
-    if (rr < 0.42 && hash01s(i, 2, seedN) < 0.30) {
-      // 中央棒：沿 x 轴拉长的椭球
-      const bx = (hash01s(i, 3, seedN) * 2 - 1) * R * 0.34;
-      const by = (hash01s(i, 4, seedN) * 2 - 1) * R * 0.10 * (1.15 - Math.abs(bx) / (R * 0.34));
-      x = bx;
-      y = by;
-    } else {
-      // 双主旋臂（自棒端起螺旋）+ 随半径放大的角向散布
-      const arm = (i % 2) * Math.PI;
-      const jitter = (hash01s(i, 3, seedN) * 2 - 1) * (0.10 + 0.55 * rr);
-      const th = arm + Math.max(0, rr - 0.30) * 6.1 + jitter;
-      const rs = r * (0.92 + hash01s(i, 4, seedN) * 0.16);
-      x = Math.cos(th) * rs;
-      y = Math.sin(th) * rs;
-    }
-    // 核球厚、边缘薄的垂直剖面（双 hash 叠加近似高斯）
-    const thick = 0.055 + 0.5 * Math.exp(-rr * 2.6);
-    const z = (hash01s(i, 5, seedN) + hash01s(i, 6, seedN) - 1) * thick;
-
-    positions[i * 3] = x;
-    positions[i * 3 + 1] = y;
-    positions[i * 3 + 2] = z;
-
-    // 色温：核黄 → 臂蓝白，少量 HII 粉斑；HDR 由着色器增益（颜色本身 <=1.1）
-    const t = Math.min(1, Math.max(0, rr * 1.35 + (hash01s(i, 7, seedN) - 0.5) * 0.4));
-    let cr = 1.0 + (0.60 - 1.0) * t;
-    let cg = 0.82 + (0.74 - 0.82) * t;
-    let cb = 0.55 + (1.00 - 0.55) * t;
-    if (hash01s(i, 8, seedN) > 0.968) { cr = 1.05; cg = 0.42; cb = 0.55; }
-    colors[i * 3] = cr;
-    colors[i * 3 + 1] = cg;
-    colors[i * 3 + 2] = cb;
-
-    // 尺寸：世界单位；少数大颗粒 + 核球增亮
-    let sz = 0.018 + Math.pow(hash01s(i, 9, seedN), 3) * 0.15;
-    if (rr < 0.2) sz += 0.02;
-    sizes[i] = sz;
-    seeds[i] = hash01s(i, 10, seedN);
-  }
-  return { positions, colors, sizes, seeds };
-}
-
-/** 本地超新星相位种子（与 systems 顺序对齐） */
-function generateSupernovaSeedsLocal(systems) {
-  const arr = Array.isArray(systems) ? systems : [];
-  const out = new Float32Array(arr.length);
-  for (let i = 0; i < arr.length; i++) {
-    const id = arr[i] && arr[i].id != null ? String(arr[i].id) : String(i);
-    out[i] = hashString01(`${id}:nova`);
-  }
-  return out;
-}
-
-/**
- * 星系盘粒子生成（包装）：并行模块在场且返回形状合法时透传，否则本地实现。
- * @param {{count?:number, seed?:number, worldScale?:number}} [params]
- * @returns {{positions:Float32Array, colors:Float32Array, sizes:Float32Array, seeds:Float32Array}}
- */
-function generateGalaxyParticles(params) {
-  const ext = _extParticles;
-  if (ext && typeof ext.generateGalaxyParticles === 'function') {
-    try {
-      const out = ext.generateGalaxyParticles(params || {});
-      if (out && out.positions && out.colors && out.sizes && out.seeds) return out;
-    } catch (_) { /* 外部模块异常：回退本地确定性实现 */ }
-  }
-  return generateGalaxyParticlesLocal(params || {});
-}
-
-/**
- * 超新星相位种子生成（包装）。
- * @param {Array<{id:string|number}>} systems
- * @param {number} [worldScale]
- * @returns {Float32Array}
- */
-function generateSupernovaSeeds(systems, worldScale) {
-  void worldScale; // 契约占位参数：本地实现不依赖尺度
-  const ext = _extParticles;
-  const n = Array.isArray(systems) ? systems.length : 0;
-  if (ext && typeof ext.generateSupernovaSeeds === 'function') {
-    try {
-      const out = ext.generateSupernovaSeeds(systems, worldScale);
-      if (out && (out.length ?? -1) === n) return out;
-    } catch (_) { /* 回退本地实现 */ }
-  }
-  return generateSupernovaSeedsLocal(systems);
-}
-
-// —— GLSL（本地契约回退实现；外部 NebulaShader 在场时优先生效） ————————
-
-/** 剥除外部着色器可能自带的 #version 行（GLCore.createProgram 统一前置） */
-function stripVersion(src) {
-  return String(src || '').replace(/^\s*#version[^\n]*\n/, '');
-}
-
-function pickShader(ext, name, local) {
-  const v = ext ? ext[name] : null;
-  return typeof v === 'string' && v.length > 8 ? stripVersion(v) : local;
-}
-
-/** 全屏四边形顶点着色器（星云用，vUv [0..1]） */
-const LOCAL_NEBULA_VERT = `
-precision highp float;
-layout(location = 0) in vec2 aPos;
-out vec2 vUv;
-void main() {
-  vUv = aPos * 0.5 + 0.5;
-  gl_Position = vec4(aPos, 0.0, 1.0);
-}
-`;
-
-/**
- * 体积星云片元：反投影生成视线，在 |z|<=HZ 薄板内 raymarch；
- * 密度 = 域扭曲(两级低频 fBm) + 5 八度 3D fBm + 对数螺旋臂偏置 + 核厚缘薄包络；
- * 尘埃带消光以光程累积 exp(-od) 作用于星云自身辐射（加法管线下不衰减既有像素）。
- */
-const LOCAL_NEBULA_FRAG = `
-precision highp float;
-in vec2 vUv;
-out vec4 fragColor;
-uniform mat4 uInvViewProj;
-uniform float uTime;
-uniform float uSteps;
-uniform float uGain;
-
-float hash13(vec3 p) {
-  p = fract(p * 0.1031);
-  p += dot(p, p.zyx + 31.32);
-  return fract((p.x + p.y) * p.z);
-}
-float vnoise(vec3 p) {
-  vec3 i = floor(p);
-  vec3 f = fract(p);
-  vec3 u = f * f * (3.0 - 2.0 * f);
-  float a = mix(hash13(i), hash13(i + vec3(1.0, 0.0, 0.0)), u.x);
-  float b = mix(hash13(i + vec3(0.0, 1.0, 0.0)), hash13(i + vec3(1.0, 1.0, 0.0)), u.x);
-  float c = mix(hash13(i + vec3(0.0, 0.0, 1.0)), hash13(i + vec3(1.0, 0.0, 1.0)), u.x);
-  float d = mix(hash13(i + vec3(0.0, 1.0, 1.0)), hash13(i + vec3(1.0, 1.0, 1.0)), u.x);
-  return mix(mix(a, b, u.y), mix(c, d, u.y), u.z);
-}
-float fbm2(vec3 p) {
-  float s = 0.5 * vnoise(p);
-  s += 0.25 * vnoise(p * 2.03 + vec3(11.7, 3.1, 7.9));
-  return s / 0.75;
-}
-float fbm5(vec3 p) {
-  float amp = 0.5;
-  float s = 0.0;
-  float norm = 0.0;
-  for (int i = 0; i < 5; i++) {
-    s += amp * vnoise(p);
-    norm += amp;
-    p = p * 2.02 + vec3(7.3, 1.9, 4.7);
-    amp *= 0.52;
-  }
-  return s / norm;
-}
-void main() {
-  vec2 ndc = vUv * 2.0 - 1.0;
-  vec4 pn = uInvViewProj * vec4(ndc, -1.0, 1.0);
-  vec4 pf = uInvViewProj * vec4(ndc, 1.0, 1.0);
-  vec3 ro = pn.xyz / pn.w;
-  vec3 rd = normalize(pf.xyz / pf.w - ro);
-
-  // 远景星野：视线方向锚定的确定性 hash 点（不随时间漂移）
-  vec3 col = vec3(0.0);
-  vec3 cell = floor(rd * 230.0);
-  float hs = hash13(cell + vec3(7.0));
-  float star = smoothstep(0.9972, 0.9999, hs) * (0.25 + 0.75 * hash13(cell + vec3(19.0)));
-  col += vec3(0.72, 0.8, 0.95) * star;
-
-  // 与银河薄板 |z| <= HZ 求交
-  const float HZ = 2.4;
-  float t0 = 0.0;
-  float t1 = 0.0;
-  bool hit = true;
-  if (abs(rd.z) < 1e-5) {
-    hit = abs(ro.z) < HZ;
-    t1 = hit ? 200.0 : 0.0;
-  } else {
-    float ta = (-HZ - ro.z) / rd.z;
-    float tb = (HZ - ro.z) / rd.z;
-    t0 = max(min(ta, tb), 0.0);
-    t1 = max(ta, tb);
-    hit = t1 > t0;
-  }
-
-  if (hit && uSteps > 0.5) {
-    float dt = (t1 - t0) / uSteps;
-    float t = t0 + dt * hash13(vec3(gl_FragCoord.xy, 1.0));
-    float od = 0.0;
-    vec3 acc = vec3(0.0);
-    for (int i = 0; i < 28; i++) {
-      if (float(i) >= uSteps) break;
-      vec3 p = ro + rd * t;
-      t += dt;
-      float rn = length(p.xy) * 0.1;
-      if (rn > 1.24 || abs(p.z) > HZ) continue;
-      // 域扭曲 + 5 八度 fBm + 对数螺旋臂偏置 + 垂直包络
-      vec3 w = vec3(fbm2(p * 0.4 + vec3(0.0, 0.0, uTime * 0.02)),
-                    fbm2(p * 0.4 + vec3(5.2, 1.3, 9.4)),
-                    fbm2(p * 0.4 + vec3(1.7, 8.1, 3.0)));
-      vec3 q = p * 0.55 + (w - 0.5) * 2.6;
-      float d = fbm5(q);
-      float ang = atan(p.y, p.x);
-      float arm = 0.5 + 0.5 * sin(ang * 2.0 - log(max(rn, 0.06)) * 4.6 + 1.7);
-      d *= 0.6 + 0.6 * arm;
-      float hThick = 0.09 + 0.5 * exp(-rn * 2.4);
-      d *= exp(-abs(p.z) / hThick) * smoothstep(1.24, 0.4, rn) * smoothstep(0.015, 0.14, rn);
-      d = smoothstep(0.3, 0.85, d);
-      if (d <= 0.002) continue;
-      // 尘埃带消光（自遮蔽光程）
-      float du = fbm2(q * 1.9 + vec3(13.1, 3.7, 8.2));
-      float dust = smoothstep(0.5, 0.78, du) * d;
-      // 辐射色：核暖黄 → 外缘蓝白 + HII 粉斑
-      vec3 em = mix(vec3(1.0, 0.62, 0.34), vec3(0.36, 0.55, 1.0), clamp(rn * 1.4 - 0.08, 0.0, 1.0));
-      float hii = fbm2(p * 1.35 + vec3(23.0, 11.0, 5.0));
-      em += vec3(1.0, 0.3, 0.48) * smoothstep(0.6, 0.85, hii) * 0.9;
-      acc += em * d * exp(-od) * dt * uGain;
-      od += dust * dt * 3.2;
-    }
-    col += acc;
-  }
-  fragColor = vec4(col, 1.0);
-}
-`;
-
-/** 超新星球壳顶点：相机朝向 billboard 展开 + 脉冲缩放（视图空间 imposter 基准） */
-const LOCAL_SUPERNOVA_VERT = `
-precision highp float;
-layout(location = 0) in vec2 aCorner;
-layout(location = 1) in vec3 iPos;
-layout(location = 2) in float iRadius;
-layout(location = 3) in vec3 iColor;
-layout(location = 4) in float iSeed;
-uniform mat4 uView;
-uniform mat4 uProj;
-uniform vec2 uProjScale;
-uniform float uTime;
-out vec2 vCorner;
-out vec3 vViewC;
-out float vRadius;
-out vec3 vColor;
-out float vSeed;
-void main() {
-  float pulse = 1.0 + 0.12 * sin(uTime * 2.3 + iSeed * 6.2831853);
-  float r = max(0.0001, iRadius * pulse);
-  vec4 vc = uView * vec4(iPos, 1.0);
-  vec4 cc = uProj * vc;
-  vCorner = aCorner;
-  vViewC = vc.xyz;
-  vRadius = r;
-  vColor = iColor;
-  vSeed = iSeed;
-  if (cc.w <= 0.0001) {
-    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
-    vRadius = 0.0;
-    return;
-  }
-  gl_Position = cc + vec4(aCorner * uProjScale * r * 1.06, 0.0, 0.0);
-}
-`;
-
-/** 超新星球壳片元：视图空间射线-球求交，limb 增亮 + 方位微条纹（additive） */
-const LOCAL_SUPERNOVA_FRAG = `
-precision highp float;
-in vec2 vCorner;
-in vec3 vViewC;
-in float vRadius;
-in vec3 vColor;
-in float vSeed;
-uniform float uTime;
-out vec4 fragColor;
-void main() {
-  if (vRadius <= 0.0) { fragColor = vec4(0.0); return; }
-  vec3 rd = vec3(vCorner * vRadius, vViewC.z);
-  vec3 c = vec3(0.0, 0.0, vViewC.z);
-  float r2 = dot(rd, rd);
-  float b = dot(rd, c);
-  float disc = b * b - r2 * (dot(c, c) - vRadius * vRadius);
-  if (disc <= 0.0) { fragColor = vec4(0.0); return; }
-  float sq = sqrt(disc);
-  float t = (b - sq) / r2;
-  if (t <= 0.0) t = (b + sq) / r2; // 相机入壳内时取后交点
-  if (t <= 0.0) { fragColor = vec4(0.0); return; }
-  vec3 p = rd * t;
-  vec3 n = normalize(p - c);
-  vec3 vdir = normalize(p);
-  float facing = clamp(dot(n, -vdir), 0.0, 1.0);
-  float rim = pow(1.0 - facing, 2.2);
-  float band = 0.78 + 0.22 * sin(atan(n.y, n.x) * 5.0 + uTime * 1.6 + vSeed * 37.0);
-  float inten = (rim * 2.6 + 0.10) * band;
-  fragColor = vec4(vColor * inten, 1.0);
-}
-`;
-
-// —— 星系盘粒子（实例化 billboard） ——————————————————————————————
-
-const VERT_DISK = `
-precision highp float;
-layout(location = 0) in vec2 aCorner;
-layout(location = 1) in vec3 iPos;
-layout(location = 2) in float iSize;
-layout(location = 3) in vec3 iColor;
-layout(location = 4) in float iSeed;
-uniform mat4 uViewProj;
-uniform vec2 uProjScale;
-uniform float uMinSize;
-uniform float uSizeClamp;
-out vec2 vCorner;
-out vec3 vColor;
-out float vSeed;
-void main() {
-  vec4 c = uViewProj * vec4(iPos, 1.0);
-  if (c.w <= 0.0001) {
-    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
-    vCorner = vec2(0.0);
-    vColor = vec3(0.0);
-    vSeed = 0.0;
-    return;
-  }
-  float sz = clamp(iSize, uMinSize, c.w * uSizeClamp);
-  gl_Position = c + vec4(aCorner * uProjScale * sz, 0.0, 0.0);
-  vCorner = aCorner;
-  vColor = iColor;
-  vSeed = iSeed;
-}
-`;
-
-/** 径向高斯软斑 + 亮核 + 种子闪烁（HDR 峰值 ~2.9，供 bloom 提取） */
-const FRAG_DISK = `
-precision highp float;
-in vec2 vCorner;
-in vec3 vColor;
-in float vSeed;
-uniform float uTime;
-out vec4 fragColor;
-void main() {
-  float d2 = dot(vCorner, vCorner);
-  float d = sqrt(d2);
-  float edge = smoothstep(1.0, 0.6, d);
-  float g = exp(-d2 * 5.0);
-  float core = exp(-d2 * 26.0);
-  float tw = 0.82 + 0.34 * sin(uTime * 1.7 + vSeed * 41.0);
-  fragColor = vec4(vColor * ((g * 1.05 + core * 1.9) * tw * edge), 1.0);
-}
-`;
-
-// —— 星系节点 / 归属光晕 / 势力环（实例化 billboard：核心高斯 + 环带） ————
-
-const VERT_SPRITE = `
-precision highp float;
-layout(location = 0) in vec2 aCorner;
-layout(location = 1) in vec3 iPos;
-layout(location = 2) in float iSize;
-layout(location = 3) in vec4 iColA;
-layout(location = 4) in vec4 iColB;
-uniform mat4 uViewProj;
-uniform vec2 uProjScale;
-uniform float uSizeClamp;
-out vec2 vCorner;
-out vec4 vColA;
-out vec4 vColB;
-void main() {
-  vec4 c = uViewProj * vec4(iPos, 1.0);
-  if (c.w <= 0.0001) {
-    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
-    vCorner = vec2(0.0);
-    vColA = vec4(0.0);
-    vColB = vec4(0.0);
-    return;
-  }
-  float sz = min(iSize, c.w * uSizeClamp);
-  gl_Position = c + vec4(aCorner * uProjScale * sz, 0.0, 0.0);
-  vCorner = aCorner;
-  vColA = iColA;
-  vColB = iColB;
-}
-`;
-
-/** 环带中心 d=0.75（调用方按 目标半径/0.75 换算实例尺寸），核心为高斯软斑 */
-const FRAG_SPRITE = `
-precision highp float;
-in vec2 vCorner;
-in vec4 vColA;
-in vec4 vColB;
-out vec4 fragColor;
-void main() {
-  float d = length(vCorner);
-  float edge = smoothstep(1.0, 0.8, d);
-  float core = exp(-d * d * 5.5);
-  float ring = exp(-pow((d - 0.75) * 9.0, 2.0));
-  vec3 col = vColA.rgb * (core * vColA.a) + vColB.rgb * (ring * vColB.a);
-  fragColor = vec4(col * edge, 1.0);
-}
-`;
-
-// —— 航路 / 标尺线 ——————————————————————————————————————————————
-
-const VERT_LINE = `
-precision highp float;
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec4 aColor;
-uniform mat4 uViewProj;
-out vec4 vColor;
-void main() {
-  vColor = aColor;
-  gl_Position = uViewProj * vec4(aPos, 1.0);
-}
-`;
-
-const FRAG_LINE = `
-precision highp float;
-in vec4 vColor;
-out vec4 fragColor;
-void main() {
-  fragColor = vec4(vColor.rgb * vColor.a, 1.0);
-}
-`;
-
-/** 解析实际生效的星云/超新星着色器（外部模块优先，本地契约回退） */
-function resolveNebulaShaders() {
-  return {
-    NEBULA_VERT: pickShader(_extNebula, 'NEBULA_VERT', LOCAL_NEBULA_VERT),
-    NEBULA_FRAG: pickShader(_extNebula, 'NEBULA_FRAG', LOCAL_NEBULA_FRAG),
-    SUPERNOVA_VERT: pickShader(_extNebula, 'SUPERNOVA_VERT', LOCAL_SUPERNOVA_VERT),
-    SUPERNOVA_FRAG: pickShader(_extNebula, 'SUPERNOVA_FRAG', LOCAL_SUPERNOVA_FRAG),
-  };
-}
-
-// —— GL 资源容器 ——————————————————————————————————————————————————
-
-/** 星系盘实例步长：pos3 + size1 + color3 + seed1（float） */
-const DISK_STRIDE_F = 8;
-/** 节点 sprite 实例步长：pos3 + size1 + colA4 + colB4（float） */
-const SPRITE_STRIDE_F = 12;
-/** 球壳实例步长：pos3 + radius1 + color3 + seed1（float） */
-const SHELL_STRIDE_F = 8;
-/** 线段顶点步长：pos3 + rgba4（float） */
-const LINE_STRIDE_F = 7;
-
-class Galaxy3D {
-  constructor() {
-    this.glc = null;
-    this.gl = null;
-    /** 实际可绘制粒子实例数（生成结果可能少于请求值） */
-    this.particleCount = 0;
-
-    this._quadBuf = null;
-    this._quadVao = null;
-    this._bufDisk = null;
-    this._vaoDisk = null;
-    this._bufSprite = null;
-    this._vaoSprite = null;
-    this._bufShell = null;
-    this._vaoShell = null;
-    this._bufLine = null;
-    this._vaoLine = null;
-
-    this._progDisk = null;
-    this._progSprite = null;
-    this._progLine = null;
-    this._progNebula = null;
-    this._progShell = null;
-    this._u = {};
-  }
-
-  /**
-   * 构建全部程序 / VAO / 缓冲（上下文丢失恢复后可重复调用：rebuild）。
-   * 任一着色器编译失败即抛错（调用方捕获后整体退回 2D 路径）。
-   * @param {import('./GLCore.js').GLContext} glc
-   */
-  init(glc) {
-    if (!glc || !glc.gl) throw new Error('[Galaxy3D] 需要 GLContext 实例');
-    this.glc = glc;
-    this.gl = glc.gl;
-    const gl = glc.gl;
-
-    this._buildPrograms();
-
-    // 单位四边形（TRIANGLE_STRIP 4 顶点）：billboard 与全屏 pass 共用数据
-    this._quadBuf = glc.createBuffer(new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
-    this._quadVao = glc.createFullscreenVAO();
-
-    this._buildDiskResources(glc, gl);
-    this._buildSpriteResources(glc, gl);
-    this._buildShellResources(glc, gl);
-    this._buildLineResources(glc, gl);
-    return this;
-  }
-
-  /** 上下文恢复钩子：旧句柄已随上下文失效，整体重建 */
-  rebuild(glc) {
-    this.init(glc);
-  }
-
-  // —— 资源构建 ————————————————————————————————————————————
-
-  _buildPrograms() {
-    const glc = this.glc;
-    const sh = resolveNebulaShaders();
-    const loc = (prog, name) => glc.gl.getUniformLocation(prog, name);
-
-    this._progDisk = glc.createProgram(VERT_DISK, FRAG_DISK, { label: 'galaxy3d.disk' });
-    this._u.disk = {
-      viewProj: loc(this._progDisk, 'uViewProj'),
-      projScale: loc(this._progDisk, 'uProjScale'),
-      minSize: loc(this._progDisk, 'uMinSize'),
-      sizeClamp: loc(this._progDisk, 'uSizeClamp'),
-      time: loc(this._progDisk, 'uTime'),
-    };
-
-    this._progSprite = glc.createProgram(VERT_SPRITE, FRAG_SPRITE, { label: 'galaxy3d.sprite' });
-    this._u.sprite = {
-      viewProj: loc(this._progSprite, 'uViewProj'),
-      projScale: loc(this._progSprite, 'uProjScale'),
-      sizeClamp: loc(this._progSprite, 'uSizeClamp'),
-    };
-
-    this._progLine = glc.createProgram(VERT_LINE, FRAG_LINE, { label: 'galaxy3d.line' });
-    this._u.line = { viewProj: loc(this._progLine, 'uViewProj') };
-
-    this._progNebula = glc.createProgram(sh.NEBULA_VERT, sh.NEBULA_FRAG, { label: 'galaxy3d.nebula' });
-    this._u.nebula = {
-      invViewProj: loc(this._progNebula, 'uInvViewProj'),
-      time: loc(this._progNebula, 'uTime'),
-      steps: loc(this._progNebula, 'uSteps'),
-      gain: loc(this._progNebula, 'uGain'),
-    };
-
-    this._progShell = glc.createProgram(sh.SUPERNOVA_VERT, sh.SUPERNOVA_FRAG, { label: 'galaxy3d.shell' });
-    this._u.shell = {
-      view: loc(this._progShell, 'uView'),
-      proj: loc(this._progShell, 'uProj'),
-      projScale: loc(this._progShell, 'uProjScale'),
-      time: loc(this._progShell, 'uTime'),
-    };
-  }
-
-  /** 星系盘：生成（外部模块优先）→ 交错 → 静态实例缓冲 + VAO */
-  _buildDiskResources(glc, gl) {
-    const gen = generateGalaxyParticles({ count: PARTICLE_MAX, seed: GALAXY_SEED, worldScale: WORLD_SCALE });
-    const pos = gen.positions;
-    const col = gen.colors;
-    const siz = gen.sizes;
-    const sd = gen.seeds;
-    const n = Math.min(Math.floor(pos.length / 3), Math.floor(col.length / 3), siz.length, sd.length);
-    this.particleCount = Math.max(0, n);
-
-    const inst = new Float32Array(this.particleCount * DISK_STRIDE_F);
-    for (let i = 0; i < this.particleCount; i++) {
-      const o = i * DISK_STRIDE_F;
-      inst[o] = pos[i * 3];
-      inst[o + 1] = pos[i * 3 + 1];
-      inst[o + 2] = pos[i * 3 + 2];
-      inst[o + 3] = siz[i];
-      inst[o + 4] = col[i * 3];
-      inst[o + 5] = col[i * 3 + 1];
-      inst[o + 6] = col[i * 3 + 2];
-      inst[o + 7] = sd[i];
-    }
-    this._bufDisk = glc.createBuffer(inst, gl.STATIC_DRAW);
-    const quad = this._quadBuf;
-    this._vaoDisk = glc.createVAO((g) => {
-      g.bindBuffer(g.ARRAY_BUFFER, quad);
-      g.enableVertexAttribArray(0);
-      g.vertexAttribPointer(0, 2, g.FLOAT, false, 0, 0);
-      g.bindBuffer(g.ARRAY_BUFFER, this._bufDisk);
-      g.enableVertexAttribArray(1);
-      g.vertexAttribPointer(1, 3, g.FLOAT, false, DISK_STRIDE_F * 4, 0);
-      g.vertexAttribDivisor(1, 1);
-      g.enableVertexAttribArray(2);
-      g.vertexAttribPointer(2, 1, g.FLOAT, false, DISK_STRIDE_F * 4, 12);
-      g.vertexAttribDivisor(2, 1);
-      g.enableVertexAttribArray(3);
-      g.vertexAttribPointer(3, 3, g.FLOAT, false, DISK_STRIDE_F * 4, 16);
-      g.vertexAttribDivisor(3, 1);
-      g.enableVertexAttribArray(4);
-      g.vertexAttribPointer(4, 1, g.FLOAT, false, DISK_STRIDE_F * 4, 28);
-      g.vertexAttribDivisor(4, 1);
-    });
-  }
-
-  /** 节点 sprite：动态实例缓冲（每帧 bufferSubData 覆盖）+ VAO */
-  _buildSpriteResources(glc, gl) {
-    this._bufSprite = glc.createBuffer(new Float32Array(1024 * SPRITE_STRIDE_F), gl.DYNAMIC_DRAW);
-    const quad = this._quadBuf;
-    this._vaoSprite = glc.createVAO((g) => {
-      g.bindBuffer(g.ARRAY_BUFFER, quad);
-      g.enableVertexAttribArray(0);
-      g.vertexAttribPointer(0, 2, g.FLOAT, false, 0, 0);
-      g.bindBuffer(g.ARRAY_BUFFER, this._bufSprite);
-      g.enableVertexAttribArray(1);
-      g.vertexAttribPointer(1, 3, g.FLOAT, false, SPRITE_STRIDE_F * 4, 0);
-      g.vertexAttribDivisor(1, 1);
-      g.enableVertexAttribArray(2);
-      g.vertexAttribPointer(2, 1, g.FLOAT, false, SPRITE_STRIDE_F * 4, 12);
-      g.vertexAttribDivisor(2, 1);
-      g.enableVertexAttribArray(3);
-      g.vertexAttribPointer(3, 4, g.FLOAT, false, SPRITE_STRIDE_F * 4, 16);
-      g.vertexAttribDivisor(3, 1);
-      g.enableVertexAttribArray(4);
-      g.vertexAttribPointer(4, 4, g.FLOAT, false, SPRITE_STRIDE_F * 4, 32);
-      g.vertexAttribDivisor(4, 1);
-    });
-  }
-
-  /** 超新星球壳：动态实例缓冲 + VAO */
-  _buildShellResources(glc, gl) {
-    this._bufShell = glc.createBuffer(new Float32Array(128 * SHELL_STRIDE_F), gl.DYNAMIC_DRAW);
-    const quad = this._quadBuf;
-    this._vaoShell = glc.createVAO((g) => {
-      g.bindBuffer(g.ARRAY_BUFFER, quad);
-      g.enableVertexAttribArray(0);
-      g.vertexAttribPointer(0, 2, g.FLOAT, false, 0, 0);
-      g.bindBuffer(g.ARRAY_BUFFER, this._bufShell);
-      g.enableVertexAttribArray(1);
-      g.vertexAttribPointer(1, 3, g.FLOAT, false, SHELL_STRIDE_F * 4, 0);
-      g.vertexAttribDivisor(1, 1);
-      g.enableVertexAttribArray(2);
-      g.vertexAttribPointer(2, 1, g.FLOAT, false, SHELL_STRIDE_F * 4, 12);
-      g.vertexAttribDivisor(2, 1);
-      g.enableVertexAttribArray(3);
-      g.vertexAttribPointer(3, 3, g.FLOAT, false, SHELL_STRIDE_F * 4, 16);
-      g.vertexAttribDivisor(3, 1);
-      g.enableVertexAttribArray(4);
-      g.vertexAttribPointer(4, 1, g.FLOAT, false, SHELL_STRIDE_F * 4, 28);
-      g.vertexAttribDivisor(4, 1);
-    });
-  }
-
-  /** 线（航路 + 标尺）：动态顶点缓冲 + VAO */
-  _buildLineResources(glc, gl) {
-    this._bufLine = glc.createBuffer(new Float32Array(6000 * LINE_STRIDE_F), gl.DYNAMIC_DRAW);
-    this._vaoLine = glc.createVAO((g) => {
-      g.bindBuffer(g.ARRAY_BUFFER, this._bufLine);
-      g.enableVertexAttribArray(0);
-      g.vertexAttribPointer(0, 3, g.FLOAT, false, LINE_STRIDE_F * 4, 0);
-      g.enableVertexAttribArray(1);
-      g.vertexAttribPointer(1, 4, g.FLOAT, false, LINE_STRIDE_F * 4, 12);
-    });
-  }
-
-  // —— 绘制调用（每帧；混合/深度状态由调用方统一：additive ONE/ONE、depth 关） ——
-
-  /**
-   * 星系盘粒子：一次 drawArraysInstanced 画 count 个 billboard（count <= particleCount）。
-   * @param {{viewProj:Float32Array, px:number, py:number, minSize:number, count:number, time:number}} o
-   */
-  drawDisk(gl, o) {
-    const u = this._u.disk;
-    const count = Math.min(Math.max(0, Math.round(o.count) || 0), this.particleCount);
-    if (count <= 0) return;
-    gl.useProgram(this._progDisk);
-    gl.uniformMatrix4fv(u.viewProj, false, o.viewProj);
-    gl.uniform2f(u.projScale, o.px, o.py);
-    gl.uniform1f(u.minSize, o.minSize);
-    gl.uniform1f(u.sizeClamp, 0.5);
-    gl.uniform1f(u.time, o.time || 0);
-    gl.bindVertexArray(this._vaoDisk);
-    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
-    gl.bindVertexArray(null);
-  }
-
-  /**
-   * 节点 sprite 批量绘制（data 为预填实例数组，count 为实例数）。
-   * @param {{viewProj:Float32Array, px:number, py:number}} o
-   */
-  drawSprites(gl, data, count, o) {
-    const n = Math.max(0, Math.round(count) || 0);
-    if (n <= 0 || !this._bufSprite) return;
-    gl.bindBuffer(gl.ARRAY_BUFFER, this._bufSprite);
-    gl.bufferSubData(gl.ARRAY_BUFFER, 0, data, 0, n * SPRITE_STRIDE_F);
-    const u = this._u.sprite;
-    gl.useProgram(this._progSprite);
-    gl.uniformMatrix4fv(u.viewProj, false, o.viewProj);
-    gl.uniform2f(u.projScale, o.px, o.py);
-    gl.uniform1f(u.sizeClamp, 0.5);
-    gl.bindVertexArray(this._vaoSprite);
-    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, n);
-    gl.bindVertexArray(null);
-  }
-
-  /**
-   * 超新星球壳批量绘制。
-   * @param {{view:Float32Array, proj:Float32Array, px:number, py:number, time:number}} o
-   */
-  drawShell(gl, data, count, o) {
-    const n = Math.max(0, Math.round(count) || 0);
-    if (n <= 0 || !this._bufShell) return;
-    gl.bindBuffer(gl.ARRAY_BUFFER, this._bufShell);
-    gl.bufferSubData(gl.ARRAY_BUFFER, 0, data, 0, n * SHELL_STRIDE_F);
-    const u = this._u.shell;
-    gl.useProgram(this._progShell);
-    gl.uniformMatrix4fv(u.view, false, o.view);
-    gl.uniformMatrix4fv(u.proj, false, o.proj);
-    gl.uniform2f(u.projScale, o.px, o.py);
-    gl.uniform1f(u.time, o.time || 0);
-    gl.bindVertexArray(this._vaoShell);
-    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, n);
-    gl.bindVertexArray(null);
-  }
-
-  /**
-   * 线段批量绘制（航路 + 垂直标尺；data 已填充 vertCount 个顶点）。
-   * @param {{viewProj:Float32Array}} o
-   */
-  drawLines(gl, data, vertCount, o) {
-    const n = Math.max(0, Math.round(vertCount) || 0);
-    if (n <= 0 || !this._bufLine) return;
-    gl.bindBuffer(gl.ARRAY_BUFFER, this._bufLine);
-    gl.bufferSubData(gl.ARRAY_BUFFER, 0, data, 0, n * LINE_STRIDE_F);
-    const u = this._u.line;
-    gl.useProgram(this._progLine);
-    gl.uniformMatrix4fv(u.viewProj, false, o.viewProj);
-    gl.bindVertexArray(this._vaoLine);
-    gl.drawArrays(gl.LINES, 0, n);
-    gl.bindVertexArray(null);
-  }
-
-  /**
-   * 全屏体积星云 pass（加法；uSteps <= 0 时调用方应整体跳过本 pass）。
-   * @param {{invViewProj:Float32Array, time:number, steps:number, gain:number}} o
-   */
-  drawNebula(gl, o) {
-    const steps = Math.max(0, Math.min(28, Math.round(o.steps) || 0));
-    if (steps <= 0) return;
-    const u = this._u.nebula;
-    gl.useProgram(this._progNebula);
-    gl.uniformMatrix4fv(u.invViewProj, false, o.invViewProj);
-    gl.uniform1f(u.time, o.time || 0);
-    gl.uniform1f(u.steps, steps);
-    gl.uniform1f(u.gain, o.gain);
-    gl.bindVertexArray(this._quadVao);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-    gl.bindVertexArray(null);
-  }
-}
-
-Object.assign(__exports, { WORLD_SCALE, hashString01, systemWorldPos, generateGalaxyParticles, generateSupernovaSeeds, Galaxy3D });
-
-});
 __register("src/ui/screens/MenuView.js", function (__exports, __require) {
 /**
  * ui/screens/MenuView.js — 主菜单（R7 全屏沉浸式重构）
@@ -33511,6 +43000,12 @@ __register("src/render/AudioManager.js", function (__exports, __require) {
  *  - 场景切换 / 停止均为 1.5s 线性交叉淡化；
  *  - ground 场景的偶发鸟鸣/机械短音由确定性整数哈希触发（绝不使用 Math.random）；
  *  - 本模块顶层不触碰 document/window：AudioContext 与定时器均延迟到方法调用中创建。
+ *
+ * TASK-4.3 主题环境音层（setAmbientTheme / stopAmbientTheme）：
+ *  - 单一合成声库（2-3 振荡器 + 滤波噪声床 + 慢速 LFO）按 18 主题预设参数化，
+ *    未知主题回退 generic；与场景层并行、独立 1.5s 交叉淡化；
+ *  - 复用 musicVolume 总线（master×music 静音即时生效，可关闭）与首次交互解锁
+ *    （挂起期间暂存主题，解锁后补启）；纯表现层，零 gameplay 影响。
  */
 
 const LS_KEY = 'vf-audio-v1';
@@ -33526,6 +43021,35 @@ const SCENE_LEVEL = {
   combat: 0.3,
   ground: 0.5,
   menu: 0.5,
+};
+
+/**
+ * 主题环境音预设（doc7 TASK-4.3：18 主题 Web Audio 合成环境音）。
+ * 单一声库（2-3 振荡器 + 滤波噪声床 + 慢速 LFO）按主题参数化：
+ *  o: 振荡器组 [type, freq, gain]（≤3）；n: 噪声床 [filterType, freq, Q, gain]；
+ *  l: 慢速 LFO [rateHz, 主振荡器音高深度Hz]；lvl: 层电平（经 music 总线二次缩放）。
+ * 未知主题 → generic。全部实时合成，零外部资产。
+ */
+const THEME_AMBIENT_PRESETS = {
+  abyssal_ocean: { o: [['sine', 48, 0.5], ['sine', 72.4, 0.22]], n: ['lowpass', 150, 0.7, 0.14], l: [0.05, 3.5], lvl: 0.5 },
+  permafrost_furnace: { o: [['sine', 110, 0.3], ['sine', 164.8, 0.12]], n: ['bandpass', 520, 0.8, 0.2], l: [0.11, 5], lvl: 0.44 },
+  red_regolith_frontier: { o: [['sine', 69.3, 0.34]], n: ['bandpass', 310, 0.7, 0.24], l: [0.07, 4], lvl: 0.46 },
+  dry_night_polar: { o: [['sine', 58.3, 0.3], ['sine', 58.9, 0.3]], n: ['lowpass', 120, 0.7, 0.07], l: [0.03, 1.2], lvl: 0.4 },
+  sulfur_marsh: { o: [['sine', 92, 0.3], ['sine', 138.6, 0.12]], n: ['lowpass', 360, 0.8, 0.2], l: [1.9, 9], lvl: 0.46 },
+  biolume_canopy: { o: [['sine', 196, 0.2], ['sine', 294, 0.14], ['sine', 392, 0.09]], n: ['lowpass', 420, 0.7, 0.12], l: [0.09, 3], lvl: 0.42 },
+  obsidian_lava: { o: [['sawtooth', 55, 0.22], ['sine', 41.2, 0.3]], n: ['lowpass', 110, 0.7, 0.2], l: [0.13, 4.5], lvl: 0.5 },
+  prism_crystal: { o: [['sine', 880, 0.08], ['sine', 1318.5, 0.05], ['sine', 220, 0.16]], n: ['bandpass', 2400, 3, 0.05], l: [0.6, 2.2], lvl: 0.36 },
+  salt_mirror_desert: { o: [['sine', 98, 0.26]], n: ['bandpass', 740, 0.8, 0.2], l: [0.06, 9], lvl: 0.44 },
+  cryomethane_sea: { o: [['sine', 52, 0.36], ['sine', 78, 0.18]], n: ['lowpass', 190, 0.7, 0.2], l: [0.08, 2.8], lvl: 0.5 },
+  tidal_lock_dusk: { o: [['sine', 65.4, 0.3], ['sine', 130.8, 0.14]], n: ['bandpass', 260, 0.8, 0.16], l: [0.05, 3], lvl: 0.44 },
+  cloud_giant_atolls: { o: [['sawtooth', 61.7, 0.2], ['sine', 46.2, 0.3]], n: ['lowpass', 330, 0.7, 0.26], l: [0.16, 6], lvl: 0.5 },
+  fungal_catacombs: { o: [['sine', 110, 0.24], ['sine', 220.5, 0.1]], n: ['lowpass', 210, 0.8, 0.18], l: [0.8, 6], lvl: 0.44 },
+  ancient_megastructure: { o: [['square', 82.4, 0.09], ['sawtooth', 41.2, 0.2]], n: ['bandpass', 950, 2.2, 0.07], l: [0.12, 3.5], lvl: 0.44 },
+  glassstorm_barrens: { o: [['sine', 87.3, 0.24]], n: ['bandpass', 1450, 1.1, 0.2], l: [0.22, 8], lvl: 0.48 },
+  magnetar_aurora: { o: [['sine', 43.7, 0.34], ['sine', 65.4, 0.16]], n: ['bandpass', 3200, 4, 0.045], l: [0.13, 2.5], lvl: 0.46 },
+  canopy_colossus: { o: [['sine', 146.8, 0.2], ['sine', 220, 0.12]], n: ['lowpass', 520, 0.7, 0.2], l: [0.18, 4], lvl: 0.44 },
+  fractured_moon: { o: [['sine', 52, 0.26], ['sine', 52.35, 0.2]], n: ['bandpass', 180, 1, 0.06], l: [0.04, 1.1], lvl: 0.38 },
+  generic: { o: [['sine', 62, 0.3], ['sine', 93, 0.14]], n: ['lowpass', 240, 0.7, 0.16], l: [0.08, 3], lvl: 0.44 },
 };
 
 /** 确定性整数哈希 → [0,1)（ground 偶发事件触发源；绝不使用 Math.random） */
@@ -33753,13 +43277,21 @@ class AudioManager {
     this._currentScene = null;  // 已应用场景名
     this._desiredScene = null;  // AudioContext 挂起态下暂存的目标场景
     this._noiseBuf = null;      // 共享白噪声缓冲（懒建，全场景复用）
+    // —— 主题环境音层状态（doc7 TASK-4.3：setAmbientTheme） ——
+    this._themeAmbient = null;  // 当前主题层句柄（与场景层并行、独立交叉淡化）
+    this._currentTheme = null;  // 已应用主题 id
+    this._desiredTheme = null;  // 挂起态下暂存的主题 id
     // 首次交互解锁
     const unlock = () => {
       this._ensureCtx();
       if (this.ctx && this.ctx.state === 'suspended') {
-        this.ctx.resume().then(() => this._applyDesiredScene()).catch(() => { /* 保持挂起 */ });
+        this.ctx.resume().then(() => {
+          this._applyDesiredScene();
+          this._applyDesiredTheme();
+        }).catch(() => { /* 保持挂起 */ });
       } else {
         this._applyDesiredScene();
+        this._applyDesiredTheme();
       }
       window.removeEventListener('pointerdown', unlock);
       window.removeEventListener('keydown', unlock);
@@ -33832,6 +43364,113 @@ class AudioManager {
   /** 独立音乐音量总线（0..1；持久化与实时增益一并生效） */
   setMusicVolume(v) {
     this.setVolume('music', v);
+  }
+
+  // ———— 主题环境音层（doc7 TASK-4.3：18 主题合成环境音） ————
+
+  /**
+   * 应用 / 切换行星主题环境音层（单一合成声库按主题预设参数化）。
+   * 与场景层（startAmbient）并行、独立 1.5s 交叉淡化；经 _musicBus 出总输出，
+   * 既有静音/音量设置即时生效；AudioContext 未解锁时暂存，首次交互后自动补启。
+   * 纯表现层，零 gameplay 影响。未知主题回退 generic 预设。
+   * @param {string|null} themeId planet.primaryThemeId（null/空 = 停止主题层）
+   */
+  setAmbientTheme(themeId) {
+    const id = themeId ? String(themeId) : null;
+    this._desiredTheme = id;
+    if (!id) {
+      this.stopAmbientTheme();
+      return;
+    }
+    this._ensureCtx();
+    if (!this.ctx) return;
+    if (this.ctx.state !== 'running') {
+      if (this.ctx.state === 'suspended') {
+        this.ctx.resume().then(() => this._applyDesiredTheme()).catch(() => { /* 保持挂起 */ });
+      }
+      return;
+    }
+    this._applyThemeLayer(id);
+  }
+
+  /** 停止主题环境音层（1.5s 淡出后释放全部节点） */
+  stopAmbientTheme() {
+    this._desiredTheme = null;
+    if (!this.ctx || !this._themeAmbient) return;
+    this._fadeOutDispose(this._themeAmbient);
+    this._themeAmbient = null;
+    this._currentTheme = null;
+  }
+
+  /** AudioContext 就绪后补启挂起期间请求的主题层 */
+  _applyDesiredTheme() {
+    if (this._desiredTheme && this.ctx && this.ctx.state === 'running') {
+      this._applyThemeLayer(this._desiredTheme);
+    }
+  }
+
+  /** 构建/切换主题层：声库 = 振荡器组（首振荡器受慢速 LFO 音高调制）+ 滤波噪声床 */
+  _applyThemeLayer(themeId) {
+    if (!this.ctx || !this._musicBus || this.ctx.state !== 'running') return;
+    if (this._currentTheme === themeId && this._themeAmbient) return;
+    if (this._themeAmbient) {
+      this._fadeOutDispose(this._themeAmbient);
+      this._themeAmbient = null;
+    }
+    const preset = THEME_AMBIENT_PRESETS[themeId] || THEME_AMBIENT_PRESETS.generic;
+    const ctx = this.ctx;
+    const out = ctx.createGain();
+    out.gain.value = 0.0001; // 交叉淡化起点
+    out.connect(this._musicBus);
+    const kit = { stops: [], noise: this._noiseBuffer(ctx) };
+    for (let i = 0; i < preset.o.length && i < 3; i++) {
+      const [type, freq, gain] = preset.o[i];
+      const osc = ctx.createOscillator();
+      osc.type = type;
+      osc.frequency.value = freq;
+      const g = ctx.createGain();
+      g.gain.value = gain;
+      osc.connect(g).connect(out);
+      if (i === 0 && preset.l) {
+        const lfo = ctx.createOscillator();
+        lfo.type = 'sine';
+        lfo.frequency.value = preset.l[0];
+        const depth = ctx.createGain();
+        depth.gain.value = preset.l[1];
+        lfo.connect(depth).connect(osc.frequency);
+        lfo.start();
+        kit.stops.push(lfo);
+      }
+      osc.start();
+      kit.stops.push(osc);
+    }
+    const noise = ctx.createBufferSource();
+    noise.buffer = kit.noise;
+    noise.loop = true;
+    const nf = ctx.createBiquadFilter();
+    nf.type = preset.n[0];
+    nf.frequency.value = preset.n[1];
+    nf.Q.value = preset.n[2];
+    const ng = ctx.createGain();
+    ng.gain.value = preset.n[3];
+    noise.connect(nf).connect(ng).connect(out);
+    noise.start();
+    kit.stops.push(noise);
+    const handle = {
+      out,
+      level: preset.lvl,
+      dispose: () => {
+        for (const snode of kit.stops) {
+          try { snode.stop(); } catch { /* 已停止的源重复 stop 会抛错，忽略 */ }
+        }
+        try { out.disconnect(); } catch { /* 已断开 */ }
+      },
+    };
+    this._themeAmbient = handle;
+    this._currentTheme = themeId;
+    const t = ctx.currentTime;
+    handle.out.gain.setValueAtTime(0.0001, t);
+    handle.out.gain.linearRampToValueAtTime(handle.level, t + AMBIENT_XFADE_SEC);
   }
 
   // ———— 环境音内部实现 ————
@@ -34079,11 +43718,16 @@ __register("src/persistence/MigrationRegistry.js", function (__exports, __requir
  * 原地升级到下一版本。迁移失败保留原记录不覆盖（SAVE-04）。
  */
 
-const migrations = new Map(); // fromVersion -> fn(payload)
+// fromVersion -> fn(payload)[]（同版本多个迁移函数按注册顺序链式执行；
+// doc7 TASK-5.3：SAVE-04 真实 v1→v2 迁移与回归套件的轻量探针共用 key 1，
+// 链式注册让两者共存——后者不再覆盖前者，先注册者先执行）
+const migrations = new Map();
 
-/** 注册迁移：把 payload 从 version 升级到 version+1 */
+/** 注册迁移：把 payload 从 version 升级到 version+1（同版本多次注册按序链接） */
 function registerMigration(fromVersion, fn) {
-  migrations.set(fromVersion, fn);
+  const chain = migrations.get(fromVersion);
+  if (chain) chain.push(fn);
+  else migrations.set(fromVersion, [fn]);
 }
 
 /** 迁移到最新版本。返回 { ok, payload, applied:[], reason? } */
@@ -34092,12 +43736,12 @@ function migratePayload(payload, fromVersion, latestVersion) {
   let data = payload;
   const applied = [];
   while (v < latestVersion) {
-    const fn = migrations.get(v);
-    if (!fn) {
+    const chain = migrations.get(v);
+    if (!chain || chain.length === 0) {
       return { ok: false, reason: `缺少迁移 v${v} → v${v + 1}`, applied };
     }
     try {
-      data = fn(data);
+      for (const fn of chain) data = fn(data);
       v += 1;
       applied.push(v);
     } catch (e) {
@@ -34112,10 +43756,781 @@ function registeredMigrations() {
 }
 
 // —— 已注册迁移 ————————————————————————————————
-// v1 为首个正式 schema；尚无历史版本。未来字段演进示例：
-// registerMigration(1, (p) => { p.settings = p.settings || {}; return p; });
+// v1 → v2（doc7 TASK-5.3 / spec6 §10.4）：旧体素地表存档迁移到连续三角地形 +
+// 主题系统。迁移纪律（spec6 §10.4，SAVE-04 门禁）：
+//  1) 识别 schemaVersion（由 SaveManager.load 以 rec.schemaVersion → SCHEMA_VERSION 驱动）
+//     与地形 generator 版本（v1 地形 generatorVersion=1，v2 场仍为 1，字段结构换代）；
+//  2) 保留 planet seed / 已采矿量 / 任务 / POI / 设施 —— 迁移只增不改（幂等）；
+//  3) 已采掘体素归纳为兼容日志资源记录（不携带体素数组，按 seed 重建）；
+//  4) 新字段（主题/POI/伴生天体/地形编辑）按确定性子流重建，绝不偷偷抽新随机值：
+//     全部派生只消费 derivePlanetSeeds 子流，world.rng 主序列零消费；
+//  5) 不能映射的旧字段进 compatLog 并给出迁移策略（保留原值），绝不静默丢弃。
 
-Object.assign(__exports, { registerMigration, migratePayload, registeredMigrations });
+const { ensurePlanetPois: ensurePlanetPois } = __require("src/domain/ground/planetPOI.js");
+const { assignTheme: assignTheme, THEME_ASSIGNMENT_VERSION: THEME_ASSIGNMENT_VERSION } = __require("src/content/planetThemes.js");
+const { generatePlanetCelestials: generatePlanetCelestials, generateSystemBelts: generateSystemBelts } = __require("src/domain/world/galaxyGen.js");
+
+/** 体素存档中「可由 seed + generator 完全重建」的字段（spec6 §10.3：不随档携带） */
+const VOXEL_REGENERABLE = ['voxels', 'heights', 'chunks'];
+/** 体素存档中「已归纳转换」的字段（stats → 资源消耗记录；buildings → 兼容占位） */
+const VOXEL_CONVERTED = ['stats', 'buildings'];
+
+/**
+ * v1 → v2 地表存档迁移（SaveManager.load 自动调用；也可作为 v2 档自愈重入——幂等）。
+ * 对每个行星确保：pois / primaryThemeId / secondaryThemeModifiers / moons /
+ * orbitPhase / terrainEdits；对每个星系确保 belts；对世界确保 entities.objectives、
+ * narrative 容器与 compatLog；旧体素 surfaceWorld 归纳进兼容日志并剥离可重建数组。
+ * @param {object} w 存档 payload（世界实体；原地升级并返回）
+ * @returns {object} 升级后的世界实体
+ */
+function migrate_v1_to_v2(w) {
+  if (!w || typeof w !== 'object') return w;
+
+  // —— 世界容器 ensure（只增不改；未知字段一律原样保留） ——
+  w.entities ||= {};
+  w.entities.objectives ||= {};
+  w.narrative ||= {};
+  w.narrative.flags ||= {};
+  w.narrative.fired ||= {};
+  w.narrative.arcs ||= {};
+  w.narrative.pendingChoices ||= [];
+  w.compatLog ||= [];
+
+  const systems = w.entities.systems || {};
+  const planets = w.entities.planets || {};
+
+  // —— 同星系主题去重集合：两趟遍历（先收集已有主题，再为缺失者补派生），
+  //     已有主题参与 takenThemes，补派生确定性（themeSeed 子流），与开局分配同式 ——
+  const takenBySystem = new Map();
+  const planetIds = Object.keys(planets);
+  for (const pid of planetIds) {
+    const p = planets[pid];
+    if (!p || typeof p !== 'object' || typeof p.primaryThemeId !== 'string' || !p.primaryThemeId) continue;
+    const sid = p.systemId != null ? p.systemId : '__none__';
+    if (!takenBySystem.has(sid)) takenBySystem.set(sid, new Set());
+    takenBySystem.get(sid).add(p.primaryThemeId);
+  }
+
+  for (const pid of planetIds) {
+    const p = planets[pid];
+    if (!p || typeof p !== 'object') continue; // 引用完整性归 invariant 管，迁移不越权
+
+    // 1) 主题：缺失 → assignTheme 确定性补派生（类别池 + 物理守卫 + 同星系去重）
+    if (typeof p.primaryThemeId !== 'string' || !p.primaryThemeId) {
+      const sys = p.systemId != null ? systems[p.systemId] : null;
+      const star = {
+        danger: sys && Number.isFinite(sys.dangerRating) ? sys.dangerRating : 0,
+      };
+      const taken = takenBySystem.get(p.systemId != null ? p.systemId : '__none__') || new Set();
+      const pick = assignTheme(w, p, star, taken);
+      p.primaryThemeId = pick.primaryThemeId;
+      p.secondaryThemeModifiers = pick.secondaryThemeModifiers;
+      p.themeAssignmentVersion = THEME_ASSIGNMENT_VERSION;
+      taken.add(pick.primaryThemeId);
+    } else {
+      // 已有主题：只补缺省容器，绝不改值（幂等）
+      if (!Array.isArray(p.secondaryThemeModifiers)) p.secondaryThemeModifiers = [];
+      if (p.themeAssignmentVersion == null) p.themeAssignmentVersion = THEME_ASSIGNMENT_VERSION;
+    }
+
+    // 2) 持久 POI（ensurePlanetPois 语义：已有原样保留——已耗尽/已发奖状态不动；
+    //    缺失按行星子流重建，与开局逐位一致）
+    ensurePlanetPois(w, p);
+
+    // 3) 伴生天体：缺失按行星子流重派生（纯函数，不消费 world.rng）
+    if (!Array.isArray(p.moons) || !Number.isFinite(p.orbitPhase)) {
+      const cel = generatePlanetCelestials(w, p);
+      if (!Number.isFinite(p.orbitPhase)) p.orbitPhase = cel.orbitPhase;
+      if (!Array.isArray(p.moons)) p.moons = cel.moons;
+    }
+
+    // 4) 地形编辑容器（F1 terrainEdits 契约 { revision, ops }；已有则原样保留）
+    if (!p.terrainEdits || typeof p.terrainEdits !== 'object' || !Array.isArray(p.terrainEdits.ops)) {
+      p.terrainEdits = { revision: 0, ops: [] };
+    }
+
+    // 5) 旧体素地表字段归纳（spec6 §10.4.3：采掘 → 资源记录；BUILDING → 兼容占位）
+    if (p.surfaceWorld && typeof p.surfaceWorld === 'object') {
+      migrateLegacySurfaceWorld(w, p, p.surfaceWorld);
+    }
+  }
+
+  // —— 星系小行星带：缺失按恒星光谱子流重派生 ——
+  //     富集度由持久化 resourceRating（= round(rich×10)/10）回推（误差 ≤0.05，
+  //     仅影响 belt.density 第三位小数；v1 星系从未有 belts，无信息丢失）
+  for (const sid of Object.keys(systems)) {
+    const s = systems[sid];
+    if (!s || typeof s !== 'object' || Array.isArray(s.belts)) continue;
+    s.belts = generateSystemBelts(
+      w, s,
+      Number.isFinite(s.resourceRating) ? s.resourceRating / 10 : 0,
+      Array.isArray(s.planetIds) ? s.planetIds.length : 0,
+    );
+  }
+
+  // —— 世界级旧体素表面（个别 v1 档把 surfaceWorld 挂在世界根上） ——
+  if (w.surfaceWorld && typeof w.surfaceWorld === 'object') {
+    migrateLegacySurfaceWorld(w, { id: '__world__' }, w.surfaceWorld);
+  }
+
+  w.schemaVersion = 2;
+  return w;
+}
+
+/**
+ * 旧体素 surfaceWorld 归纳：stats.dug/mined → voxelMiningSummary 兼容记录；
+ * buildings → voxelBuildingPlaceholders 兼容占位记录；voxels/heights/chunks
+ * 为可重建字段（按 planet seed + generator 重建，不随档携带）；其余未知字段
+ * 保留原值并写入 unmappedVoxelFields 记录（给出迁移策略：保留原值）。
+ * 幂等：同源条目按 ref 键去重；已剥离字段不再产生新条目。
+ * @param {object} w 世界实体（写 compatLog）
+ * @param {{id:string}} owner 归属实体（行星实体或 {id:'__world__'}）
+ * @param {object} sw 旧体素地表对象（原地剥离已归纳字段）
+ */
+function migrateLegacySurfaceWorld(w, owner, sw) {
+  const ref = `v1voxel:${owner.id}`;
+  const log = w.compatLog;
+  const already = log.some((e) => e && e.ref === ref);
+  if (already) return; // 幂等：同源体素归纳只记一次
+
+  const stripped = [];   // 可重建而剥离的字段
+  let mined = null;
+  let dug = null;
+  if (sw.stats && typeof sw.stats === 'object') {
+    dug = Number.isFinite(sw.stats.dug) ? sw.stats.dug : null;
+    mined = sw.stats.mined && typeof sw.stats.mined === 'object' ? { ...sw.stats.mined } : {};
+    stripped.push('stats');
+  }
+  for (const k of VOXEL_REGENERABLE) {
+    if (k in sw) stripped.push(k);
+  }
+  if (stripped.length > 0) {
+    log.push({
+      kind: 'voxelMiningSummary',
+      ref,
+      owner: owner.id,
+      dug,
+      mined: mined || {},
+      voxelFieldsStripped: stripped,
+      strategy: 'regenerate', // 体素数组按 planet seed + generator v2 重建，不随档携带
+      atTick: w.tick ?? null,
+    });
+  }
+
+  // BUILDING 体素 → 兼容占位记录（明确列位，不静默丢弃）
+  if (Array.isArray(sw.buildings)) {
+    log.push({
+      kind: 'voxelBuildingPlaceholders',
+      ref,
+      owner: owner.id,
+      count: sw.buildings.length,
+      items: sw.buildings.map((b, i) => ({
+        slot: i,
+        kind: b && typeof b === 'object' ? (b.kind || 'BUILDING') : 'BUILDING',
+        x: b && Number.isFinite(b.x) ? b.x : null,
+        z: b && Number.isFinite(b.z) ? b.z : null,
+      })),
+      strategy: 'compat_placeholder', // 位置级占位；连续地形下由玩家重定 foundation
+      atTick: w.tick ?? null,
+    });
+    stripped.push('buildings');
+  }
+
+  // 未知字段：保留原值 + 兼容日志（绝不静默丢弃）
+  const unmapped = Object.keys(sw).filter(
+    (k) => !VOXEL_REGENERABLE.includes(k) && !VOXEL_CONVERTED.includes(k),
+  );
+  if (unmapped.length > 0) {
+    log.push({
+      kind: 'unmappedVoxelFields',
+      ref,
+      owner: owner.id,
+      fields: unmapped,
+      strategy: 'preserved_verbatim', // 原样保留在 surfaceWorld 上，待后续版本映射
+      atTick: w.tick ?? null,
+    });
+  }
+
+  // 剥离已归纳字段（可重建数组不携带；未知字段保留）
+  for (const k of stripped) delete sw[k];
+  if (Object.keys(sw).length === 0) {
+    delete owner.surfaceWorld; // 空壳移除；有未知字段则整体保留
+  }
+}
+
+registerMigration(1, migrate_v1_to_v2);
+
+Object.assign(__exports, { registerMigration, migratePayload, registeredMigrations, migrate_v1_to_v2 });
+
+});
+__register("src/domain/world/galaxyGen.js", function (__exports, __require) {
+/**
+ * domain/world/galaxyGen.js — 程序化星系生成（任务书 3.1 / 3.2 / 9.5 阶段02）
+ *
+ * 生成步骤（规范顺序）：
+ *  1. 抖动网格采样星系坐标（带最小间距约束）
+ *  2. k 近邻候选航路 + 长边剪除 + 连通性修复（UnionFind）
+ *  3. 按空间区块分配恒星类型 / 资源带 / 危险度
+ *  4. 生成行星槽位、环境与矿藏
+ *  5. 伴生卫星 / 小行星带 / 黄金角轨道相位（doc5 §3.2 处方 1，行星与星系子流）
+ *  6. 异常点布置
+ *  7. 文明出生点分配（贪心最远点 + 公平性验证，含扩张路径检查）
+ *
+ * 全程使用 world.rng（xoshiro128**），同种子同配置结果完全一致。
+ */
+
+const { RNG: RNG, seedFromNumber: seedFromNumber, float: subFloat, int: subInt, chance: subChance } = __require("src/core/rng.js");
+const { clamp: clamp, dist: dist, safeDivide: safeDivide } = __require("src/core/math.js");
+const { kNearest: kNearest, UnionFind: UnionFind, connectedComponents: connectedComponents } = __require("src/core/spatial.js");
+const { createEntity: createEntity } = __require("src/domain/entities/registry.js");
+const { BAL: BAL } = __require("src/content/constants.js");
+const { generatePlanetPois: generatePlanetPois } = __require("src/domain/ground/planetPOI.js");
+const { assignTheme: assignTheme, THEME_ASSIGNMENT_VERSION: THEME_ASSIGNMENT_VERSION } = __require("src/content/planetThemes.js");
+const { derivePlanetSeeds: derivePlanetSeeds } = __require("src/domain/ground/planetSeeds.js");
+const { hash32: hash32 } = __require("src/domain/ground/SurfaceSandbox.js");
+
+const STAR_TYPES = [
+  { id: 'yellowDwarf', name: '黄矮星', weight: 34, habitZone: 1.0, energy: 1.0, danger: 0, scanNoise: 0.1 },
+  { id: 'redDwarf', name: '红矮星', weight: 26, habitZone: 0.55, energy: 0.7, danger: 1, scanNoise: 0.2 },
+  { id: 'blueGiant', name: '蓝巨星', weight: 8, habitZone: 2.4, energy: 1.6, danger: 3, scanNoise: 0.35 },
+  { id: 'whiteDwarf', name: '白矮星', weight: 12, habitZone: 0.3, energy: 0.9, danger: 2, scanNoise: 0.25 },
+  { id: 'neutronStar', name: '中子星', weight: 6, habitZone: 0.15, energy: 1.8, danger: 6, scanNoise: 0.7 },
+  { id: 'pulsar', name: '脉冲星', weight: 5, habitZone: 0.2, energy: 1.7, danger: 5, scanNoise: 0.9 },
+  { id: 'blackHole', name: '黑洞', weight: 4, habitZone: 0.05, energy: 1.2, danger: 8, scanNoise: 1.0 },
+];
+
+const PLANET_CATEGORIES = [
+  { id: 'rocky', name: '岩质行星', habitRange: [15, 55], deposit: 3.0, weight: 30 },
+  { id: 'ocean', name: '海洋行星', habitRange: [25, 60], deposit: 1.6, weight: 10 },
+  { id: 'ice', name: '冰封行星', habitRange: [5, 25], deposit: 2.2, weight: 16 },
+  { id: 'desert', name: '沙漠行星', habitRange: [12, 40], deposit: 1.8, weight: 14 },
+  { id: 'gasGiant', name: '气态巨行星', habitRange: [0, 0], deposit: 2.6, weight: 14 },
+  { id: 'lava', name: '熔岩行星', habitRange: [0, 12], deposit: 4.2, weight: 9 },
+  { id: 'toxic', name: '腐蚀大气行星', habitRange: [0, 15], deposit: 2.4, weight: 8 },
+  { id: 'artificial', name: '人工改造天体', habitRange: [45, 75], deposit: 0.8, weight: 2 },
+];
+
+// 星系命名音节表（原创）
+const NAME_A = ['泽', '维', '诺', '卡', '塞', '苍', '冥', '翎', '孤', '川', '岚', '珀', '烬', '泓', '曜', '桉', '湮', '缔', '穹', '犁'];
+const NAME_B = ['尔', '拉', '昆', '瑟', '纳', '托', '菲', '隆', '伽', '希', '德', '穆', '叶', '瑞', '翁', '珞'];
+const NUMERALS = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI', 'XII'];
+
+/* ========================= 伴生卫星与小行星带（doc5 §3.2 处方 1 / P3-01） ========================= */
+
+/** 黄金角（行星轨道初始相位散布，doc5 §3.2） */
+const GOLDEN_ANGLE = 2.399963229728653;
+const TAU = Math.PI * 2;
+/** 卫星类别池（doc5 §3.2 处方 1） */
+const MOON_KINDS = ['barren_moon', 'ice_moon', 'volcanic_moon', 'captured_asteroid'];
+/** 卫星概率/数量参数（doc5 §3.2 处方 1） */
+const MOON_SPEC = {
+  chanceGasGiant: 0.85,
+  chanceOther: 0.35,
+  maxGasGiant: 3,
+  maxLarge: 2,    // radiusClass >= 3
+  maxSmall: 1,
+  radiusRatioBase: 0.22,
+  radiusRatioSpan: 0.14,
+  orbitBase: 1.65,
+  orbitStep: 0.55,
+};
+/** 小行星带出现概率按恒星光谱（doc5 §3.2 处方 1；中子星/脉冲星同档 0.90） */
+const BELT_CHANCE = {
+  yellowDwarf: 0.65, redDwarf: 0.35, blueGiant: 0.80, whiteDwarf: 0.75,
+  neutronStar: 0.90, pulsar: 0.90, blackHole: 0.85,
+};
+const BELT_CHANCE_DEFAULT = 0.55;
+/** 天体子流盐（planetSeed 派生；与 planetSeeds.js 各 salt 互异） */
+const CELESTIAL_SALT = 0x27d4eb2f;
+
+function round4(v) {
+  return Math.round(v * 10000) / 10000;
+}
+
+/**
+ * 行星伴生天体生成（纯函数：只读 world.seed 与行星字段，绝不读写 world.rng）。
+ * 子流 = seedFromNumber(derivePlanetSeeds(world, planet.id).planetSeed ^ CELESTIAL_SALT)。
+ * 产出：
+ *  - orbitPhase：黄金角初始轨道相位（doc5 §3.2 处方 1），渲染侧 _layout 优先消费；
+ *  - moons：0..3 颗卫星（gasGiant ≤3 / radiusClass≥3 ≤2 / 其余 ≤1；出现率 0.85/0.35），
+ *    kind ∈ MOON_KINDS，radiusRatio ∈ [0.22, 0.36]，orbitRadius = 1.65 + m×0.55
+ *    （行星半径倍数），orbitSpeed/orbitPhase 由子流派生。JSON-safe，随存档持久化。
+ * @param {{seed:number}} world 世界实体（只读 world.seed）
+ * @param {{id:string, category:string, radiusClass?:number, orbitIndex?:number}} planet 行星档案
+ * @returns {{orbitPhase:number, moons:Array<{id:string,kind:string,radiusRatio:number,orbitRadius:number,orbitSpeed:number,orbitPhase:number}>}}
+ */
+function generatePlanetCelestials(world, planet) {
+  const seeds = derivePlanetSeeds(world, planet.id);
+  const sub = seedFromNumber(((seeds.planetSeed >>> 0) ^ CELESTIAL_SALT) >>> 0);
+  const orbit = Math.max(0, Number(planet.orbitIndex) || 0);
+  const orbitPhase = (((orbit * GOLDEN_ANGLE) + subFloat(sub) * 0.85) % TAU + TAU) % TAU;
+
+  const gasGiant = planet.category === 'gasGiant';
+  const maxMoons = gasGiant
+    ? MOON_SPEC.maxGasGiant
+    : ((Number(planet.radiusClass) || 1) >= 3 ? MOON_SPEC.maxLarge : MOON_SPEC.maxSmall);
+  const moonChance = gasGiant ? MOON_SPEC.chanceGasGiant : MOON_SPEC.chanceOther;
+  const moons = [];
+  if (subChance(sub, moonChance)) {
+    const count = 1 + subInt(sub, maxMoons);
+    for (let m = 0; m < count; m++) {
+      const radiusRatio = round4(MOON_SPEC.radiusRatioBase + subFloat(sub) * MOON_SPEC.radiusRatioSpan);
+      const speed = (0.85 - m * 0.18) + subFloat(sub) * 0.12;
+      moons.push({
+        id: `${planet.id}_moon_${m + 1}`,
+        kind: MOON_KINDS[subInt(sub, MOON_KINDS.length)],
+        radiusRatio,
+        orbitRadius: round4(MOON_SPEC.orbitBase + m * MOON_SPEC.orbitStep),
+        orbitSpeed: round4(Math.max(0.12, speed)),
+        orbitPhase: round4(subFloat(sub) * TAU) % TAU,
+      });
+    }
+  }
+  return { orbitPhase: round4(orbitPhase) % TAU, moons };
+}
+
+/**
+ * 星系小行星带生成（纯函数：只读 world.seed / sys.id / star.typeId，绝不读写 world.rng）。
+ * 出现率按恒星光谱（BELT_CHANCE）；blueGiant 为「双层富金属碎石带」（同率双带）。
+ * orbitRadius 为轨道槽位单位（渲染侧世界半径 = ORBIT_BASE + slot×ORBIT_STEP），
+ * midOrbit = max(1.5, floor(行星数×0.55)+0.5)（doc5 §3.2 处方 1）。
+ * richRes：blueGiant/neutronStar/pulsar → heavyMetal，否则 ferro；
+ * density = round((0.5 + rich×0.6)×100)/100；spread ∈ [0.10, 0.18] 槽位单位。
+ * @param {{seed:number}} world 世界实体（只读 world.seed）
+ * @param {{id:string, star?:{typeId?:string}}} sys 星系实体（只需 id 与 star.typeId）
+ * @param {number} richness 星系资源富集度（galaxyGen 的 gaussField 原值 0..1.6）
+ * @param {number} planetCount 该星系行星数
+ * @returns {Array<{id:string,orbitRadius:number,richRes:string,density:number,spread:number}>}
+ */
+function generateSystemBelts(world, sys, richness, planetCount) {
+  const typeId = (sys && sys.star && sys.star.typeId) || null;
+  const prob = BELT_CHANCE[typeId] != null ? BELT_CHANCE[typeId] : BELT_CHANCE_DEFAULT;
+  const sub = seedFromNumber((((world && world.seed) >>> 0) ^ hash32(`belts:${sys.id}`)) >>> 0);
+  if (!subChance(sub, prob)) return [];
+  const midOrbit = Math.max(1.5, Math.floor(Math.max(0, planetCount) * 0.55) + 0.5);
+  const richRes = (typeId === 'blueGiant' || typeId === 'neutronStar' || typeId === 'pulsar')
+    ? 'heavyMetal' : 'ferro';
+  const density = Math.round((0.5 + Math.max(0, richness) * 0.6) * 100) / 100;
+  const layers = typeId === 'blueGiant' ? 2 : 1;
+  const belts = [];
+  for (let k = 0; k < layers; k++) {
+    belts.push({
+      id: `${sys.id}_belt_${k + 1}`,
+      orbitRadius: Math.round((midOrbit + k * 0.85) * 100) / 100,
+      richRes,
+      density,
+      spread: round4(0.10 + subFloat(sub) * 0.08),
+    });
+  }
+  return belts;
+}
+
+function weightedPick(world, table) {
+  let total = 0;
+  for (const t of table) total += t.weight;
+  let r = RNG.float(world) * total;
+  for (const t of table) {
+    r -= t.weight;
+    if (r <= 0) return t;
+  }
+  return table[table.length - 1];
+}
+
+function genSystemName(world, used) {
+  for (let attempt = 0; attempt < 64; attempt++) {
+    const n = NAME_A[RNG.int(world, NAME_A.length)] + NAME_B[RNG.int(world, NAME_B.length)];
+    if (!used.has(n)) {
+      used.add(n);
+      return n;
+    }
+  }
+  // 兜底：加编号
+  const n = NAME_A[RNG.int(world, NAME_A.length)] + '-' + RNG.intRange(world, 2, 99);
+  used.add(n);
+  return n;
+}
+
+/**
+ * 生成银河。config = {
+ *   systemCount: 96,
+ *   factionConfigs: [{ id?, name, adjective, personality, ethosTag, color, homeName?, originType? }],
+ *   storyMode: false
+ * }
+ * 返回 { systemIds, factionIds, warnings }
+ */
+function generateGalaxy(world, config = {}) {
+  const sizeKey = world.galaxySize || 'standard';
+  const systemCount = clamp(config.systemCount ?? BAL.galaxy.sizes[sizeKey] ?? 96, 24, 256);
+  const W = 1000; // 策略空间坐标范围（0..1000）
+  const usedNames = new Set();
+
+  // 1. 抖动网格采样 —— 间距约束保证不重叠
+  const cols = Math.ceil(Math.sqrt(systemCount * 1.35));
+  const cell = W / cols;
+  const points = [];
+  for (let gy = 0; gy < cols && points.length < systemCount; gy++) {
+    for (let gx = 0; gx < cols && points.length < systemCount; gx++) {
+      const jx = cell * (0.15 + 0.7 * RNG.float(world));
+      const jy = cell * (0.15 + 0.7 * RNG.float(world));
+      points.push({
+        idx: points.length, // 确定性索引（航路表键）
+        x: clamp(gx * cell + jx, 8, W - 8),
+        y: clamp(gy * cell + jy, 8, W - 8),
+      });
+    }
+  }
+
+  // 2. k 近邻候选航路（以 idx 为键）
+  const avgNNDist = meanNearestDist(points);
+  const prune = avgNNDist * BAL.galaxy.lanePruneFactor;
+  const laneSets = new Map(); // idx -> Set(idx)
+  for (const p of points) {
+    p.knn = kNearest(points, p.x, p.y, 6).filter((e) => e.point.idx !== p.idx); // 排除自身
+    laneSets.set(p.idx, new Set());
+  }
+  for (const p of points) {
+    for (const { point: q, dist: d } of p.knn) {
+      if (d <= prune) {
+        laneSets.get(p.idx).add(q.idx);
+        laneSets.get(q.idx).add(p.idx);
+      }
+    }
+  }
+
+  // 2b. 连通性修复：分量间用最短可用边桥接
+  repairConnectivity(points, laneSets);
+
+  // 2c. 保证每节点度数下限
+  for (const p of points) {
+    const set = laneSets.get(p.idx);
+    if (set.size < BAL.galaxy.lanesPerNodeMin) {
+      for (const { point: q } of p.knn) {
+        if (set.size >= BAL.galaxy.lanesPerNodeMin) break;
+        if (q.idx === p.idx) continue;
+        set.add(q.idx);
+        laneSets.get(q.idx).add(p.idx);
+      }
+    }
+  }
+
+  // 3. 空间区块特征：资源带与危险簇
+  const richnessCenters = [];
+  for (let i = 0; i < 4; i++) richnessCenters.push({ x: RNG.range(world, 100, W - 100), y: RNG.range(world, 100, W - 100), s: RNG.range(world, 90, 200) });
+  const dangerCenters = [];
+  for (let i = 0; i < BAL.galaxy.dangerClusters; i++) {
+    dangerCenters.push({ x: RNG.range(world, 100, W - 100), y: RNG.range(world, 100, W - 100), s: RNG.range(world, 120, 240) });
+  }
+
+  // 4. 创建星系实体（先全体建档获得 ID，再回填航路）
+  const systemIds = [];
+  const sysIdByIdx = [];
+  const sysData = [];
+  for (const p of points) {
+    const star = weightedPick(world, STAR_TYPES);
+    const rich = gaussField(p.x, p.y, richnessCenters) * (star.id === 'blackHole' ? 0.6 : 1.0);
+    const danger = clamp(gaussField(p.x, p.y, dangerCenters) + star.danger * 0.35 + RNG.range(world, -0.8, 0.8), 0, 10);
+    const sys = createEntity(world, 'systems', {
+      name: genSystemName(world, usedNames),
+      x: p.x,
+      y: p.y,
+      star: {
+        typeId: star.id,
+        name: star.name,
+        energy: star.energy,
+        scanNoise: star.scanNoise,
+      },
+      lanes: [], // 回填
+      planetIds: [],
+      stationIds: [],
+      anomalyIds: [],
+      ownerFactionId: null,
+      surveyedBy: {},          // factionId → 0 未接触 / 1 侦测 / 2 分类 / 3 定位 / 4 调查完成
+      resourceRating: Math.round(rich * 10) / 10,
+      dangerRating: Math.round(danger * 10) / 10,
+      hazards: genHazards(world, star),
+      flags: {},
+    });
+    systemIds.push(sys.id);
+    sysIdByIdx[p.idx] = sys.id;
+    sysData.push({ sys, p, star });
+
+    // 行星：2-8 个（主题抽选/POI 走行星子流，同星系 takenThemes 去重不触碰 world.rng）
+    const takenThemes = new Set();
+    const nPlanets = RNG.intRange(world, 2, 8);
+    for (let orbit = 0; orbit < nPlanets; orbit++) {
+      const cat = weightedPick(world, PLANET_CATEGORIES);
+      const hz = orbitToHabitability(world, orbit, nPlanets, star, cat);
+      const planet = createEntity(world, 'planets', {
+        systemId: sys.id,
+        orbitIndex: orbit,
+        name: `${sys.name} ${NUMERALS[orbit] || orbit + 1}`,
+        category: cat.id,
+        categoryName: cat.name,
+        radiusClass: RNG.intRange(world, 1, 5),        // 1 小 — 5 巨
+        gravity: Math.round(RNG.range(world, 0.3, 1.9) * 10) / 10,
+        temperatureBand: tempBand(cat.id),
+        atmosphere: genAtmosphere(world, cat.id),
+        radiation: Math.round(clamp(star.danger * 0.3 + RNG.range(world, 0, 2), 0, 6) * 10) / 10,
+        habitability: hz,
+        water: cat.id === 'ocean' ? RNG.intRange(world, 70, 95) : cat.id === 'ice' ? RNG.intRange(world, 30, 60) : RNG.intRange(world, 0, 40),
+        deposits: genDeposits(world, cat, rich),
+        maxDistricts: clamp(3 + Math.round(hz / 18) + (cat.id === 'gasGiant' ? 0 : 1), 3, 10),
+        colonyId: null,
+        terraform: null,      // { stage, progress }
+      });
+      // 主题分配（doc7 TASK-3.1 / doc6 §4.3）：物理约束 + 同星系去重；
+      // 只消费 derivePlanetSeeds(world, planet.id).themeSeed 子流，绝不触碰 world.rng
+      const themePick = assignTheme(world, planet, star, takenThemes);
+      planet.primaryThemeId = themePick.primaryThemeId;
+      planet.secondaryThemeModifiers = themePick.secondaryThemeModifiers;
+      planet.themeAssignmentVersion = THEME_ASSIGNMENT_VERSION;
+      takenThemes.add(themePick.primaryThemeId);
+      // 持久 POI（doc5 §3.7）：行星子流确定性生成，随存档持久化；
+      // 只消费 derivePlanetSeeds 子流，不触碰 world.rng 主序列
+      // （POI 池在 primaryThemeId 就绪后取主题池，缺省回退类别池）
+      planet.pois = generatePlanetPois(world, planet, star);
+      // 伴生卫星 + 黄金角轨道相位（doc5 §3.2 处方 1 / P3-01 / doc7 TASK-4.3）：
+      // 行星子流确定性派生，绝不触碰 world.rng（JSON-safe，随存档持久化）
+      const cel = generatePlanetCelestials(world, planet);
+      planet.orbitPhase = cel.orbitPhase;
+      planet.moons = cel.moons;
+      sys.planetIds.push(planet.id);
+    }
+
+    // 小行星带（doc5 §3.2 处方 1）：按恒星光谱概率；同样只消费独立子流
+    sys.belts = generateSystemBelts(world, sys, rich, nPlanets);
+
+    // 异常点槽位（异常实体由 exploration 阶段在扫描时揭示）
+    if (RNG.chance(world, BAL.galaxy.anomalyBaseChance + rich * 0.06)) {
+      sys.flags.hasAnomalySlot = true;
+    }
+  }
+  // 回填航路（映射 idx → system id，确定性排序）
+  for (const { sys, p } of sysData) {
+    sys.lanes = [...laneSets.get(p.idx)].map((idx) => sysIdByIdx[idx]).sort();
+  }
+
+  // 5. 文明出生点
+  const factionIds = [];
+  const warnings = [];
+  if (config.factionConfigs && config.factionConfigs.length > 0) {
+    const spawned = spawnFactions(world, config.factionConfigs, systemIds);
+    factionIds.push(...spawned.factionIds);
+    warnings.push(...spawned.warnings);
+  }
+
+  return { systemIds, factionIds, warnings };
+}
+
+function meanNearestDist(points) {
+  let sum = 0;
+  let n = 0;
+  for (const p of points) {
+    const nn = kNearest(points, p.x, p.y, 2);
+    if (nn.length >= 2) {
+      sum += nn[1].dist;
+      n++;
+    }
+  }
+  return safeDivide(sum, n, 60);
+}
+
+function repairConnectivity(points, laneSets) {
+  const uf = new UnionFind(points.map((p) => p.idx));
+  for (const [a, set] of laneSets) for (const b of set) uf.union(a, b);
+  let comps = uf.components();
+  let guard = 0;
+  while (comps.length > 1 && guard++ < 64) {
+    // 找分量间最短点对桥接（确定性：按 (dist, idxA, idxB) 排序）
+    let best = null;
+    for (let i = 0; i < comps.length; i++) {
+      for (let j = i + 1; j < comps.length; j++) {
+        for (const ia of comps[i]) {
+          const A = points.find((p) => p.idx === ia);
+          for (const ib of comps[j]) {
+            const B = points.find((p) => p.idx === ib);
+            const d = dist(A.x, A.y, B.x, B.y);
+            if (!best || d < best.d) best = { d, a: ia, b: ib };
+          }
+        }
+      }
+    }
+    if (!best) break;
+    laneSets.get(best.a).add(best.b);
+    laneSets.get(best.b).add(best.a);
+    uf.union(best.a, best.b);
+    comps = uf.components();
+  }
+}
+
+function gaussField(x, y, centers) {
+  let v = 0;
+  for (const c of centers) {
+    const d = dist(x, y, c.x, c.y);
+    v += Math.exp(-(d * d) / (2 * c.s * c.s));
+  }
+  return clamp(v, 0, 1.6);
+}
+
+function orbitToHabitability(world, orbit, total, star, cat) {
+  // 宜居带中心随恒星类型移动；气态/熔岩行星不叠加宜居
+  const zoneCenter = (total - 1) * star.habitZone * 0.42;
+  const d = Math.abs(orbit - zoneCenter);
+  const base = clamp(80 - d * 26 - star.danger * 3 + RNG.range(world, -12, 12), 0, 90);
+  if (cat.habitRange[1] === 0) return 0; // 气态巨行星不可直接殖民
+  return Math.round(clamp(base, cat.habitRange[0], cat.habitRange[1]));
+}
+
+function tempBand(catId) {
+  const bands = {
+    rocky: 'temperate', ocean: 'temperate', ice: 'cold', desert: 'hot',
+    gasGiant: 'cold', lava: 'inferno', toxic: 'hot', artificial: 'temperate',
+  };
+  return bands[catId] || 'temperate';
+}
+
+function genAtmosphere(world, catId) {
+  const table = {
+    rocky: ['薄氮氧', '二氧化碳型', '稀薄'],
+    ocean: ['湿润氮氧', '高湿'],
+    ice: ['稀薄', '无大气'],
+    desert: ['干燥二氧化碳', '尘暴型'],
+    gasGiant: ['氢氦主导'],
+    lava: ['硫化物', '高压'],
+    toxic: ['酸性', '氯系'],
+    artificial: ['受控生境'],
+  };
+  const arr = table[catId] || ['未知'];
+  return arr[RNG.int(world, arr.length)];
+}
+
+const DEPOSIT_RESOURCES = ['ferro', 'silicate', 'rareEarth', 'heavyMetal', 'hydrogen', 'helium3', 'water'];
+const DEPOSIT_PROFILE = {
+  rocky: { ferro: 2.0, silicate: 2.2, heavyMetal: 0.8, rareEarth: 0.4 },
+  ocean: { water: 3.0, ferro: 0.4, hydrocarbon: 0 },
+  ice: { water: 2.4, hydrogen: 1.2, helium3: 0.6 },
+  desert: { silicate: 1.8, rareEarth: 1.0, ferro: 0.8 },
+  gasGiant: { hydrogen: 3.2, helium3: 2.2 },
+  lava: { heavyMetal: 2.6, ferro: 2.0, rareEarth: 0.6 },
+  toxic: { ferro: 1.0, heavyMetal: 1.2, hydrogen: 0.8 },
+  artificial: { ferro: 0.4, silicate: 0.4 },
+};
+
+function genDeposits(world, cat, richness) {
+  const prof = DEPOSIT_PROFILE[cat.id] || {};
+  const out = {};
+  for (const resId of DEPOSIT_RESOURCES) {
+    const base = prof[resId] || 0;
+    if (base > 0) {
+      out[resId] = Math.round(base * (0.6 + richness) * RNG.range(world, 60, 160));
+    }
+  }
+  return out;
+}
+
+function genHazards(world, star) {
+  const h = [];
+  if (star.id === 'neutronStar' || star.id === 'pulsar') h.push('pulsarInterference');
+  if (star.id === 'blackHole') h.push('gravityWell');
+  if (star.id === 'blueGiant' || star.id === 'whiteDwarf') h.push('radiationFlare');
+  if (RNG.chance(world, 0.12)) h.push('asteroidDebris');
+  return h;
+}
+
+/**
+ * 出生点分配：贪心最远点采样 + 公平性验证。
+ * 每个文明获得：母星系（必含一颗宜居≥45 行星）+ 邻近 1-2 系归属。
+ */
+function spawnFactions(world, configs, systemIds) {
+  const S = world.entities.systems;
+  const warnings = [];
+  // 候选：宜居星系（有 hz>=45 行星），按资源降序为次序参考
+  const candidates = systemIds
+    .map((id) => S[id])
+    .filter((s) => s.planetIds.some((pid) => world.entities.planets[pid].habitability >= 45));
+  if (candidates.length < configs.length) {
+    // 放宽标准
+    candidates.length = 0;
+    for (const id of systemIds) {
+      const s = S[id];
+      if (s.planetIds.some((pid) => world.entities.planets[pid].habitability >= 25)) candidates.push(s);
+    }
+    warnings.push('宜居候选不足，已放宽到 25 阈值');
+  }
+  candidates.sort((a, b) => b.resourceRating - a.resourceRating || (a.id < b.id ? -1 : 1));
+
+  // 贪心最远点：先取资源最好者，之后每次取“距已选出生点最小距离最大”者
+  const chosen = [];
+  const pool = [...candidates];
+  while (chosen.length < configs.length && pool.length > 0) {
+    let best = null;
+    let bestScore = -Infinity;
+    for (const c of pool) {
+      const minD = chosen.length === 0 ? Infinity : Math.min(...chosen.map((s) => dist(s.x, s.y, c.x, c.y)));
+      const score = Math.min(minD, 9999) + c.resourceRating * 8;
+      if (score > bestScore) {
+        bestScore = score;
+        best = c;
+      }
+    }
+    chosen.push(best);
+    pool.splice(pool.indexOf(best), 1);
+  }
+
+  const factionIds = [];
+  for (let i = 0; i < configs.length; i++) {
+    const cfg = configs[i];
+    const home = chosen[i % chosen.length];
+    const fac = createEntity(world, 'factions', {
+      name: cfg.name,
+      adjective: cfg.adjective || cfg.name,
+      personality: cfg.personality || 'balanced',
+      ethosTag: cfg.ethosTag || null,
+      color: cfg.color || '#5ad1e6',
+      originType: cfg.originType || 'homeworld',
+      homeSystemId: home.id,
+      isPlayer: !!cfg.isPlayer,
+      policySlots: 3,
+      policies: {},
+    });
+    factionIds.push(fac.id);
+    if (cfg.isPlayer) world.playerFactionId = fac.id;
+
+    // 母星系归属 + 找一颗宜居行星登记为母星
+    home.ownerFactionId = fac.id;
+    home.surveyedBy[fac.id] = 4;
+    const homePlanet = home.planetIds
+      .map((pid) => world.entities.planets[pid])
+      .filter((p) => p.habitability >= 25)
+      .sort((a, b) => b.habitability - a.habitability)[0];
+    if (homePlanet) {
+      fac.homePlanetId = homePlanet.id;
+      homePlanet.homeOfFactionId = fac.id;
+    }
+
+    // 归属 1-2 个近邻
+    const neighbors = home.lanes
+      .map((lid) => S[lid])
+      .filter((s) => s.ownerFactionId === null)
+      .sort((a, b) => dist(home.x, home.y, a.x, a.y) - dist(home.x, home.y, b.x, b.y));
+    const claimN = Math.min(neighbors.length, RNG.intRange(world, 1, 2));
+    for (let k = 0; k < claimN; k++) neighbors[k].ownerFactionId = fac.id;
+  }
+
+  // 公平性：每个文明至少 2 条可扩张路径（含未归属航路邻接）
+  for (const fid of factionIds) {
+    const fac = world.entities.factions[fid];
+    const owned = systemIds.map((id) => S[id]).filter((s) => s.ownerFactionId === fid);
+    let frontier = 0;
+    for (const s of owned) {
+      for (const lid of s.lanes) if (S[lid].ownerFactionId === null) frontier++;
+    }
+    if (frontier < 2) warnings.push(`文明 ${fac.name} 扩张路径不足（${frontier}）`);
+  }
+  return { factionIds, warnings };
+}
+
+Object.assign(__exports, { STAR_TYPES, PLANET_CATEGORIES, MOON_KINDS, MOON_SPEC, BELT_CHANCE, generatePlanetCelestials, generateSystemBelts, generateGalaxy });
 
 });
 __register("src/persistence/SaveCodec.js", function (__exports, __require) {
@@ -34493,9 +44908,36 @@ function buildSnapshot(world) {
     logLines: buildLogLines(world),
     resources: player ? resourceSummary(world, player) : null,
     pendingEvent: world.narrative.pendingChoices?.[0] || null,
+    objectives: buildObjectivesView(world),
     victory: world.victory,
   };
   return snap;
+}
+
+/** 活跃空间任务目标（GalaxyRenderer 目标叠加层 / EventsView 目标卡消费） */
+function buildObjectivesView(world) {
+  const out = [];
+  const bag = world.entities.objectives || {};
+  for (const id of sortedKeys(bag)) {
+    const o = bag[id];
+    if (o.status !== 'active') continue;
+    out.push({
+      id,
+      kind: o.kind,
+      titleZh: o.titleZh,
+      status: o.status,
+      priority: o.priority,
+      sourceEventId: o.sourceEventId,
+      targetSystemId: o.targetSystemId,
+      secondarySystemId: o.secondarySystemId,
+      targetPlanetId: o.targetPlanetId,
+      deadlineTick: o.deadlineTick,
+      assignedFleetId: o.assignedFleetId,
+      progress: o.progress,
+      goalProgress: o.goalProgress,
+    });
+  }
+  return out;
 }
 
 function factionSummary(world, f) {
@@ -35043,6 +45485,7 @@ __register("src/simulation/DailySystems.js", function (__exports, __require) {
 
 const { registerDaily: registerDaily } = __require("src/simulation/TickPipeline.js");
 const { dailyEventCheck: dailyEventCheck, expirePendingChoices: expirePendingChoices } = __require("src/domain/events/narrative.js");
+const { dailyObjectiveSweep: dailyObjectiveSweep } = __require("src/domain/events/objectives.js");
 const { dailyPolicySettlement: dailyPolicySettlement } = __require("src/domain/politics/policy.js");
 const { buildingDef: buildingDef } = __require("src/domain/planets/colony.js");
 const { dailyPopulation: dailyPopulation } = __require("src/domain/planets/colony.js");
@@ -35114,6 +45557,7 @@ registerDaily('ledger', (world) => {
 registerDaily('narrative', (world) => {
   dailyEventCheck(world);
   expirePendingChoices(world);
+  dailyObjectiveSweep(world);   // WorldObjective 到期结算（doc5 P1-01）
 });
 
 registerDaily('policies', (world) => {
@@ -35193,6 +45637,7 @@ const { tickResearch: tickResearch } = __require("src/domain/research/research.j
 const { createShip: createShip } = __require("src/domain/ships/ship.js");
 const { getMod: getMod } = __require("src/domain/factions/modifiers.js");
 const { registerAI: registerAI } = __require("src/domain/ai/FactionAI.js");
+const { factionShipMods: factionShipMods } = __require("src/domain/fleets/fleet.js");
 
 registerHourly('orders', (world) => {
   // AI 命令超时与目标清理（防无限重试 —— RISK-06）
@@ -35312,6 +45757,7 @@ function tickShipyards(world) {
           blueprintId: bp.id,
           systemId: station.systemId,
           name: bp.name,
+          factionMods: factionShipMods(world, job.factionId), // TD3：文明战斗特质汇入 computeShipStats
         });
       }
       q.shift();
@@ -35911,6 +46357,116 @@ const { chronicle: chronicle } = __require("src/core/eventBus.js");
 
 const DT = BAL.combat.dt;
 
+// ———— TD3：投射物 / 命中事件环形对象池（doc5 §3.8；容量 256，复用对象） ————
+
+/** 环形池容量（doc5:900：容量 256 的预分配环形对象池） */
+const POOL_CAPACITY = 256;
+
+/**
+ * 预分配环形对象池：acquire 从空闲栈取对象（空则返回 null，调用方透传瞬态对象，
+ * 行为与池化完全一致 —— 只省分配不改模拟）；release 归还。零 Math.random、零 world.rng。
+ */
+function createRingPool(capacity, factory) {
+  const items = new Array(capacity);
+  const freeStack = new Array(capacity);
+  for (let i = 0; i < capacity; i++) {
+    items[i] = factory();
+    items[i]._poolIdx = i;
+    items[i]._poolFree = true;
+    freeStack[i] = capacity - 1 - i;
+  }
+  let freeTop = capacity;
+  return {
+    capacity,
+    items,
+    acquire() {
+      if (freeTop === 0) return null;
+      const it = items[freeStack[--freeTop]];
+      it._poolFree = false;
+      return it;
+    },
+    release(item) {
+      if (!item || item._poolIdx === undefined || item._poolFree) return;
+      item._poolFree = true;
+      freeStack[freeTop++] = item._poolIdx;
+    },
+  };
+}
+
+/** 投射物工厂（覆盖导弹与光束可视化两种形态的字段并集） */
+function makeProjectile() {
+  return {
+    id: '', side: 'a', kind: '',
+    x: 0, y: 0, vx: 0, vy: 0, speed: 0,
+    damage: 0, damageType: '', targetShipId: null,
+    life: 0, maxLife: 0, tracking: 0, intercepted: false,
+    x0: 0, y0: 0, x1: 0, y1: 0,
+  };
+}
+
+/** 命中事件工厂（战斗时间线） */
+function makeEvent() {
+  return { t: 0, type: '', side: 'a', shipId: null };
+}
+
+/**
+ * 战斗池登记簿（WeakMap）：池与代次计数挂在战斗实例之外 —— 战斗实体保持纯数据
+ * （存档 payload 不含函数/池结构，SAVE-03 校验和不受影响），战斗结束随 WeakMap 释放。
+ */
+const battlePools = new WeakMap();
+
+/** 战斗开局惰性预热（一次性分配；每步归零复用） */
+function ensureBattlePools(battle) {
+  let entry = battlePools.get(battle);
+  if (!entry) {
+    entry = {
+      projPool: createRingPool(POOL_CAPACITY, makeProjectile),
+      evtPool: createRingPool(POOL_CAPACITY, makeEvent),
+      gen: 0,
+    };
+    battlePools.set(battle, entry);
+  }
+  return entry;
+}
+
+/**
+ * 逐步吸收（reconcile）：把战术层本步推入的瞬态字面量吸进预分配池对象（原位替换，
+ * 列表顺序与字段值逐位不变 → 模拟结果不变）；上一步存活、本步已消失的池对象归还空闲栈。
+ * 池满（256 在用）后新对象保持瞬态透传 —— 行为不变，仅不再复用。
+ * 零新增分配：不建临时数组，直接原位改写 battle.projectiles / battle.events。
+ */
+function reconcileBattlePools(battle) {
+  const entry = ensureBattlePools(battle);
+  const gen = ++entry.gen;
+  absorb(battle.projectiles, entry.projPool, gen);
+  absorb(battle.events, entry.evtPool, gen);
+
+  /** 原位吸收：瞬态字面量 → 池对象；标记 gen */
+  function absorb(list, pool, gen) {
+    for (let i = 0; i < list.length; i++) {
+      const it = list[i];
+      if (it && it._poolIdx !== undefined) {
+        it._gen = gen; // 本步仍存活
+      } else {
+        const q = pool.acquire();
+        if (q) {
+          const poolIdx = q._poolIdx;
+          Object.assign(q, it); // 复用对象：字段复制，无新分配
+          q._poolIdx = poolIdx;
+          q._poolFree = false;
+          q._gen = gen;
+          list[i] = q;
+        }
+      }
+    }
+    // 归还：本步未出现的在借池对象
+    for (let k = 0; k < pool.capacity; k++) {
+      const it = pool.items[k];
+      if (!it._poolFree && it._gen !== gen) pool.release(it);
+    }
+  }
+}
+
 /** 每战略 tick 推进所有活动战斗 */
 function stepBattles(world) {
   const active = world.battles.active;
@@ -35957,6 +46513,9 @@ function stepOneBattle(world, battle, dt) {
   // 单位行为（武器系统在阶段08注入：unitBehaviors 注册表）
   for (const behavior of unitBehaviors) behavior(world, battle, dt);
   for (const behavior of projectileBehaviors) behavior(world, battle, dt);
+  // TD3：逐步吸收瞬态投射物/事件进环形池（容量 256；原位替换，模拟值不变）
+  ensureBattlePools(battle);
+  reconcileBattlePools(battle);
 }
 
 /** 行为注册表（阶段08由武器/机动模块注册；保持顺序确定） */
@@ -36012,7 +46571,7 @@ function finishBattle(world, battle, winnerSide) {
 const { installCombatBehaviors: installCombatBehaviors } = __require("src/domain/combat/tactics.js");
 installCombatBehaviors(unitBehaviors, projectileBehaviors);
 
-Object.assign(__exports, { stepBattles, stepOneBattle, unitBehaviors, projectileBehaviors, finishBattle });
+Object.assign(__exports, { POOL_CAPACITY, createRingPool, stepBattles, stepOneBattle, unitBehaviors, projectileBehaviors, finishBattle });
 
 });
 __register("src/domain/combat/tactics.js", function (__exports, __require) {
@@ -36487,14 +47046,18 @@ function createStarterCampaign(config = {}) {
     // 初始舰队：科学船 + 2 护卫舰（玩家）；AI 同规格保持公平
     const homeSystemId = fac.homeSystemId;
     ensureMarket(world, homeSystemId);
-    // 母星轨道船坞（舰船生产入口）
-    createEntity(world, 'stations', {
+    // 母星轨道船坞（舰船生产入口）；TD1：stationIds 确定性回填（星系快照 stationCount 口径）
+    const shipyard = createEntity(world, 'stations', {
       kind: 'shipyard',
       systemId: homeSystemId,
       factionId: fid,
       level: 1,
       buildQueue: [],
     });
+    const homeSys = world.entities.systems[homeSystemId];
+    if (homeSys && Array.isArray(homeSys.stationIds) && !homeSys.stationIds.includes(shipyard.id)) {
+      homeSys.stationIds.push(shipyard.id);
+    }
     // 每文明初始蓝图：护卫舰（AI 建军与玩家造船共用）
     createEntity(world, 'blueprints', {
       factionId: fid,
@@ -36587,441 +47150,6 @@ function createMinimalWorld(seed = 1234) {
 }
 
 Object.assign(__exports, { createStarterCampaign, createMinimalWorld });
-
-});
-__register("src/domain/world/galaxyGen.js", function (__exports, __require) {
-/**
- * domain/world/galaxyGen.js — 程序化星系生成（任务书 3.1 / 3.2 / 9.5 阶段02）
- *
- * 生成步骤（规范顺序）：
- *  1. 抖动网格采样星系坐标（带最小间距约束）
- *  2. k 近邻候选航路 + 长边剪除 + 连通性修复（UnionFind）
- *  3. 按空间区块分配恒星类型 / 资源带 / 危险度
- *  4. 生成行星槽位、环境与矿藏
- *  5. 异常点布置
- *  6. 文明出生点分配（贪心最远点 + 公平性验证，含扩张路径检查）
- *
- * 全程使用 world.rng（xoshiro128**），同种子同配置结果完全一致。
- */
-
-const { RNG: RNG } = __require("src/core/rng.js");
-const { clamp: clamp, dist: dist, safeDivide: safeDivide } = __require("src/core/math.js");
-const { kNearest: kNearest, UnionFind: UnionFind, connectedComponents: connectedComponents } = __require("src/core/spatial.js");
-const { createEntity: createEntity } = __require("src/domain/entities/registry.js");
-const { BAL: BAL } = __require("src/content/constants.js");
-
-const STAR_TYPES = [
-  { id: 'yellowDwarf', name: '黄矮星', weight: 34, habitZone: 1.0, energy: 1.0, danger: 0, scanNoise: 0.1 },
-  { id: 'redDwarf', name: '红矮星', weight: 26, habitZone: 0.55, energy: 0.7, danger: 1, scanNoise: 0.2 },
-  { id: 'blueGiant', name: '蓝巨星', weight: 8, habitZone: 2.4, energy: 1.6, danger: 3, scanNoise: 0.35 },
-  { id: 'whiteDwarf', name: '白矮星', weight: 12, habitZone: 0.3, energy: 0.9, danger: 2, scanNoise: 0.25 },
-  { id: 'neutronStar', name: '中子星', weight: 6, habitZone: 0.15, energy: 1.8, danger: 6, scanNoise: 0.7 },
-  { id: 'pulsar', name: '脉冲星', weight: 5, habitZone: 0.2, energy: 1.7, danger: 5, scanNoise: 0.9 },
-  { id: 'blackHole', name: '黑洞', weight: 4, habitZone: 0.05, energy: 1.2, danger: 8, scanNoise: 1.0 },
-];
-
-const PLANET_CATEGORIES = [
-  { id: 'rocky', name: '岩质行星', habitRange: [15, 55], deposit: 3.0, weight: 30 },
-  { id: 'ocean', name: '海洋行星', habitRange: [25, 60], deposit: 1.6, weight: 10 },
-  { id: 'ice', name: '冰封行星', habitRange: [5, 25], deposit: 2.2, weight: 16 },
-  { id: 'desert', name: '沙漠行星', habitRange: [12, 40], deposit: 1.8, weight: 14 },
-  { id: 'gasGiant', name: '气态巨行星', habitRange: [0, 0], deposit: 2.6, weight: 14 },
-  { id: 'lava', name: '熔岩行星', habitRange: [0, 12], deposit: 4.2, weight: 9 },
-  { id: 'toxic', name: '腐蚀大气行星', habitRange: [0, 15], deposit: 2.4, weight: 8 },
-  { id: 'artificial', name: '人工改造天体', habitRange: [45, 75], deposit: 0.8, weight: 2 },
-];
-
-// 星系命名音节表（原创）
-const NAME_A = ['泽', '维', '诺', '卡', '塞', '苍', '冥', '翎', '孤', '川', '岚', '珀', '烬', '泓', '曜', '桉', '湮', '缔', '穹', '犁'];
-const NAME_B = ['尔', '拉', '昆', '瑟', '纳', '托', '菲', '隆', '伽', '希', '德', '穆', '叶', '瑞', '翁', '珞'];
-const NUMERALS = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI', 'XII'];
-
-function weightedPick(world, table) {
-  let total = 0;
-  for (const t of table) total += t.weight;
-  let r = RNG.float(world) * total;
-  for (const t of table) {
-    r -= t.weight;
-    if (r <= 0) return t;
-  }
-  return table[table.length - 1];
-}
-
-function genSystemName(world, used) {
-  for (let attempt = 0; attempt < 64; attempt++) {
-    const n = NAME_A[RNG.int(world, NAME_A.length)] + NAME_B[RNG.int(world, NAME_B.length)];
-    if (!used.has(n)) {
-      used.add(n);
-      return n;
-    }
-  }
-  // 兜底：加编号
-  const n = NAME_A[RNG.int(world, NAME_A.length)] + '-' + RNG.intRange(world, 2, 99);
-  used.add(n);
-  return n;
-}
-
-/**
- * 生成银河。config = {
- *   systemCount: 96,
- *   factionConfigs: [{ id?, name, adjective, personality, ethosTag, color, homeName?, originType? }],
- *   storyMode: false
- * }
- * 返回 { systemIds, factionIds, warnings }
- */
-function generateGalaxy(world, config = {}) {
-  const sizeKey = world.galaxySize || 'standard';
-  const systemCount = clamp(config.systemCount ?? BAL.galaxy.sizes[sizeKey] ?? 96, 24, 256);
-  const W = 1000; // 策略空间坐标范围（0..1000）
-  const usedNames = new Set();
-
-  // 1. 抖动网格采样 —— 间距约束保证不重叠
-  const cols = Math.ceil(Math.sqrt(systemCount * 1.35));
-  const cell = W / cols;
-  const points = [];
-  for (let gy = 0; gy < cols && points.length < systemCount; gy++) {
-    for (let gx = 0; gx < cols && points.length < systemCount; gx++) {
-      const jx = cell * (0.15 + 0.7 * RNG.float(world));
-      const jy = cell * (0.15 + 0.7 * RNG.float(world));
-      points.push({
-        idx: points.length, // 确定性索引（航路表键）
-        x: clamp(gx * cell + jx, 8, W - 8),
-        y: clamp(gy * cell + jy, 8, W - 8),
-      });
-    }
-  }
-
-  // 2. k 近邻候选航路（以 idx 为键）
-  const avgNNDist = meanNearestDist(points);
-  const prune = avgNNDist * BAL.galaxy.lanePruneFactor;
-  const laneSets = new Map(); // idx -> Set(idx)
-  for (const p of points) {
-    p.knn = kNearest(points, p.x, p.y, 6).filter((e) => e.point.idx !== p.idx); // 排除自身
-    laneSets.set(p.idx, new Set());
-  }
-  for (const p of points) {
-    for (const { point: q, dist: d } of p.knn) {
-      if (d <= prune) {
-        laneSets.get(p.idx).add(q.idx);
-        laneSets.get(q.idx).add(p.idx);
-      }
-    }
-  }
-
-  // 2b. 连通性修复：分量间用最短可用边桥接
-  repairConnectivity(points, laneSets);
-
-  // 2c. 保证每节点度数下限
-  for (const p of points) {
-    const set = laneSets.get(p.idx);
-    if (set.size < BAL.galaxy.lanesPerNodeMin) {
-      for (const { point: q } of p.knn) {
-        if (set.size >= BAL.galaxy.lanesPerNodeMin) break;
-        if (q.idx === p.idx) continue;
-        set.add(q.idx);
-        laneSets.get(q.idx).add(p.idx);
-      }
-    }
-  }
-
-  // 3. 空间区块特征：资源带与危险簇
-  const richnessCenters = [];
-  for (let i = 0; i < 4; i++) richnessCenters.push({ x: RNG.range(world, 100, W - 100), y: RNG.range(world, 100, W - 100), s: RNG.range(world, 90, 200) });
-  const dangerCenters = [];
-  for (let i = 0; i < BAL.galaxy.dangerClusters; i++) {
-    dangerCenters.push({ x: RNG.range(world, 100, W - 100), y: RNG.range(world, 100, W - 100), s: RNG.range(world, 120, 240) });
-  }
-
-  // 4. 创建星系实体（先全体建档获得 ID，再回填航路）
-  const systemIds = [];
-  const sysIdByIdx = [];
-  const sysData = [];
-  for (const p of points) {
-    const star = weightedPick(world, STAR_TYPES);
-    const rich = gaussField(p.x, p.y, richnessCenters) * (star.id === 'blackHole' ? 0.6 : 1.0);
-    const danger = clamp(gaussField(p.x, p.y, dangerCenters) + star.danger * 0.35 + RNG.range(world, -0.8, 0.8), 0, 10);
-    const sys = createEntity(world, 'systems', {
-      name: genSystemName(world, usedNames),
-      x: p.x,
-      y: p.y,
-      star: {
-        typeId: star.id,
-        name: star.name,
-        energy: star.energy,
-        scanNoise: star.scanNoise,
-      },
-      lanes: [], // 回填
-      planetIds: [],
-      stationIds: [],
-      anomalyIds: [],
-      ownerFactionId: null,
-      surveyedBy: {},          // factionId → 0 未接触 / 1 侦测 / 2 分类 / 3 定位 / 4 调查完成
-      resourceRating: Math.round(rich * 10) / 10,
-      dangerRating: Math.round(danger * 10) / 10,
-      hazards: genHazards(world, star),
-      flags: {},
-    });
-    systemIds.push(sys.id);
-    sysIdByIdx[p.idx] = sys.id;
-    sysData.push({ sys, p, star });
-
-    // 行星：2-8 个
-    const nPlanets = RNG.intRange(world, 2, 8);
-    for (let orbit = 0; orbit < nPlanets; orbit++) {
-      const cat = weightedPick(world, PLANET_CATEGORIES);
-      const hz = orbitToHabitability(world, orbit, nPlanets, star, cat);
-      const planet = createEntity(world, 'planets', {
-        systemId: sys.id,
-        orbitIndex: orbit,
-        name: `${sys.name} ${NUMERALS[orbit] || orbit + 1}`,
-        category: cat.id,
-        categoryName: cat.name,
-        radiusClass: RNG.intRange(world, 1, 5),        // 1 小 — 5 巨
-        gravity: Math.round(RNG.range(world, 0.3, 1.9) * 10) / 10,
-        temperatureBand: tempBand(cat.id),
-        atmosphere: genAtmosphere(world, cat.id),
-        radiation: Math.round(clamp(star.danger * 0.3 + RNG.range(world, 0, 2), 0, 6) * 10) / 10,
-        habitability: hz,
-        water: cat.id === 'ocean' ? RNG.intRange(world, 70, 95) : cat.id === 'ice' ? RNG.intRange(world, 30, 60) : RNG.intRange(world, 0, 40),
-        deposits: genDeposits(world, cat, rich),
-        maxDistricts: clamp(3 + Math.round(hz / 18) + (cat.id === 'gasGiant' ? 0 : 1), 3, 10),
-        colonyId: null,
-        terraform: null,      // { stage, progress }
-      });
-      sys.planetIds.push(planet.id);
-    }
-
-    // 异常点槽位（异常实体由 exploration 阶段在扫描时揭示）
-    if (RNG.chance(world, BAL.galaxy.anomalyBaseChance + rich * 0.06)) {
-      sys.flags.hasAnomalySlot = true;
-    }
-  }
-  // 回填航路（映射 idx → system id，确定性排序）
-  for (const { sys, p } of sysData) {
-    sys.lanes = [...laneSets.get(p.idx)].map((idx) => sysIdByIdx[idx]).sort();
-  }
-
-  // 5. 文明出生点
-  const factionIds = [];
-  const warnings = [];
-  if (config.factionConfigs && config.factionConfigs.length > 0) {
-    const spawned = spawnFactions(world, config.factionConfigs, systemIds);
-    factionIds.push(...spawned.factionIds);
-    warnings.push(...spawned.warnings);
-  }
-
-  return { systemIds, factionIds, warnings };
-}
-
-function meanNearestDist(points) {
-  let sum = 0;
-  let n = 0;
-  for (const p of points) {
-    const nn = kNearest(points, p.x, p.y, 2);
-    if (nn.length >= 2) {
-      sum += nn[1].dist;
-      n++;
-    }
-  }
-  return safeDivide(sum, n, 60);
-}
-
-function repairConnectivity(points, laneSets) {
-  const uf = new UnionFind(points.map((p) => p.idx));
-  for (const [a, set] of laneSets) for (const b of set) uf.union(a, b);
-  let comps = uf.components();
-  let guard = 0;
-  while (comps.length > 1 && guard++ < 64) {
-    // 找分量间最短点对桥接（确定性：按 (dist, idxA, idxB) 排序）
-    let best = null;
-    for (let i = 0; i < comps.length; i++) {
-      for (let j = i + 1; j < comps.length; j++) {
-        for (const ia of comps[i]) {
-          const A = points.find((p) => p.idx === ia);
-          for (const ib of comps[j]) {
-            const B = points.find((p) => p.idx === ib);
-            const d = dist(A.x, A.y, B.x, B.y);
-            if (!best || d < best.d) best = { d, a: ia, b: ib };
-          }
-        }
-      }
-    }
-    if (!best) break;
-    laneSets.get(best.a).add(best.b);
-    laneSets.get(best.b).add(best.a);
-    uf.union(best.a, best.b);
-    comps = uf.components();
-  }
-}
-
-function gaussField(x, y, centers) {
-  let v = 0;
-  for (const c of centers) {
-    const d = dist(x, y, c.x, c.y);
-    v += Math.exp(-(d * d) / (2 * c.s * c.s));
-  }
-  return clamp(v, 0, 1.6);
-}
-
-function orbitToHabitability(world, orbit, total, star, cat) {
-  // 宜居带中心随恒星类型移动；气态/熔岩行星不叠加宜居
-  const zoneCenter = (total - 1) * star.habitZone * 0.42;
-  const d = Math.abs(orbit - zoneCenter);
-  const base = clamp(80 - d * 26 - star.danger * 3 + RNG.range(world, -12, 12), 0, 90);
-  if (cat.habitRange[1] === 0) return 0; // 气态巨行星不可直接殖民
-  return Math.round(clamp(base, cat.habitRange[0], cat.habitRange[1]));
-}
-
-function tempBand(catId) {
-  const bands = {
-    rocky: 'temperate', ocean: 'temperate', ice: 'cold', desert: 'hot',
-    gasGiant: 'cold', lava: 'inferno', toxic: 'hot', artificial: 'temperate',
-  };
-  return bands[catId] || 'temperate';
-}
-
-function genAtmosphere(world, catId) {
-  const table = {
-    rocky: ['薄氮氧', '二氧化碳型', '稀薄'],
-    ocean: ['湿润氮氧', '高湿'],
-    ice: ['稀薄', '无大气'],
-    desert: ['干燥二氧化碳', '尘暴型'],
-    gasGiant: ['氢氦主导'],
-    lava: ['硫化物', '高压'],
-    toxic: ['酸性', '氯系'],
-    artificial: ['受控生境'],
-  };
-  const arr = table[catId] || ['未知'];
-  return arr[RNG.int(world, arr.length)];
-}
-
-const DEPOSIT_RESOURCES = ['ferro', 'silicate', 'rareEarth', 'heavyMetal', 'hydrogen', 'helium3', 'water'];
-const DEPOSIT_PROFILE = {
-  rocky: { ferro: 2.0, silicate: 2.2, heavyMetal: 0.8, rareEarth: 0.4 },
-  ocean: { water: 3.0, ferro: 0.4, hydrocarbon: 0 },
-  ice: { water: 2.4, hydrogen: 1.2, helium3: 0.6 },
-  desert: { silicate: 1.8, rareEarth: 1.0, ferro: 0.8 },
-  gasGiant: { hydrogen: 3.2, helium3: 2.2 },
-  lava: { heavyMetal: 2.6, ferro: 2.0, rareEarth: 0.6 },
-  toxic: { ferro: 1.0, heavyMetal: 1.2, hydrogen: 0.8 },
-  artificial: { ferro: 0.4, silicate: 0.4 },
-};
-
-function genDeposits(world, cat, richness) {
-  const prof = DEPOSIT_PROFILE[cat.id] || {};
-  const out = {};
-  for (const resId of DEPOSIT_RESOURCES) {
-    const base = prof[resId] || 0;
-    if (base > 0) {
-      out[resId] = Math.round(base * (0.6 + richness) * RNG.range(world, 60, 160));
-    }
-  }
-  return out;
-}
-
-function genHazards(world, star) {
-  const h = [];
-  if (star.id === 'neutronStar' || star.id === 'pulsar') h.push('pulsarInterference');
-  if (star.id === 'blackHole') h.push('gravityWell');
-  if (star.id === 'blueGiant' || star.id === 'whiteDwarf') h.push('radiationFlare');
-  if (RNG.chance(world, 0.12)) h.push('asteroidDebris');
-  return h;
-}
-
-/**
- * 出生点分配：贪心最远点采样 + 公平性验证。
- * 每个文明获得：母星系（必含一颗宜居≥45 行星）+ 邻近 1-2 系归属。
- */
-function spawnFactions(world, configs, systemIds) {
-  const S = world.entities.systems;
-  const warnings = [];
-  // 候选：宜居星系（有 hz>=45 行星），按资源降序为次序参考
-  const candidates = systemIds
-    .map((id) => S[id])
-    .filter((s) => s.planetIds.some((pid) => world.entities.planets[pid].habitability >= 45));
-  if (candidates.length < configs.length) {
-    // 放宽标准
-    candidates.length = 0;
-    for (const id of systemIds) {
-      const s = S[id];
-      if (s.planetIds.some((pid) => world.entities.planets[pid].habitability >= 25)) candidates.push(s);
-    }
-    warnings.push('宜居候选不足，已放宽到 25 阈值');
-  }
-  candidates.sort((a, b) => b.resourceRating - a.resourceRating || (a.id < b.id ? -1 : 1));
-
-  // 贪心最远点：先取资源最好者，之后每次取“距已选出生点最小距离最大”者
-  const chosen = [];
-  const pool = [...candidates];
-  while (chosen.length < configs.length && pool.length > 0) {
-    let best = null;
-    let bestScore = -Infinity;
-    for (const c of pool) {
-      const minD = chosen.length === 0 ? Infinity : Math.min(...chosen.map((s) => dist(s.x, s.y, c.x, c.y)));
-      const score = Math.min(minD, 9999) + c.resourceRating * 8;
-      if (score > bestScore) {
-        bestScore = score;
-        best = c;
-      }
-    }
-    chosen.push(best);
-    pool.splice(pool.indexOf(best), 1);
-  }
-
-  const factionIds = [];
-  for (let i = 0; i < configs.length; i++) {
-    const cfg = configs[i];
-    const home = chosen[i % chosen.length];
-    const fac = createEntity(world, 'factions', {
-      name: cfg.name,
-      adjective: cfg.adjective || cfg.name,
-      personality: cfg.personality || 'balanced',
-      ethosTag: cfg.ethosTag || null,
-      color: cfg.color || '#5ad1e6',
-      originType: cfg.originType || 'homeworld',
-      homeSystemId: home.id,
-      isPlayer: !!cfg.isPlayer,
-      policySlots: 3,
-      policies: {},
-    });
-    factionIds.push(fac.id);
-    if (cfg.isPlayer) world.playerFactionId = fac.id;
-
-    // 母星系归属 + 找一颗宜居行星登记为母星
-    home.ownerFactionId = fac.id;
-    home.surveyedBy[fac.id] = 4;
-    const homePlanet = home.planetIds
-      .map((pid) => world.entities.planets[pid])
-      .filter((p) => p.habitability >= 25)
-      .sort((a, b) => b.habitability - a.habitability)[0];
-    if (homePlanet) {
-      fac.homePlanetId = homePlanet.id;
-      homePlanet.homeOfFactionId = fac.id;
-    }
-
-    // 归属 1-2 个近邻
-    const neighbors = home.lanes
-      .map((lid) => S[lid])
-      .filter((s) => s.ownerFactionId === null)
-      .sort((a, b) => dist(home.x, home.y, a.x, a.y) - dist(home.x, home.y, b.x, b.y));
-    const claimN = Math.min(neighbors.length, RNG.intRange(world, 1, 2));
-    for (let k = 0; k < claimN; k++) neighbors[k].ownerFactionId = fac.id;
-  }
-
-  // 公平性：每个文明至少 2 条可扩张路径（含未归属航路邻接）
-  for (const fid of factionIds) {
-    const fac = world.entities.factions[fid];
-    const owned = systemIds.map((id) => S[id]).filter((s) => s.ownerFactionId === fid);
-    let frontier = 0;
-    for (const s of owned) {
-      for (const lid of s.lanes) if (S[lid].ownerFactionId === null) frontier++;
-    }
-    if (frontier < 2) warnings.push(`文明 ${fac.name} 扩张路径不足（${frontier}）`);
-  }
-  return { factionIds, warnings };
-}
-
-Object.assign(__exports, { STAR_TYPES, PLANET_CATEGORIES, generateGalaxy });
 
 });
   __require("src/main.js");
