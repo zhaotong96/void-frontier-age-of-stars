@@ -67,14 +67,18 @@ export function createStarterCampaign(config = {}) {
     // 初始舰队：科学船 + 2 护卫舰（玩家）；AI 同规格保持公平
     const homeSystemId = fac.homeSystemId;
     ensureMarket(world, homeSystemId);
-    // 母星轨道船坞（舰船生产入口）
-    createEntity(world, 'stations', {
+    // 母星轨道船坞（舰船生产入口）；TD1：stationIds 确定性回填（星系快照 stationCount 口径）
+    const shipyard = createEntity(world, 'stations', {
       kind: 'shipyard',
       systemId: homeSystemId,
       factionId: fid,
       level: 1,
       buildQueue: [],
     });
+    const homeSys = world.entities.systems[homeSystemId];
+    if (homeSys && Array.isArray(homeSys.stationIds) && !homeSys.stationIds.includes(shipyard.id)) {
+      homeSys.stationIds.push(shipyard.id);
+    }
     // 每文明初始蓝图：护卫舰（AI 建军与玩家造船共用）
     createEntity(world, 'blueprints', {
       factionId: fid,

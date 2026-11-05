@@ -22,6 +22,7 @@ import { colonyDetail } from '../../simulation/ViewModels.js';
 import { BUILDINGS } from '../../content/buildings.js';
 import { RESOURCES } from '../../content/resources.js';
 import { BAL } from '../../content/constants.js';
+import { storageCapacity, buildingJobSlots } from '../../domain/planets/colony.js';
 
 /** 快照刷新节流间隔（与 App 的 4Hz 快照节奏对齐） */
 const REFRESH_MS = 250;
@@ -44,6 +45,23 @@ const BLD_STATE_ZH = {
   starved: ['缺料', 'danger'],
   suspended: ['停摆', 'warn'],
 };
+
+/** 五态 runtimeStatus 诊断 → [彩色圆点+中文, vf-tag 色调]（doc5 §3.8 P2-02 / ECON-02） */
+const RUNTIME_STATUS_ZH = {
+  running: ['● 运行中', 'ok'],
+  understaffed: ['● 劳力短缺', 'warn'],
+  starved_input: ['● 断供', 'danger'],
+  low_power: ['● 电力不足', 'warn'],
+  storage_full: ['● 仓储满溢', 'danger'],
+};
+
+/** 四级流向看板分层（doc5 §3.8：矿脉采掘 → 仓储物流 → 精炼制造 → 船坞/轨道输出） */
+const FLOW_TIERS = [
+  { key: 'mining', title: '① 矿脉采掘', cats: ['mining'], hint: '矿井/气井按矿藏开采原矿，岗位短缺按 η 降产。' },
+  { key: 'storage', title: '② 仓储物流', cats: ['energy'], hint: '原料入殖民地仓储（含供能设施）；满溢将阻塞上游周期启动。' },
+  { key: 'refining', title: '③ 精炼制造', cats: ['refining', 'industry', 'agri', 'science'], hint: '精炼/制造/农业/科研消耗原矿与中间品，输出精炼品与科研数据。' },
+  { key: 'output', title: '④ 船坞/轨道输出', cats: ['admin'], hint: '行政港/交易所承担轨道输出与贸易税收。' },
+];
 
 /** 建筑类别中文（表格列与建造面板分组；键序即展示序） */
 const BLD_CAT_ZH = {
@@ -370,8 +388,10 @@ export const ColonyView = {
     this._col1.appendChild(pFood);
   },
 
-  /** 第二列：建筑表（行展开配方）+ 建造面板 + 建造队列 */
+  /** 第二列：四级流向看板 + 建筑表（行展开配方）+ 建造面板 + 建造队列 */
   _renderCol2(detail) {
+    this._col2.appendChild(this._flowPanel(detail));
+
     // 概要：能源平衡与槽位
     const pBld = panel({ title: '建筑', dense: true });
     const bal = Number(detail.powerBalance) || 0;
@@ -392,9 +412,111 @@ export const ColonyView = {
     this._col2.appendChild(this._queuePanel(detail));
   },
 
+  /** 活体殖民地实体（runtimeStatus / jobsFilled 在实体上，ViewModel 只读快照不含） */
+  _liveColony() {
+    const w = this.app && this.app.world;
+    return (w && w.entities && w.entities.colonies && this._colonyId)
+      ? w.entities.colonies[this._colonyId] || null
+      : null;
+  },
+
+  /** 建筑运行状态徽章：五态 runtimeStatus 优先，缺省回退 building state（建造中/停摆） */
+  _runtimeBadge(b) {
+    if (b.runtimeStatus && RUNTIME_STATUS_ZH[b.runtimeStatus]) {
+      const [text, tone] = RUNTIME_STATUS_ZH[b.runtimeStatus];
+      const tip = b.runtimeStatus === 'starved_input' && b.starvedInput
+        ? `断供原料：${resName(b.starvedInput)}` : undefined;
+      return el('span', { class: `vf-tag ${tone}`, title: tip, text });
+    }
+    const [text, tone] = BLD_STATE_ZH[b.state] || [b.state || '—', ''];
+    return el('span', { class: tone ? `vf-tag ${tone}` : 'vf-tag', text });
+  },
+
+  /**
+   * 四级流向看板（doc5 §3.8 P2-01/02）：矿脉采掘 → 仓储物流 → 精炼制造 → 船坞/轨道输出。
+   * 逐建筑 runtimeStatus 徽章 + 仓储容量条 + 瓶颈摘要；面板 id 稳定（UIStateStore 折叠记忆）。
+   */
+  _flowPanel(detail) {
+    const p = panel({ title: '物流流向看板', dense: true, id: 'colony:flow' });
+    const colony = this._liveColony();
+    const buildings = colony && Array.isArray(colony.buildings) ? colony.buildings : [];
+
+    // 顶层流向链
+    p.appendChild(el('div', {
+      class: 'vf-dim vf-small',
+      style: { marginBottom: '4px', letterSpacing: '1px' },
+      text: FLOW_TIERS.map((t) => t.title.replace(/^\S+\s/, '')).join('  ▸  '),
+    }));
+
+    const statusCount = {};
+    for (const tier of FLOW_TIERS) {
+      const sec = el('div', { class: 'vf-col', style: { gap: '2px', marginTop: '4px' } });
+      sec.appendChild(el('div', { class: 'vf-dim vf-small', text: tier.title }));
+
+      if (tier.key === 'storage') {
+        // 仓储物流：原料存量概览 + 容量条（满溢预警）
+        const cap = colony ? storageCapacity(colony) : 0;
+        const stockRows = Object.keys(detail.stock || {})
+          .filter((rid) => (Number(detail.stock[rid]) || 0) > 0)
+          .sort((a, b) => detail.stock[b] - detail.stock[a])
+          .slice(0, 5)
+          .map((rid) => `${resName(rid)} ${fmtQty(detail.stock[rid])}`);
+        sec.appendChild(el('div', {
+          class: 'vf-small',
+          text: stockRows.length ? stockRows.join(' · ') : '仓储为空',
+        }));
+        const peak = Math.max(1, ...Object.keys(detail.stock || {}).map((rid) => Number(detail.stock[rid]) || 0));
+        sec.appendChild(statBar({
+          value: Math.min(peak, cap), max: Math.max(cap, peak, 1),
+          label: `仓储峰值 / 容量 ${cap}`, tone: peak >= cap ? 'danger' : peak >= cap * 0.85 ? 'warn' : null,
+        }));
+      }
+
+      // 本层建筑徽章行
+      const tierBlds = buildings.filter((b) => tier.cats.includes(buildingDef(b.defId)?.category));
+      if (tier.key !== 'storage' && tierBlds.length === 0) {
+        sec.appendChild(el('div', { class: 'vf-faint vf-small', text: '（本层暂无设施）' }));
+      }
+      for (const b of tierBlds) {
+        const def = buildingDef(b.defId);
+        const row = el('div', { class: 'vf-row', style: { gap: '6px' } });
+        row.appendChild(el('span', { class: 'vf-grow vf-small', text: def ? def.nameZh : b.defId }));
+        row.appendChild(el('span', { class: 'vf-faint vf-small vf-mono', text: `${b.jobsFilled ?? 0}/${buildingJobSlots(def)}岗` }));
+        const badge = this._runtimeBadge(b);
+        if (badge && b.runtimeStatus) {
+          statusCount[b.runtimeStatus] = (statusCount[b.runtimeStatus] || 0) + 1;
+        }
+        row.appendChild(badge);
+        sec.appendChild(row);
+      }
+      if (tier.hint && (tierBlds.length > 0 || tier.key === 'storage')) {
+        sec.appendChild(el('div', { class: 'vf-faint vf-small', text: tier.hint }));
+      }
+      p.appendChild(sec);
+    }
+
+    // 瓶颈摘要（ECON-02：阻塞原因一眼可读）
+    const issues = Object.keys(statusCount).filter((k) => k !== 'running');
+    p.appendChild(el('div', {
+      class: issues.length ? 'vf-warn vf-small' : 'vf-ok vf-small',
+      style: { marginTop: '4px' },
+      text: issues.length
+        ? `产能瓶颈：${issues.map((k) => `${RUNTIME_STATUS_ZH[k][0].replace('● ', '')}×${statusCount[k]}`).join('，')}`
+        : '全链路运行中，无阻塞。',
+    }));
+    return p;
+  },
+
   /** 建筑 dataTable + 展开明细行（配方 inputs→outputs） */
   _buildingTable(detail) {
-    const rows = detail.buildings.map((b) => ({ ...b, id: b.index }));
+    const colony = this._liveColony();
+    const rows = detail.buildings.map((b) => ({
+      ...b,
+      id: b.index,
+      runtimeStatus: colony && colony.buildings[b.index] ? colony.buildings[b.index].runtimeStatus : null,
+      starvedInput: colony && colony.buildings[b.index] ? colony.buildings[b.index].starvedInput : null,
+      jobsFilled: colony && colony.buildings[b.index] ? colony.buildings[b.index].jobsFilled : null,
+    }));
     const table = dataTable({
       dense: true,
       rows,
@@ -410,10 +532,7 @@ export const ColonyView = {
         { key: 'category', label: '类别', render: (r) => BLD_CAT_ZH[r.category] || r.category || '—' },
         {
           key: 'state', label: '状态',
-          render: (r) => {
-            const [text, tone] = BLD_STATE_ZH[r.state] || [r.state || '—', ''];
-            return el('span', { class: tone ? `vf-tag ${tone}` : 'vf-tag', text });
-          },
+          render: (r) => this._runtimeBadge(r),
         },
         {
           key: 'progress', label: '进度',
@@ -421,7 +540,15 @@ export const ColonyView = {
             ? '—'
             : `${Math.min(100, Math.round((r.progress / r.cycleHours) * 100))}%`,
         },
-        { key: 'jobs', label: '岗位', render: (r) => (r.jobs > 0 ? String(r.jobs) : '—') },
+        {
+          key: 'jobs', label: '岗位',
+          render: (r) => {
+            const def = buildingDef(r.defId);
+            const slots = buildingJobSlots(def);
+            if (r.jobsFilled == null) return slots > 0 ? `—/${slots}` : '—';
+            return `${r.jobsFilled}/${slots}`;
+          },
+        },
         {
           key: 'powerUse', label: '能耗',
           render: (r) => (r.powerGen > 0 ? `+${r.powerGen}` : (r.powerUse ? String(r.powerUse) : '—')),

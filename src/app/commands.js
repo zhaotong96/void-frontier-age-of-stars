@@ -16,7 +16,12 @@ import { canStart, startResearch } from '../domain/research/research.js';
 import { marketBuy, marketSell } from '../domain/economy/market.js';
 import { validateFit, hullDef, computeShipStats } from '../domain/ships/ship.js';
 import { getMod } from '../domain/factions/modifiers.js';
-import { declareWar, createTreaty, treatyAcceptanceScore, getRelation } from '../domain/diplomacy/war.js';
+import { declareWar, createTreaty, treatyAcceptanceScore, getRelation, resolvePeaceProposal, annexOccupiedSystem, warScore, OCCUPATION_ANNEX_THRESHOLD } from '../domain/diplomacy/war.js';
+import { buildTerrainField } from '../domain/ground/terrainField.js';
+import {
+  applyEdit, attachTerrainEdits, serializeEdits, deserializeEdits,
+  checkBuildingPlacement, rebuildDirtyChunks, BRUSH_LIMITS,
+} from '../domain/ground/terrainEdits.js';
 import { RNG } from '../core/rng.js';
 import { emit } from '../core/eventBus.js';
 
@@ -557,6 +562,229 @@ registerCommand('AbortGroundMission', {
   execute(ctx, cmd) {
     const m = ctx.world.entities.groundMissions[cmd.params.missionId];
     finishMission(ctx.world, m, 'aborted');
+  },
+});
+
+// —— 地形整形与地表建造（doc7 TASK-5.1/5.2 槽位 5 / TERRAIN-06、GAME-06..08、SITE-07） ————
+
+const SHAPE_OPS = new Set(['raise', 'lower', 'smooth', 'flatten', 'restore']);
+const FLORA_OPS = new Set(['plant', 'removePlant']);
+
+/** 采掘类建筑与行星矿藏匹配（与 BuildOnColony 同口径：禁止装饰性数据） */
+function miningDepositOk(planet, defId) {
+  const def = buildingDef(defId);
+  if (!def || def.category !== 'mining' || !planet || !planet.deposits) return true;
+  const depMap = { bld_mine_ferro: 'ferro', bld_mine_silicate: 'silicate', bld_mine_rare: 'rareEarth', bld_mine_heavy: 'heavyMetal', bld_volatile_well: 'hydrogen', bld_gas_harvester: 'helium3' };
+  const need = depMap[def.id];
+  return !need || planet.deposits[need] > 0;
+}
+
+/** 取（惰性初始化）行星地形编辑日志（纯 JSON 形态，随行星实体存档 —— SITE-07） */
+function terrainEditLog(world, planetId) {
+  const planet = world.entities.planets[planetId];
+  if (!planet.terrainEdits) {
+    planet.terrainEdits = { v: 1, rev: 0, seq: 0, ops: [] };
+  }
+  return planet.terrainEdits;
+}
+
+/** 命令时点校验/执行：由存档日志重建场域 + 活体编辑仓库（一次性成本，可接受） */
+function loadLiveEdits(world, planetId) {
+  const log = terrainEditLog(world, planetId);
+  const field = buildTerrainField(world, planetId, {});
+  const edits = deserializeEdits(log, field);
+  attachTerrainEdits(field, edits);
+  rebuildDirtyChunks(field); // 日志重放只标脏 —— 命令时点采样前须增量重建受影响区块
+  return { field, edits };
+}
+
+/** ShapeTerrain/RestoreTerrain 共用参数校验（不改状态） */
+function validateShapeParams(ctx, cmd, op) {
+  const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+  if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+  if (!op) return { ok: false, code: 'BAD_OP', reason: '缺少编辑算子' };
+  if (!Number.isFinite(cmd.params.x) || !Number.isFinite(cmd.params.z)) {
+    return { ok: false, code: 'BAD_COORD', reason: '场域坐标非法' };
+  }
+  if (op === 'plant' && (typeof cmd.params.prefabId !== 'string' || cmd.params.prefabId.length === 0)) {
+    return { ok: false, code: 'BAD_PARAM', reason: '植被移植需要 prefabId' };
+  }
+  if (op === 'removePlant' && typeof cmd.params.plantId !== 'string') {
+    return { ok: false, code: 'BAD_PARAM', reason: '植被回收需要 plantId' };
+  }
+  if (SHAPE_OPS.has(op)) {
+    const radius = Number(cmd.params.radius);
+    if (!(radius > 0) || radius > BRUSH_LIMITS.maxRadiusM) {
+      return { ok: false, code: 'BAD_RADIUS', reason: `刷子半径须在 (0,${BRUSH_LIMITS.maxRadiusM}] 米（TERRAIN-06 增量重建约束）` };
+    }
+    const strength = cmd.params.strength;
+    if (op === 'raise' || op === 'lower') {
+      if (!Number.isFinite(strength) || strength <= 0 || strength > BRUSH_LIMITS.maxStrokeM) {
+        return { ok: false, code: 'BAD_STRENGTH', reason: `行程强度须在 (0,${BRUSH_LIMITS.maxStrokeM}] 米` };
+      }
+    } else if (op === 'smooth' || op === 'flatten') {
+      if (!Number.isFinite(strength) || strength <= 0 || strength > 1) {
+        return { ok: false, code: 'BAD_STRENGTH', reason: 'smooth/flatten 强度为混合系数 (0,1]' };
+      }
+    }
+  }
+  return { ok: true, planet };
+}
+
+/** ShapeTerrain/RestoreTerrain 共用执行体：应用编辑 → 写回存档日志 → 事件 */
+function executeShape(ctx, cmd, op) {
+  const planetId = cmd.params.planetId || cmd.targetId;
+  const { field, edits } = loadLiveEdits(ctx.world, planetId);
+  const res = applyEdit(field, edits, {
+    kind: op,
+    x: cmd.params.x,
+    z: cmd.params.z,
+    radius: cmd.params.radius,
+    strength: cmd.params.strength,
+    prefabId: cmd.params.prefabId,
+    plantId: cmd.params.plantId,
+  });
+  // 写回行星实体（紧凑命令序列；GroundView 打开时由该日志确定性重放）
+  ctx.world.entities.planets[planetId].terrainEdits = JSON.parse(serializeEdits(edits));
+  emit(ctx.world, 'TerrainShaped', {
+    planetId,
+    op,
+    x: cmd.params.x,
+    z: cmd.params.z,
+    radius: cmd.params.radius ?? null,
+    strength: cmd.params.strength ?? null,
+    revision: edits.revision,
+    dirtyChunks: res.dirtyChunks,
+    floraId: res.floraId ?? null,
+  }, 'ground');
+}
+
+registerCommand('ShapeTerrain', {
+  desc: '地形整形器：raise/lower/smooth/flatten 刷子与植被移植（TERRAIN-06 增量重建）',
+  validate(ctx, cmd) {
+    const op = cmd.params.op;
+    if (!SHAPE_OPS.has(op) && !FLORA_OPS.has(op)) {
+      return { ok: false, code: 'BAD_OP', reason: `未知算子 ${op}` };
+    }
+    return validateShapeParams(ctx, cmd, op);
+  },
+  execute(ctx, cmd) {
+    executeShape(ctx, cmd, cmd.params.op);
+  },
+});
+
+registerCommand('RestoreTerrain', {
+  desc: '一键恢复自然地貌（DSP 式：清除半径内全部编辑与凹陷影响）',
+  validate(ctx, cmd) {
+    return validateShapeParams(ctx, cmd, 'restore');
+  },
+  execute(ctx, cmd) {
+    executeShape(ctx, cmd, 'restore');
+  },
+});
+
+registerCommand('PlaceBuilding', {
+  desc: '地表放置建筑：9 点三角网格投影坡度校验 + 自动地基承台（GAME-07）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    const defId = cmd.params.defId;
+    if (defId && !buildingDef(defId)) return { ok: false, code: 'NO_DEF', reason: '未知建筑' };
+    if (!Number.isFinite(cmd.params.x) || !Number.isFinite(cmd.params.z)) {
+      return { ok: false, code: 'BAD_COORD', reason: '场域坐标非法' };
+    }
+    if (defId && !miningDepositOk(planet, defId)) {
+      return { ok: false, code: 'NO_DEPOSIT', reason: '该行星缺乏对应矿藏' };
+    }
+    // 命令时点校验：由存档编辑日志重建场域（含既有地形改造），做 9 点投影坡度校验
+    const { field } = loadLiveEdits(ctx.world, planet.id);
+    const chk = checkBuildingPlacement(field, cmd.params.x, cmd.params.z, {
+      footprintHalfM: cmd.params.footprintHalfM,
+      themeId: planet.primaryThemeId,
+    });
+    if (!chk.ok) {
+      const reason = chk.code === 'SLOPE_TOO_STEEP'
+        ? `坡度过大（${chk.maxSlopeDeg.toFixed(1)}° > 阈值），请先整地推平或改用主题桩基`
+        : chk.code === 'HEIGHT_DELTA'
+          ? `落点高差过大（${chk.maxHeightDeltaM.toFixed(2)}m > 阈值），请先整地或使用桩基`
+          : '落点在可建造场域之外';
+      return { ok: false, code: chk.code || 'OUT_OF_FIELD', reason, maxSlopeDeg: chk.maxSlopeDeg, maxHeightDeltaM: chk.maxHeightDeltaM };
+    }
+    return { ok: true, planet, foundation: chk.foundation, maxSlopeDeg: chk.maxSlopeDeg, maxHeightDeltaM: chk.maxHeightDeltaM };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    planet.groundBuildings ||= [];
+    // validate 已通过坡度校验；此处的 foundation 由再次快速校验得出（同输入逐位一致）
+    const { field } = loadLiveEdits(ctx.world, planet.id);
+    const chk = checkBuildingPlacement(field, cmd.params.x, cmd.params.z, {
+      footprintHalfM: cmd.params.footprintHalfM,
+      themeId: planet.primaryThemeId,
+    });
+    const entry = {
+      defId: cmd.params.defId || 'bld_generic_pad',
+      x: cmd.params.x,
+      z: cmd.params.z,
+      foundation: chk.ok ? chk.foundation : { kind: 'flat', piling: 'standard', etaHeightM: 0 },
+      maxSlopeDeg: chk.maxSlopeDeg,
+      maxHeightDeltaM: chk.maxHeightDeltaM,
+      placedTick: ctx.world.tick,
+    };
+    planet.groundBuildings.push(entry);
+    emit(ctx.world, 'BuildingPlaced', {
+      planetId: planet.id,
+      defId: entry.defId,
+      x: entry.x,
+      z: entry.z,
+      foundation: entry.foundation,
+      index: planet.groundBuildings.length - 1,
+    }, 'ground');
+  },
+});
+
+// —— 外交战争终局（doc5 TD2 / DIP-02：和谈与占领吞并） ——————————————————
+
+registerCommand('ProposePeace', {
+  desc: '向交战对方提出和谈（战争疲劳/战况决定接受概率）',
+  validate(ctx, cmd) {
+    const war = ctx.world.entities.wars[cmd.params.warId];
+    if (!war || war.status !== 'active') return { ok: false, code: 'NO_WAR', reason: '战争不存在或已结束' };
+    if (!war.attackers.includes(cmd.actorId) && !war.defenders.includes(cmd.actorId)) {
+      return { ok: false, code: 'NOT_PARTY', reason: '非交战方' };
+    }
+    const terms = cmd.params.terms || 'whitePeace';
+    if (!['whitePeace', 'enforceStatusQuo', 'sueForPeace'].includes(terms)) {
+      return { ok: false, code: 'BAD_TERMS', reason: '未知和谈条款' };
+    }
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const r = resolvePeaceProposal(ctx.world, cmd.actorId, cmd.params.warId, cmd.params.terms || 'whitePeace');
+    if (!r.ok) throw new Error(r.reason || '和谈失败');
+  },
+});
+
+registerCommand('AnnexOccupied', {
+  desc: '正式吞并被占领星系（占领积分达阈值后方可割地）',
+  validate(ctx, cmd) {
+    const war = ctx.world.entities.wars[cmd.params.warId];
+    if (!war) return { ok: false, code: 'NO_WAR', reason: '战争不存在' };
+    if (!war.attackers.includes(cmd.actorId) && !war.defenders.includes(cmd.actorId)) {
+      return { ok: false, code: 'NOT_PARTY', reason: '非交战方' };
+    }
+    const sys = getEntity(ctx.world, 'systems', cmd.params.systemId);
+    if (!sys) return { ok: false, code: 'NO_TARGET', reason: '星系不存在' };
+    if (war.occupiedSystems[cmd.params.systemId] !== cmd.actorId) {
+      return { ok: false, code: 'NOT_OCCUPIED', reason: '该星系未被己方实际占领' };
+    }
+    if (warScore(war, cmd.actorId) < OCCUPATION_ANNEX_THRESHOLD) {
+      return { ok: false, code: 'SCORE_TOO_LOW', reason: '占领积分不足，无法割地' };
+    }
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const r = annexOccupiedSystem(ctx.world, cmd.params.warId, cmd.params.systemId, cmd.actorId);
+    if (!r.ok) throw new Error(r.reason || '吞并失败');
   },
 });
 

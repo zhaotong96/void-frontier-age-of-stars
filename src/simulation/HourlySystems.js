@@ -18,6 +18,7 @@ import { tickResearch } from '../domain/research/research.js';
 import { createShip } from '../domain/ships/ship.js';
 import { getMod } from '../domain/factions/modifiers.js';
 import { registerAI } from '../domain/ai/FactionAI.js';
+import { factionShipMods } from '../domain/fleets/fleet.js';
 
 registerHourly('orders', (world) => {
   // AI 命令超时与目标清理（防无限重试 —— RISK-06）
@@ -137,6 +138,7 @@ function tickShipyards(world) {
           blueprintId: bp.id,
           systemId: station.systemId,
           name: bp.name,
+          factionMods: factionShipMods(world, job.factionId), // TD3：文明战斗特质汇入 computeShipStats
         });
       }
       q.shift();

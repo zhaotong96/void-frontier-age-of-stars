@@ -15,6 +15,116 @@ import { chronicle } from '../../core/eventBus.js';
 
 const DT = BAL.combat.dt;
 
+// ———— TD3：投射物 / 命中事件环形对象池（doc5 §3.8；容量 256，复用对象） ————
+
+/** 环形池容量（doc5:900：容量 256 的预分配环形对象池） */
+export const POOL_CAPACITY = 256;
+
+/**
+ * 预分配环形对象池：acquire 从空闲栈取对象（空则返回 null，调用方透传瞬态对象，
+ * 行为与池化完全一致 —— 只省分配不改模拟）；release 归还。零 Math.random、零 world.rng。
+ */
+export function createRingPool(capacity, factory) {
+  const items = new Array(capacity);
+  const freeStack = new Array(capacity);
+  for (let i = 0; i < capacity; i++) {
+    items[i] = factory();
+    items[i]._poolIdx = i;
+    items[i]._poolFree = true;
+    freeStack[i] = capacity - 1 - i;
+  }
+  let freeTop = capacity;
+  return {
+    capacity,
+    items,
+    acquire() {
+      if (freeTop === 0) return null;
+      const it = items[freeStack[--freeTop]];
+      it._poolFree = false;
+      return it;
+    },
+    release(item) {
+      if (!item || item._poolIdx === undefined || item._poolFree) return;
+      item._poolFree = true;
+      freeStack[freeTop++] = item._poolIdx;
+    },
+  };
+}
+
+/** 投射物工厂（覆盖导弹与光束可视化两种形态的字段并集） */
+function makeProjectile() {
+  return {
+    id: '', side: 'a', kind: '',
+    x: 0, y: 0, vx: 0, vy: 0, speed: 0,
+    damage: 0, damageType: '', targetShipId: null,
+    life: 0, maxLife: 0, tracking: 0, intercepted: false,
+    x0: 0, y0: 0, x1: 0, y1: 0,
+  };
+}
+
+/** 命中事件工厂（战斗时间线） */
+function makeEvent() {
+  return { t: 0, type: '', side: 'a', shipId: null };
+}
+
+/**
+ * 战斗池登记簿（WeakMap）：池与代次计数挂在战斗实例之外 —— 战斗实体保持纯数据
+ * （存档 payload 不含函数/池结构，SAVE-03 校验和不受影响），战斗结束随 WeakMap 释放。
+ */
+const battlePools = new WeakMap();
+
+/** 战斗开局惰性预热（一次性分配；每步归零复用） */
+function ensureBattlePools(battle) {
+  let entry = battlePools.get(battle);
+  if (!entry) {
+    entry = {
+      projPool: createRingPool(POOL_CAPACITY, makeProjectile),
+      evtPool: createRingPool(POOL_CAPACITY, makeEvent),
+      gen: 0,
+    };
+    battlePools.set(battle, entry);
+  }
+  return entry;
+}
+
+/**
+ * 逐步吸收（reconcile）：把战术层本步推入的瞬态字面量吸进预分配池对象（原位替换，
+ * 列表顺序与字段值逐位不变 → 模拟结果不变）；上一步存活、本步已消失的池对象归还空闲栈。
+ * 池满（256 在用）后新对象保持瞬态透传 —— 行为不变，仅不再复用。
+ * 零新增分配：不建临时数组，直接原位改写 battle.projectiles / battle.events。
+ */
+function reconcileBattlePools(battle) {
+  const entry = ensureBattlePools(battle);
+  const gen = ++entry.gen;
+  absorb(battle.projectiles, entry.projPool, gen);
+  absorb(battle.events, entry.evtPool, gen);
+
+  /** 原位吸收：瞬态字面量 → 池对象；标记 gen */
+  function absorb(list, pool, gen) {
+    for (let i = 0; i < list.length; i++) {
+      const it = list[i];
+      if (it && it._poolIdx !== undefined) {
+        it._gen = gen; // 本步仍存活
+      } else {
+        const q = pool.acquire();
+        if (q) {
+          const poolIdx = q._poolIdx;
+          Object.assign(q, it); // 复用对象：字段复制，无新分配
+          q._poolIdx = poolIdx;
+          q._poolFree = false;
+          q._gen = gen;
+          list[i] = q;
+        }
+      }
+    }
+    // 归还：本步未出现的在借池对象
+    for (let k = 0; k < pool.capacity; k++) {
+      const it = pool.items[k];
+      if (!it._poolFree && it._gen !== gen) pool.release(it);
+    }
+  }
+}
+
 /** 每战略 tick 推进所有活动战斗 */
 export function stepBattles(world) {
   const active = world.battles.active;
@@ -61,6 +171,9 @@ export function stepOneBattle(world, battle, dt) {
   // 单位行为（武器系统在阶段08注入：unitBehaviors 注册表）
   for (const behavior of unitBehaviors) behavior(world, battle, dt);
   for (const behavior of projectileBehaviors) behavior(world, battle, dt);
+  // TD3：逐步吸收瞬态投射物/事件进环形池（容量 256；原位替换，模拟值不变）
+  ensureBattlePools(battle);
+  reconcileBattlePools(battle);
 }
 
 /** 行为注册表（阶段08由武器/机动模块注册；保持顺序确定） */

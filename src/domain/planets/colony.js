@@ -41,6 +41,124 @@ export function buildingDef(id) {
   return bldIndex.get(id);
 }
 
+// ———— 岗位分配与运行状态诊断（doc5 §3.8 P2-01/P2-02 / COL-01..04、ECON-02） ————
+
+/**
+ * 类别岗位定额兜底（doc5:873：采掘/精炼/制造 2、科研 2、农业 1、行政 1）。
+ * 建筑定义自带 jobs（3-6）时优先采用 —— authored 定额是权威口径。
+ */
+const CATEGORY_JOB_SLOTS = {
+  mining: 2, refining: 2, industry: 2, science: 2, agri: 1, admin: 1,
+  energy: 1, service: 1, military: 1,
+};
+
+/** 建筑岗位槽位数：定义 jobs 优先，缺省回退类别定额 */
+export function buildingJobSlots(def) {
+  if (def && Number.isFinite(def.jobs) && def.jobs > 0) return def.jobs;
+  return CATEGORY_JOB_SLOTS[def && def.category] || 1;
+}
+
+/** 殖民地仓储容量（原料资源；ECON-02 storage_full 诊断） */
+const STORAGE_BASE_CAP = 600;
+const STORAGE_PLANT_CAP = 500;
+
+/** 仓储容量：基础 + 每座在役仓储平台加成 */
+export function storageCapacity(colony) {
+  let cap = STORAGE_BASE_CAP;
+  for (const b of colony.buildings) {
+    const def = buildingDef(b.defId);
+    if (def && def.id === 'bld_storage_plant' && b.state === 'active') cap += STORAGE_PLANT_CAP;
+  }
+  return cap;
+}
+
+/**
+ * 岗位分配（每小时随生产结算执行，确定性）：
+ * 活跃建筑按「玩家优先级权重降序 → 建筑序号升序」从 population.total 依序填充槽位；
+ * 每座建筑写入 jobsFilled（实配人数）与 staffingEta（η = 实配/定额，understaffed 降产系数）。
+ * colony.jobPriority = { category: weight } 缺省逐类权重 1（均等）。
+ * 汇总写入 colony.jobsFilled = { total, byCategory, unassigned }。
+ */
+export function assignJobs(world, colony) {
+  const pop = colony.population || { total: 0 };
+  const prio = colony.jobPriority && typeof colony.jobPriority === 'object' ? colony.jobPriority : {};
+  let remaining = Math.max(0, Math.floor(pop.total || 0));
+  const byCategory = {};
+
+  const order = colony.buildings.map((b, i) => ({ b, i })).sort((A, B) => {
+    const ca = buildingDef(A.b.defId)?.category;
+    const cb = buildingDef(B.b.defId)?.category;
+    const pa = Number.isFinite(prio[ca]) ? prio[ca] : 1;
+    const pb = Number.isFinite(prio[cb]) ? prio[cb] : 1;
+    if (pb !== pa) return pb - pa;
+    return A.i - B.i;
+  });
+
+  for (const { b } of order) {
+    const def = buildingDef(b.defId);
+    const need = def && b.state === 'active' ? buildingJobSlots(def) : 0;
+    const give = Math.min(need, remaining);
+    remaining -= give;
+    b.jobsFilled = give;
+    b.staffingEta = need > 0 ? give / need : 1;
+    if (give > 0) {
+      const cat = def ? def.category : 'other';
+      byCategory[cat] = (byCategory[cat] || 0) + give;
+    }
+  }
+
+  colony.jobsFilled = { total: Math.max(0, Math.floor(pop.total || 0)) - remaining, byCategory, unassigned: remaining };
+  return colony.jobsFilled;
+}
+
+/** 配方产出是否被仓储满溢阻塞（存在原料类产出、且全部原料产出都已到容量） */
+function storageBlocked(world, colony, def) {
+  if (!def.recipe) return false;
+  const cap = storageCapacity(colony);
+  let hasRawOut = false;
+  for (const rid of Object.keys(def.recipe.outputs)) {
+    if (!isRaw(rid)) continue; // 精炼品/战略资源入阵营账本，不受殖民仓储容量约束
+    hasRawOut = true;
+    if (colonyStock(world, colony, rid) < cap) return false;
+  }
+  return hasRawOut; // 产出全为精炼品 → 永不受殖民仓储约束
+}
+
+/**
+ * 五态 runtimeStatus 诊断（doc5 §3.8 P2-02 / ECON-02）：
+ *   storage_full > starved_input > low_power > understaffed > running（严重度优先）。
+ * 建造中/手动停摆 → null（尚未投入运行）。starved_input 同时写 b.starvedInput（缺失原料 id）。
+ */
+function deriveRuntimeStatus(world, colony, pf) {
+  for (const b of colony.buildings) {
+    const def = buildingDef(b.defId);
+    if (!def || b.state === 'construction' || b.state === 'suspended') {
+      b.runtimeStatus = null;
+      continue;
+    }
+    const need = buildingJobSlots(def);
+    const eta = need > 0 ? (Number.isFinite(b.jobsFilled) ? b.jobsFilled : 0) / need : 1;
+    b.staffingEta = eta;
+    if (def.recipe && storageBlocked(world, colony, def)) {
+      b.runtimeStatus = 'storage_full';
+      continue;
+    }
+    if (def.recipe && b.state === 'starved') {
+      b.runtimeStatus = 'starved_input';
+      continue;
+    }
+    if (def.recipe && pf < 1) {
+      b.runtimeStatus = 'low_power';
+      continue;
+    }
+    if (eta < 1) {
+      b.runtimeStatus = 'understaffed';
+      continue;
+    }
+    b.runtimeStatus = 'running';
+  }
+}
+
 /**
  * 建立殖民地（FoundOutpost/EstablishColony 命令执行体）。
  * colony = { planetId, factionId, population, buildings, stockpile, stability, ... }
@@ -73,7 +191,7 @@ export function foundColony(world, planetId, factionId, initialPop = 6, isOutpos
   return colony;
 }
 
-/** 计算殖民地能源平衡（发电 − 用电） */
+/** 计算殖民地能源平衡（发电 − 用电；powerUse 在内容侧为负值 → Σ 后即净余） */
 export function powerBalance(colony) {
   let gen = 0;
   let use = 0;
@@ -83,7 +201,9 @@ export function powerBalance(colony) {
     if (def.powerGen) gen += def.powerGen * (b.level || 1);
     if (def.powerUse) use += def.powerUse * (b.level || 1);
   }
-  return gen - use;
+  // 用电按负值累加，净平衡 = 发电 + 用电（负）；旧实现 gen-use 把缺口翻正成盈余，
+  // 导致 low_power/缺电降产与 AI 扩电梯队永远不可达（五态诊断 low_power 的前置修复）。
+  return gen + use;
 }
 
 /** 能源充足度系数（0.3-1.0）：缺电按比例降产（不出现无因停摆） */
@@ -103,11 +223,14 @@ export function habitabilityFactor(world, colony) {
 
 /**
  * 每小时生产结算：有配方建筑按周期推进（原料检查在周期开始）。
- * 缺料 → state 'starved'；能源不足 → 按 powerFactor 降速。
+ * 缺料 → state 'starved'（并记 starvedInput）；能源不足 → 按 powerFactor 降速；
+ * 仓储满溢 → 周期不启动（storage_full）；岗位短缺 → 按 staffingEta 降产（P2-01）。
+ * 每轮为全部建筑派生五态 runtimeStatus（P2-02）。
  */
 export function tickColonyProduction(world, colony) {
   const pf = powerFactor(colony);
   colony.powerBalance = powerBalance(colony);
+  assignJobs(world, colony);
   for (const b of colony.buildings) {
     const def = bldIndex.get(b.defId);
     if (!def) continue;
@@ -117,11 +240,17 @@ export function tickColonyProduction(world, colony) {
     if (b.progress === undefined) b.progress = 0;
     // 周期开始：锁定原料（检查且扣款一次）
     if (b.progress === 0 && !b.cycleLocked) {
+      if (storageBlocked(world, colony, def)) {
+        b.state = 'active';
+        continue; // 仓储满溢：不投入原料，等待物流消化（runtimeStatus=storage_full）
+      }
       let ok = true;
+      b.starvedInput = null;
       for (const rid of Object.keys(def.recipe.inputs)) {
         const have = isRaw(rid) ? colonyStock(world, colony, rid) : (world.economy.ledgers[colony.factionId]?.balances?.[rid] ?? 0);
         if (have < def.recipe.inputs[rid]) {
           ok = false;
+          b.starvedInput = rid; // starved_input 诊断指明断供原料（doc5 §3.8）
           break;
         }
       }
@@ -142,7 +271,7 @@ export function tickColonyProduction(world, colony) {
         getMod(world, colony.factionId, outputStatFor(def.category), 'mult'),
         0.1, 2.0
       );
-      b.progress += eff;
+      b.progress += eff * (Number.isFinite(b.staffingEta) ? b.staffingEta : 1); // understaffed 按 η 降产
       if (b.progress >= def.recipe.hours) {
         b.progress = 0;
         b.cycleLocked = false;
@@ -152,6 +281,7 @@ export function tickColonyProduction(world, colony) {
       }
     }
   }
+  deriveRuntimeStatus(world, colony, pf);
 }
 
 function outputStatFor(category) {
