@@ -12,7 +12,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
-const ROOT = new URL('../../', import.meta.url).pathname.replace(/^\/(\w):/, '$1:');
+const ROOT = decodeURIComponent(new URL('../../', import.meta.url).pathname.replace(/^\/(\w):/, '$1:'));
 const SRC = join(ROOT, 'src');
 const violations = [];
 
