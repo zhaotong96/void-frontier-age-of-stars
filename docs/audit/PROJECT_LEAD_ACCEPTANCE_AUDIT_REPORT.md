@@ -58,14 +58,14 @@ flowchart LR
 
 ### 痛点 1：星系界面无法推进与交互断裂
 * **复验结论**：**PASS**
-* **代码实证**：[SystemView.js](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/ui/screens/SystemView.js#L240-L290)
+* **代码实证**：[SystemView.js](file:///src/ui/screens/SystemView.js#L240-L290)
   * 画布正式接入 `dblclick` 监听器：双击行星触发相机构图平滑推进聚焦（`setOrbitFocus` + `distCur` 指数阻尼插值）；双击空白处平滑复位星系全景；
   * 行星卡与右键菜单均挂载 `app.goto('ground', planetId)` 与 `app.goto('colony', colonyId)` 显式路由直达入口；
   * 支持键盘无障碍交互：`Enter` / `Space` 首次聚焦行星、二次推进直接登陆。
 
 ### 痛点 2：每个星系只有 2 个星球的空旷感
 * **复验结论**：**PASS**
-* **代码实证**：[galaxyGen.js](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/domain/world/galaxyGen.js#L140-L210) & [celestial-bodies.suite.js](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/tests/suites/celestial-bodies.suite.js)
+* **代码实证**：[galaxyGen.js](file:///src/domain/world/galaxyGen.js#L140-L210) & [celestial-bodies.suite.js](file:///tests/suites/celestial-bodies.suite.js)
   * 行星数量维持在 2~8 颗（千种子分布实测均值 5.008 颗）；
   * 新增天体层次：气态巨行星与大型行星追加 0~3 颗天然卫星（`generatePlanetCelestials`，出现率 85% / 35%）；
   * 新增小行星带（`generateSystemBelts`），按恒星光谱产生富金属碎石带；
@@ -73,25 +73,25 @@ flowchart LR
 
 ### 痛点 3：星球光辉效果 2 倍半径漂移 BUG
 * **复验结论**：**PASS**
-* **代码实证**：[System3D.js](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/render/gl/System3D.js#L260-L330)（提交 `ba8b822`）
+* **代码实证**：[System3D.js](file:///src/render/gl/System3D.js#L260-L330)（提交 `ba8b822`）
   * 纠正 `GLOW_VERT` 着色器：将原 `gl_Position = uMVP * (uModel * local)` 彻底修正为 `gl_Position = uMVP * local;`，仅在世界光照时使用 `uModel` 计算 `vWorld` 与 `vN`；
   * 片元着色器 `GLOW_FRAG` 升级为双幂次菲涅尔与晨昏线窄带高斯红移模型，实机截图证明大气光辉与行星本体严密贴合，几何中心零漂移。
 
 ### 痛点 4：非银河界面被左侧选项卡物理遮挡
 * **复验结论**：**PASS**
-* **代码实证**：[styles.css](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/styles.css#L660-L690)（提交 `f647aa2`）
+* **代码实证**：[styles.css](file:///styles.css#L660-L690)（提交 `f647aa2`）
   * 实装双模外壳布局变量：`--vf-safe-left-collapsed: 68px`，`--vf-safe-left-expanded: 198px`；
   * 所有管理模式视图（`.vf-view:not(.vf-view-immersive)`）统一获得自适应安全左边距；在侧栏展开时通过 `:has()` 响应式推移至 198px；右侧检视器抽屉滑入时自动退避 346px，彻底消除物理重叠。
 
 ### 痛点 5：星系右侧折叠面板展开即“瞬缩闪闭”
 * **复验结论**：**PASS**
-* **代码实证**：[UIStateStore.js](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/ui/state/UIStateStore.js) & [SystemView.js](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/ui/screens/SystemView.js#L540-L580)
+* **代码实证**：[UIStateStore.js](file:///src/ui/state/UIStateStore.js) & [SystemView.js](file:///src/ui/screens/SystemView.js#L540-L580)
   * `_dossierSignature()` 建立情报舱轻量签名缓存：当快照周期（250ms）内天体数据无实质变动时，直接跳过 DOM 重构；
-  * 引入 `UIStateStore` 瞬态仓库：[panels.js](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/ui/components/panels.js) 展开状态通过稳定键（`sys:${id}:dossier` 等）记忆在内存槽中，即使强制重绘，折叠状态与滚动位置（`scrollTop`）100% 保持稳定。
+  * 引入 `UIStateStore` 瞬态仓库：[panels.js](file:///src/ui/components/panels.js) 展开状态通过稳定键（`sys:${id}:dossier` 等）记忆在内存槽中，即使强制重绘，折叠状态与滚动位置（`scrollTop`）100% 保持稳定。
 
 ### 痛点 6：地表简报页面致命软锁死（无返回按钮/检视器残留）
 * **复验结论**：**PASS**
-* **代码实证**：[GroundView.js](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/ui/screens/GroundView.js#L300-L360) & [App.js](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/app/App.js#L525-L540)
+* **代码实证**：[GroundView.js](file:///src/ui/screens/GroundView.js#L300-L360) & [App.js](file:///src/app/App.js#L525-L540)
   * `App._onRoute` 守卫：除银河总图保留外，切入任何其他视图时强制执行 `this.closeInspector()`，抽屉同步置 `hidden`（`display: none`），彻底杜绝残留遮挡；
   * `GroundView._buildBriefing` 头部无条件渲染“← 返回 [所属星系]”与“← 银河星图”按钮；
   * 简报页与自由探索模式全局挂载 `Escape` 监听器，随时可一键升空返回轨道；
@@ -99,14 +99,14 @@ flowchart LR
 
 ### 痛点 7：各类突发事件缺乏空间引导
 * **复验结论**：**PASS**
-* **代码实证**：[objectives.js](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/domain/events/objectives.js) & [EventsView.js](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/ui/screens/EventsView.js#L140-L190) & [GalaxyRenderer.js](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/render/GalaxyRenderer.js#L320-L380)
+* **代码实证**：[objectives.js](file:///src/domain/events/objectives.js) & [EventsView.js](file:///src/ui/screens/EventsView.js#L140-L190) & [GalaxyRenderer.js](file:///src/render/GalaxyRenderer.js#L320-L380)
   * 实装 `WorldObjective` 领域实体：劫掠、商队、深空遗迹等事件触发时直接锚定目标星系与航路；
   * 事件弹窗与目标追踪面板配备“聚焦目标”（星图相机秒级定位）与“派遣护航”（就近自动指派舰队出击）快捷动作；
   * 银河大地图 3D 画布实装空间目标动态发光 Pin 标、离屏边缘导引箭头（Off-screen Indicator）与威胁高亮航线。
 
 ### 痛点 8：行星地表空洞荒漠化（“无人深空首发式”落差）
 * **复验结论**：**PASS**
-* **代码实证**：[PlanetTerrainMesh.js](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/render/gl/PlanetTerrainMesh.js) & [planetThemes.js](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/content/planetThemes.js) & [planetPOI.js](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/domain/ground/planetPOI.js)
+* **代码实证**：[PlanetTerrainMesh.js](file:///src/render/gl/PlanetTerrainMesh.js) & [planetThemes.js](file:///src/content/planetThemes.js) & [planetPOI.js](file:///src/domain/ground/planetPOI.js)
   * **几何革命**：彻底废止 64×24×64 方块体素渲染，全面转向**连续三角网格地形**（3 级 LOD + 裙边水密闭合 + 三平面法线崖壁增强），呈现类似《戴森球计划》的宏伟地貌；
   * **美学主题**：实装 18 类鲜明主题（含 7 大旗舰主题：碧渊双向焦散海洋、永冬融雪热区、星辉生物荧光、黑曜石熔岩桥等）；
   * **微观玩法闭环**：未殖民星球全面开放“先遣地表勘探”，实装持久化 `PlanetPOI`（富矿深核、地下洋海流、远古残骸等），靠近按 `E` 键采样并直接回写玩家科技与资源账本（`HarvestPlanetPOI` 命令）。
@@ -132,7 +132,7 @@ flowchart LR
 * 生产代码零 `TODO`/`FIXME`/占位伪实现。
 
 ### 3.3 离线与双模自足部署资产验证
-* **全打包单文件产物**：[dist/void-frontier.bundle.js](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/dist/void-frontier.bundle.js) 成功注册打包 141 个原生模块（1,677 KB）。
+* **全打包单文件产物**：[dist/void-frontier.bundle.js](file:///dist/void-frontier.bundle.js) 成功注册打包 141 个原生模块（1,677 KB）。
 * **静态语法校验**：通过 `node --check dist/void-frontier.bundle.js` 零报错，`file://` 双击即玩契约与 GitHub Pages 二级路径离线 PWA 运行能力均通过实机校验。
 
 ---
@@ -145,7 +145,7 @@ flowchart LR
    * 当前本地 `main` 分支领先远程 `origin/main` 23 个提交（版本已打磨至最佳状态）。
    * 请在网络与 Git 凭据就绪后，由用户或在授权下执行 `git push origin main` 完成远端发布。
 2. **测试脚本跨平台容错补强**：
-   * 验收期间项目负责人已对 [tests/tools/static-audit.mjs](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/tests/tools/static-audit.mjs#L15) 中的路径解析补上了 `decodeURIComponent`，解决了 Windows 下含有空格路径（如 `My Drive`）时的 URI 编码解析异常。该改进已被纳入本地工作树。
+   * 验收期间项目负责人已对 [tests/tools/static-audit.mjs](file:///tests/tools/static-audit.mjs#L15) 中的路径解析补上了 `decodeURIComponent`，解决了 Windows 下含有空格路径（如 `My Drive`）时的 URI 编码解析异常。该改进已被纳入本地工作树。
 3. **长期长线扩展储备**：
    * 规范 doc6 §6.5 预留的“地质钻探器与扫描仪独立 HUD 槽位”以及“巨树冠层双层地表导航”，底层物理算子（`terrainEdits`）与数据标志已全部实装就位，可作为后续体验 DLC 阶段的纯 UI 组装任务。
 

@@ -29,7 +29,7 @@
 ### 1.3 文档基线对齐准则（doc5:17）
 
 - 严格恪守《星际游戏长线研发任务书》最高准则：**单一游戏应用、统一 World 实体模型、单一确定性模拟内核、全系统命令与事件互联**。
-- **严禁**套用《超长线 Web 研发任务书设计》面向八个独立科学模拟沙盒的 `{5,1,4,3,6,8,7,2}` 目录拆分模式——不得把殖民、外交、行星、战斗拆成互不关联的小游戏。
+- **严禁**套用《[REDACTED]》面向八个独立科学模拟沙盒的 `{5,1,4,3,6,8,7,2}` 目录拆分模式——不得把殖民、外交、行星、战斗拆成互不关联的小游戏。
 - 将 README.md 与 AUTONOMOUS_RUNBOOK.md 中滞后的"22 个测试套件"统一校准为当前 CI 实跑的 **26 个**自动化测试套件（52 轮断言）。
 
 ---
@@ -292,7 +292,7 @@ npm run lint:static
 
 ### 7.1 参考资料（doc5:973-1000，共 26 项）
 
-项目内案卷与源码（Google Drive 链接）：¹专家调研委托书 TASK_DELEGATION_EXPERT_RESEARCH_BRIEF.md、²负责人审计 PROJECT_LEAD_AUDIT_REPORT.md、³专家诊断 report.md、⁴AUTONOMOUS_RUNBOOK.md、⁵report.md、⁶System3D.js、⁷SystemView.js、⁸void-frontier.bundle.js、⁹Inspector.js、¹⁰events.js、¹⁴GalaxyRenderer.js、²²galaxyGen.js、²³SystemRenderer.js、¹⁸/²⁶Stellar 返工方案两份。
+项目内案卷与源码（Google Drive 链接）：¹专家调研委托书 TASK_DELEGATION_EXPERT_RESEARCH_BRIEF.md、²负责人审计 PROJECT_LEAD_AUDIT_REPORT.md、³专家诊断 report.md、⁴AUTONOMOUS_RUNBOOK.md、⁵report.md、⁶System3D.js、⁷SystemView.js、⁸void-frontier.bundle.js、⁹Inspector.js、¹⁰events.js、¹⁴GalaxyRenderer.js、²²galaxyGen.js、²³SystemRenderer.js、¹⁸/²⁶[REDACTED]方案两份。
 外部方法论文献：¹¹/¹²Stellaris 双击切图与地图缩放（Reddit）、¹³离屏指示器（YouTube）、¹⁵Endless Space 2（NamuWiki）、¹⁶/²⁵atan2（CSS-Tricks/MATLAB）、¹⁷Rust 控制台命令、¹⁹4X 界面演进 Dev Journal #114（SteamDB）、²⁰WebGL 大气绘制（Mike Lodato）、²¹GLSL 大气技法、²⁴MDN CSS 数学函数。
 
 ### 7.2 内嵌图像与公式还原说明（doc5:1002-1112）
