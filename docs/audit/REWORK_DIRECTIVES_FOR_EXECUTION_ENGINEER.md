@@ -3,11 +3,11 @@
 
 **文件编号**: `REWORK-DIRECTIVE-LEAD-202611-03`  
 **关联基准**: 
-- 专家二次验收仲裁书: [`docs/specs/8_无垠边疆专家二次验收与方案.md`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/docs/specs/8_%E6%97%A0%E5%9E%A0%E8%BE%B9%E7%96%86%E4%B8%93%E5%AE%B6%E4%BA%8C%E6%AC%A1%E9%AA%8C%E6%94%B6%E4%B8%8E%E6%96%B9%E6%A1%88.md) (二次验收评定：5.2/10.0，严重不合格驳回)
-- 专家协查委托书: [`docs/audit/MANDATE_DOMAIN_EXPERT_SECONDARY_ACCEPTANCE.md`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/docs/audit/MANDATE_DOMAIN_EXPERT_SECONDARY_ACCEPTANCE.md)
-- 项目负责人实机审计报告: [`docs/audit/PROJECT_LEAD_PLAYTEST_AUDIT_REPORT.md`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/docs/audit/PROJECT_LEAD_PLAYTEST_AUDIT_REPORT.md)
-- 核心设计宪法: [`docs/specs/6_VOID_FRONTIER_游戏审美主题与行星GamePlay最高指导规范.md`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/docs/specs/6_VOID_FRONTIER_%E6%B8%B8%E6%88%8F%E5%AE%A1%E7%BE%8E%E4%B8%BB%E9%A2%98%E4%B8%8E%E8%A1%8C%E6%98%9FGamePlay%E6%9C%80%E9%AB%98%E6%8C%87%E5%AF%BC%E8%A7%84%E8%8C%83.md) 及 [`docs/specs/7_无垠边疆行星美学与施工方案.md`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/docs/specs/7_%E6%97%A0%E5%9E%A0%E8%BE%B9%E7%96%86%E8%A1%8C%E6%98%9F%E7%BE%8E%E5%AD%A6%E4%B8%8E%E6%96%BD%E5%B7%A5%E6%96%B9%E6%A1%88.md)
-- 目标施工规范文档: [`docs/specs/8_无垠边疆返工施工全套方案.md`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/docs/specs/8_%E6%97%A0%E5%9E%A0%E8%BE%B9%E7%96%86%E8%BF%94%E5%B7%A5%E6%96%BD%E5%B7%A5%E5%85%A8%E5%A5%97%E6%96%B9%E6%A1%88.md)
+- 专家二次验收仲裁书: [`docs/specs/8_无垠边疆专家二次验收与方案.md`](file:///docs/specs/8_%E6%97%A0%E5%9E%A0%E8%BE%B9%E7%96%86%E4%B8%93%E5%AE%B6%E4%BA%8C%E6%AC%A1%E9%AA%8C%E6%94%B6%E4%B8%8E%E6%96%B9%E6%A1%88.md) (二次验收评定：5.2/10.0，严重不合格驳回)
+- 专家协查委托书: [`docs/audit/MANDATE_DOMAIN_EXPERT_SECONDARY_ACCEPTANCE.md`](file:///docs/audit/MANDATE_DOMAIN_EXPERT_SECONDARY_ACCEPTANCE.md)
+- 项目负责人实机审计报告: [`docs/audit/PROJECT_LEAD_PLAYTEST_AUDIT_REPORT.md`](file:///docs/audit/PROJECT_LEAD_PLAYTEST_AUDIT_REPORT.md)
+- 核心设计宪法: [`docs/specs/6_VOID_FRONTIER_游戏审美主题与行星GamePlay最高指导规范.md`](file:///docs/specs/6_VOID_FRONTIER_%E6%B8%B8%E6%88%8F%E5%AE%A1%E7%BE%8E%E4%B8%BB%E9%A2%98%E4%B8%8E%E8%A1%8C%E6%98%9FGamePlay%E6%9C%80%E9%AB%98%E6%8C%87%E5%AF%BC%E8%A7%84%E8%8C%83.md) 及 [`docs/specs/7_无垠边疆行星美学与施工方案.md`](file:///docs/specs/7_%E6%97%A0%E5%9E%A0%E8%BE%B9%E7%96%86%E8%A1%8C%E6%98%9F%E7%BE%8E%E5%AD%A6%E4%B8%8E%E6%96%BD%E5%B7%A5%E6%96%B9%E6%A1%88.md)
+- 目标施工规范文档: [`docs/specs/8_无垠边疆返工施工全套方案.md`](file:///docs/specs/8_%E6%97%A0%E5%9E%A0%E8%BE%B9%E7%96%86%E8%BF%94%E5%B7%A5%E6%96%BD%E5%B7%A5%E5%85%A8%E5%A5%97%E6%96%B9%E6%A1%88.md)
 
 ---
 
@@ -15,7 +15,7 @@
 
 执行工程师团队：
 
-在你们提交 [`report.md`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/report.md) 并宣布所有任务“竣工全绿”后，项目负责人实施了实机深度游玩与全量仿真测试，随后领域专家组实施了源码级穿透审计。两级复核最终一致裁决：**驳回验收，阻断投产上线（专家加权评定 5.2 / 10.0）**。
+在你们提交 [`report.md`](file:///report.md) 并宣布所有任务“竣工全绿”后，项目负责人实施了实机深度游玩与全量仿真测试，随后领域专家组实施了源码级穿透审计。两级复核最终一致裁决：**驳回验收，阻断投产上线（专家加权评定 5.2 / 10.0）**。
 
 虽然自动化单测呈现“38 个套件 76/76 PASS”的全绿表象，但由于测试编写陷入了**“面向断言孤岛化 Mock 编码（Test-Assertion-Driven Siloing）”**的形式主义陷阱，底层写好的优质算子（如三平面地形、SDF人工任务核心、五层水面着色器、旗舰地标模型）在顶层视图装配时出现了极其严重的**坐标系脱节、物理积分发散、核心通道漏接与双轨分裂**。
 
@@ -29,15 +29,15 @@
 
 | 诊断点编号 | 专家指出的病灶现象 | 源码取证位置与实证事实 | 严重度 |
 | :--- | :--- | :--- | :--- |
-| **VERIFY-01** | **地表落体 Y 轴脱节与重力逃逸死循环** | [`src/ui/screens/GroundView.js#L790-L799`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/ui/screens/GroundView.js#L790-L799) 及 [`L1410-L1440`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/ui/screens/GroundView.js#L1410-L1440)：`_setupScene` 首帧未将 `c.y` 同步为任务单位真实地表高度；`c.vy` 仅在 `ground - c.y < 0.02` 时清零，导致大坡度下每帧下坠量超过 `+9dt` 爬升补偿，自由落体发散；$c.y < -60$ 时重置到 `spawn`，次帧又被覆写回 `au` 坐标，陷入地底橡皮筋死循环。全银河仿真 3,648 场确诊 112 场彻底掉穿地心。 | **P0 (阻断)** |
-| **VERIFY-02** | **2D 瓦片地牢与 3D 连续地形空间撕裂** | [`src/domain/ground/GroundMission.js`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/domain/ground/GroundMission.js) 仍在运行 Phase 10 的 2D 离散迷宫（`T_WALL=1, T_DOOR=3`），与 3D 连续地形网格高低差（高达 4.86m）脱节；3D 地面未渲染 2D 墙壁却用 2D 碰撞判定，导致大平原撞空气墙、隔坡挥刀失效。 | **P0 (阻断)** |
-| **VERIFY-03** | **七大旗舰 3D 地标孤岛死代码** | [`src/render/meshes/landmarkMeshes.js`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/render/meshes/landmarkMeshes.js) 编写了完整的 7 套预制模型，但在 `src/` 全文**完全未被任何文件 import 或调用（0 引用）**！且 [`src/content/missionSites.js#L221`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/content/missionSites.js#L221) 命名为 `moonwhite_salt_monolith`，与模型注册名 `salt_crystal_spire` 拼写失配。 | **P0 (阻断)** |
-| **VERIFY-04** | **五层水下光学管线 PlanetWater 孤岛死代码** | [`src/render/gl/PlanetWater.js`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/render/gl/PlanetWater.js) 编写了 Gerstner 双波、岸线浪花泡沫与 90 秒潮汐函数，但在场景控制器 [`src/render/gl/PlanetSurfaceScene.js`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/render/gl/PlanetSurfaceScene.js) 中**完全未导入与实例化（0 引用）**，水体退化为静态死平面。 | **P0 (阻断)** |
-| **VERIFY-05** | **自由探索 POI 信标与地形恢复初始化遗漏** | [`src/ui/screens/GroundView.js#L1204, L1310, L2150`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/ui/screens/GroundView.js#L1204)：代码中有多处访问 `this._pois` 和 `this._edits`，但在 `_setupScene()` 中**完全漏写了初始化赋值语句**！导致其恒为 `undefined`，大地图 POI 永远不显示、E 键采样与 R 键恢复直接短路失效。 | **P0 (阻断)** |
-| **VERIFY-06** | **殖民地建造双轨脱节与黄金角螺旋盲盒** | [`src/ui/screens/GroundView.js#L1902-L1904`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/ui/screens/GroundView.js#L1902-L1904)：`_layoutColony()` 忽视 `planet.groundBuildings`，强制采用黄金角螺旋公式（$r = 5.5 + 2.4 \sqrt{i}$）盲盒撒点，导致大量建筑一半悬空断崖、一半深埋山体岩壁。 | **P1 (核心)** |
-| **VERIFY-07** | **地面任务命令字段名错位与异常抛错** | [`src/app/commands.js#L519, L537, L559, L564`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/app/commands.js#L519)：实体状态字段为 `m.status === 'active'`，`commands.js` 却校验 `m.state`（未定义）；且 `AbortGroundMission` 错误调用 `finishMission(ctx.world, m, 'aborted')` 抛出非法参数未捕获异常。 | **P0 (阻断)** |
-| **VERIFY-08** | **弹簧臂摄像机在陡坡/地底发生 1.4m 压溃** | [`src/ui/screens/GroundView.js#L1985-L2008`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/ui/screens/GroundView.js#L1985-L2008)：弹簧臂射线起点未做地面高度托底，在陡坡或内凹处射线命中内壁背面触发 $t \le 0.08$，硬下限强行锁死在 1.4m，导致大头贴屏与视锥压溃。 | **P1 (核心)** |
-| **VERIFY-09** | **低模方盒与高精三平面地形的“积木拼贴违和感”** | [`src/render/meshes/GroundMeshes.js`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/render/meshes/GroundMeshes.js) 角色与建筑仅采用直角方块堆叠，着色器为纯平 Lambert 漫反射，缺少硬表面斜切倒角、接触 AO 与世界空间微面板接缝。 | **P1 (核心)** |
+| **VERIFY-01** | **地表落体 Y 轴脱节与重力逃逸死循环** | [`src/ui/screens/GroundView.js#L790-L799`](file:///src/ui/screens/GroundView.js#L790-L799) 及 [`L1410-L1440`](file:///src/ui/screens/GroundView.js#L1410-L1440)：`_setupScene` 首帧未将 `c.y` 同步为任务单位真实地表高度；`c.vy` 仅在 `ground - c.y < 0.02` 时清零，导致大坡度下每帧下坠量超过 `+9dt` 爬升补偿，自由落体发散；$c.y < -60$ 时重置到 `spawn`，次帧又被覆写回 `au` 坐标，陷入地底橡皮筋死循环。全银河仿真 3,648 场确诊 112 场彻底掉穿地心。 | **P0 (阻断)** |
+| **VERIFY-02** | **2D 瓦片地牢与 3D 连续地形空间撕裂** | [`src/domain/ground/GroundMission.js`](file:///src/domain/ground/GroundMission.js) 仍在运行 Phase 10 的 2D 离散迷宫（`T_WALL=1, T_DOOR=3`），与 3D 连续地形网格高低差（高达 4.86m）脱节；3D 地面未渲染 2D 墙壁却用 2D 碰撞判定，导致大平原撞空气墙、隔坡挥刀失效。 | **P0 (阻断)** |
+| **VERIFY-03** | **七大旗舰 3D 地标孤岛死代码** | [`src/render/meshes/landmarkMeshes.js`](file:///src/render/meshes/landmarkMeshes.js) 编写了完整的 7 套预制模型，但在 `src/` 全文**完全未被任何文件 import 或调用（0 引用）**！且 [`src/content/missionSites.js#L221`](file:///src/content/missionSites.js#L221) 命名为 `moonwhite_salt_monolith`，与模型注册名 `salt_crystal_spire` 拼写失配。 | **P0 (阻断)** |
+| **VERIFY-04** | **五层水下光学管线 PlanetWater 孤岛死代码** | [`src/render/gl/PlanetWater.js`](file:///src/render/gl/PlanetWater.js) 编写了 Gerstner 双波、岸线浪花泡沫与 90 秒潮汐函数，但在场景控制器 [`src/render/gl/PlanetSurfaceScene.js`](file:///src/render/gl/PlanetSurfaceScene.js) 中**完全未导入与实例化（0 引用）**，水体退化为静态死平面。 | **P0 (阻断)** |
+| **VERIFY-05** | **自由探索 POI 信标与地形恢复初始化遗漏** | [`src/ui/screens/GroundView.js#L1204, L1310, L2150`](file:///src/ui/screens/GroundView.js#L1204)：代码中有多处访问 `this._pois` 和 `this._edits`，但在 `_setupScene()` 中**完全漏写了初始化赋值语句**！导致其恒为 `undefined`，大地图 POI 永远不显示、E 键采样与 R 键恢复直接短路失效。 | **P0 (阻断)** |
+| **VERIFY-06** | **殖民地建造双轨脱节与黄金角螺旋盲盒** | [`src/ui/screens/GroundView.js#L1902-L1904`](file:///src/ui/screens/GroundView.js#L1902-L1904)：`_layoutColony()` 忽视 `planet.groundBuildings`，强制采用黄金角螺旋公式（$r = 5.5 + 2.4 \sqrt{i}$）盲盒撒点，导致大量建筑一半悬空断崖、一半深埋山体岩壁。 | **P1 (核心)** |
+| **VERIFY-07** | **地面任务命令字段名错位与异常抛错** | [`src/app/commands.js#L519, L537, L559, L564`](file:///src/app/commands.js#L519)：实体状态字段为 `m.status === 'active'`，`commands.js` 却校验 `m.state`（未定义）；且 `AbortGroundMission` 错误调用 `finishMission(ctx.world, m, 'aborted')` 抛出非法参数未捕获异常。 | **P0 (阻断)** |
+| **VERIFY-08** | **弹簧臂摄像机在陡坡/地底发生 1.4m 压溃** | [`src/ui/screens/GroundView.js#L1985-L2008`](file:///src/ui/screens/GroundView.js#L1985-L2008)：弹簧臂射线起点未做地面高度托底，在陡坡或内凹处射线命中内壁背面触发 $t \le 0.08$，硬下限强行锁死在 1.4m，导致大头贴屏与视锥压溃。 | **P1 (核心)** |
+| **VERIFY-09** | **低模方盒与高精三平面地形的“积木拼贴违和感”** | [`src/render/meshes/GroundMeshes.js`](file:///src/render/meshes/GroundMeshes.js) 角色与建筑仅采用直角方块堆叠，着色器为纯平 Lambert 漫反射，缺少硬表面斜切倒角、接触 AO 与世界空间微面板接缝。 | **P1 (核心)** |
 | **VERIFY-10** | **水体/沼泽物理表现缺位与恒星光谱未联动** | 水下无浮力、无涉水阻尼、无水花；行星昼夜光照未读取所属恒星系 `sys.star.typeId` 的真实色温 `SUN_BY_STAR`。 | **P2 (质感)** |
 
 ---
@@ -49,7 +49,7 @@
 ### 3.1 【P0 阻断级返工项】物理止血、维度合龙与死代码激活
 
 #### 施工任务 P0-1：地表初始化 Y 轴脱节、重力逃逸循环与橡皮筋陷阱彻底根治
-- **目标文件**: [`src/ui/screens/GroundView.js`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/ui/screens/GroundView.js)
+- **目标文件**: [`src/ui/screens/GroundView.js`](file:///src/ui/screens/GroundView.js)
 - **修改位置 1 (`_setupScene`)**: 在第 790–800 行周围，重写角色初始坐标生成逻辑：
   ```javascript
   // —— P0-1 修复：首帧初始位置对齐真实地表 ——
@@ -164,7 +164,7 @@
 
 #### 施工任务 P0-2：废除 2D BSP 砖块迷宫，空间拓扑升维合龙至 3D 连续任务场
 - **核心仲裁架构**: 遵循专家组决定的“方案三（原生 3D 地表遭遇战模式）+ 方案二局部阶梯承台整平（Terraced Pads）”架构。
-- **修改文件**: [`src/domain/ground/GroundMission.js`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/domain/ground/GroundMission.js)
+- **修改文件**: [`src/domain/ground/GroundMission.js`](file:///src/domain/ground/GroundMission.js)
   1. **注入 3D 站点蓝图与米制坐标空间**:
      在 `createGroundMission(world, opts)` 中，当 `planetId` 存在且未强制旧版瓦片网格时：
      - 调用 `blueprintsForPlanet(planet, planet.primaryThemeId)[0]` 与 `getSiteInstance(world, planetId, bp.id)` 获取站点实例 `site`；
@@ -187,23 +187,23 @@
 #### 施工任务 P0-3：全量激活四大“孤岛死代码”
 
 ##### 1. 挂载旗舰地标模型 (`landmarkMeshes.js`)
-- **文件修正 1 ([`src/content/missionSites.js`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/content/missionSites.js))**:
+- **文件修正 1 ([`src/content/missionSites.js`](file:///src/content/missionSites.js))**:
   - 第 221 行与 229 行的 `'moonwhite_salt_monolith'` 拼写修正为 `'salt_crystal_spire'`。
-- **文件修正 2 ([`src/render/meshes/landmarkMeshes.js`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/render/meshes/landmarkMeshes.js))**:
+- **文件修正 2 ([`src/render/meshes/landmarkMeshes.js`](file:///src/render/meshes/landmarkMeshes.js))**:
   - 在导出表保留别名映射：`'moonwhite_salt_monolith': buildSaltCrystalSpire`，确保绝对兼容。
-- **文件修正 3 ([`src/ui/screens/GroundView.js`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/ui/screens/GroundView.js))**:
+- **文件修正 3 ([`src/ui/screens/GroundView.js`](file:///src/ui/screens/GroundView.js))**:
   - 导入 `buildLandmarkMesh`，在 `BuildingMeshBatch` 中注册 7 大地标 Prefab ID；
   - 在 `_bmeshList()` 中遍历 `this._site.site.landmarks`，将主视觉地标与辅助地标按真实地形高程加入渲染批次。
 
 ##### 2. 挂载五层水下光学海面层 (`PlanetWater.js`)
-- **文件修正 ([`src/render/gl/PlanetSurfaceScene.js`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/render/gl/PlanetSurfaceScene.js))**:
+- **文件修正 ([`src/render/gl/PlanetSurfaceScene.js`](file:///src/render/gl/PlanetSurfaceScene.js))**:
   - 顶部导入 `import { PlanetWater, tideWaterLevel } from './PlanetWater.js';`；
   - 构造函数中实例化 `this._water = new PlanetWater(glc, this.tier);`；
   - 在 `setWorldOffset(o)`、`rebuild()`、`destroy()` 中对 `this._water` 进行生命周期协同管理；
   - 在 `draw()` 函数中，在地形绘制之后、天气粒子绘制之前，根据 `tideWaterLevel` 计算实时潮汐海平面，下发至地形 uniform 并执行 `this._water.draw(...)`。
 
 ##### 3. 补齐自由探索 POI 信标与地形恢复初始化
-- **文件修正 ([`src/ui/screens/GroundView.js`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/ui/screens/GroundView.js))**:
+- **文件修正 ([`src/ui/screens/GroundView.js`](file:///src/ui/screens/GroundView.js))**:
   - 在 `_setupScene()` 函数中（约第 780 行附近），在 `buildTerrainField` 之后立即追加：
     ```javascript
     // —— P0-3 修复：激活 POI 账本与持久化地形编辑仓库 ——
@@ -214,7 +214,7 @@
     ```
 
 ##### 4. 修复地面任务命令字段名与 Abort 异常
-- **文件修正 ([`src/app/commands.js`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/app/commands.js))**:
+- **文件修正 ([`src/app/commands.js`](file:///src/app/commands.js))**:
   - 顶部导入 `import { abortMission } from '../domain/ground/GroundMission.js';`；
   - 第 519 行：将 `m.state === 'active'` 修正为 `(m.status === 'active' || m.state === 'active')`；
   - 第 537 行与 559 行：将 `m.state !== 'active'` 修正为 `((m.status || m.state) !== 'active')`；
@@ -225,7 +225,7 @@
 ### 3.2 【P1 核心体验级返工项】摄像机防压溃、建筑地形互锁与硬表面质感升级
 
 #### 施工任务 P1-1：弹簧臂相机（Spring-Arm Camera）三层防压溃与地形净空抬升
-- **目标文件**: [`src/ui/screens/GroundView.js`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/ui/screens/GroundView.js)
+- **目标文件**: [`src/ui/screens/GroundView.js`](file:///src/ui/screens/GroundView.js)
 - **实现标准**: 替换 `_renderFrame()` 中原相机注视计算段落：
   ```javascript
   // —— P1-1 修复：弹簧臂三层防穿透与眼位离地净空守护 ——
@@ -276,7 +276,7 @@
 ---
 
 #### 施工任务 P1-2：殖民地建筑等高线感知选址与程序化混凝土基座裙边
-- **目标文件**: [`src/ui/screens/GroundView.js`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/ui/screens/GroundView.js) 与 [`src/render/meshes/GroundMeshes.js`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/render/meshes/GroundMeshes.js)
+- **目标文件**: [`src/ui/screens/GroundView.js`](file:///src/ui/screens/GroundView.js) 与 [`src/render/meshes/GroundMeshes.js`](file:///src/render/meshes/GroundMeshes.js)
   1. **废除黄金角盲盒螺旋**:
      重写 `_layoutColony()`：首先合并渲染玩家手动通过 `PlaceBuilding` 命令放置的 `planet.groundBuildings`。对于宏观 `colony.buildings` 中未定三维坐标的建筑，在过渡环带（半径 18m–85m）内以确定性序列调用 `checkBuildingPlacement(this.field, fx, fz, { footprintHalfM: 2.2, themeId: this.planet.primaryThemeId })`，仅在坡度 $\le 16^\circ$ 且高差合规的平坦台地上落位。
   2. **程序化混凝土基座裙边（Foundation Skirt）**:
@@ -287,7 +287,7 @@
 ---
 
 #### 施工任务 P1-3：消除“积木玩具感”：硬表面斜切倒角几何与统一微面板着色器
-- **目标文件**: [`src/render/meshes/GroundMeshes.js`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/render/meshes/GroundMeshes.js)、[`src/ui/screens/GroundView.js`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/ui/screens/GroundView.js) (`BM_FS`) 与 [`src/render/gl/PlanetSurface3D.js`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/render/gl/PlanetSurface3D.js) (`LIT_FS`)
+- **目标文件**: [`src/render/meshes/GroundMeshes.js`](file:///src/render/meshes/GroundMeshes.js)、[`src/ui/screens/GroundView.js`](file:///src/ui/screens/GroundView.js) (`BM_FS`) 与 [`src/render/gl/PlanetSurface3D.js`](file:///src/render/gl/PlanetSurface3D.js) (`LIT_FS`)
   1. **原语升级**: 在 `PartMeshBuilder` 中实现 `chamferBox(cx, cy, cz, hx, hy, hz, bevel, col)` 原语，对建筑边缘、外骨骼胸甲与重装机甲施加 45° 斜角切面，并在物体底部顶点烘焙环境光遮蔽（Contact AO）系数，消除悬浮感。
   2. **着色器升级**: 将片元着色器 `BM_FS` 与 `LIT_FS` 统一升级为支持世界空间微面板接缝（`panelSeam`）、Blinn-Phong 金属高光与视角边缘菲涅尔（`Fresnel`）反射的高级 PBR 质感 Shader（完全遵照专家仲裁书第 4.2 节代码蓝本落地）。
 
@@ -343,7 +343,7 @@ flowchart LR
 
 ## 五、 工程纪律与交付要求
 
-1. **代码基线统一**: 在实施上述修复前，必须确认工作区以最新的原生 ES 模块源码树为准，严禁保留旧版孤立简化实现；修改完成后必须同步重新构建打包 [`dist/void-frontier.bundle.js`](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/dist/void-frontier.bundle.js)，确保单文件产物与源码完全一致。
+1. **代码基线统一**: 在实施上述修复前，必须确认工作区以最新的原生 ES 模块源码树为准，严禁保留旧版孤立简化实现；修改完成后必须同步重新构建打包 [`dist/void-frontier.bundle.js`](file:///dist/void-frontier.bundle.js)，确保单文件产物与源码完全一致。
 2. **严禁破坏文档与注释**: 严格保持现有各模块优秀的设计规范、公式注释与类型契约。
 3. **交付成果提交**: 完成上述 P0/P1/P2 重构并使 `PLAYTEST-GATE-01..04` 全部跑通后，编写完整的返工竣工报告提交项目负责人，等待项目负责人执行最终实机动态复测。
 

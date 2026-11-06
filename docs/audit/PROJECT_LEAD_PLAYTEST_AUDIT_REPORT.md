@@ -39,10 +39,10 @@ sequenceDiagram
 
 ### 1.1 致命代码证据链穿透（Three-Tier Fatal Mechanism）
 
-通过查阅 [GroundView.js](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/ui/screens/GroundView.js)，确认以下三重物理逻辑叠加缺陷：
+通过查阅 [GroundView.js](file:///src/ui/screens/GroundView.js)，确认以下三重物理逻辑叠加缺陷：
 
 #### 根因一：场景初始化坐标与任务出击位置严重脱节
-查阅 [GroundView.js lines 790-799](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/ui/screens/GroundView.js#L790-L799)：
+查阅 [GroundView.js lines 790-799](file:///src/ui/screens/GroundView.js#L790-L799)：
 ```javascript
 const c = this.char3d;
 const spawn = this.sw.spawn;
@@ -61,7 +61,7 @@ c.z = au.y * kz; // 直接瞬移到任务出击点（如 7.0m）
 若任务出击点所在山脉的地面高度高于体素中心，角色在第 1 帧就**物理内嵌在地下数米甚至数十米处**！
 
 #### 根因二：重力发散死循环（Runaway Downward Velocity Loop）
-查阅 [GroundView.js lines 1415-1428](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/ui/screens/GroundView.js#L1415-L1428)：
+查阅 [GroundView.js lines 1415-1428](file:///src/ui/screens/GroundView.js#L1415-L1428)：
 ```javascript
 c.vy -= g * dt;
 c.y += c.vy * dt;
@@ -116,7 +116,7 @@ if (ground !== Infinity) {
 ### 病灶二：弹簧臂相机（Spring-Arm Camera）地下视锥压溃 (Camera Terrain Inversion)
 * **现象**：当角色落入地面微小凹陷或坡度陡升时，摄像机镜头瞬间猛烈拉近至角色脚踝，视口被大量撕裂的灰色多边形内表面充斥。
 * **技术病理**：
-  * [GroundView.js line 1991](file:///C:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/ui/screens/GroundView.js#L1991)：摄像机视线目标取 `tgt = [c.x, c.y + 1.55, c.z]`；
+  * [GroundView.js line 1991](file:///src/ui/screens/GroundView.js#L1991)：摄像机视线目标取 `tgt = [c.x, c.y + 1.55, c.z]`；
   * 当角色处于地势负落差时，`tgt` 已经位于地形网格下方。此时调用 `raycastTerrain` 从地下向天空发射射线，射线在 $t \approx 0$ 处即触碰到地形内壁背面，导致相机安全臂长 `want` 直接被强行锁死在最小值 `1.4m`，产生令人眩晕的镜头穿模与画面翻滚。
 
 ### 病灶三：殖民地建筑与任务站点的“盲盒式堆叠” (Colony Spiral vs Site Collision)
