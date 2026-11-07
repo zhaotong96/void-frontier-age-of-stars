@@ -88,6 +88,10 @@ const BLD_DEFS = new Map(BUILDINGS.map((b) => [b.id, b]));
 /** 资源定义索引（只读查询；未知 id 不抛错，回退显示原始 id） */
 const RES_DEFS = new Map(RESOURCES.map((r) => [r.id, r]));
 
+function buildingDef(defId) {
+  return BLD_DEFS.get(defId);
+}
+
 /** 资源中文名：本地映射 → 定义 nameZh（内容扩展时）→ 原始 id */
 function resName(rid) {
   const def = RES_DEFS.get(rid);

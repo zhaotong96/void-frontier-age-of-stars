@@ -30829,9 +30829,11 @@ const MESH_OF_CATEGORY = (cat) => {
   const i = BUILD_CATEGORY_IDS.indexOf(String(cat || 'default'));
   return i >= 0 ? i : 9; // 兜底槽 'default'
 };
-/** 地标 prefabId → 图集槽位（未注册网格的辅助地标返回 -1，跳过渲染） */
+/** 地标 prefabId → 图集槽位（仅 LANDMARK_PREFAB_IDS 内有效，避免尾部工业槽位被误判） */
 const LANDMARK_MESH_OF = (prefabId) => {
-  const i = BUILD_CATEGORY_IDS.indexOf(String(prefabId || ''));
+  const pid = String(prefabId || '');
+  if (!LANDMARK_PREFAB_IDS.includes(pid)) return -1;
+  const i = BUILD_CATEGORY_IDS.indexOf(pid);
   return i >= 11 ? i : -1;
 };
 /** doc9 P0-3：地标逐 prefab 渲染缩放（拱/桥 1.6，塔 2.2，穹顶 1.4，晶簇 1.2，锥 1.0，树 1.8） */
@@ -34621,8 +34623,6 @@ __register("src/render/gl/BioFloraPass.js", function (__exports, __require) {
  * 上下文丢失安全；destroy 对失效句柄删除为空操作。
  */
 
-const { GLSL_VERSION: GLSL_VERSION } = __require("src/render/gl/GLCore.js");
-
 /** 通道 A 实例上限（植被） */
 const FLORA_MAX_INSTANCES = 1024;
 /** 通道 B 实例上限（动物） */
@@ -34647,8 +34647,8 @@ function faunaPhaseOffset(anchorX, anchorZ, radius, phase0, speed, time) {
   return { dx, dz, yaw };
 }
 
-/** 通道 A 顶点着色器：十字双面片 × 风摆 + 荧光脉冲（GLSL ES 3.0，#version 前置自动） */
-const FLORA_VS = GLSL_VERSION + `
+/** 通道 A 顶点着色器：十字双面片 × 风摆 + 荧光脉冲（GLSL ES 3.0，#version 由 GLCore.createProgram 注入） */
+const FLORA_VS = `
 layout(location=0) in vec2 aPos;        // 单位片 [-0.5..0.5]²（x 半区选十字片朝向）
 layout(location=1) in vec3 iOffset;     // 实例锚点（场域坐标）
 layout(location=2) in vec3 iParam;      // x: 高度 m, y: 相位, z: 朝向角
@@ -34682,7 +34682,7 @@ void main() {
 }
 `;
 
-const FLORA_FS = GLSL_VERSION + `
+const FLORA_FS = `
 precision mediump float;
 in float vGlow;
 in float vHue;
@@ -34698,7 +34698,7 @@ void main() {
 `;
 
 /** 通道 B 顶点着色器：盒体躯干 × aLimb 肢体部位四足迈步代数（CPU 零骨骼） */
-const FAUNA_VS = GLSL_VERSION + `
+const FAUNA_VS = `
 layout(location=0) in vec3 aPos;        // 单位盒 [-0.5..0.5]³
 layout(location=1) in vec3 iAnchor;     // 游荡锚点（场域坐标）
 layout(location=2) in vec4 iParam;      // x: 体长 m, y: 相位, z: 角速度, w: 游荡半径
@@ -34738,7 +34738,7 @@ void main() {
 }
 `;
 
-const FAUNA_FS = GLSL_VERSION + `
+const FAUNA_FS = `
 precision mediump float;
 in float vHue;
 in float vLimb;
@@ -45605,6 +45605,10 @@ const JOB_STATE_ZH = {
 const BLD_DEFS = new Map(BUILDINGS.map((b) => [b.id, b]));
 /** 资源定义索引（只读查询；未知 id 不抛错，回退显示原始 id） */
 const RES_DEFS = new Map(RESOURCES.map((r) => [r.id, r]));
+
+function buildingDef(defId) {
+  return BLD_DEFS.get(defId);
+}
 
 /** 资源中文名：本地映射 → 定义 nameZh（内容扩展时）→ 原始 id */
 function resName(rid) {
