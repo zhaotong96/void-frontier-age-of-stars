@@ -327,7 +327,7 @@ export class PlanetTerrainMesh {
    *  matColors : [4]×vec3 linear        —— 4 通道材质基色
    *  heatZones : [{x,z,radius,intensity}]（≤8，radius<=0 的项忽略）
    *  themeFx   : { waterLevel, biolumePulse, lavaEmissive }（debugMode 走 setDebugMode）
-   *  footsteps : [8]×{x,z,time,strength} 或 [x,z,time,s] 四元组（不足补零）
+   *  footsteps : Float32Array(32) 平面环形缓冲（8 槽×[x,z,time,strength]，场域坐标）或 [8]×{x,z,time,strength} 元组（不足补零）
    *  fog       : { color:[r,g,b], range:[near,far] }
    *  sun       : { dir:[x,y,z], color:[r,g,b] }（dir 自动归一化）
    * @param {object} [theme]
@@ -363,7 +363,11 @@ export class PlanetTerrainMesh {
       if (fx.biolumePulse != null) this._themeFx[1] = fx.biolumePulse;
       if (fx.lavaEmissive != null) this._themeFx[2] = fx.lavaEmissive;
     }
-    if (Array.isArray(t.footsteps)) {
+    // WP-0（doc18 v0.1.1）：GroundView 8 槽环形缓冲为 Float32Array(32) 平面布局，
+    // 旧 Array.isArray 判定会静默拦截导致 uFootsteps 恒零——直通复制，防丢帧涟漪
+    if (t.footsteps instanceof Float32Array && t.footsteps.length === this._footsteps.length) {
+      this._footsteps.set(t.footsteps);
+    } else if (Array.isArray(t.footsteps)) {
       this._footsteps.fill(0);
       for (let i = 0; i < 8 && i < t.footsteps.length; i++) {
         const f = t.footsteps[i];

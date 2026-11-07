@@ -935,6 +935,20 @@ export const GroundView = {
     const w = this.app.world;
     this.planet = planet;
     this.sw = createSurfaceWorld(w, planet.id);   // 种子 = world.seed ^ hash32(planetId)：同 seed 同地貌
+    // —— WP-0.3（doc18 v0.1.1）：工程模式建筑型号轮换面板（与 PlaceBuilding/miningDepositOk
+    //     同口径过滤矿脉要求；[ / ] / B 键循环，自由探索 HUD 明示名称/造价/矿脉要求） ——
+    const depMap3 = {
+      bld_mine_ferro: 'ferro', bld_mine_silicate: 'silicate', bld_mine_rare: 'rareEarth',
+      bld_mine_heavy: 'heavyMetal', bld_volatile_well: 'hydrogen', bld_gas_harvester: 'helium3',
+    };
+    const deposits3 = planet.deposits || {};
+    this._availableBuildDefs = BUILDINGS.filter((d) => {
+      const need = depMap3[d.id];
+      return !need || deposits3[need] > 0;
+    });
+    this._selectedBuildDefIndex = 0;
+    this._selectedBuildDefId = null;   // null = 默认采掘站（保持 GATE-02 既有口径）
+    this._buildHudNoteT = -1e9;        // 型号切换提示的剩余显示时长锚（_clock 秒）
     // —— 人工任务核心蓝图实例化（doc7 TASK-2.2：SDF 三层关卡 + 首屏构图） ——
     const bp = blueprintsForPlanet(planet, planet.primaryThemeId || null)[0] || null;
     this._site = bp ? getSiteInstance(w, planet.id, bp.id) : null;
@@ -963,10 +977,11 @@ export const GroundView = {
     this.field.siteModifier = (fx, fz, base) => {
       let siteDy = 0;
       let eff = base;
+      let baseRes = null;
       if (baseSiteMod) {
-        const m = baseSiteMod(fx, fz, base);
-        if (m && Number.isFinite(m.dy)) {
-          siteDy = m.dy;
+        baseRes = baseSiteMod(fx, fz, base);
+        if (baseRes && Number.isFinite(baseRes.dy)) {
+          siteDy = baseRes.dy;
           eff = { ...base, y: (Number.isFinite(base.y) ? base.y : 0) + siteDy };
         }
       }
@@ -974,7 +989,18 @@ export const GroundView = {
       // 总 dy = 站点 SDF dy + 采掘凹陷 dy（terrainField 仅应用单层 mod.dy）
       const dentDy = dent && Number.isFinite(dent.dy) ? dent.dy : 0;
       const total = siteDy + dentDy;
-      return total !== 0 ? { dy: total } : null;
+      // WP-0（doc18 v0.1.1）：语义旗完整透传（flags/clearFlags/weights/biomeId）——
+      // 此前仅回 {dy} 会令 rebuildDirtyChunks 增量重建区块时丢失坪面路面材质与
+      // clearFlags 安全豁免位（P0-D 坪面清险被渲染场域静默回退）
+      if (!baseRes && total === 0) return null;
+      return {
+        ...(baseRes || null),
+        dy: total,
+        flags: (baseRes && baseRes.flags) || 0,
+        clearFlags: (baseRes && baseRes.clearFlags) || 0,
+        weights: (baseRes && baseRes.weights) || null,
+        biomeId: (baseRes && baseRes.biomeId) != null ? baseRes.biomeId : null,
+      };
     };
     // —— P0-3 修复（doc9 §3.1）：激活 POI 账本与持久化地形编辑仓库 ——
     //     attachTerrainEdits 自动组合在既有 siteModifier 链之上（内部保存
@@ -1313,6 +1339,14 @@ export const GroundView = {
         this._shapeBrushOp = this._shapeBrushOp === 'flatten' ? 'smooth'
           : this._shapeBrushOp === 'smooth' ? 'lower' : 'flatten';
         break;
+      case 'BracketLeft':
+        // WP-0.3（doc18 v0.1.1）：工程模式建筑型号循环（箭头键为移动键不占用，doc17 §4.1 口径）
+        this._cycleBuildDef(-1);
+        break;
+      case 'BracketRight':
+      case 'KeyB':
+        this._cycleBuildDef(1);
+        break;
       case 'Tab':
         e.preventDefault();
         this._oneShot.switchUnit = true;
@@ -1590,6 +1624,25 @@ export const GroundView = {
       rebuildDirtyChunks(this.field);
     }
     return res || null;
+  },
+
+  /**
+   * WP-0.3（doc18 v0.1.1）：工程模式（技能 5）建筑型号循环切换。
+   * dir = ±1；选定型号同步写 _selectedBuildDefId（_fieldPlace 右键建造消费）。
+   */
+  _cycleBuildDef(dir) {
+    if (!this._buildMode) return;
+    const list = this._availableBuildDefs;
+    if (!list || !list.length) return;
+    const idx = ((this._selectedBuildDefIndex || 0) + dir + list.length) % list.length;
+    this._selectedBuildDefIndex = idx;
+    this._selectedBuildDefId = list[idx].id;
+    this._renderBuildHudNotification();
+  },
+
+  /** WP-0.3：型号切换 HUD 提示（自由探索面板顶部高亮 3s；_drawHudFree 消费） */
+  _renderBuildHudNotification() {
+    this._buildHudNoteT = this._clock;
   },
 
   /**
@@ -2143,11 +2196,14 @@ export const GroundView = {
         this._stepDist = (this._stepDist || 0) + Math.hypot(dx, dz);
         if (this._stepDist >= 1.5) {
           this._stepDist = 0;
+          // WP-0（doc18 v0.1.1）：缓冲持场域坐标（渲染层 draw 时按 uWorldOffset=[+32,0,+32]
+          // 平移到着色器 world 系）；char3d 为世界系，需先内收 FIELD_OFFSET 防二次叠加
+          const isRunning = !!(this.keys.ShiftLeft || this.keys.ShiftRight);
           const off = this._footstepIdx * 4;
-          this._footstepRing[off] = c.x;
-          this._footstepRing[off + 1] = c.z;
+          this._footstepRing[off] = c.x + FIELD_OFFSET;
+          this._footstepRing[off + 1] = c.z + FIELD_OFFSET;
           this._footstepRing[off + 2] = this._clock;
-          this._footstepRing[off + 3] = 1.0;
+          this._footstepRing[off + 3] = isRunning ? 1.0 : 0.5;
           this._footstepIdx = (this._footstepIdx + 1) % 8;
           this.scene.setFootsteps(this._footstepRing);
         }
@@ -3080,6 +3136,35 @@ export const GroundView = {
     // WP-4：工程刷子状态（F 键循环）随建造模式明示
     const brushZh = this._shapeBrushOp === 'smooth' ? '平滑' : this._shapeBrushOp === 'lower' ? '采掘' : '压平';
     ctx.fillText(`采掘/建造模式：${this._buildMode ? `开（${brushZh}刷）` : '关'} · F 切换工程刷 · Esc 升空返回`, 22, 100);
+    // —— WP-0.3（doc18 v0.1.1）：工程模式建筑型号面板（[ / ] / B 循环，右上顶部区）——
+    if (this._buildMode && this._availableBuildDefs && this._availableBuildDefs.length) {
+      const defs = this._availableBuildDefs;
+      const idx = (this._selectedBuildDefIndex || 0) % defs.length;
+      const def = defs[idx];
+      const noteFresh = (this._clock - (this._buildHudNoteT || -1e9)) < 3.0;
+      const costTxt = Object.entries(def.cost || {})
+        .map(([k, v]) => `${k}×${v}`)
+        .join(' ') || '无';
+      const depMap = {
+        bld_mine_ferro: 'ferro', bld_mine_silicate: 'silicate', bld_mine_rare: 'rareEarth',
+        bld_mine_heavy: 'heavyMetal', bld_volatile_well: 'hydrogen', bld_gas_harvester: 'helium3',
+      };
+      const need = depMap[def.id];
+      const depTxt = need
+        ? `矿脉要求 ${need}（${(this.planet.deposits || {})[need] > 0 ? '已确认' : '未发现'}）`
+        : '无矿脉要求';
+      const px = W - 356;
+      ctx.fillStyle = noteFresh ? 'rgba(20,50,44,0.85)' : 'rgba(8,14,22,0.72)';
+      ctx.fillRect(px, 62, 344, 40);
+      ctx.strokeStyle = noteFresh ? 'rgba(93,235,223,0.65)' : 'rgba(140,170,200,0.3)';
+      ctx.strokeRect(px + 0.5, 62.5, 343.5, 39.5);
+      ctx.fillStyle = noteFresh ? '#5debdf' : '#cfe3f2';
+      ctx.font = 'bold 12px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText(`[ ] 建筑型号 ${idx + 1}/${defs.length}：${def.nameZh || def.id}`, px + 10, 79);
+      ctx.fillStyle = '#9fb6c9';
+      ctx.font = '11px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText(`造价 ${costTxt} · ${depTxt}`, px + 10, 94);
+    }
     // —— 最近未勘探 POI 罗盘（doc5 P1-04：方位 + 距离 + E 采样提示） ——
     if (this._pois) {
       let best = null;
