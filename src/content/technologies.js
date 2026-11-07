@@ -891,6 +891,27 @@ export const TECHNOLOGIES = [
     ],
     unlocks: [], special: 'crisis',
   },
+  // ── doc20 v0.6 WP-2：特种外骨骼环境抗性模块（风暴庇护三重判定的第三重） ──
+  {
+    id: 'exo_mod_thermal_shield',
+    nameZh: '外骨骼耐热盾模块',
+    nameEn: 'Exo Thermal Shield',
+    descZh: '特种外骨骼插件：热浪与极寒风暴中完全免除环境扣血与喷气散热惩罚。',
+    descEn: 'Exosuit module granting full environmental immunity in thermal and cryo storms.',
+    category: 'bio', tier: 3, cost: 420, prereqs: ['tech_bio_2'],
+    effects: [{ stat: 'stormResist', mode: 'add', value: 1 }],
+    unlocks: [], special: 'exo_mod',
+  },
+  {
+    id: 'exo_mod_acid_carapace',
+    nameZh: '外骨骼防酸甲壳',
+    nameEn: 'Exo Acid Carapace',
+    descZh: '特种外骨骼插件：酸雹风暴中完全免除 4.5 HP/s 腐蚀扣盾。',
+    descEn: 'Exosuit carapace nullifying corrosive acid-hail damage on exposed operators.',
+    category: 'bio', tier: 3, cost: 420, prereqs: ['tech_bio_2'],
+    effects: [{ stat: 'stormResistAcid', mode: 'add', value: 1 }],
+    unlocks: [], special: 'exo_mod',
+  },
   // ── 先驱者遗落科技（doc18 WP-3：仅能由五阶段巨石遗迹核心破译解锁，常规科研不可研发） ──
   {
     id: 'tech_precursor_shield_harmonics',

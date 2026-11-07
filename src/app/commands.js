@@ -35,6 +35,11 @@ import {
   ensurePlanetInd, rebuildPowerGrids, createBeltTuple, NODE_IDX, NODE_STATE, BELT_IDX,
 } from '../domain/industry/planetaryLogistics.js';
 import { feedCatapult, resIdToIdx } from '../domain/industry/catapult.js';
+import { breakLeviathanPart, reportLeviathanDefeated } from '../domain/ground/planetaryThreat.js';
+import {
+  ensurePlanetSoc, deriveColonyAgents, resolveColonyDilemma, reportRebellionSuppressed,
+  COLONY_EDICTS,
+} from '../domain/planets/colonyGovernance.js';
 
 function ownFleet(world, cmd) {
   const fleet = getEntity(world, 'fleets', cmd.params.fleetId || cmd.targetId);
@@ -895,6 +900,134 @@ registerCommand('CatapultFeed', {
     }
     feedCatapult(planet.ind, resIdToIdx(resId), units);
     emit(ctx.world, 'CatapultFed', { planetId: planet.id, resId, units }, 'ground');
+  },
+});
+
+// —— doc20 v0.6：利维坦部位破坏与讨伐战果命令（WP-4） ——————————————————
+
+registerCommand('BreakLeviathanPart', {
+  desc: '利维坦部位破坏回执（背部散热晶核/毒素腺囊 → 6s 瘫痪硬直；doc20 WP-4）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet || !planet.threat || !planet.threat.leviathan || !planet.threat.leviathan.active) {
+      return { ok: false, code: 'NO_LEVIATHAN', reason: '利维坦未苏醒' };
+    }
+    if (!['back_core', 'toxin_sacs'].includes(cmd.params.part)) {
+      return { ok: false, code: 'BAD_PART', reason: '部位非法' };
+    }
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    const res = breakLeviathanPart(ctx.world, planet, cmd.params.part);
+    if (!res.ok && !res.already) throw new Error(res.reason || '部位破坏失败');
+  },
+});
+
+registerCommand('ReportLeviathanDefeated', {
+  desc: '利维坦讨伐战果上报（PTI 归零 + 弹射井解锁 + exoticMatter ×5；doc20 WP-4）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet || !planet.threat || !planet.threat.leviathan || !planet.threat.leviathan.active) {
+      return { ok: false, code: 'NO_LEVIATHAN', reason: '利维坦未苏醒' };
+    }
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    const res = reportLeviathanDefeated(ctx.world, planet);
+    if (!res.ok) throw new Error(res.reason || '讨伐上报失败');
+  },
+});
+
+// —— doc21 v0.8：驻星总督任命与聚落法典命令（WP-3/WP-4） ——————————————————
+
+registerCommand('AppointOverseer', {
+  desc: '任命驻星总督（world.entities.characters 领袖；性格特质修正聚落微模拟）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    const ch = getEntity(ctx.world, 'characters', cmd.params.characterId);
+    if (!ch) return { ok: false, code: 'NO_CHARACTER', reason: '人物不存在' };
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    ensurePlanetSoc(planet);
+    planet.soc.overseerId = cmd.params.characterId;
+    emit(ctx.world, 'OverseerAppointed', { planetId: planet.id, overseerId: planet.soc.overseerId }, 'ground');
+  },
+});
+
+registerCommand('SignColonyEdict', {
+  desc: '签署聚落法典（四大本地法典；与帝国政策互补；doc21 WP-3.3）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    if (!COLONY_EDICTS[cmd.params.edictId]) return { ok: false, code: 'NO_EDICT', reason: '未知法典' };
+    ensurePlanetSoc(planet);
+    if (planet.soc.edicts.includes(cmd.params.edictId)) {
+      return { ok: false, code: 'ALREADY_SIGNED', reason: '法典已生效' };
+    }
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    planet.soc.edicts.push(cmd.params.edictId);
+    emit(ctx.world, 'ColonyEdictSigned', { planetId: planet.id, edictId: cmd.params.edictId }, 'ground');
+  },
+});
+
+registerCommand('RevokeColonyEdict', {
+  desc: '废止聚落法典',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet || !planet.soc) return { ok: false, code: 'NO_TARGET', reason: '行星无聚落治理态' };
+    if (!planet.soc.edicts.includes(cmd.params.edictId)) {
+      return { ok: false, code: 'NOT_SIGNED', reason: '法典未生效' };
+    }
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    planet.soc.edicts = planet.soc.edicts.filter((e) => e !== cmd.params.edictId);
+    emit(ctx.world, 'ColonyEdictRevoked', { planetId: planet.id, edictId: cmd.params.edictId }, 'ground');
+  },
+});
+
+registerCommand('ResolveColonyDilemma', {
+  desc: '总督治理困境裁决（罢工/疫情/走私；长期记忆写入 planet.soc.history）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet || !planet.soc || !planet.soc.pendingDilemma) {
+      return { ok: false, code: 'NO_DILEMMA', reason: '无待裁决困境' };
+    }
+    if (!planet.soc.pendingDilemma.choices.some((x) => x.id === cmd.params.choiceId)) {
+      return { ok: false, code: 'BAD_CHOICE', reason: '未知裁决选项' };
+    }
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    const colony = Object.values(ctx.world.entities.colonies || {}).find((cc) => cc.planetId === planet.id);
+    const res = resolveColonyDilemma(ctx.world, planet, colony || null, cmd.params.choiceId);
+    if (!res.ok) throw new Error(res.reason || '裁决失败');
+  },
+});
+
+registerCommand('ReportRebellionSuppressed', {
+  desc: '武装平叛战果上报（gmt_suppress_rebellion 成功 → 重置不满/暴动态）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet || !planet.soc || !planet.soc.rebellionActive) {
+      return { ok: false, code: 'NO_REBELLION', reason: '该行星未处于暴动态' };
+    }
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    const res = reportRebellionSuppressed(ctx.world, planet);
+    if (!res.ok) throw new Error(res.reason || '平叛上报失败');
   },
 });
 
