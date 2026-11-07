@@ -296,9 +296,11 @@ const MESH_OF_CATEGORY = (cat) => {
   const i = BUILD_CATEGORY_IDS.indexOf(String(cat || 'default'));
   return i >= 0 ? i : 9; // 兜底槽 'default'
 };
-/** 地标 prefabId → 图集槽位（未注册网格的辅助地标返回 -1，跳过渲染） */
+/** 地标 prefabId → 图集槽位（仅 LANDMARK_PREFAB_IDS 内有效，避免尾部工业槽位被误判） */
 const LANDMARK_MESH_OF = (prefabId) => {
-  const i = BUILD_CATEGORY_IDS.indexOf(String(prefabId || ''));
+  const pid = String(prefabId || '');
+  if (!LANDMARK_PREFAB_IDS.includes(pid)) return -1;
+  const i = BUILD_CATEGORY_IDS.indexOf(pid);
   return i >= 11 ? i : -1;
 };
 /** doc9 P0-3：地标逐 prefab 渲染缩放（拱/桥 1.6，塔 2.2，穹顶 1.4，晶簇 1.2，锥 1.0，树 1.8） */

@@ -17,8 +17,6 @@
  * 上下文丢失安全；destroy 对失效句柄删除为空操作。
  */
 
-import { GLSL_VERSION } from './GLCore.js';
-
 /** 通道 A 实例上限（植被） */
 export const FLORA_MAX_INSTANCES = 1024;
 /** 通道 B 实例上限（动物） */
@@ -43,8 +41,8 @@ export function faunaPhaseOffset(anchorX, anchorZ, radius, phase0, speed, time) 
   return { dx, dz, yaw };
 }
 
-/** 通道 A 顶点着色器：十字双面片 × 风摆 + 荧光脉冲（GLSL ES 3.0，#version 前置自动） */
-const FLORA_VS = GLSL_VERSION + `
+/** 通道 A 顶点着色器：十字双面片 × 风摆 + 荧光脉冲（GLSL ES 3.0，#version 由 GLCore.createProgram 注入） */
+const FLORA_VS = `
 layout(location=0) in vec2 aPos;        // 单位片 [-0.5..0.5]²（x 半区选十字片朝向）
 layout(location=1) in vec3 iOffset;     // 实例锚点（场域坐标）
 layout(location=2) in vec3 iParam;      // x: 高度 m, y: 相位, z: 朝向角
@@ -78,7 +76,7 @@ void main() {
 }
 `;
 
-const FLORA_FS = GLSL_VERSION + `
+const FLORA_FS = `
 precision mediump float;
 in float vGlow;
 in float vHue;
@@ -94,7 +92,7 @@ void main() {
 `;
 
 /** 通道 B 顶点着色器：盒体躯干 × aLimb 肢体部位四足迈步代数（CPU 零骨骼） */
-const FAUNA_VS = GLSL_VERSION + `
+const FAUNA_VS = `
 layout(location=0) in vec3 aPos;        // 单位盒 [-0.5..0.5]³
 layout(location=1) in vec3 iAnchor;     // 游荡锚点（场域坐标）
 layout(location=2) in vec4 iParam;      // x: 体长 m, y: 相位, z: 角速度, w: 游荡半径
@@ -134,7 +132,7 @@ void main() {
 }
 `;
 
-const FAUNA_FS = GLSL_VERSION + `
+const FAUNA_FS = `
 precision mediump float;
 in float vHue;
 in float vLimb;
