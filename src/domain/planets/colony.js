@@ -13,6 +13,7 @@ import { BUILDINGS } from '../../content/buildings.js';
 import { getMod } from '../factions/modifiers.js';
 import { pay } from '../economy/ledger.js';
 import { colonyStock, creditColony, debitColony, credit, debit } from '../economy/ledger.js';
+import { checkAndProgressObjectives } from '../events/objectives.js';
 
 /** 原料类资源存于殖民地仓储；精炼品/战略资源存于阵营账本 */
 const RAW_RESOURCES = new Set([
@@ -188,6 +189,10 @@ export function foundColony(world, planetId, factionId, initialPop = 6, isOutpos
   const sys = world.entities.systems[planet.systemId];
   if (sys && !sys.ownerFactionId) sys.ownerFactionId = factionId;
   emit(world, 'ColonyFounded', { colonyId: colony.id, planetId, factionId, outpost: isOutpost }, 'colony');
+  // WP-6：殖民建立推进空间目标（目标星系殖民存在即视作调查星域锚定完成；
+  // WorldObjective 无 colonize 类，colonize 语义映射到 investigate_system）
+  checkAndProgressObjectives(world, (o) =>
+    o.kind === 'investigate_system' && o.factionId === factionId && o.targetSystemId === planet.systemId);
   return colony;
 }
 

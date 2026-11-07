@@ -9,6 +9,7 @@
 import { registerHourly } from './TickPipeline.js';
 import { BAL } from '../content/constants.js';
 import { stepBattles } from '../domain/combat/BattleSimulation.js';
+import { stepMission } from '../domain/ground/GroundMission.js';
 import { checkEngagements } from '../domain/combat/engagement.js';
 import { advanceFleets } from '../domain/fleets/navigation.js';
 import { runDiplomacyTimers } from '../domain/diplomacy/war.js';
@@ -103,10 +104,12 @@ registerHourly('ground', (world) => {
   while (seconds > 0) {
     const step = Math.min(1 / 30, seconds);
     for (const m of missions) {
-      if (m.state !== 'active') continue;
+      // P0-C：GroundMission 状态键为 status；保留 state 读取以兼容旧存档口径
+      if ((m.status || m.state) !== 'active') continue;
       try {
         stepMission(world, m, dt);
       } catch (e) {
+        m.status = 'failed';
         m.state = 'failed';
         m.results = { outcome: 'failed', error: String(e && e.message) };
       }

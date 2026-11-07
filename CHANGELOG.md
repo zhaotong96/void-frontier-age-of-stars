@@ -10,6 +10,41 @@
 
 ### Added
 
+- **终审返工（docs 10/11，WP-1..WP-6）**：专家终审 6.4/10 有条件驳回的全链路根治。
+  **地质采掘命令** `HarvestTerrainOre`（ORE 旗点位采样 + 殖民地仓储入账，
+  `src/app/commands.js:757`）接入 GroundView 工程作业闭环（`_fieldDig`/`_fieldPlace`
+  派发 ShapeTerrain/PlaceBuilding，坐标口径 world+FIELD_OFFSET=行星本地米）。
+  **目标跨系统闭环** `checkAndProgressObjectives`（`src/domain/events/objectives.js:102`）
+  挂接舰队抵达/星系调查 L4/地面任务成功/建立殖民地/POI 采样五结算点
+  （`navigation.js:101`、`scan.js:125`、`GroundMission.js:1863`、`colony.js:194`、
+  `planetPOI.js:304`），rewards 经 `objectiveReward` 流水幂等入账。
+  **18 主题环境音**：`AudioManager.setAmbientTheme` 接入 `_setupScene/_teardownScene`
+  （`GroundView.js:1104`）、场景层 `audio.setScene` 随路由流转（`App.js:535`）；
+  **EXPANSION_GAMEPLAY** 接线（低重力倍率 `_gravity()`、glassstorm 确定性相位风场、
+  cloud_giant 浮台甲板禁出，`GroundView.js:941-950/1409/2006`）。
+
+### Changed
+
+- **终审返工（docs 10/11）**：地面任务运行时场域剥离实体树——`mission.field`
+  可枚举挂载（97MB 存档/deepClone 1.4s/读档崩溃）改为不可枚举 `_runtimeField` +
+  `getMissionRuntimeField` 幂等重建（`GroundMission.js:521-556/926/1187/1867`），
+  单任务存档增量 5850B（<40KB 门禁）、deepClone 增量 0.44ms；`HourlySystems`
+  地面步进状态键 `m.state`→`m.status||m.state` 对齐（`HourlySystems.js:108`）。
+  着陆坪/撤离坪/桥面 clearFlags 清险契约（`terrainField.js:302` +
+  `missionSiteFactory.js:556-642`）+ 海洋主题坪面抬升 seaLevel+0.6，608 行星
+  3648 场 HAZARD 旗 52413 帧 → **0**。GroundView 统一度量 `_missionToWorld`
+  （`GroundView.js:1801`）根除 kx/kz NaN 全场隐形，撤离罗盘/3.0m 交互/±286 边界/
+  35° 坡度阻断齐修；`LIT_FS`/`BM_FS` 补 `uHdr`（`PlanetSurface3D.js:307`、
+  `GroundView.js:407`）；`PlanetWater` 主题色注入 + 权威色板源接线
+  （`PlanetSurfaceScene.js:297`、`themePayload.js:509`）+ sulfur_marsh 酸液面
+  3.8m（`themePayload.js:212`）+ permafrost 热源对位 + biolume 脚步涟漪。
+  防伪绿门禁升级：GATE-01 300 帧（10s）全银河仿真 + 环境伤亡/存档健康度断言、
+  GATE-02 真实渲染装配运行态 0-NaN 扫描 + 交互/边界/坡度/工程坐标契约
+  （`ground-playtest-physics.suite.js`、`playtest-gates.suite.js`）。
+  **金快照无漂移**：REG-01 基线 `68462446` 两轮 PASS（本轮返工域侧确定性零变更）。
+
+### Added（历史）
+
 - **地形编辑层与殖民地岗位看板（doc7 TASK-5.1/5.2）**：terrainEdits 编辑刷
   （raise/lower/smooth/flatten/restore + 植被移植回收，flatten 平芯裙边、restore
   DSP 式一键恢复、flatten/restore 可覆写采掘凹陷；TERRAIN-06 单次编辑 ≤4 区块标脏、
@@ -99,7 +134,7 @@
   纯静态直传、无构建步骤）与 CI 工作流（`.github/workflows/ci.yml`，
   套件 + 静态审计，Node 22、零依赖免安装）（`f92f4d4`）。
 
-### Changed
+### Changed（历史）
 
 - **经济存储分层**：原料（矿物/挥发物/生态）存殖民地仓储，精炼品与经济资源
   存阵营账本，跨层转移显式记账，殖民地盈余自动出售构成财政主循环

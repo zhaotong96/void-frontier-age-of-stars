@@ -12,6 +12,7 @@ import { emit } from '../../core/eventBus.js';
 import { getEntity } from '../entities/registry.js';
 import { shortestPath } from '../../core/spatial.js';
 import { observeForeignSystem } from '../exploration/scan.js';
+import { checkAndProgressObjectives } from '../events/objectives.js';
 
 /** 计算一段航路的小时数 */
 export function laneHours(world, fleet, fromSystem, toSystem) {
@@ -96,6 +97,9 @@ export function advanceFleets(world) {
         fleet.status = 'idle';
         fleet.orders = null;
         emit(world, 'FleetArrived', { fleetId: fid, systemId: arriveId }, 'fleet');
+        // WP-6：抵达即推进护航/巡逻类空间目标（escort_lane 锚定目标星系，按舰队归属匹配）
+        checkAndProgressObjectives(world, (o) =>
+          o.kind === 'escort_lane' && o.factionId === fleet.factionId && o.targetSystemId === arriveId);
       } else {
         t.legEta = t.legs[t.legIndex].eta;
       }

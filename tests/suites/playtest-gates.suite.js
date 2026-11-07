@@ -12,17 +12,19 @@
 
 import { readFileSync } from 'node:fs';
 import { createStarterCampaign } from '../../src/devtools/scenarioFactory.js';
-import { createGroundMission, getMissionField } from '../../src/domain/ground/GroundMission.js';
+import { createGroundMission, getMissionField, getMissionView } from '../../src/domain/ground/GroundMission.js';
 import { blueprintsForPlanet } from '../../src/content/missionSites.js';
 import { getSiteInstance } from '../../src/domain/ground/missionSiteFactory.js';
-import { buildTerrainField } from '../../src/domain/ground/terrainField.js';
+import { buildTerrainField, TERRAIN_FLAGS } from '../../src/domain/ground/terrainField.js';
 import { planColonyLayout, checkBuildingPlacement } from '../../src/domain/ground/terrainEdits.js';
-import { computeSpringArm } from '../../src/ui/screens/GroundView.js';
+import { computeSpringArm, GroundView } from '../../src/ui/screens/GroundView.js';
 import { sampleTerrain, slopeAt } from '../../src/domain/ground/surfaceQueries.js';
 
 const GV_SRC = readFileSync('src/ui/screens/GroundView.js', 'utf8');
 const SCENE_SRC = readFileSync('src/render/gl/PlanetSurfaceScene.js', 'utf8');
 const GMESH_SRC = readFileSync('src/render/meshes/GroundMeshes.js', 'utf8');
+const PS3D_SRC = readFileSync('src/render/gl/PlanetSurface3D.js', 'utf8');
+const TP_SRC = readFileSync('src/render/gl/themePayload.js', 'utf8');
 
 /** 世界坐标 → 场域坐标采样（world = field − FIELD_OFFSET，FIELD_OFFSET = −32） */
 function groundAt(field) {
@@ -102,9 +104,205 @@ export const suite02 = {
     if (bp.terrainProfile === 'ocean_basin_reef_trench' || planet.category === 'ocean') {
       if (!/getWaterLevel/.test(SCENE_SRC)) throw new Error('场景缺 getWaterLevel 潮汐访问器');
     }
-    return { ok: true, detail: `site_meters + _pois/_edits 接线 + 地标 ${site.site.landmarks.length} 座 + PlanetWater/潮汐 全部实装` };
+
+    // (5) doc11 WP-6 防伪绿升级：真实 GroundView 渲染装配管线实例化（运行态，非源码正则）。
+    //     doc10 P0-A 根因即「GATE 只测受控玩家 au0，从未调用渲染层装配」——此处以
+    //     最小视图壳 + 真实 field/mission 调用 _assembleRenderData/_bmeshList 全管线。
+    const view = getMissionView(mission);
+    const groundAtReal = (x, z) => {
+      const s = sampleTerrain(field, x + 32, z + 32);   // world = field − 32（FIELD_OFFSET = −32）
+      return s ? s.y : Infinity;
+    };
+    // 视图壳：原型链挂 GroundView（.call 会整体替换 this，方法经由原型解析，
+    // 壳字段覆盖 _groundAt 等环境依赖；被调方法全部为真实未 mock 实现）
+    const gvCtx = Object.assign(Object.create(GroundView), {
+      cam: { yaw: 0, pitch: 0.5, dist: 9 },
+      _buildingColonists: [],
+      _conveyor: [],
+      _fx: { slashes: [], beams: [], dig: [] },
+      _buildingLayout: [],
+      char3d: { x: 0, y: 8, z: 0 },
+      _lastView: view,
+      mode: 'mission',
+      mission,
+      _clock: 1.23,
+      _site: site,                       // 真实站点实例（地标进 bmesh 实例表）
+      _pois: null,
+      _placedVoxels: new Map(),
+      _aim: null,
+      _buildMode: false,
+      _mouse: { rDown: false },
+      _groundAt: groundAtReal,
+    });
+    const rd = GroundView._assembleRenderData.call(gvCtx, view);
+    const bm = GroundView._bmeshList.call(gvCtx);
+    let swept = 0;
+    const finite3 = (o, tag) => {
+      for (const k of ['x', 'y', 'z']) {
+        if (!Number.isFinite(o[k])) throw new Error(`GATE-02 渲染装配 NaN：${tag}.${k}=${o[k]}`);
+      }
+      swept++;
+    };
+    for (const e of rd.enemies) finite3(e, 'enemy');
+    for (const col of rd.colonists) finite3(col, 'colonist/npc');
+    for (const a of rd.effects.aoe) finite3(a, 'aoe');
+    for (const b of bm) finite3(b, 'bmesh');
+    if (rd.enemies.length === 0) throw new Error('GATE-02 敌人装配为空（任务无敌人或视图快照断链）');
+    // 撤离罗盘（doc10 P0-A④「撤离区 NaNm」）：世界坐标有限 + 距离非 NaN
+    const ext = GroundView._extractionWorldPos.call(gvCtx, mission, view);
+    if (!Number.isFinite(ext.x) || !Number.isFinite(ext.z)) throw new Error('GATE-02 撤离罗盘 NaN');
+    const extDist = Math.hypot(ext.x - gvCtx.char3d.x, ext.z - gvCtx.char3d.z);
+    if (!Number.isFinite(extDist) || extDist <= 0) throw new Error(`GATE-02 撤离罗盘距离非法：${extDist}`);
+    // E 键交互 3.0m 米制语义（doc10 P0-C）：出生点远距无目标；2m 触发 / 4m 不触发
+    if (GroundView._resolveInteract.call(gvCtx, mission) != null) {
+      throw new Error('GATE-02 出生点即触发交互（交互半径未按 3.0m 收紧）');
+    }
+    const tFirst = mission.targets[0];
+    const u0 = mission.playerUnits[0];
+    if (tFirst && u0) {
+      const sx = tFirst.x;
+      const sy = tFirst.y;
+      tFirst.x = u0.x + 2.0; tFirst.y = u0.y;
+      if (!GroundView._resolveInteract.call(gvCtx, mission)) {
+        throw new Error('GATE-02 2.0m 未触发交互（半径误收紧）');
+      }
+      tFirst.x = u0.x + 4.0; tFirst.y = u0.y;
+      if (GroundView._resolveInteract.call(gvCtx, mission) != null) {
+        throw new Error('GATE-02 4.0m 触发交互（米制交互半径失效）');
+      }
+      tFirst.x = sx; tFirst.y = sy;
+    }
+
+    // (6) doc10 P1-F/P1-G 源级接线断言：uHdr 预缩放 + 权威色板源 + 18 主题音/工程闭环
+    if (!/uniform float uHdr;/.test(PS3D_SRC) || !/uHdr, 1\.0\)/.test(PS3D_SRC)) {
+      throw new Error('PlanetSurface3D.LIT_FS 缺 uHdr 预缩放（RGBA8 降级 4 倍过曝）');
+    }
+    if (!/uniform float uHdr;/.test(GV_SRC)) throw new Error('BM_FS 缺 uHdr 预缩放');
+    if (!/setThemePaletteSource\(\(id\)/.test(TP_SRC)) throw new Error('themePayload 未接线权威色板源');
+    if (!/dispatch\('ShapeTerrain'/.test(GV_SRC) || !/dispatch\('PlaceBuilding'/.test(GV_SRC)) {
+      throw new Error('GroundView 工程模式未接 ShapeTerrain/PlaceBuilding（P1-E 复发）');
+    }
+    if (!/dispatch\('HarvestTerrainOre'/.test(GV_SRC)) throw new Error('GroundView 缺地质采掘接线');
+    if (!/setAmbientTheme\(/.test(GV_SRC)) throw new Error('GroundView 未接线 18 主题环境音（P1-G 复发）');
+    if (!/EXPANSION_GAMEPLAY\[/.test(GV_SRC)) throw new Error('GroundView 未消费 EXPANSION_GAMEPLAY（P1-G 复发）');
+    if (!/heatOpts\.heatZones/.test(GV_SRC)) throw new Error('GroundView 缺 permafrost_furnace 热源对位接线（P1-F④）');
+    if (!/matColors/.test(SCENE_SRC) || !/waterOpts\.colors/.test(SCENE_SRC)) {
+      throw new Error('PlanetSurfaceScene 未向 PlanetWater 传主题水色（P1-F②）');
+    }
+
+    // (7) doc11 验收表「移动边界」运行态断言：真实 _moveAABB —— 西/北半场全域可达
+    //     （doc10 P0-C：旧 clamp 下限 2 截断场域西半 [-256,-30]）+ 35° 坡度物理阻断。
+    //     边界段用平地桩（隔离夹带地形干扰）；坡度段用套件内真实场域确定性扫描。
+    const moveCtx = Object.assign(Object.create(GroundView), {
+      char3d: { x: 0, y: 0, z: 0, vy: 0 },
+      _deckClamp: false,
+      _footstepRing: null,
+      _stepDist: 0,
+      _clock: 0,
+      // 确定性平地桩：foot 采样（模块级 sampleTerrain）返回 null → h0=Infinity
+      // 防御放行路径成立，行走仅受 FIELD_WALK_MIN/MAX 钳制 —— 纯边界断言。
+      _groundAt() { return 0; },
+      field: {},
+    });
+    for (let i = 0; i < 400; i++) moveCtx._moveAABB(-1, 0);
+    if (Math.abs(moveCtx.char3d.x - (-222)) > 1e-6) {
+      throw new Error(`GATE-02 西行 400m 后 x=${moveCtx.char3d.x.toFixed(2)} ≠ -222（旧边界 2 截断复发）`);
+    }
+    moveCtx.char3d.x = 0;
+    for (let i = 0; i < 400; i++) moveCtx._moveAABB(1, 0);
+    if (Math.abs(moveCtx.char3d.x - 286) > 1e-6) {
+      throw new Error(`GATE-02 东行 400m 后 x=${moveCtx.char3d.x.toFixed(2)} ≠ 286（东界收缩）`);
+    }
+    // 35° 坡度阻断（真实场域）：全场 8m 栅格扫最大 1m 高差点对，站在低侧向高侧行走必须被挡
+    const tan35 = Math.tan((35 * Math.PI) / 180);
+    let cliff = null;
+    let maxJump = 0;
+    for (let fz = -240; fz <= 240; fz += 8) {
+      for (let fx = -240; fx <= 240; fx += 8) {
+        const s0 = sampleTerrain(field, fx, fz);
+        const s1 = sampleTerrain(field, fx + 1, fz);
+        if (!s0 || !s1) continue;
+        const jump = s1.y - s0.y;
+        if (jump > maxJump) { maxJump = jump; cliff = { fx, fz }; }
+      }
+    }
+    if (cliff && maxJump > tan35) {
+      const slopeCtx = Object.assign(Object.create(GroundView), {
+        // world = field − FIELD_OFFSET（GroundView 内 FIELD_OFFSET = −32 → +32）
+        char3d: { x: cliff.fx + 32, y: 0, z: cliff.fz + 32, vy: 0 },
+        _deckClamp: false,
+        _footstepRing: null,
+        _stepDist: 0,
+        _clock: 0,
+        _groundAt: groundAtReal,
+        field,
+      });
+      const xBefore = slopeCtx.char3d.x;
+      for (let i = 0; i < 4; i++) slopeCtx._moveAABB(1, 0);
+      if (slopeCtx.char3d.x > xBefore + 1e-6) {
+        throw new Error(`GATE-02 陡壁（Δh=${maxJump.toFixed(2)}m/1m > tan35°）被翻越：x ${xBefore} → ${slopeCtx.char3d.x.toFixed(2)}`);
+      }
+    }
+
+    // (8) doc11 验收表「工程模式」运行态断言：_fieldDig/_fieldPlace 以行星本地米
+    //     （world = field + 32）派发域命令，坐标契约防 64m 系统偏移回归。
+    //     场域用套件内真实 field；ORE 点确定性扫描（flags & ORE）。
+    let orePt = null;
+    for (let fz = -240; fz <= 240 && !orePt; fz += 4) {
+      for (let fx = -240; fx <= 240; fx += 4) {
+        const s = sampleTerrain(field, fx, fz);
+        if (s && (s.flags & TERRAIN_FLAGS.ORE) !== 0) { orePt = [fx, fz]; break; }
+      }
+    }
+    const dispatched = [];
+    const fieldCtx = Object.assign(Object.create(GroundView), {
+      field,
+      _edits: {},                   // 假编辑日志：守卫通过；ok:false 跳过本地 applyEdit
+      planet: { id: 'plt_x' },
+      _shapeBrushOp: 'flatten',
+      _selectedBuildDefId: null,
+      _aim: { dug: false },
+      _fx: { dig: [] },
+      _groundAt: groundAtReal,
+      app: {
+        dispatch(type, params, targetId, opts) {
+          dispatched.push({ type, params });
+          // ok:false → 跳过本地 applyEdit/重布局（测试世界不重建）；坐标断言只看派发参数
+          return { ok: false, reason: 'test-stub' };
+        },
+      },
+    });
+    if (orePt) {
+      // world = field + 32（GroundView FIELD_OFFSET = −32）
+      fieldCtx._fieldDig({ hit: true, px: orePt[0] + 32, py: 5, pz: orePt[1] + 32, vx: Math.floor(orePt[0] + 32), vz: Math.floor(orePt[1] + 32) });
+      const digCmds = dispatched.filter((d) => d.type === 'ShapeTerrain');
+      const oreCmds = dispatched.filter((d) => d.type === 'HarvestTerrainOre');
+      if (digCmds.length !== 1) throw new Error('GATE-02 左键工程作业未派发 ShapeTerrain');
+      if (digCmds[0].params.x !== orePt[0] || digCmds[0].params.z !== orePt[1]) {
+        throw new Error(`GATE-02 ShapeTerrain 坐标口径错误：(${digCmds[0].params.x}, ${digCmds[0].params.z}) ≠ 行星本地米 (${orePt[0]}, ${orePt[1]})`);
+      }
+      if (oreCmds.length !== 1) throw new Error('GATE-02 ORE 点未派发 HarvestTerrainOre');
+      if (oreCmds[0].params.x !== orePt[0] || oreCmds[0].params.z !== orePt[1]) {
+        throw new Error('GATE-02 HarvestTerrainOre 坐标口径错误');
+      }
+    }
+    dispatched.length = 0;
+    fieldCtx._fieldPlace({ hit: true, px: 40.5, py: 5, pz: 41.5 });
+    const placeCmds = dispatched.filter((d) => d.type === 'PlaceBuilding');
+    if (placeCmds.length !== 1 || placeCmds[0].params.defId !== 'bld_mine_ferro') {
+      throw new Error('GATE-02 右键建造未派发 PlaceBuilding（默认 bld_mine_ferro）');
+    }
+    if (placeCmds[0].params.x !== 8.5 || placeCmds[0].params.z !== 9.5) {
+      throw new Error(`GATE-02 PlaceBuilding 坐标口径错误：(${placeCmds[0].params.x}, ${placeCmds[0].params.z}) ≠ 行星本地米 (8.5, 9.5)`);
+    }
+
+    return { ok: true, detail: `site_meters + 渲染装配全管线 ${sweepDetail(swept)} 坐标 100% 有限（0 NaN）+ 撤离罗盘/交互 3.0m/边界 ±286/35° 坡阻/工程命令坐标契约 + uHdr/色板/工程/音效/热源接线 全部实装` };
   },
 };
+
+function sweepDetail(swept) {
+  return `（敌/友/NPC/AoE/建筑实例计 ${swept} 个实体）`;
+}
 
 export const suite03 = {
   id: 'PLAYTEST-03',

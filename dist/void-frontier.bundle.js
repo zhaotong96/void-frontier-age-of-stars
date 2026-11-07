@@ -579,6 +579,20 @@ const { L: L, setLanguage: setLanguage } = __require("src/core/i18n.js");
 const { AudioManager: AudioManager } = __require("src/render/AudioManager.js");
 const { recentLog: recentLog } = __require("src/core/eventBus.js");
 
+/**
+ * WP-5 P1-G：路由 → 场景环境音层映射（AudioManager.startAmbient 六场景声库；
+ * 此前 setScene 全仓 0 调用，场景层环境音为孤岛死代码）。未列出的次要屏
+ * 落到 'planet' 基准层；AMBIENT_BUILDERS 对未知 id 静默忽略，不致命。
+ */
+const AMBIENT_ROUTE_SCENE = {
+  menu: 'menu', settings: 'menu', diagnostics: 'menu',
+  galaxy: 'deepSpace', chronicle: 'deepSpace', events: 'deepSpace',
+  diplomacy: 'deepSpace', market: 'deepSpace', government: 'deepSpace',
+  system: 'starCorona', designer: 'starCorona', fleet: 'starCorona', research: 'starCorona',
+  colony: 'planet',
+  ground: 'ground', combat: 'combat',
+};
+
 const { MenuView: MenuView } = __require("src/ui/screens/MenuView.js");
 const { GalaxyView: GalaxyView } = __require("src/ui/screens/GalaxyView.js");
 const { SystemView: SystemView } = __require("src/ui/screens/SystemView.js");
@@ -1075,6 +1089,8 @@ class App {
   _onRoute(route) {
     this._route = route.screen;
     this._routeParam = route.param; // 供 refreshLocaleUI 原地重挂当前视图
+    // WP-5 P1-G：场景环境音层随路由流转（与主题层 setAmbientTheme 并行独立）
+    if (this.audio) this.audio.setScene(AMBIENT_ROUTE_SCENE[route.screen] || 'planet');
     // 主菜单路由隐藏战略顶栏与遥测条（.vf-shell.in-menu，见 styles.css）
     if (this.shellEl) this.shellEl.classList.toggle('in-menu', route.screen === 'menu');
     // 战役外白名单：菜单 / 设置 / 诊断可直达，其余一律弹回菜单
@@ -1196,14 +1212,15 @@ const { canScanTarget: canScanTarget, startScan: startScan, scanPower: scanPower
 const { orderMove: orderMove, addShipToFleet: addShipToFleet, createFleet: createFleet } = __require("src/domain/fleets/fleet.js");
 const { orderRetreat: orderRetreat, findAttackTarget: findAttackTarget } = __require("src/domain/combat/engagement.js");
 const { foundColony: foundColony, buildingDef: buildingDef } = __require("src/domain/planets/colony.js");
-const { canAfford: canAfford, pay: pay, debit: debit, credit: credit, balance: balance } = __require("src/domain/economy/ledger.js");
+const { canAfford: canAfford, pay: pay, debit: debit, credit: credit, balance: balance, creditColony: creditColony } = __require("src/domain/economy/ledger.js");
 const { canStart: canStart, startResearch: startResearch } = __require("src/domain/research/research.js");
 const { marketBuy: marketBuy, marketSell: marketSell } = __require("src/domain/economy/market.js");
 const { validateFit: validateFit, hullDef: hullDef, computeShipStats: computeShipStats } = __require("src/domain/ships/ship.js");
 const { getMod: getMod } = __require("src/domain/factions/modifiers.js");
 const { declareWar: declareWar, createTreaty: createTreaty, treatyAcceptanceScore: treatyAcceptanceScore, getRelation: getRelation, resolvePeaceProposal: resolvePeaceProposal, annexOccupiedSystem: annexOccupiedSystem, warScore: warScore, OCCUPATION_ANNEX_THRESHOLD: OCCUPATION_ANNEX_THRESHOLD } = __require("src/domain/diplomacy/war.js");
-const { buildTerrainField: buildTerrainField } = __require("src/domain/ground/terrainField.js");
+const { buildTerrainField: buildTerrainField, TERRAIN_FLAGS: TERRAIN_FLAGS } = __require("src/domain/ground/terrainField.js");
 const { applyEdit: applyEdit, attachTerrainEdits: attachTerrainEdits, serializeEdits: serializeEdits, deserializeEdits: deserializeEdits, checkBuildingPlacement: checkBuildingPlacement, rebuildDirtyChunks: rebuildDirtyChunks, BRUSH_LIMITS: BRUSH_LIMITS } = __require("src/domain/ground/terrainEdits.js");
+const { sampleTerrain: sampleTerrain } = __require("src/domain/ground/surfaceQueries.js");
 const { RNG: RNG } = __require("src/core/rng.js");
 const { emit: emit } = __require("src/core/eventBus.js");
 
@@ -1920,6 +1937,46 @@ registerCommand('PlaceBuilding', {
       z: entry.z,
       foundation: entry.foundation,
       index: planet.groundBuildings.length - 1,
+    }, 'ground');
+  },
+});
+
+// —— WP-4 地质采掘（场域工程作业闭环） ————————————————————————————
+
+/** 行星矿藏 → 采掘资源 id（与 miningDepositOk 同一优先序；缺省 ferro） */
+function fieldOreResIdOf(planet) {
+  const priority = ['ferro', 'silicate', 'heavyMetal', 'rareEarth'];
+  for (let i = 0; i < priority.length; i++) {
+    if (planet.deposits && planet.deposits[priority[i]] > 0) return priority[i];
+  }
+  return 'ferro';
+}
+
+registerCommand('HarvestTerrainOre', {
+  desc: '地质采掘：场域 ORE 旗点位采矿（amount=1）入殖民地仓储（WP-4 工程作业）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    if (!Number.isFinite(cmd.params.x) || !Number.isFinite(cmd.params.z)) {
+      return { ok: false, code: 'BAD_COORD', reason: '场域坐标非法' };
+    }
+    const { field } = loadLiveEdits(ctx.world, planet.id);
+    const s = sampleTerrain(field, cmd.params.x, cmd.params.z);
+    if (!s || (s.flags & TERRAIN_FLAGS.ORE) === 0) {
+      return { ok: false, code: 'NO_ORE', reason: '此处无矿脉' };
+    }
+    return { ok: true, planet, resId: fieldOreResIdOf(planet) };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    const resId = fieldOreResIdOf(planet);
+    const colony = Object.values(ctx.world.entities.colonies || {})
+      .find((c) => c.planetId === planet.id) || null;
+    if (colony) {
+      creditColony(ctx.world, colony, resId, 1, 'terrainHarvest', colony.id);
+    }
+    emit(ctx.world, 'TerrainOreHarvested', {
+      planetId: planet.id, x: cmd.params.x, z: cmd.params.z, resId, credited: !!colony,
     }, 'ground');
   },
 });
@@ -3104,6 +3161,8 @@ __register("src/domain/ground/GroundMission.js", function (__exports, __require)
  *
  * 固定步长 dt = 1/30s（与战术战斗一致）。任务实体是纯数据（Plain Data），
  * 挂在 world.entities.groundMissions 上，全部状态可 JSON 序列化。
+ * 例外约定（P0-B）：_runtimeField 为不可枚举运行时挂载（TerrainField 重型对象），
+ * 不进入实体树、不参与 JSON/structuredClone；读档后经 getMissionRuntimeField 幂等重建。
  *
  * 验收条目对照：
  *  - GROUND-01 确定性：地图生成使用独立 RNG 状态（不消耗世界主 RNG），
@@ -3137,6 +3196,7 @@ const { int: int, intRange: intRange, float: float, chance: chance, pick: pick, 
 const { findMissionTemplate: findMissionTemplate } = __require("src/content/missions.js");
 const { blueprintsForPlanet: blueprintsForPlanet } = __require("src/content/missionSites.js");
 const { TERRAIN_FLAGS: TERRAIN_FLAGS, buildTerrainField: buildTerrainField } = __require("src/domain/ground/terrainField.js");
+const { checkAndProgressObjectives: checkAndProgressObjectives } = __require("src/domain/events/objectives.js");
 const { sampleTerrain: sampleTerrain, raycastTerrain: raycastTerrain } = __require("src/domain/ground/surfaceQueries.js");
 const { getSiteInstance: getSiteInstance } = __require("src/domain/ground/missionSiteFactory.js");
 
@@ -3297,7 +3357,7 @@ function inExtraction(mission, x, y) {
  * （<1.5m 且高差 <1.6m）赋予 cover 防护（远程伤害 ×0.5）。返回 { clear, cover }。
  */
 function lineOfSightSite(mission, x0, y0, x1, y1) {
-  const field = mission.field;
+  const field = mission._runtimeField;
   if (!field) return { clear: true, cover: false };
   const s0 = sampleTerrain(field, x0, y0);
   const s1 = sampleTerrain(field, x1, y1);
@@ -3613,6 +3673,39 @@ function getMissionField(world, planetId, siteCtx = null) {
   return field;
 }
 
+// 运行时场域注册表：mission → TerrainField。严禁进入可枚举实体树（P0-B）：
+// JSON/structuredClone 均跳过不可枚举属性，存档体积与 deepClone 耗时恢复常态；
+// 读档后经 getMissionRuntimeField 以 (world.seed, planetId) 幂等重建（getMissionField 确定性红线）。
+const _runtimeFieldMap = new Map();
+
+/**
+ * 取任务绑定的运行时 TerrainField（不可枚举属性 → 按 seed/planetId 重建）。
+ * 读档（decodeSave）后 mission 上无任何场域，首次 stepMission 前调用即可 100% 确定性续跑。
+ * 注意：注册表仅作写入侧台账（终结时成对 delete），不做 mission.id 键读取——
+ * 同进程多世界（e2e/探针/存档往返）中跨世界 mission.id 可碰撞，按 id 取场域会
+ * 串用他种子地形（探针 P0-B 实证）；确定性取场域必须经 getMissionField 的
+ * (world.seed, planetId) LRU 键。
+ */
+function getMissionRuntimeField(world, mission) {
+  if (!mission) return null;
+  const held = mission._runtimeField;
+  if (held && typeof held.evalPoint === 'function') {
+    _runtimeFieldMap.set(mission.id, held);
+    return held;
+  }
+  if (mission.coordSpace === 'site_meters' && mission.planetId != null) {
+    const rebuilt = getMissionField(world, mission.planetId);
+    if (rebuilt) {
+      Object.defineProperty(mission, '_runtimeField', {
+        value: rebuilt, writable: true, enumerable: false, configurable: true,
+      });
+      _runtimeFieldMap.set(mission.id, rebuilt);
+      return rebuilt;
+    }
+  }
+  return null;
+}
+
 /** 场内高程采样（场外回退 0） */
 function spawnElev(field, x, z) {
   const s = sampleTerrain(field, x, z);
@@ -3688,7 +3781,7 @@ function columnBlocked(mission, self, x, z) {
 function moveSite(mission, u, nx, ny, speed, dt) {
   const step = speed * dt;
   if (!(step > 0)) return;
-  const field = mission.field;
+  const field = mission._runtimeField;
   if (!field) return;
   const tryTo = (tx, tz) => {
     const s = sitePassable(field, tx, tz);
@@ -3749,7 +3842,7 @@ function catmullRomPts(pts) {
  *  - 其余敌军 → route_main / route_flank 链等距巡逻（距着陆坪 ≥ 警戒距离逐级放宽）。
  */
 function populateSiteMission(mission, template) {
-  const field = mission.field;
+  const field = mission._runtimeField;
   const site = mission.site;
   const A = site.anchors;
 
@@ -3986,7 +4079,12 @@ function createGroundMission(world, opts = {}) {
   if (siteCtx) {
     const field = fieldOpt || getMissionField(world, planetId, siteCtx);
     if (!field) throw new Error('ground: 站点地形场构建失败');
-    mission.field = field;
+    // P0-B：场域是重型运行时对象（TypedArray + 闭包），严禁挂可枚举属性进实体树；
+    // defineProperty 不可枚举 → JSON.stringify / structuredClone / Object.keys 全部跳过。
+    Object.defineProperty(mission, '_runtimeField', {
+      value: field, writable: true, enumerable: false, configurable: true,
+    });
+    _runtimeFieldMap.set(mission.id, field);
     const site = siteCtx.site;
     // 站点几何（锚点为 Planet-Local 场域米制坐标；doc8 P0-2 指令 1/2）
     mission.site = {
@@ -4242,6 +4340,11 @@ function makeEnemy(type, p, opts = {}, table = ENEMY_TYPES) {
  */
 function stepMission(world, mission, dt = DT_DEFAULT) {
   if (!mission || mission.status !== 'active') return mission;
+  // P0-B：读档恢复路径——site_meters 任务首次步进前确保运行时场域就绪（按 seed 幂等重建）
+  if (mission.coordSpace === 'site_meters' && !mission._runtimeField) {
+    const field = getMissionRuntimeField(world, mission);
+    if (!field) throw new Error('ground: 运行时场域缺失且无法重建');
+  }
   mission.time += dt;
   const input = mission.input;
 
@@ -4630,7 +4733,7 @@ function bossPhaseCheck(mission, e) {
 /** boss 召唤护卫：boss 周身逐环扫描可通行位，受 UNIT_CAP 约束（确定性顺序） */
 function summonAdds(mission, e, count) {
   if (mission.coordSpace === 'site_meters') {
-    const field = mission.field;
+    const field = mission._runtimeField;
     if (!field) return;
     let spawned = 0;
     for (let r = 1; r <= 3 && spawned < count; r++) {
@@ -4817,7 +4920,7 @@ function updateObjectives(mission, dt) {
 /** 危险区判定：site_meters 按地表 HAZARD 旗采样，旧版按瓦片值 */
 function isHazardAt(mission, x, y) {
   if (mission.coordSpace === 'site_meters') {
-    const s = sampleTerrain(mission.field, x, y);
+    const s = sampleTerrain(mission._runtimeField, x, y);
     return !!(s && (s.flags & TERRAIN_FLAGS.HAZARD));
   }
   return tileAtPx(mission, x, y) === T_HAZARD;
@@ -4912,6 +5015,15 @@ function finishMission(world, mission, outcome = 'success', reason = null) {
   mission.results = results;
   mission.status = outcome === 'success' ? 'success' : 'failed';
   mission.failReason = results.reason;
+  // WP-6：任务成功推进行星锚定空间目标（按 targetPlanetId 匹配：行星勘探/殖民地救援；
+  // 地面小队完成地表行动即达成，失败不推进。结算锁内执行，幂等由目标 status 保证）
+  if (outcome === 'success') {
+    checkAndProgressObjectives(world, (o) =>
+      o.targetPlanetId === mission.planetId && o.factionId === world.playerFactionId);
+  }
+  // P0-B：任务终结后释放运行时场域（Map 引用 + 不可枚举属性），防 64 Chunk 网格滞留内存
+  _runtimeFieldMap.delete(mission.id);
+  if (mission._runtimeField) delete mission._runtimeField;
   mlog(mission, outcome === 'success' ? '行动完成，小队撤离成功' : `行动失败（${results.reason || 'unknown'}）`);
   emit(world, 'GroundMissionEnded', {
     missionId: mission.id,
@@ -4929,6 +5041,9 @@ function abortMission(world, mission) {
   mission.rewardPaid = true; // 结算锁（GROUND-03）
   mission.status = 'aborted';
   mission.failReason = 'aborted';
+  // P0-B：任务终结后释放运行时场域（Map 引用 + 不可枚举属性），防 64 Chunk 网格滞留内存
+  _runtimeFieldMap.delete(mission.id);
+  if (mission._runtimeField) delete mission._runtimeField;
   mission.results = {
     outcome: 'aborted',
     rewardsPaid: [],
@@ -4993,7 +5108,7 @@ function getMissionView(mission) {
   };
 }
 
-Object.assign(__exports, { GROUND_TILES, MISSION_UNIT_SCALE, genMap, getMissionField, createGroundMission, stepMission, finishMission, abortMission, getMissionView });
+Object.assign(__exports, { GROUND_TILES, MISSION_UNIT_SCALE, genMap, getMissionField, getMissionRuntimeField, createGroundMission, stepMission, finishMission, abortMission, getMissionView });
 
 });
 __register("src/domain/ground/missionSiteFactory.js", function (__exports, __require) {
@@ -5019,6 +5134,9 @@ __register("src/domain/ground/missionSiteFactory.js", function (__exports, __req
  *     「两端岸高 + 拱升」抛物线抬高桥面（岩浆河/裂隙跨越）。
  *  C. 语义旗：CORE_PROTECTED（r ≤ coreRadius）、HAZARD（蓝图 hazardZones 圆域）、
  *     FOUNDATION（地标/锚点坪心）。
+ *  clearFlags 契约（P0-D）：siteModifier 可输出 clearFlags 位掩码，evalPoint 在 flags
+ *  合入后按位清除——坪面有效覆盖区（w ≥ 0.5）与高架桥面强制抹除自然环境危险旗
+ *  （HAZARD），蓝图显式战术危险仅在坪面外生效。
  *  D. 过渡带融合：走廊高度/材质影响乘 s(r)=1-smoothstep(86.4,112.4,r)，权重平滑归零，
  *     无「人工/随机」突变边界（SITE-04）。
  *
@@ -5397,7 +5515,7 @@ function padMask(d, inner, outer) {
 }
 
 /**
- * 构建 terrainField 的 siteModifier（(wx, wz, base) => {dy, flags, weights}|null）。
+ * 构建 terrainField 的 siteModifier（(wx, wz, base) => {dy, flags, clearFlags, weights}|null）。
  * 调用方将返回值传入 createTerrainField(world, planetId, { siteModifier, profile })；
  * field 的 profile 必须与 blueprint.terrainProfile 一致（坪目标高/无缝基准取自同一剖面）。
  *
@@ -5416,6 +5534,14 @@ function buildSiteModifier(world, planetId, blueprint, opts = {}) {
   const targetY = (x, z) => clamp(macro ? macro.heightAt(x, z) : 0, TARGET_CLAMP_LO, TARGET_CLAMP_HI);
   /** 精确自然高（含与 evalPoint 相同的预算钳制；无缝检查基准） */
   const naturalYExact = (x, z) => clamp(macro ? macro.heightAt(x, z) : 0, MIN_HEIGHT, MAX_HEIGHT);
+  /**
+   * 人工结构坪目标高（P0-D）：海洋/流体主题（profile.seaLevel != null）的着陆坪/撤离坪
+   * 抬升出海面（浮台/耐压船坞基座，防淹没）；主/次目标坪与地标保持自然主题（水下设施
+   * 属主题设计，坪面危险旗由 clearFlags 清除）。
+   */
+  const padTargetY = (x, z, lift) => (profile && profile.seaLevel != null && lift)
+    ? Math.max(targetY(x, z), profile.seaLevel + 0.6)
+    : targetY(x, z);
 
   // A. 锚点坪：着陆坪（平地半径 ≥12m）、主/次目标坪、撤离坪 + 地标地基
   const pads = [];
@@ -5426,12 +5552,12 @@ function buildSiteModifier(world, planetId, blueprint, opts = {}) {
   ];
   for (let i = 0; i < padSpecs.length; i++) {
     const a = site.anchors[padSpecs[i][0]];
-    pads.push({ x: a.x, z: a.z, inner: padSpecs[i][1], outer: padSpecs[i][2], H: targetY(a.x, a.z) });
+    pads.push({ x: a.x, z: a.z, inner: padSpecs[i][1], outer: padSpecs[i][2], H: padTargetY(a.x, a.z, padSpecs[i][0] === 'landing') });
   }
   const exInner = clamp(num(site.extraction.radius, 8) + 1, 8, 12);
   pads.push({
     x: site.anchors.extraction.x, z: site.anchors.extraction.z,
-    inner: exInner, outer: exInner + 12, H: targetY(site.anchors.extraction.x, site.anchors.extraction.z),
+    inner: exInner, outer: exInner + 12, H: padTargetY(site.anchors.extraction.x, site.anchors.extraction.z, true),
   });
   for (let i = 0; i < site.landmarks.length; i++) {
     const lm = site.landmarks[i];
@@ -5541,6 +5667,7 @@ function buildSiteModifier(world, planetId, blueprint, opts = {}) {
     const r = Math.sqrt(r2);
     let dy = 0;
     let flags = 0;
+    let clearFlags = 0; // P0-D：人工结构显式清除的自然危险旗（与 flags 同位掩码语义）
     let roadTake = 0;
 
     // A. 锚点坪 / 地标地基：取权重最高者的整平贡献（互叠时优先坪面）
@@ -5558,6 +5685,7 @@ function buildSiteModifier(world, planetId, blueprint, opts = {}) {
         const auth = 6 + 34 * w; // 坪心权限 40m（填平陨坑/河道/裂隙等局部特征），裙边收敛回 ±6m
         bestDy = clamp((p.H - base.y) * w, -auth, auth);
         if (w >= 0.999) flags |= FLAG_FOUNDATION;
+        if (w >= 0.5) clearFlags |= FLAG_HAZARD; // 坪面有效覆盖区强制抹除自然环境危害（P0-D）
       }
     }
     if (bestW > 0.0001) dy = bestDy;
@@ -5589,6 +5717,7 @@ function buildSiteModifier(world, planetId, blueprint, opts = {}) {
       corrW = 1 - smoothstep(bs.half * 0.45, bs.half, d);
       flags |= FLAG_ROAD;
       if (bs.deck) flags |= FLAG_BRIDGE_DECK;
+      if (bs.deck) clearFlags |= FLAG_HAZARD; // 人工高架桥面免受桥下毒液/岩浆侵蚀（P0-D）
       // D. 过渡带融合：走廊高度/材质影响随 r 平滑衰减（86.4m → 112.4m → 0）
       const sFade = 1 - smoothstep(transOuter, transOuter + TRANSITION_FADE_WIDTH, r);
       const auth = bs.deck ? 18 : 6; // 桥面为人工结构，允许跨越河道的拱升
@@ -5599,26 +5728,32 @@ function buildSiteModifier(world, planetId, blueprint, opts = {}) {
       roadTake = Math.max(roadTake, Math.round(200 * corrW * sFade));
     }
 
-    // C. 语义旗：任务核心保护区 / 蓝图危险域
+    // C. 语义旗：任务核心保护区 / 蓝图危险域（蓝图显式战术危险优先，
+    //    坪面有效覆盖区 bestW ≥ 0.3 内豁免且不阻断后续危险域判定）
     if (r <= coreRadius) flags |= FLAG_CORE_PROTECTED;
     for (let i = 0; i < hazards.length; i++) {
       const hz = hazards[i];
       const ddx = wx - hz.x;
       const ddz = wz - hz.z;
       if (ddx * ddx + ddz * ddz <= hz.radius * hz.radius) {
-        flags |= FLAG_HAZARD;
-        break;
+        if (bestW < 0.3) {
+          flags |= FLAG_HAZARD;
+          clearFlags &= ~FLAG_HAZARD; // 战术危险优先，抵消坪面/桥面的清除位
+          break;
+        }
+        continue; // 命中但在坪面上：豁免，继续查下一个危险域
       }
     }
 
     const hasDy = dy !== 0;
     const w0 = base.weights ? base.weights[0] : 255;
     const take = Math.min(roadTake, w0);
-    if (!hasDy && flags === 0 && take <= 0) return null;
+    if (!hasDy && flags === 0 && clearFlags === 0 && take <= 0) return null;
 
     const mod = {};
     if (hasDy) mod.dy = dy;
     if (flags !== 0) mod.flags = flags;
+    if (clearFlags !== 0) mod.clearFlags = clearFlags;
     if (take > 0 && base.weights) {
       const w = [base.weights[0], base.weights[1], base.weights[2], base.weights[3]];
       w[0] -= take;
@@ -6644,6 +6779,7 @@ function evalPoint(field, wx, wz) {
       if (Number.isFinite(mod.dy)) y += mod.dy;
       if (Number.isFinite(mod.biomeId)) biomeId = mod.biomeId;
       if (Number.isFinite(mod.flags)) flags |= mod.flags;
+      if (Number.isFinite(mod.clearFlags)) flags &= ~mod.clearFlags; // 人工结构显式清除自然危险旗（P0-D）
       if (mod.weights) {
         let m0 = clampByte(mod.weights[0]);
         let m1 = clampByte(mod.weights[1]);
@@ -8992,481 +9128,335 @@ function blueprintsForPlanet(planet, themeId) {
 Object.assign(__exports, { MISSION_SITE_BLUEPRINTS, GENERIC_SITE_BLUEPRINT_ID, getSiteBlueprint, blueprintsForPlanet });
 
 });
-__register("src/domain/economy/ledger.js", function (__exports, __require) {
+__register("src/domain/events/objectives.js", function (__exports, __require) {
 /**
- * domain/economy/ledger.js — 统一经济账本（任务书 4.4 / ECON-01/02）
+ * domain/events/objectives.js — 结构化空间任务目标实体（doc5 §3.6 / TASK-2.3 / EVT-01..02）
  *
- * 账本等式：S_{t+1} = S_t + P + I + L - C - E - D
- * （生产/进口/战利品转入；消耗/出口/损耗转出）
- * 每笔流量必须带 reason 与 sourceId，可审计追溯。
- * 库存使用安全整数；严禁负库存（违者抛出 —— RISK-15）。
+ * WorldObjective 是持久化纯数据实体（world.entities.objectives，'obj' 前缀）：
+ * B 类空间事件触发时绑定真实世界空间实体（目标星系/航路另一端/行星），
+ * 银河图据此绘制 Pin / 离屏方向箭头 / 威胁航路虚线。
+ *
+ * 集成边界（与 TickPipeline/DailySystems 的接线归主工程）：
+ *  - 本模块只导出纯领域函数，不自行注册每日/每小时钩子；
+ *  - dailyObjectiveSweep(world) 供 DailySystems 每日调用（过期 + 一次性罚则）。
+ *
+ * 离屏数学（doc5:730-809）：目标星系投影 (sx,sy) 移出视口安全矩形时，
+ *   θ = atan2(dy,dx)，padX = max(80, cx-84)（避开左侧导航栏），
+ *   padY = max(60, cy-64)，t = min(padX/|dx|, padY/|dy|)，
+ *   边缘点 = (cx,cy) + t×(dx,dy)。
  */
 
+const { createEntity: createEntity, getEntity: getEntity, listEntities: listEntities } = __require("src/domain/entities/registry.js");
 const { emit: emit } = __require("src/core/eventBus.js");
-const { safeInt: safeInt } = __require("src/core/math.js");
+const { credit: credit, debit: debit } = __require("src/domain/economy/ledger.js");
+const { orderMove: orderMove } = __require("src/domain/fleets/fleet.js");
 
-/** 流量类别（写入 daily 流水的键） */
-const FLOW = {
-  PRODUCE: 'produced',
-  CONSUME: 'consumed',
-  IMPORT: 'imported',
-  EXPORT: 'exported',
-  LOOT: 'loot',
-  DECAY: 'decay',
-  TRANSFER: 'transfer', // 阵营/殖民地间划拨
-  TAX: 'tax',
-};
+/** 目标种类（doc5 §3.6） */
+const OBJECTIVE_KINDS = ['escort_lane', 'investigate_system', 'relief_colony', 'survey_planet'];
 
-/** 确保阵营账本存在 */
-function ensureLedger(world, factionId) {
-  let led = world.economy.ledgers[factionId];
-  if (!led) {
-    led = { balances: {} };
-    world.economy.ledgers[factionId] = led;
-  }
-  if (!world.economy.daily[factionId]) world.economy.daily[factionId] = {};
-  return led;
-}
+/** 默认行动窗口：336 小时 = 14 天 */
+const DEFAULT_DURATION_HOURS = 336;
 
-function ensureDaily(world, factionId, resId) {
-  const d = world.economy.daily[factionId];
-  if (!d[resId]) d[resId] = { produced: 0, consumed: 0, imported: 0, exported: 0, loot: 0, decay: 0, transfer: 0, tax: 0 };
-  return d[resId];
-}
-
-/** 读取余额 */
-function balance(world, factionId, resId) {
-  return world.economy.ledgers[factionId]?.balances[resId] ?? 0;
-}
-
-/** 记一笔流水（内部） */
-function record(world, factionId, resId, flow, delta, reason, sourceId) {
-  ensureDaily(world, factionId, resId)[flow] += delta;
-  world.economy.transactions.push({
-    tick: world.tick,
-    factionId,
-    resId,
-    flow,
-    delta,
-    reason: reason || '',
-    sourceId: sourceId || null,
-  });
-  const cap = 400;
-  if (world.economy.transactions.length > cap) {
-    world.economy.transactions.splice(0, world.economy.transactions.length - cap);
-  }
-}
-
-/** 入账：增加库存 */
-function credit(world, factionId, resId, amount, reason, sourceId, flow = FLOW.PRODUCE) {
-  const amt = safeInt(amount, 0);
-  if (amt <= 0) return;
-  const led = ensureLedger(world, factionId);
-  led.balances[resId] = (led.balances[resId] ?? 0) + amt;
-  record(world, factionId, resId, flow, amt, reason, sourceId);
-}
-
-/** 出账：减少库存。不足时整体失败（返回 false），绝不产生负库存（ECON-02） */
-function debit(world, factionId, resId, amount, reason, sourceId, flow = FLOW.CONSUME) {
-  const amt = safeInt(amount, 0);
-  if (amt <= 0) return true;
-  const led = ensureLedger(world, factionId);
-  const cur = led.balances[resId] ?? 0;
-  if (cur < amt) return false;
-  led.balances[resId] = cur - amt;
-  record(world, factionId, resId, flow, -amt, reason, sourceId);
-  return true;
-}
-
-/** 批量出账：全部满足才扣（命令事务的原子支付原语） */
-function canAfford(world, factionId, costs) {
-  for (const resId of Object.keys(costs)) {
-    if (balance(world, factionId, resId) < costs[resId]) return false;
-  }
-  return true;
-}
-
-function pay(world, factionId, costs, reason, sourceId) {
-  if (!canAfford(world, factionId, costs)) return false;
-  for (const resId of Object.keys(costs)) {
-    debit(world, factionId, resId, costs[resId], reason, sourceId, FLOW.CONSUME);
-  }
-  return true;
-}
-
-function refund(world, factionId, costs, reason, sourceId) {
-  for (const resId of Object.keys(costs)) {
-    credit(world, factionId, resId, costs[resId], reason, sourceId, FLOW.TRANSFER);
-  }
-}
-
-/** 阵营→阵营转移（贸易、赔款、礼物；双向记账） */
-function transferBetween(world, fromFaction, toFaction, resId, amount, reason) {
-  if (!debit(world, fromFaction, resId, amount, reason, toFaction, FLOW.EXPORT)) return false;
-  credit(world, toFaction, resId, amount, reason, fromFaction, FLOW.IMPORT);
-  return true;
-}
-
-/** 日结：汇总当日流量、重置日累计（由 DailySystems 调用） */
-function closeDailyLedgers(world) {
-  const out = {};
-  for (const fid of Object.keys(world.economy.daily).sort()) {
-    out[fid] = world.economy.daily[fid];
-    world.economy.daily[fid] = {};
-  }
-  return out; // 上一日流水（市场/统计可用）
-}
-
-/** 账本守恒校验（ECON-01：期末库存与流量等式一致） */
-function verifyLedgerConsistency(world, factionId, openingBalances, dayFlow) {
-  const problems = [];
-  const resIds = new Set([
-    ...Object.keys(openingBalances || {}),
-    ...Object.keys(dayFlow || {}),
-    ...Object.keys(world.economy.ledgers[factionId]?.balances || {}),
-  ]);
-  for (const resId of resIds) {
-    const open = openingBalances?.[resId] ?? 0;
-    const f = dayFlow?.[resId] || {};
-    const expected = open +
-      (f.produced || 0) + (f.imported || 0) + (f.loot || 0) + (f.transfer || 0) + (f.tax || 0) -
-      ((f.consumed || 0) + (f.exported || 0) + (f.decay || 0));
-    const actual = world.economy.ledgers[factionId]?.balances[resId] ?? 0;
-    if (expected !== actual) {
-      problems.push(`${resId}: 账本不平 ${actual} ≠ 期望 ${expected}`);
-    }
-  }
-  return problems;
-}
-
-/** 资源损耗（decayRule，每日） */
-function applyDecay(world, factionId, resIds, decayRules) {
-  for (const resId of resIds) {
-    const rule = decayRules[resId];
-    if (!rule || rule.perDayPct <= 0) continue;
-    const cur = balance(world, factionId, resId);
-    if (cur <= 0) continue;
-    const loss = Math.max(0, Math.min(cur, Math.round(cur * rule.perDayPct / 100)));
-    if (loss > 0) {
-      debit(world, factionId, resId, loss, 'decay', null, FLOW.DECAY);
-    }
-  }
-}
-
-/** 税收（殖民地→阵营，源自殖民模块） */
-function collectTax(world, colony, amount, reason = 'tax') {
-  const ok = debitColony(world, colony, 'credits', amount, reason);
-  if (ok) credit(world, colony.factionId, 'credits', amount, reason, colony.id, FLOW.TAX);
-  return ok;
-}
-
-// —— 殖民地库存（行星级仓储，与阵营账本分离但可互转） ——
-
-function colonyStock(world, colony, resId) {
-  return colony.stockpile?.[resId] ?? 0;
-}
-
-function creditColony(world, colony, resId, amount, reason, sourceId) {
-  const amt = safeInt(amount, 0);
-  if (amt <= 0) return;
-  colony.stockpile ||= {};
-  colony.stockpile[resId] = (colony.stockpile[resId] ?? 0) + amt;
-  recordColony(world, colony, resId, FLOW.PRODUCE, amt, reason, sourceId);
-}
-
-function debitColony(world, colony, resId, amount, reason, sourceId) {
-  const amt = safeInt(amount, 0);
-  if (amt <= 0) return true;
-  const cur = colony.stockpile?.[resId] ?? 0;
-  if (cur < amt) return false;
-  colony.stockpile[resId] = cur - amt;
-  recordColony(world, colony, resId, FLOW.CONSUME, -amt, reason, sourceId);
-  return true;
-}
-
-function recordColony(world, colony, resId, flow, delta, reason, sourceId) {
-  colony.ledger ||= {};
-  colony.ledger[resId] ||= { produced: 0, consumed: 0, transfer: 0, exported: 0, imported: 0 };
-  const l = colony.ledger[resId];
-  if (flow === FLOW.PRODUCE) l.produced += delta;
-  else if (flow === FLOW.CONSUME) l.consumed += -delta;
-  else l.transfer += delta;
-  if (colony.ledgerTickCap === undefined) colony.ledgerTickCap = world.tick;
-  // 殖民地账本按日清理由 DailySystems 执行；这里只累加
-}
-
-/** 殖民地→阵营 上缴（ minerals 等；阵营库存 +，殖民地 -） */
-function colonyToFaction(world, colony, resId, amount, reason) {
-  if (!debitColony(world, colony, resId, amount, reason, colony.factionId)) return false;
-  credit(world, colony.factionId, resId, amount, reason, colony.id, FLOW.IMPORT);
-  return true;
-}
-
-function factionToColony(world, colony, resId, amount, reason) {
-  if (!debit(world, colony.factionId, resId, amount, reason, colony.id, FLOW.EXPORT)) return false;
-  creditColony(world, colony, resId, amount, reason, colony.factionId);
-  return true;
-}
-
-/** 短缺告警（COL-03：断供后果由殖民系统触发事件） */
-function shortageEvent(world, colony, resId) {
-  emit(world, 'ColonyShortage', { colonyId: colony.id, resId }, 'colony');
-}
-
-Object.assign(__exports, { FLOW, ensureLedger, balance, credit, debit, canAfford, pay, refund, transferBetween, closeDailyLedgers, verifyLedgerConsistency, applyDecay, collectTax, colonyStock, creditColony, debitColony, colonyToFaction, factionToColony, shortageEvent });
-
-});
-__register("src/domain/events/crisis.js", function (__exports, __require) {
 /**
- * domain/events/crisis.js — 银河级危机（任务书 5.10 / CRISIS-01）
- *
- * 两套首发危机：机偶狂潮（失控自治机械群）与弦裂风暴（空间结构失稳）。
- * 阶段机：休眠 → 预兆 → 爆发 → 扩张 → 应对 → 终结；阶段转换由可检查
- * 条件驱动；进度可累积可消减；玩家缺席时 AI 仍自动应对（月度）。
+ * 创建空间任务目标。
+ * targetSystemId 必须可解析为真实星系实体（绑定真实世界实体是本实体的存在意义），
+ * 否则返回 null（调用方按「无有效空间锚点」静默跳过，不建空目标）。
  */
-
-const { registerMonthly: registerMonthly } = __require("src/simulation/TickPipeline.js");
-const { emit: emit, chronicle: chronicle } = __require("src/core/eventBus.js");
-const { createEntity: createEntity } = __require("src/domain/entities/registry.js");
-const { RNG: RNG } = __require("src/core/rng.js");
-const { balance: balance, debit: debit, credit: credit } = __require("src/domain/economy/ledger.js");
-const { createFleet: createFleet } = __require("src/domain/fleets/fleet.js");
-const { difficultyParam: difficultyParam } = __require("src/domain/factions/modifiers.js");
-
-const CRISIS_DEFS = [
-  {
-    id: 'crisis_automata',
-    nameZh: '机偶狂潮',
-    descZh: '沉睡数个纪元的工业自治体突然重启，把一切有机文明视为「干扰源」。',
-    omenFlags: ['crisis_automata'],          // 异常调查 storyTag 可提前点亮预兆
-    startYear: 5,
-    progressPerMonth: 3.2,
-    suppressionPerContribution: 0.9,
-    outbreakThreshold: 40,
-    catastropheThreshold: 100,
-    containedThreshold: -40,                 // 压制到负值 → 封锁成功
-  },
-  {
-    id: 'crisis_rift',
-    nameZh: '弦裂风暴',
-    descZh: '空间结构在弦锚点阵列激活后开始连锁失稳，航道逐一崩解。',
-    omenFlags: ['chord_anchors_known', 'chord_anchors_sold'],
-    startYear: 6,
-    progressPerMonth: 2.8,
-    suppressionPerContribution: 1.1,
-    outbreakThreshold: 45,
-    catastropheThreshold: 100,
-    containedThreshold: -40,
-  },
-];
-
-/** 注册月度危机推进（由 MonthlySystems 在正确顺序显式调用） */
-function registerCrisis() {
-  registerMonthly('crisis', crisisMonthly);
-}
-
-function crisisMonthly(world) {
-  if (world.victory.ended && !world.narrative.flags.sandbox_continue) return;
-  const year = Math.floor(world.tick / 8640) + 1;
-  const speed = difficultyParam(world, 'crisisSpeedMult');
-
-  // 触发检查（一次只有一场活动危机）
-  const active = Object.values(world.entities.crises).find((c) => c.status === 'active');
-  if (!active) {
-    for (const def of CRISIS_DEFS) {
-      if (world.narrative.firedCrisis?.[def.id]) continue;
-      const omen = def.omenFlags.some((f) => world.narrative.flags[f]);
-      if (year >= def.startYear && (omen || year >= def.startYear + 3)) {
-        startCrisis(world, def);
-        break;
-      }
-    }
-    return;
-  }
-
-  // 阶段推进
-  const def = CRISIS_DEFS.find((d) => d.id === active.kind);
-  if (!def) return;
-  const aiSuppression = aiSuppressCrisis(world, active, def);
-
-  if (active.status === 'active') {
-    active.progress += def.progressPerMonth * speed - aiSuppression;
-    if (active.progress >= def.outbreakThreshold && active.phase === 'omens') {
-      setPhase(world, active, 'outbreak');
-    }
-    if (active.phase === 'outbreak' || active.phase === 'expansion') {
-      active.progress += def.progressPerMonth * 0.4 * speed;
-      crisisCombatPressure(world, active);
-      if (active.progress >= 70 && active.phase === 'outbreak') setPhase(world, active, 'expansion');
-    }
-    if (active.progress >= def.catastropheThreshold) {
-      endCrisis(world, active, 'catastrophe');
-    } else if (active.progress <= def.containedThreshold) {
-      endCrisis(world, active, 'contained');
-    }
-  }
-}
-
-function startCrisis(world, def) {
-  world.narrative.firedCrisis ||= {};
-  world.narrative.firedCrisis[def.id] = world.tick;
-  const crisis = createEntity(world, 'crises', {
-    kind: def.id,
-    nameZh: def.nameZh,
-    descZh: def.descZh,
-    phase: 'omens',
+function createWorldObjective(world, opts = {}) {
+  world.entities.objectives ||= {};
+  const kind = opts.kind;
+  if (!OBJECTIVE_KINDS.includes(kind)) return null;
+  const targetSystemId = opts.targetSystemId;
+  if (!targetSystemId || !world.entities.systems[targetSystemId]) return null;
+  const durationHours = Number.isFinite(opts.durationHours) && opts.durationHours > 0
+    ? Math.round(opts.durationHours)
+    : DEFAULT_DURATION_HOURS;
+  const o = createEntity(world, 'objectives', {
+    factionId: opts.factionId || world.playerFactionId,
+    status: 'active', // active | completed | expired
+    kind,
+    titleZh: opts.titleZh || '空间任务目标',
+    descZh: opts.descZh || '',
+    sourceEventId: opts.sourceEventId || null,
+    targetSystemId,
+    secondarySystemId: opts.secondarySystemId || null,
+    targetPlanetId: opts.targetPlanetId || null,
+    priority: opts.priority || 'high',          // high | normal
+    createdTick: world.tick,
+    deadlineTick: world.tick + durationHours,
+    assignedFleetId: null,
     progress: 0,
-    status: 'active',
-    startedTick: world.tick,
-    contributed: {},
-    threatSystemIds: pickThreatSystems(world, 5),
+    goalProgress: 100,
+    rewards: opts.rewards || [],
+    penalty: opts.penalty || null,              // { credits: n } | { flag: 'key' }
   });
-  emit(world, 'CrisisOmens', { crisisId: crisis.id, kind: def.id }, 'crisis');
-  chronicle(world, 'crisis', `预兆：${def.nameZh}的迹象开始出现`, { crisisId: crisis.id });
-  return crisis;
+  emit(world, 'ObjectiveCreated', {
+    objectiveId: o.id,
+    targetSystemId: o.targetSystemId,
+    kind: o.kind,
+    sourceEventId: o.sourceEventId,
+  }, 'world');
+  return o;
 }
 
-function pickThreatSystems(world, n) {
-  const owned = Object.values(world.entities.systems).filter((s) => s.ownerFactionId);
-  const picks = [];
-  const pool = [...owned];
-  for (let i = 0; i < n && pool.length > 0; i++) {
-    const idx = RNG.int(world, pool.length);
-    picks.push(pool[idx].id);
-    pool.splice(idx, 1);
-  }
-  return picks;
+/** 目标进度推进（到达/调查/护航完成等系统调用；满格自动完成） */
+function progressObjective(world, objectiveId, delta) {
+  const o = getEntity(world, 'objectives', objectiveId);
+  if (!o || o.status !== 'active') return { ok: false, reason: '目标不存在或已结束' };
+  o.progress = Math.max(0, Math.min(o.goalProgress, (o.progress || 0) + delta));
+  if (o.progress >= o.goalProgress) return completeObjective(world, objectiveId);
+  return { ok: true, progress: o.progress };
 }
 
-function setPhase(world, crisis, phase) {
-  crisis.phase = phase;
-  emit(world, 'CrisisPhase', { crisisId: crisis.id, phase }, 'crisis');
-  chronicle(world, 'crisis', `${crisis.nameZh}进入${phaseName(phase)}阶段`, { crisisId: crisis.id });
-}
-
-function phaseName(p) {
-  return { omens: '预兆', outbreak: '爆发', expansion: '扩张', response: '应对', resolved: '终结' }[p] || p;
-}
-
-/** 危机军事压力：爆发/扩张阶段生成敌对自治舰队 */
-function crisisCombatPressure(world, crisis) {
-  if (crisis.kind !== 'crisis_automata') return;
-  // 每月最多 1 支，且场上自治舰队 < 4
-  const existing = Object.values(world.entities.fleets).filter((f) => f.isCrisisFleet).length;
-  if (existing >= 4) return;
-  const systemId = crisis.threatSystemIds[RNG.int(world, crisis.threatSystemIds.length)];
-  if (!systemId) return;
-  const fleet = createFleet(world, {
-    factionId: crisis.factionId || (crisis.factionId = createCrisisFaction(world)),
-    systemId,
-    name: '失控自治集群',
-    role: 'combat',
-    stance: 'aggressive',
-    ships: [
-      { hullId: 'hull_destroyer', moduleIds: ['mod_kinetic_cannon', 'mod_reactor_fusion', 'mod_fusion_thruster', 'mod_armor_composite'], name: '收割体' },
-      { hullId: 'hull_frigate', moduleIds: ['mod_laser_array', 'mod_reactor_fission', 'mod_ion_thruster'], name: '蜂群单元' },
-    ],
-  });
-  fleet.isCrisisFleet = true;
-  // 对所有正式文明敌对
-  for (const fid of Object.keys(world.entities.factions)) {
-    const rel = world.relations.diplomacy[fid < 'fac_crisis' ? `${fid}|fac_crisis` : `fac_crisis|${fid}`];
-    if (rel) rel.warId = crisis.warId || (crisis.warId = `war_${++world.seq}`), rel.warId = crisis.warId;
-  }
-  world.entities.wars[crisis.warId] ||= {
-    id: crisis.warId,
-    type: 'war',
-    createdAtTick: world.tick,
-    attackers: ['fac_crisis'],
-    defenders: Object.keys(world.entities.factions).filter((f) => f !== 'fac_crisis'),
-    startTick: world.tick,
-    wargoals: ['exterminate'],
-    occupiedSystems: {},
-    exhaustion: {},
-    battles: 0,
-    status: 'active',
-    peaceOffers: [],
-  };
-  emit(world, 'CrisisFleetSpotted', { crisisId: crisis.id, systemId }, 'crisis');
-}
-
-let _crisisFactionMade = false;
-function createCrisisFaction(world) {
-  if (_crisisFactionMade && world.entities.factions['fac_crisis']) return 'fac_crisis';
-  createEntity(world, 'factions', {
-    id: 'fac_crisis',
-    name: '失控自治体',
-    traitId: 'crisis_automata',
-    personality: 'balanced',
-    color: '#e85f5f',
-    originType: 'automata',
-    isPlayer: false,
-  });
-  _crisisFactionMade = true;
-  return 'fac_crisis';
-}
-
-/** AI 自动应对：有能力的文明月度投入科研数据压制（玩家缺席时世界仍有响应） */
-function aiSuppressCrisis(world, crisis, def) {
-  let suppression = 0;
-  for (const fid of Object.keys(world.research).sort()) {
-    const fac = world.entities.factions[fid];
-    if (!fac || fac.isPlayer) continue;
-    const rd = balance(world, fid, 'researchData');
-    if (rd >= 20) {
-      debit(world, fid, 'researchData', 20, `crisisContribution:${crisis.id}`, crisis.id);
-      crisis.contributed[fid] = (crisis.contributed[fid] || 0) + 20;
-      suppression += def.suppressionPerContribution;
-    }
-  }
-  return suppression;
-}
-
-/** 玩家贡献（ContributeToCrisis 命令执行体） */
-function playerContribute(world, crisisId, amount) {
-  const crisis = world.entities.crises[crisisId];
-  if (!crisis || crisis.status !== 'active') return { ok: false, reason: '危机不存在或已结束' };
-  const pid = world.playerFactionId;
-  if (balance(world, pid, 'researchData') < amount) {
-    return { ok: false, reason: '科研数据不足' };
-  }
-  const def = CRISIS_DEFS.find((d) => d.id === crisis.kind);
-  debit(world, pid, 'researchData', amount, `crisisContribution:${crisisId}`, crisisId);
-  crisis.contributed[pid] = (crisis.contributed[pid] || 0) + amount;
-  crisis.progress -= amount * 0.05 * (def?.suppressionPerContribution || 1);
-  emit(world, 'CrisisContribution', { crisisId, factionId: pid, amount }, 'crisis');
+/** 完成目标（发放 rewards 资源表由调用方/主工程按奖励语义执行，这里只迁移状态） */
+function completeObjective(world, objectiveId) {
+  const o = getEntity(world, 'objectives', objectiveId);
+  if (!o || o.status !== 'active') return { ok: false, reason: '目标不存在或已结束' };
+  o.status = 'completed';
+  o.progress = o.goalProgress;
+  o.completedTick = world.tick;
+  emit(world, 'ObjectiveCompleted', { objectiveId: o.id, sourceEventId: o.sourceEventId }, 'world');
   return { ok: true };
 }
 
-function endCrisis(world, crisis, outcome) {
-  crisis.status = 'resolved';
-  crisis.outcome = outcome;
-  crisis.endedTick = world.tick;
-  crisis.phase = 'resolved';
-  // 清理敌对舰队与战争
-  for (const fid of Object.keys(world.entities.fleets)) {
-    const f = world.entities.fleets[fid];
-    if (f.isCrisisFleet) {
-      for (const sid of f.shipIds.slice()) {
-        const ship = world.entities.ships[sid];
-        if (ship) ship.status = 'destroyed';
-      }
-      f.shipIds = [];
-      f.status = 'dissolved';
+/**
+ * WP-6（P1-H 闭环）：跨系统目标推进 —— 供战略动作与地表结算点调用
+ * （舰队抵达 navigation / 星系调查 scan / 地面任务 GroundMission / 殖民建立 colony /
+ * POI 采样 planetPOI）。凡 filterFn(o) 为真的活跃目标推进 delta 进度；
+ * progressObjective 满格自动 completeObjective，完成迁移的当次按目标自带
+ * rewards（[{resId, amount}] 资源表）入账 factionId 账本——completeObjective
+ * 本身不发奖，奖励只在此处迁移判定内发放一次（幂等：completed 目标不再进入枚举）。
+ * @param {Function} filterFn (objective) => boolean（按真实字段匹配：kind/targetSystemId/targetPlanetId/factionId）
+ * @param {number} delta 本次推进量（默认 100 = goalProgress，单次触发即完成）
+ * @returns {number} 本次实际推进（含完成）的目标数
+ */
+function checkAndProgressObjectives(world, filterFn, delta = 100) {
+  let progressed = 0;
+  for (const o of activeObjectives(world)) {
+    let hit = false;
+    try {
+      hit = !!filterFn(o);
+    } catch (e) {
+      emit(world, 'ObjectiveFilterError', { objectiveId: o.id, message: String(e && e.message) }, 'system');
+      continue;
     }
+    if (!hit) continue;
+    const res = progressObjective(world, o.id, delta);
+    if (res.ok) progressed++;
+    if (o.status === 'completed') grantObjectiveRewards(world, o);
   }
-  if (crisis.warId && world.entities.wars[crisis.warId]) {
-    world.entities.wars[crisis.warId].status = 'ended';
-  }
-  world.narrative.arcs.arc_crisis ||= { stage: 0, vars: {} };
-  world.narrative.arcs.arc_crisis.resolved = outcome;
-  emit(world, 'CrisisEnded', { crisisId: crisis.id, outcome }, 'crisis');
-  chronicle(world, 'crisis', outcome === 'contained'
-    ? `${crisis.nameZh}被联合力量封锁压制`
-    : `${crisis.nameZh}演变为银河灾难`, { crisisId: crisis.id });
+  return progressed;
 }
 
-Object.assign(__exports, { CRISIS_DEFS, registerCrisis, playerContribute });
+/** 目标奖励入账（rewards: [{resId, amount}] → factionId 账本；审计 reason=objectiveReward） */
+function grantObjectiveRewards(world, o) {
+  const rewards = Array.isArray(o.rewards) ? o.rewards : [];
+  if (!rewards.length || !o.factionId) return;
+  const paid = [];
+  for (const r of rewards) {
+    if (!r || !r.resId || !(r.amount > 0)) continue;
+    credit(world, o.factionId, r.resId, r.amount, 'objectiveReward', o.id);
+    paid.push({ resId: r.resId, amount: r.amount });
+  }
+  if (paid.length) {
+    emit(world, 'ObjectiveRewarded', { objectiveId: o.id, factionId: o.factionId, rewards: paid }, 'world');
+  }
+}
+
+/**
+ * 每日清扫：过期目标迁移状态并一次性应用罚则。
+ * 返回本次过期的目标数（供 DailySystems 统计）。
+ */
+function dailyObjectiveSweep(world) {
+  world.entities.objectives ||= {};
+  world.narrative.flags ||= {};
+  let expired = 0;
+  for (const o of listEntities(world, 'objectives')) {
+    if (o.status !== 'active') continue;
+    if (world.tick <= o.deadlineTick) continue;
+    o.status = 'expired';
+    o.expiredTick = world.tick;
+    expired++;
+    const pen = o.penalty;
+    if (pen && pen.credits > 0 && o.factionId) {
+      // 信用点不足时挂债标记（不产生负库存，ECON-02）
+      const paid = debit(world, o.factionId, 'credits', pen.credits, 'objectiveExpired', o.id);
+      if (!paid) world.narrative.flags[`${o.id}:creditDebt`] = true;
+    }
+    if (pen && pen.flag) {
+      world.narrative.flags[pen.flag] = world.tick;
+    }
+    emit(world, 'ObjectiveExpired', {
+      objectiveId: o.id,
+      sourceEventId: o.sourceEventId,
+      penaltyApplied: !!(pen && (pen.credits > 0 || pen.flag)),
+    }, 'world');
+  }
+  return expired;
+}
+
+/** 兼容别名（doc5 用语：过期清扫） */
+const expireObjectives = dailyObjectiveSweep;
+
+/**
+ * 目标 → 舰队派遣桥接（EVT-02）：与 OrderFleetMove 命令共用同一域路径
+ * （planRoute 只读预检 → beginPlannedTransit）。失败不触碰任何状态。
+ */
+function dispatchObjectiveFleet(world, objectiveId, fleetId) {
+  const o = getEntity(world, 'objectives', objectiveId);
+  if (!o) return { ok: false, reason: '任务目标不存在' };
+  if (o.status !== 'active') return { ok: false, reason: '任务目标已结束' };
+  const fleet = getEntity(world, 'fleets', fleetId);
+  if (!fleet) return { ok: false, reason: '舰队不存在' };
+  if (!(fleet.shipIds || []).length) return { ok: false, reason: '舰队没有舰船' };
+  const res = orderMove(world, fleet, o.targetSystemId);
+  if (!res.ok) return res;
+  o.assignedFleetId = fleet.id;
+  emit(world, 'ObjectiveFleetDispatched', {
+    objectiveId: o.id,
+    fleetId: fleet.id,
+    targetSystemId: o.targetSystemId,
+    eta: res.eta ?? null,
+  }, 'world');
+  return { ok: true, eta: res.eta ?? null };
+}
+
+/**
+ * 离屏方向箭头数学（纯函数，供渲染层与单测共用）。
+ * @param {number} sx 目标投影屏幕 x
+ * @param {number} sy 目标投影屏幕 y
+ * @param {number} w 视口逻辑宽
+ * @param {number} h 视口逻辑高
+ * @returns {{onScreen:true} | {onScreen:false, x:number, y:number, angle:number, padX:number, padY:number}}
+ */
+function computeOffscreenArrow(sx, sy, w, h) {
+  const cx = w / 2;
+  const cy = h / 2;
+  const padX = Math.max(80, cx - 84); // 避开左侧导航栏
+  const padY = Math.max(60, cy - 64);
+  const dx = sx - cx;
+  const dy = sy - cy;
+  if (Math.abs(dx) <= padX && Math.abs(dy) <= padY) return { onScreen: true };
+  const adx = Math.abs(dx);
+  const ady = Math.abs(dy);
+  const tx = adx > 1e-9 ? padX / adx : Infinity;
+  const ty = ady > 1e-9 ? padY / ady : Infinity;
+  const t = Math.min(tx, ty);
+  return {
+    onScreen: false,
+    x: cx + dx * t,
+    y: cy + dy * t,
+    angle: Math.atan2(dy, dx),
+    padX,
+    padY,
+  };
+}
+
+/** 活跃目标列表（快照/渲染用，确定性序） */
+function activeObjectives(world) {
+  return listEntities(world, 'objectives').filter((o) => o.status === 'active');
+}
+
+Object.assign(__exports, { OBJECTIVE_KINDS, DEFAULT_DURATION_HOURS, createWorldObjective, progressObjective, completeObjective, checkAndProgressObjectives, dailyObjectiveSweep, expireObjectives, dispatchObjectiveFleet, computeOffscreenArrow, activeObjectives });
+
+});
+__register("src/domain/fleets/fleet.js", function (__exports, __require) {
+/**
+ * domain/fleets/fleet.js — 舰队编组与命令（任务书 4.9）
+ */
+
+const { createEntity: createEntity } = __require("src/domain/entities/registry.js");
+const { emit: emit } = __require("src/core/eventBus.js");
+const { createShip: createShip, computeShipStats: computeShipStats } = __require("src/domain/ships/ship.js");
+const { hullDef: hullDef } = __require("src/domain/ships/ship.js");
+const { beginPlannedTransit: beginPlannedTransit, planRoute: planRoute, fleetFuelTotal: fleetFuelTotal } = __require("src/domain/fleets/navigation.js");
+const { getMod: getMod } = __require("src/domain/factions/modifiers.js");
+
+/**
+ * 文明修正表（TD3：combat特质断链清偿）—— computeShipStats 消费的全部乘数键。
+ * 统一经 getMod 聚合（特质 × 科技 × 政策），开局投放与船坞生产共用同一口径。
+ */
+function factionShipMods(world, factionId) {
+  return {
+    strategicSpeed: getMod(world, factionId, 'strategicSpeed', 'mult'),
+    fuelEfficiency: getMod(world, factionId, 'fuelEfficiency', 'mult'),
+    sensorStrength: getMod(world, factionId, 'sensorStrength', 'mult'),
+    ewarStrength: getMod(world, factionId, 'ewarStrength', 'mult'),
+    weaponDamage: getMod(world, factionId, 'weaponDamage', 'mult'),
+    maxShield: getMod(world, factionId, 'maxShield', 'mult'),
+    shieldRegen: getMod(world, factionId, 'shieldRegen', 'mult'),
+    armor: getMod(world, factionId, 'armor', 'mult'),
+  };
+}
+
+/** 创建舰队（ships: [{hullId, moduleIds, name?}] 或直接给 shipIds） */
+function createFleet(world, opts) {
+  const fleet = createEntity(world, 'fleets', {
+    factionId: opts.factionId,
+    name: opts.name || `第 ${1 + Object.keys(world.entities.fleets).length} 分舰队`,
+    shipIds: [],
+    systemId: opts.systemId || null,
+    stance: opts.stance || 'hold', // hold|patrol|aggressive|escort
+    status: 'idle',
+    orders: null,
+    transit: null,
+    commanderId: opts.commanderId || null,
+    supplyDays: opts.supplyDays ?? 60,
+    morale: 70,
+    role: opts.role || 'combat', // combat|science|mining|trade|colony
+  });
+  for (const spec of opts.ships || []) {
+    const ship = createShip(world, {
+      factionId: opts.factionId,
+      hullId: spec.hullId,
+      moduleIds: spec.moduleIds || [],
+      name: spec.name,
+      fleetId: fleet.id,
+      systemId: opts.systemId,
+      cargo: spec.cargo,
+      fuel: spec.fuel,
+      factionMods: factionShipMods(world, opts.factionId), // TD3：文明战斗特质汇入 computeShipStats
+    });
+    fleet.shipIds.push(ship.id);
+  }
+  emit(world, 'FleetFormed', { fleetId: fleet.id, factionId: fleet.factionId, ships: fleet.shipIds.length }, 'fleet');
+  return fleet;
+}
+
+/** 向舰队追加舰船 */
+function addShipToFleet(world, fleet, shipId) {
+  const ship = world.entities.ships[shipId];
+  if (!ship || ship.status !== 'active') return false;
+  if (ship.fleetId && ship.fleetId !== fleet.id) {
+    const old = world.entities.fleets[ship.fleetId];
+    if (old) old.shipIds = old.shipIds.filter((id) => id !== shipId);
+  }
+  ship.fleetId = fleet.id;
+  if (!fleet.shipIds.includes(shipId)) fleet.shipIds.push(shipId);
+  return true;
+}
+
+/** 从舰队移除舰船（不销毁） */
+function removeShipFromFleet(world, fleet, shipId) {
+  fleet.shipIds = fleet.shipIds.filter((id) => id !== shipId);
+  const ship = world.entities.ships[shipId];
+  if (ship) ship.fleetId = null;
+  if (fleet.shipIds.length === 0) {
+    fleet.status = 'dissolved';
+    emit(world, 'FleetDissolved', { fleetId: fleet.id }, 'fleet');
+  }
+}
+
+/** 舰队移动（planRoute 只读预检 → beginPlannedTransit；失败不触碰状态） */
+function orderMove(world, fleet, targetSystemId) {
+  const plan = planRoute(world, fleet, targetSystemId);
+  if (!plan.ok) return plan;
+  const res = beginPlannedTransit(world, fleet, plan);
+  emit(world, 'FleetDeparted', { fleetId: fleet.id, from: plan.route.path[0], to: targetSystemId, eta: res.eta }, 'fleet');
+  return res;
+}
+
+Object.assign(__exports, { factionShipMods, createFleet, addShipToFleet, removeShipFromFleet, orderMove });
 
 });
 __register("src/domain/factions/modifiers.js", function (__exports, __require) {
@@ -9848,105 +9838,6 @@ const DIFFICULTY = {
 Object.assign(__exports, { BAL, RESOURCE_CATEGORIES, DIFFICULTY });
 
 });
-__register("src/domain/fleets/fleet.js", function (__exports, __require) {
-/**
- * domain/fleets/fleet.js — 舰队编组与命令（任务书 4.9）
- */
-
-const { createEntity: createEntity } = __require("src/domain/entities/registry.js");
-const { emit: emit } = __require("src/core/eventBus.js");
-const { createShip: createShip, computeShipStats: computeShipStats } = __require("src/domain/ships/ship.js");
-const { hullDef: hullDef } = __require("src/domain/ships/ship.js");
-const { beginPlannedTransit: beginPlannedTransit, planRoute: planRoute, fleetFuelTotal: fleetFuelTotal } = __require("src/domain/fleets/navigation.js");
-const { getMod: getMod } = __require("src/domain/factions/modifiers.js");
-
-/**
- * 文明修正表（TD3：combat特质断链清偿）—— computeShipStats 消费的全部乘数键。
- * 统一经 getMod 聚合（特质 × 科技 × 政策），开局投放与船坞生产共用同一口径。
- */
-function factionShipMods(world, factionId) {
-  return {
-    strategicSpeed: getMod(world, factionId, 'strategicSpeed', 'mult'),
-    fuelEfficiency: getMod(world, factionId, 'fuelEfficiency', 'mult'),
-    sensorStrength: getMod(world, factionId, 'sensorStrength', 'mult'),
-    ewarStrength: getMod(world, factionId, 'ewarStrength', 'mult'),
-    weaponDamage: getMod(world, factionId, 'weaponDamage', 'mult'),
-    maxShield: getMod(world, factionId, 'maxShield', 'mult'),
-    shieldRegen: getMod(world, factionId, 'shieldRegen', 'mult'),
-    armor: getMod(world, factionId, 'armor', 'mult'),
-  };
-}
-
-/** 创建舰队（ships: [{hullId, moduleIds, name?}] 或直接给 shipIds） */
-function createFleet(world, opts) {
-  const fleet = createEntity(world, 'fleets', {
-    factionId: opts.factionId,
-    name: opts.name || `第 ${1 + Object.keys(world.entities.fleets).length} 分舰队`,
-    shipIds: [],
-    systemId: opts.systemId || null,
-    stance: opts.stance || 'hold', // hold|patrol|aggressive|escort
-    status: 'idle',
-    orders: null,
-    transit: null,
-    commanderId: opts.commanderId || null,
-    supplyDays: opts.supplyDays ?? 60,
-    morale: 70,
-    role: opts.role || 'combat', // combat|science|mining|trade|colony
-  });
-  for (const spec of opts.ships || []) {
-    const ship = createShip(world, {
-      factionId: opts.factionId,
-      hullId: spec.hullId,
-      moduleIds: spec.moduleIds || [],
-      name: spec.name,
-      fleetId: fleet.id,
-      systemId: opts.systemId,
-      cargo: spec.cargo,
-      fuel: spec.fuel,
-      factionMods: factionShipMods(world, opts.factionId), // TD3：文明战斗特质汇入 computeShipStats
-    });
-    fleet.shipIds.push(ship.id);
-  }
-  emit(world, 'FleetFormed', { fleetId: fleet.id, factionId: fleet.factionId, ships: fleet.shipIds.length }, 'fleet');
-  return fleet;
-}
-
-/** 向舰队追加舰船 */
-function addShipToFleet(world, fleet, shipId) {
-  const ship = world.entities.ships[shipId];
-  if (!ship || ship.status !== 'active') return false;
-  if (ship.fleetId && ship.fleetId !== fleet.id) {
-    const old = world.entities.fleets[ship.fleetId];
-    if (old) old.shipIds = old.shipIds.filter((id) => id !== shipId);
-  }
-  ship.fleetId = fleet.id;
-  if (!fleet.shipIds.includes(shipId)) fleet.shipIds.push(shipId);
-  return true;
-}
-
-/** 从舰队移除舰船（不销毁） */
-function removeShipFromFleet(world, fleet, shipId) {
-  fleet.shipIds = fleet.shipIds.filter((id) => id !== shipId);
-  const ship = world.entities.ships[shipId];
-  if (ship) ship.fleetId = null;
-  if (fleet.shipIds.length === 0) {
-    fleet.status = 'dissolved';
-    emit(world, 'FleetDissolved', { fleetId: fleet.id }, 'fleet');
-  }
-}
-
-/** 舰队移动（planRoute 只读预检 → beginPlannedTransit；失败不触碰状态） */
-function orderMove(world, fleet, targetSystemId) {
-  const plan = planRoute(world, fleet, targetSystemId);
-  if (!plan.ok) return plan;
-  const res = beginPlannedTransit(world, fleet, plan);
-  emit(world, 'FleetDeparted', { fleetId: fleet.id, from: plan.route.path[0], to: targetSystemId, eta: res.eta }, 'fleet');
-  return res;
-}
-
-Object.assign(__exports, { factionShipMods, createFleet, addShipToFleet, removeShipFromFleet, orderMove });
-
-});
 __register("src/domain/fleets/navigation.js", function (__exports, __require) {
 /**
  * domain/fleets/navigation.js — 舰队战略航行（任务书 3.3 / 4.9 / FLEET-01/02）
@@ -9962,6 +9853,7 @@ const { emit: emit } = __require("src/core/eventBus.js");
 const { getEntity: getEntity } = __require("src/domain/entities/registry.js");
 const { shortestPath: shortestPath } = __require("src/core/spatial.js");
 const { observeForeignSystem: observeForeignSystem } = __require("src/domain/exploration/scan.js");
+const { checkAndProgressObjectives: checkAndProgressObjectives } = __require("src/domain/events/objectives.js");
 
 /** 计算一段航路的小时数 */
 function laneHours(world, fleet, fromSystem, toSystem) {
@@ -10046,6 +9938,9 @@ function advanceFleets(world) {
         fleet.status = 'idle';
         fleet.orders = null;
         emit(world, 'FleetArrived', { fleetId: fid, systemId: arriveId }, 'fleet');
+        // WP-6：抵达即推进护航/巡逻类空间目标（escort_lane 锚定目标星系，按舰队归属匹配）
+        checkAndProgressObjectives(world, (o) =>
+          o.kind === 'escort_lane' && o.factionId === fleet.factionId && o.targetSystemId === arriveId);
       } else {
         t.legEta = t.legs[t.legIndex].eta;
       }
@@ -10254,6 +10149,7 @@ const { ANOMALY_TEMPLATES: ANOMALY_TEMPLATES } = __require("src/content/anomalie
 const { createEntity: createEntity, getEntity: getEntity } = __require("src/domain/entities/registry.js");
 const { getMod: getMod } = __require("src/domain/factions/modifiers.js");
 const { getRelation: getRelation } = __require("src/domain/diplomacy/war.js");
+const { checkAndProgressObjectives: checkAndProgressObjectives } = __require("src/domain/events/objectives.js");
 
 /** 分层阈值（扫描点） */
 const LEVEL_THRESHOLDS = [0, 14, 36, 72, 120];
@@ -10361,6 +10257,9 @@ function revealSurveyLevel(world, sys, factionId, newLevel) {
       }
       emit(world, 'SystemSurveyed', { systemId: sys.id, factionId, researchData: data }, 'exploration');
     }
+    // WP-6：调查层级升满推进空间目标（investigate_system 锚定目标星系，调查完成即溯源达成）
+    checkAndProgressObjectives(world, (o) =>
+      o.kind === 'investigate_system' && o.factionId === factionId && o.targetSystemId === sys.id);
     if (fleetId) {
       const fleet = world.entities.fleets[fleetId];
       if (fleet && fleet.orders?.kind === 'scan' && fleet.orders.targetSystemId === sys.id) {
@@ -10952,6 +10851,230 @@ const ANOMALY_TEMPLATES = [
 ];
 
 Object.assign(__exports, { ANOMALY_TEMPLATES });
+
+});
+__register("src/domain/economy/ledger.js", function (__exports, __require) {
+/**
+ * domain/economy/ledger.js — 统一经济账本（任务书 4.4 / ECON-01/02）
+ *
+ * 账本等式：S_{t+1} = S_t + P + I + L - C - E - D
+ * （生产/进口/战利品转入；消耗/出口/损耗转出）
+ * 每笔流量必须带 reason 与 sourceId，可审计追溯。
+ * 库存使用安全整数；严禁负库存（违者抛出 —— RISK-15）。
+ */
+
+const { emit: emit } = __require("src/core/eventBus.js");
+const { safeInt: safeInt } = __require("src/core/math.js");
+
+/** 流量类别（写入 daily 流水的键） */
+const FLOW = {
+  PRODUCE: 'produced',
+  CONSUME: 'consumed',
+  IMPORT: 'imported',
+  EXPORT: 'exported',
+  LOOT: 'loot',
+  DECAY: 'decay',
+  TRANSFER: 'transfer', // 阵营/殖民地间划拨
+  TAX: 'tax',
+};
+
+/** 确保阵营账本存在 */
+function ensureLedger(world, factionId) {
+  let led = world.economy.ledgers[factionId];
+  if (!led) {
+    led = { balances: {} };
+    world.economy.ledgers[factionId] = led;
+  }
+  if (!world.economy.daily[factionId]) world.economy.daily[factionId] = {};
+  return led;
+}
+
+function ensureDaily(world, factionId, resId) {
+  const d = world.economy.daily[factionId];
+  if (!d[resId]) d[resId] = { produced: 0, consumed: 0, imported: 0, exported: 0, loot: 0, decay: 0, transfer: 0, tax: 0 };
+  return d[resId];
+}
+
+/** 读取余额 */
+function balance(world, factionId, resId) {
+  return world.economy.ledgers[factionId]?.balances[resId] ?? 0;
+}
+
+/** 记一笔流水（内部） */
+function record(world, factionId, resId, flow, delta, reason, sourceId) {
+  ensureDaily(world, factionId, resId)[flow] += delta;
+  world.economy.transactions.push({
+    tick: world.tick,
+    factionId,
+    resId,
+    flow,
+    delta,
+    reason: reason || '',
+    sourceId: sourceId || null,
+  });
+  const cap = 400;
+  if (world.economy.transactions.length > cap) {
+    world.economy.transactions.splice(0, world.economy.transactions.length - cap);
+  }
+}
+
+/** 入账：增加库存 */
+function credit(world, factionId, resId, amount, reason, sourceId, flow = FLOW.PRODUCE) {
+  const amt = safeInt(amount, 0);
+  if (amt <= 0) return;
+  const led = ensureLedger(world, factionId);
+  led.balances[resId] = (led.balances[resId] ?? 0) + amt;
+  record(world, factionId, resId, flow, amt, reason, sourceId);
+}
+
+/** 出账：减少库存。不足时整体失败（返回 false），绝不产生负库存（ECON-02） */
+function debit(world, factionId, resId, amount, reason, sourceId, flow = FLOW.CONSUME) {
+  const amt = safeInt(amount, 0);
+  if (amt <= 0) return true;
+  const led = ensureLedger(world, factionId);
+  const cur = led.balances[resId] ?? 0;
+  if (cur < amt) return false;
+  led.balances[resId] = cur - amt;
+  record(world, factionId, resId, flow, -amt, reason, sourceId);
+  return true;
+}
+
+/** 批量出账：全部满足才扣（命令事务的原子支付原语） */
+function canAfford(world, factionId, costs) {
+  for (const resId of Object.keys(costs)) {
+    if (balance(world, factionId, resId) < costs[resId]) return false;
+  }
+  return true;
+}
+
+function pay(world, factionId, costs, reason, sourceId) {
+  if (!canAfford(world, factionId, costs)) return false;
+  for (const resId of Object.keys(costs)) {
+    debit(world, factionId, resId, costs[resId], reason, sourceId, FLOW.CONSUME);
+  }
+  return true;
+}
+
+function refund(world, factionId, costs, reason, sourceId) {
+  for (const resId of Object.keys(costs)) {
+    credit(world, factionId, resId, costs[resId], reason, sourceId, FLOW.TRANSFER);
+  }
+}
+
+/** 阵营→阵营转移（贸易、赔款、礼物；双向记账） */
+function transferBetween(world, fromFaction, toFaction, resId, amount, reason) {
+  if (!debit(world, fromFaction, resId, amount, reason, toFaction, FLOW.EXPORT)) return false;
+  credit(world, toFaction, resId, amount, reason, fromFaction, FLOW.IMPORT);
+  return true;
+}
+
+/** 日结：汇总当日流量、重置日累计（由 DailySystems 调用） */
+function closeDailyLedgers(world) {
+  const out = {};
+  for (const fid of Object.keys(world.economy.daily).sort()) {
+    out[fid] = world.economy.daily[fid];
+    world.economy.daily[fid] = {};
+  }
+  return out; // 上一日流水（市场/统计可用）
+}
+
+/** 账本守恒校验（ECON-01：期末库存与流量等式一致） */
+function verifyLedgerConsistency(world, factionId, openingBalances, dayFlow) {
+  const problems = [];
+  const resIds = new Set([
+    ...Object.keys(openingBalances || {}),
+    ...Object.keys(dayFlow || {}),
+    ...Object.keys(world.economy.ledgers[factionId]?.balances || {}),
+  ]);
+  for (const resId of resIds) {
+    const open = openingBalances?.[resId] ?? 0;
+    const f = dayFlow?.[resId] || {};
+    const expected = open +
+      (f.produced || 0) + (f.imported || 0) + (f.loot || 0) + (f.transfer || 0) + (f.tax || 0) -
+      ((f.consumed || 0) + (f.exported || 0) + (f.decay || 0));
+    const actual = world.economy.ledgers[factionId]?.balances[resId] ?? 0;
+    if (expected !== actual) {
+      problems.push(`${resId}: 账本不平 ${actual} ≠ 期望 ${expected}`);
+    }
+  }
+  return problems;
+}
+
+/** 资源损耗（decayRule，每日） */
+function applyDecay(world, factionId, resIds, decayRules) {
+  for (const resId of resIds) {
+    const rule = decayRules[resId];
+    if (!rule || rule.perDayPct <= 0) continue;
+    const cur = balance(world, factionId, resId);
+    if (cur <= 0) continue;
+    const loss = Math.max(0, Math.min(cur, Math.round(cur * rule.perDayPct / 100)));
+    if (loss > 0) {
+      debit(world, factionId, resId, loss, 'decay', null, FLOW.DECAY);
+    }
+  }
+}
+
+/** 税收（殖民地→阵营，源自殖民模块） */
+function collectTax(world, colony, amount, reason = 'tax') {
+  const ok = debitColony(world, colony, 'credits', amount, reason);
+  if (ok) credit(world, colony.factionId, 'credits', amount, reason, colony.id, FLOW.TAX);
+  return ok;
+}
+
+// —— 殖民地库存（行星级仓储，与阵营账本分离但可互转） ——
+
+function colonyStock(world, colony, resId) {
+  return colony.stockpile?.[resId] ?? 0;
+}
+
+function creditColony(world, colony, resId, amount, reason, sourceId) {
+  const amt = safeInt(amount, 0);
+  if (amt <= 0) return;
+  colony.stockpile ||= {};
+  colony.stockpile[resId] = (colony.stockpile[resId] ?? 0) + amt;
+  recordColony(world, colony, resId, FLOW.PRODUCE, amt, reason, sourceId);
+}
+
+function debitColony(world, colony, resId, amount, reason, sourceId) {
+  const amt = safeInt(amount, 0);
+  if (amt <= 0) return true;
+  const cur = colony.stockpile?.[resId] ?? 0;
+  if (cur < amt) return false;
+  colony.stockpile[resId] = cur - amt;
+  recordColony(world, colony, resId, FLOW.CONSUME, -amt, reason, sourceId);
+  return true;
+}
+
+function recordColony(world, colony, resId, flow, delta, reason, sourceId) {
+  colony.ledger ||= {};
+  colony.ledger[resId] ||= { produced: 0, consumed: 0, transfer: 0, exported: 0, imported: 0 };
+  const l = colony.ledger[resId];
+  if (flow === FLOW.PRODUCE) l.produced += delta;
+  else if (flow === FLOW.CONSUME) l.consumed += -delta;
+  else l.transfer += delta;
+  if (colony.ledgerTickCap === undefined) colony.ledgerTickCap = world.tick;
+  // 殖民地账本按日清理由 DailySystems 执行；这里只累加
+}
+
+/** 殖民地→阵营 上缴（ minerals 等；阵营库存 +，殖民地 -） */
+function colonyToFaction(world, colony, resId, amount, reason) {
+  if (!debitColony(world, colony, resId, amount, reason, colony.factionId)) return false;
+  credit(world, colony.factionId, resId, amount, reason, colony.id, FLOW.IMPORT);
+  return true;
+}
+
+function factionToColony(world, colony, resId, amount, reason) {
+  if (!debit(world, colony.factionId, resId, amount, reason, colony.id, FLOW.EXPORT)) return false;
+  creditColony(world, colony, resId, amount, reason, colony.factionId);
+  return true;
+}
+
+/** 短缺告警（COL-03：断供后果由殖民系统触发事件） */
+function shortageEvent(world, colony, resId) {
+  emit(world, 'ColonyShortage', { colonyId: colony.id, resId }, 'colony');
+}
+
+Object.assign(__exports, { FLOW, ensureLedger, balance, credit, debit, canAfford, pay, refund, transferBetween, closeDailyLedgers, verifyLedgerConsistency, applyDecay, collectTax, colonyStock, creditColony, debitColony, colonyToFaction, factionToColony, shortageEvent });
 
 });
 __register("src/core/spatial.js", function (__exports, __require) {
@@ -12174,6 +12297,259 @@ const HULLS = [
 Object.assign(__exports, { HULLS });
 
 });
+__register("src/domain/events/crisis.js", function (__exports, __require) {
+/**
+ * domain/events/crisis.js — 银河级危机（任务书 5.10 / CRISIS-01）
+ *
+ * 两套首发危机：机偶狂潮（失控自治机械群）与弦裂风暴（空间结构失稳）。
+ * 阶段机：休眠 → 预兆 → 爆发 → 扩张 → 应对 → 终结；阶段转换由可检查
+ * 条件驱动；进度可累积可消减；玩家缺席时 AI 仍自动应对（月度）。
+ */
+
+const { registerMonthly: registerMonthly } = __require("src/simulation/TickPipeline.js");
+const { emit: emit, chronicle: chronicle } = __require("src/core/eventBus.js");
+const { createEntity: createEntity } = __require("src/domain/entities/registry.js");
+const { RNG: RNG } = __require("src/core/rng.js");
+const { balance: balance, debit: debit, credit: credit } = __require("src/domain/economy/ledger.js");
+const { createFleet: createFleet } = __require("src/domain/fleets/fleet.js");
+const { difficultyParam: difficultyParam } = __require("src/domain/factions/modifiers.js");
+
+const CRISIS_DEFS = [
+  {
+    id: 'crisis_automata',
+    nameZh: '机偶狂潮',
+    descZh: '沉睡数个纪元的工业自治体突然重启，把一切有机文明视为「干扰源」。',
+    omenFlags: ['crisis_automata'],          // 异常调查 storyTag 可提前点亮预兆
+    startYear: 5,
+    progressPerMonth: 3.2,
+    suppressionPerContribution: 0.9,
+    outbreakThreshold: 40,
+    catastropheThreshold: 100,
+    containedThreshold: -40,                 // 压制到负值 → 封锁成功
+  },
+  {
+    id: 'crisis_rift',
+    nameZh: '弦裂风暴',
+    descZh: '空间结构在弦锚点阵列激活后开始连锁失稳，航道逐一崩解。',
+    omenFlags: ['chord_anchors_known', 'chord_anchors_sold'],
+    startYear: 6,
+    progressPerMonth: 2.8,
+    suppressionPerContribution: 1.1,
+    outbreakThreshold: 45,
+    catastropheThreshold: 100,
+    containedThreshold: -40,
+  },
+];
+
+/** 注册月度危机推进（由 MonthlySystems 在正确顺序显式调用） */
+function registerCrisis() {
+  registerMonthly('crisis', crisisMonthly);
+}
+
+function crisisMonthly(world) {
+  if (world.victory.ended && !world.narrative.flags.sandbox_continue) return;
+  const year = Math.floor(world.tick / 8640) + 1;
+  const speed = difficultyParam(world, 'crisisSpeedMult');
+
+  // 触发检查（一次只有一场活动危机）
+  const active = Object.values(world.entities.crises).find((c) => c.status === 'active');
+  if (!active) {
+    for (const def of CRISIS_DEFS) {
+      if (world.narrative.firedCrisis?.[def.id]) continue;
+      const omen = def.omenFlags.some((f) => world.narrative.flags[f]);
+      if (year >= def.startYear && (omen || year >= def.startYear + 3)) {
+        startCrisis(world, def);
+        break;
+      }
+    }
+    return;
+  }
+
+  // 阶段推进
+  const def = CRISIS_DEFS.find((d) => d.id === active.kind);
+  if (!def) return;
+  const aiSuppression = aiSuppressCrisis(world, active, def);
+
+  if (active.status === 'active') {
+    active.progress += def.progressPerMonth * speed - aiSuppression;
+    if (active.progress >= def.outbreakThreshold && active.phase === 'omens') {
+      setPhase(world, active, 'outbreak');
+    }
+    if (active.phase === 'outbreak' || active.phase === 'expansion') {
+      active.progress += def.progressPerMonth * 0.4 * speed;
+      crisisCombatPressure(world, active);
+      if (active.progress >= 70 && active.phase === 'outbreak') setPhase(world, active, 'expansion');
+    }
+    if (active.progress >= def.catastropheThreshold) {
+      endCrisis(world, active, 'catastrophe');
+    } else if (active.progress <= def.containedThreshold) {
+      endCrisis(world, active, 'contained');
+    }
+  }
+}
+
+function startCrisis(world, def) {
+  world.narrative.firedCrisis ||= {};
+  world.narrative.firedCrisis[def.id] = world.tick;
+  const crisis = createEntity(world, 'crises', {
+    kind: def.id,
+    nameZh: def.nameZh,
+    descZh: def.descZh,
+    phase: 'omens',
+    progress: 0,
+    status: 'active',
+    startedTick: world.tick,
+    contributed: {},
+    threatSystemIds: pickThreatSystems(world, 5),
+  });
+  emit(world, 'CrisisOmens', { crisisId: crisis.id, kind: def.id }, 'crisis');
+  chronicle(world, 'crisis', `预兆：${def.nameZh}的迹象开始出现`, { crisisId: crisis.id });
+  return crisis;
+}
+
+function pickThreatSystems(world, n) {
+  const owned = Object.values(world.entities.systems).filter((s) => s.ownerFactionId);
+  const picks = [];
+  const pool = [...owned];
+  for (let i = 0; i < n && pool.length > 0; i++) {
+    const idx = RNG.int(world, pool.length);
+    picks.push(pool[idx].id);
+    pool.splice(idx, 1);
+  }
+  return picks;
+}
+
+function setPhase(world, crisis, phase) {
+  crisis.phase = phase;
+  emit(world, 'CrisisPhase', { crisisId: crisis.id, phase }, 'crisis');
+  chronicle(world, 'crisis', `${crisis.nameZh}进入${phaseName(phase)}阶段`, { crisisId: crisis.id });
+}
+
+function phaseName(p) {
+  return { omens: '预兆', outbreak: '爆发', expansion: '扩张', response: '应对', resolved: '终结' }[p] || p;
+}
+
+/** 危机军事压力：爆发/扩张阶段生成敌对自治舰队 */
+function crisisCombatPressure(world, crisis) {
+  if (crisis.kind !== 'crisis_automata') return;
+  // 每月最多 1 支，且场上自治舰队 < 4
+  const existing = Object.values(world.entities.fleets).filter((f) => f.isCrisisFleet).length;
+  if (existing >= 4) return;
+  const systemId = crisis.threatSystemIds[RNG.int(world, crisis.threatSystemIds.length)];
+  if (!systemId) return;
+  const fleet = createFleet(world, {
+    factionId: crisis.factionId || (crisis.factionId = createCrisisFaction(world)),
+    systemId,
+    name: '失控自治集群',
+    role: 'combat',
+    stance: 'aggressive',
+    ships: [
+      { hullId: 'hull_destroyer', moduleIds: ['mod_kinetic_cannon', 'mod_reactor_fusion', 'mod_fusion_thruster', 'mod_armor_composite'], name: '收割体' },
+      { hullId: 'hull_frigate', moduleIds: ['mod_laser_array', 'mod_reactor_fission', 'mod_ion_thruster'], name: '蜂群单元' },
+    ],
+  });
+  fleet.isCrisisFleet = true;
+  // 对所有正式文明敌对
+  for (const fid of Object.keys(world.entities.factions)) {
+    const rel = world.relations.diplomacy[fid < 'fac_crisis' ? `${fid}|fac_crisis` : `fac_crisis|${fid}`];
+    if (rel) rel.warId = crisis.warId || (crisis.warId = `war_${++world.seq}`), rel.warId = crisis.warId;
+  }
+  world.entities.wars[crisis.warId] ||= {
+    id: crisis.warId,
+    type: 'war',
+    createdAtTick: world.tick,
+    attackers: ['fac_crisis'],
+    defenders: Object.keys(world.entities.factions).filter((f) => f !== 'fac_crisis'),
+    startTick: world.tick,
+    wargoals: ['exterminate'],
+    occupiedSystems: {},
+    exhaustion: {},
+    battles: 0,
+    status: 'active',
+    peaceOffers: [],
+  };
+  emit(world, 'CrisisFleetSpotted', { crisisId: crisis.id, systemId }, 'crisis');
+}
+
+let _crisisFactionMade = false;
+function createCrisisFaction(world) {
+  if (_crisisFactionMade && world.entities.factions['fac_crisis']) return 'fac_crisis';
+  createEntity(world, 'factions', {
+    id: 'fac_crisis',
+    name: '失控自治体',
+    traitId: 'crisis_automata',
+    personality: 'balanced',
+    color: '#e85f5f',
+    originType: 'automata',
+    isPlayer: false,
+  });
+  _crisisFactionMade = true;
+  return 'fac_crisis';
+}
+
+/** AI 自动应对：有能力的文明月度投入科研数据压制（玩家缺席时世界仍有响应） */
+function aiSuppressCrisis(world, crisis, def) {
+  let suppression = 0;
+  for (const fid of Object.keys(world.research).sort()) {
+    const fac = world.entities.factions[fid];
+    if (!fac || fac.isPlayer) continue;
+    const rd = balance(world, fid, 'researchData');
+    if (rd >= 20) {
+      debit(world, fid, 'researchData', 20, `crisisContribution:${crisis.id}`, crisis.id);
+      crisis.contributed[fid] = (crisis.contributed[fid] || 0) + 20;
+      suppression += def.suppressionPerContribution;
+    }
+  }
+  return suppression;
+}
+
+/** 玩家贡献（ContributeToCrisis 命令执行体） */
+function playerContribute(world, crisisId, amount) {
+  const crisis = world.entities.crises[crisisId];
+  if (!crisis || crisis.status !== 'active') return { ok: false, reason: '危机不存在或已结束' };
+  const pid = world.playerFactionId;
+  if (balance(world, pid, 'researchData') < amount) {
+    return { ok: false, reason: '科研数据不足' };
+  }
+  const def = CRISIS_DEFS.find((d) => d.id === crisis.kind);
+  debit(world, pid, 'researchData', amount, `crisisContribution:${crisisId}`, crisisId);
+  crisis.contributed[pid] = (crisis.contributed[pid] || 0) + amount;
+  crisis.progress -= amount * 0.05 * (def?.suppressionPerContribution || 1);
+  emit(world, 'CrisisContribution', { crisisId, factionId: pid, amount }, 'crisis');
+  return { ok: true };
+}
+
+function endCrisis(world, crisis, outcome) {
+  crisis.status = 'resolved';
+  crisis.outcome = outcome;
+  crisis.endedTick = world.tick;
+  crisis.phase = 'resolved';
+  // 清理敌对舰队与战争
+  for (const fid of Object.keys(world.entities.fleets)) {
+    const f = world.entities.fleets[fid];
+    if (f.isCrisisFleet) {
+      for (const sid of f.shipIds.slice()) {
+        const ship = world.entities.ships[sid];
+        if (ship) ship.status = 'destroyed';
+      }
+      f.shipIds = [];
+      f.status = 'dissolved';
+    }
+  }
+  if (crisis.warId && world.entities.wars[crisis.warId]) {
+    world.entities.wars[crisis.warId].status = 'ended';
+  }
+  world.narrative.arcs.arc_crisis ||= { stage: 0, vars: {} };
+  world.narrative.arcs.arc_crisis.resolved = outcome;
+  emit(world, 'CrisisEnded', { crisisId: crisis.id, outcome }, 'crisis');
+  chronicle(world, 'crisis', outcome === 'contained'
+    ? `${crisis.nameZh}被联合力量封锁压制`
+    : `${crisis.nameZh}演变为银河灾难`, { crisisId: crisis.id });
+}
+
+Object.assign(__exports, { CRISIS_DEFS, registerCrisis, playerContribute });
+
+});
 __register("src/simulation/TickPipeline.js", function (__exports, __require) {
 /**
  * simulation/TickPipeline.js — 领域更新阶段注册与执行（任务书 4.10）
@@ -12470,6 +12846,7 @@ const { BUILDINGS: BUILDINGS } = __require("src/content/buildings.js");
 const { getMod: getMod } = __require("src/domain/factions/modifiers.js");
 const { pay: pay } = __require("src/domain/economy/ledger.js");
 const { colonyStock: colonyStock, creditColony: creditColony, debitColony: debitColony, credit: credit, debit: debit } = __require("src/domain/economy/ledger.js");
+const { checkAndProgressObjectives: checkAndProgressObjectives } = __require("src/domain/events/objectives.js");
 
 /** 原料类资源存于殖民地仓储；精炼品/战略资源存于阵营账本 */
 const RAW_RESOURCES = new Set([
@@ -12645,6 +13022,10 @@ function foundColony(world, planetId, factionId, initialPop = 6, isOutpost = fal
   const sys = world.entities.systems[planet.systemId];
   if (sys && !sys.ownerFactionId) sys.ownerFactionId = factionId;
   emit(world, 'ColonyFounded', { colonyId: colony.id, planetId, factionId, outpost: isOutpost }, 'colony');
+  // WP-6：殖民建立推进空间目标（目标星系殖民存在即视作调查星域锚定完成；
+  // WorldObjective 无 colonize 类，colonize 语义映射到 investigate_system）
+  checkAndProgressObjectives(world, (o) =>
+    o.kind === 'investigate_system' && o.factionId === factionId && o.targetSystemId === planet.systemId);
   return colony;
 }
 
@@ -13705,6 +14086,7 @@ const { getEntity: getEntity } = __require("src/domain/entities/registry.js");
 const { emit: emit } = __require("src/core/eventBus.js");
 const { credit: credit, creditColony: creditColony, debit: debit, balance: balance } = __require("src/domain/economy/ledger.js");
 const { createCharacter: createCharacter } = __require("src/domain/characters/crew.js");
+const { checkAndProgressObjectives: checkAndProgressObjectives } = __require("src/domain/events/objectives.js");
 
 /** 八类 POI 展示名（UI/日志用） */
 const POI_KIND_ZH = {
@@ -13981,6 +14363,11 @@ function harvestPlanetPoi(world, planetId, poiId, actorId) {
     scientistId,
   }, 'world');
 
+  // WP-6：POI 采样推进行星锚定空间目标（按 targetPlanetId 匹配：行星勘探/殖民地救援，
+  // 地表采样勘探即达成；rewardPaid 锁保证采样幂等，目标侧幂等由 status 迁移保证）
+  checkAndProgressObjectives(world, (o) =>
+    o.targetPlanetId === planetId && o.factionId === factionId);
+
   return { ok: true, rewards, scientistId };
 }
 
@@ -14001,194 +14388,6 @@ function attachPlanetPois(world, planet, star) {
 }
 
 Object.assign(__exports, { POI_KIND_ZH, CATEGORY_POI_POOLS, THEME_POI_POOLS, poiPoolForPlanet, generatePlanetPois, ensurePlanetPois, harvestPlanetPoi, unexploredPoiCount, attachPlanetPois });
-
-});
-__register("src/domain/events/objectives.js", function (__exports, __require) {
-/**
- * domain/events/objectives.js — 结构化空间任务目标实体（doc5 §3.6 / TASK-2.3 / EVT-01..02）
- *
- * WorldObjective 是持久化纯数据实体（world.entities.objectives，'obj' 前缀）：
- * B 类空间事件触发时绑定真实世界空间实体（目标星系/航路另一端/行星），
- * 银河图据此绘制 Pin / 离屏方向箭头 / 威胁航路虚线。
- *
- * 集成边界（与 TickPipeline/DailySystems 的接线归主工程）：
- *  - 本模块只导出纯领域函数，不自行注册每日/每小时钩子；
- *  - dailyObjectiveSweep(world) 供 DailySystems 每日调用（过期 + 一次性罚则）。
- *
- * 离屏数学（doc5:730-809）：目标星系投影 (sx,sy) 移出视口安全矩形时，
- *   θ = atan2(dy,dx)，padX = max(80, cx-84)（避开左侧导航栏），
- *   padY = max(60, cy-64)，t = min(padX/|dx|, padY/|dy|)，
- *   边缘点 = (cx,cy) + t×(dx,dy)。
- */
-
-const { createEntity: createEntity, getEntity: getEntity, listEntities: listEntities } = __require("src/domain/entities/registry.js");
-const { emit: emit } = __require("src/core/eventBus.js");
-const { debit: debit } = __require("src/domain/economy/ledger.js");
-const { orderMove: orderMove } = __require("src/domain/fleets/fleet.js");
-
-/** 目标种类（doc5 §3.6） */
-const OBJECTIVE_KINDS = ['escort_lane', 'investigate_system', 'relief_colony', 'survey_planet'];
-
-/** 默认行动窗口：336 小时 = 14 天 */
-const DEFAULT_DURATION_HOURS = 336;
-
-/**
- * 创建空间任务目标。
- * targetSystemId 必须可解析为真实星系实体（绑定真实世界实体是本实体的存在意义），
- * 否则返回 null（调用方按「无有效空间锚点」静默跳过，不建空目标）。
- */
-function createWorldObjective(world, opts = {}) {
-  world.entities.objectives ||= {};
-  const kind = opts.kind;
-  if (!OBJECTIVE_KINDS.includes(kind)) return null;
-  const targetSystemId = opts.targetSystemId;
-  if (!targetSystemId || !world.entities.systems[targetSystemId]) return null;
-  const durationHours = Number.isFinite(opts.durationHours) && opts.durationHours > 0
-    ? Math.round(opts.durationHours)
-    : DEFAULT_DURATION_HOURS;
-  const o = createEntity(world, 'objectives', {
-    factionId: opts.factionId || world.playerFactionId,
-    status: 'active', // active | completed | expired
-    kind,
-    titleZh: opts.titleZh || '空间任务目标',
-    descZh: opts.descZh || '',
-    sourceEventId: opts.sourceEventId || null,
-    targetSystemId,
-    secondarySystemId: opts.secondarySystemId || null,
-    targetPlanetId: opts.targetPlanetId || null,
-    priority: opts.priority || 'high',          // high | normal
-    createdTick: world.tick,
-    deadlineTick: world.tick + durationHours,
-    assignedFleetId: null,
-    progress: 0,
-    goalProgress: 100,
-    rewards: opts.rewards || [],
-    penalty: opts.penalty || null,              // { credits: n } | { flag: 'key' }
-  });
-  emit(world, 'ObjectiveCreated', {
-    objectiveId: o.id,
-    targetSystemId: o.targetSystemId,
-    kind: o.kind,
-    sourceEventId: o.sourceEventId,
-  }, 'world');
-  return o;
-}
-
-/** 目标进度推进（到达/调查/护航完成等系统调用；满格自动完成） */
-function progressObjective(world, objectiveId, delta) {
-  const o = getEntity(world, 'objectives', objectiveId);
-  if (!o || o.status !== 'active') return { ok: false, reason: '目标不存在或已结束' };
-  o.progress = Math.max(0, Math.min(o.goalProgress, (o.progress || 0) + delta));
-  if (o.progress >= o.goalProgress) return completeObjective(world, objectiveId);
-  return { ok: true, progress: o.progress };
-}
-
-/** 完成目标（发放 rewards 资源表由调用方/主工程按奖励语义执行，这里只迁移状态） */
-function completeObjective(world, objectiveId) {
-  const o = getEntity(world, 'objectives', objectiveId);
-  if (!o || o.status !== 'active') return { ok: false, reason: '目标不存在或已结束' };
-  o.status = 'completed';
-  o.progress = o.goalProgress;
-  o.completedTick = world.tick;
-  emit(world, 'ObjectiveCompleted', { objectiveId: o.id, sourceEventId: o.sourceEventId }, 'world');
-  return { ok: true };
-}
-
-/**
- * 每日清扫：过期目标迁移状态并一次性应用罚则。
- * 返回本次过期的目标数（供 DailySystems 统计）。
- */
-function dailyObjectiveSweep(world) {
-  world.entities.objectives ||= {};
-  world.narrative.flags ||= {};
-  let expired = 0;
-  for (const o of listEntities(world, 'objectives')) {
-    if (o.status !== 'active') continue;
-    if (world.tick <= o.deadlineTick) continue;
-    o.status = 'expired';
-    o.expiredTick = world.tick;
-    expired++;
-    const pen = o.penalty;
-    if (pen && pen.credits > 0 && o.factionId) {
-      // 信用点不足时挂债标记（不产生负库存，ECON-02）
-      const paid = debit(world, o.factionId, 'credits', pen.credits, 'objectiveExpired', o.id);
-      if (!paid) world.narrative.flags[`${o.id}:creditDebt`] = true;
-    }
-    if (pen && pen.flag) {
-      world.narrative.flags[pen.flag] = world.tick;
-    }
-    emit(world, 'ObjectiveExpired', {
-      objectiveId: o.id,
-      sourceEventId: o.sourceEventId,
-      penaltyApplied: !!(pen && (pen.credits > 0 || pen.flag)),
-    }, 'world');
-  }
-  return expired;
-}
-
-/** 兼容别名（doc5 用语：过期清扫） */
-const expireObjectives = dailyObjectiveSweep;
-
-/**
- * 目标 → 舰队派遣桥接（EVT-02）：与 OrderFleetMove 命令共用同一域路径
- * （planRoute 只读预检 → beginPlannedTransit）。失败不触碰任何状态。
- */
-function dispatchObjectiveFleet(world, objectiveId, fleetId) {
-  const o = getEntity(world, 'objectives', objectiveId);
-  if (!o) return { ok: false, reason: '任务目标不存在' };
-  if (o.status !== 'active') return { ok: false, reason: '任务目标已结束' };
-  const fleet = getEntity(world, 'fleets', fleetId);
-  if (!fleet) return { ok: false, reason: '舰队不存在' };
-  if (!(fleet.shipIds || []).length) return { ok: false, reason: '舰队没有舰船' };
-  const res = orderMove(world, fleet, o.targetSystemId);
-  if (!res.ok) return res;
-  o.assignedFleetId = fleet.id;
-  emit(world, 'ObjectiveFleetDispatched', {
-    objectiveId: o.id,
-    fleetId: fleet.id,
-    targetSystemId: o.targetSystemId,
-    eta: res.eta ?? null,
-  }, 'world');
-  return { ok: true, eta: res.eta ?? null };
-}
-
-/**
- * 离屏方向箭头数学（纯函数，供渲染层与单测共用）。
- * @param {number} sx 目标投影屏幕 x
- * @param {number} sy 目标投影屏幕 y
- * @param {number} w 视口逻辑宽
- * @param {number} h 视口逻辑高
- * @returns {{onScreen:true} | {onScreen:false, x:number, y:number, angle:number, padX:number, padY:number}}
- */
-function computeOffscreenArrow(sx, sy, w, h) {
-  const cx = w / 2;
-  const cy = h / 2;
-  const padX = Math.max(80, cx - 84); // 避开左侧导航栏
-  const padY = Math.max(60, cy - 64);
-  const dx = sx - cx;
-  const dy = sy - cy;
-  if (Math.abs(dx) <= padX && Math.abs(dy) <= padY) return { onScreen: true };
-  const adx = Math.abs(dx);
-  const ady = Math.abs(dy);
-  const tx = adx > 1e-9 ? padX / adx : Infinity;
-  const ty = ady > 1e-9 ? padY / ady : Infinity;
-  const t = Math.min(tx, ty);
-  return {
-    onScreen: false,
-    x: cx + dx * t,
-    y: cy + dy * t,
-    angle: Math.atan2(dy, dx),
-    padX,
-    padY,
-  };
-}
-
-/** 活跃目标列表（快照/渲染用，确定性序） */
-function activeObjectives(world) {
-  return listEntities(world, 'objectives').filter((o) => o.status === 'active');
-}
-
-Object.assign(__exports, { OBJECTIVE_KINDS, DEFAULT_DURATION_HOURS, createWorldObjective, progressObjective, completeObjective, dailyObjectiveSweep, expireObjectives, dispatchObjectiveFleet, computeOffscreenArrow, activeObjectives });
 
 });
 __register("src/domain/events/narrative.js", function (__exports, __require) {
@@ -27429,16 +27628,16 @@ const { L: L } = __require("src/core/i18n.js");
 const { CanvasManager: CanvasManager } = __require("src/render/CanvasManager.js");
 const { PlanetSurface3D: PlanetSurface3D } = __require("src/render/gl/PlanetSurface3D.js");
 const { PlanetSurfaceScene: PlanetSurfaceScene } = __require("src/render/gl/PlanetSurfaceScene.js");
-const { buildThemePayload: buildThemePayload } = __require("src/render/gl/themePayload.js");
+const { buildThemePayload: buildThemePayload, EXPANSION_GAMEPLAY: EXPANSION_GAMEPLAY } = __require("src/render/gl/themePayload.js");
 const { mat4: mat4, mat4Perspective: mat4Perspective, mat4LookAt: mat4LookAt, mat4Multiply: mat4Multiply } = __require("src/render/gl/Mat4.js");
 const { buildBuildingMesh: buildBuildingMesh, buildUnitBox: buildUnitBox } = __require("src/render/meshes/GroundMeshes.js");
 const { buildLandmarkMesh: buildLandmarkMesh, LANDMARK_PREFAB_IDS: LANDMARK_PREFAB_IDS } = __require("src/render/meshes/landmarkMeshes.js");
 const { createSurfaceWorld: createSurfaceWorld, digVoxel: digVoxel, placeVoxel: placeVoxel, getVoxel: getVoxel, ddaRaycast: ddaRaycast, getSurfaceHeight: getSurfaceHeight, SURFACE_SIZE: SURFACE_SIZE, SURFACE_MAT: SURFACE_MAT } = __require("src/domain/ground/SurfaceSandbox.js");
-const { buildTerrainField: buildTerrainField } = __require("src/domain/ground/terrainField.js");
+const { buildTerrainField: buildTerrainField, TERRAIN_FLAGS: TERRAIN_FLAGS } = __require("src/domain/ground/terrainField.js");
 const { ensurePlanetPois: ensurePlanetPois, unexploredPoiCount: unexploredPoiCount } = __require("src/domain/ground/planetPOI.js");
 const { createTerrainEdits: createTerrainEdits, applyEdit: applyEdit, attachTerrainEdits: attachTerrainEdits, deserializeEdits: deserializeEdits, rebuildDirtyChunks: rebuildDirtyChunks, planColonyLayout: planColonyLayout } = __require("src/domain/ground/terrainEdits.js");
 const { sampleTerrain: sampleTerrain, raycastTerrain: raycastTerrain } = __require("src/domain/ground/surfaceQueries.js");
-const { createGroundMission: createGroundMission, stepMission: stepMission, getMissionView: getMissionView } = __require("src/domain/ground/GroundMission.js");
+const { createGroundMission: createGroundMission, stepMission: stepMission, getMissionView: getMissionView, MISSION_UNIT_SCALE: MISSION_UNIT_SCALE } = __require("src/domain/ground/GroundMission.js");
 const { getSiteInstance: getSiteInstance } = __require("src/domain/ground/missionSiteFactory.js");
 const { blueprintsForPlanet: blueprintsForPlanet } = __require("src/content/missionSites.js");
 const { creditColony: creditColony, debitColony: debitColony } = __require("src/domain/economy/ledger.js");
@@ -27583,10 +27782,15 @@ function computeSpringArm(o) {
 
 /** 采掘凹陷每击深度（米）：场域地形雕刻（TERRAIN-06 增量重建演示） */
 const DIG_DENT_DEPTH = 1.2;
-/** 场域行走坡度阻断阈值（Δh/Δx > 此值的陡壁不可步行） */
-const WALK_SLOPE_BLOCK = 1.6;
-/** 场域可行走范围（体素坐标；对应场域 [−256,+256] 边界内收 2m） */
+/**
+ * 场域可行走范围（世界坐标；WP-1 P0-C）：世界 = 场域 - FIELD_OFFSET（FIELD_OFFSET=-32
+ * → 世界 = 场域 + 32），场域 [-256,+256] 对应世界 [-224,+288]，内收 2m 保护带得
+ * [-222,+286] —— 西/北半场（旧 clamp 下限 2）与东/南半场全域四象限可达。
+ */
+const FIELD_WALK_MIN = -222;
 const FIELD_WALK_MAX = 286;
+/** 场域行走极限坡度正切（35°；Δh / 水平步长超过即陡壁物理阻断，P0-C 垂直断崖修复） */
+const FIELD_MAX_SLOPE_TAN = Math.tan((35 * Math.PI) / 180);
 
 /** 喷气背包（本地燃料池；任务模式的耐力由 domain 权威，视图不回写） */
 const JET_DRAIN = 22;
@@ -27780,6 +27984,7 @@ uniform vec3 uSunColor;
 uniform vec3 uCamPos;
 uniform vec3 uFogColor;
 uniform vec2 uFogRange;
+uniform float uHdr; /* WP-5 P1-F：RGBA8 模拟 HDR 预缩放（与 PlanetSurface3D.LIT_FS 同口径） */
 out vec4 fragColor;
 float hash31(vec3 p) {
   p = fract(p * 0.1031);
@@ -27807,7 +28012,7 @@ void main() {
            + baseAlbedo * vE * 1.35;
   col = mix(col, vec3(2.0, 2.0, 2.1), vF);
   float fog = smoothstep(uFogRange.x, uFogRange.y, distance(vW, uCamPos));
-  fragColor = vec4(mix(col, uFogColor, fog), 1.0);
+  fragColor = vec4(mix(col, uFogColor, fog) * uHdr, 1.0);
 }`;
 
 /**
@@ -27890,6 +28095,7 @@ class BuildingMeshBatch {
       uCamPos: gl.getUniformLocation(this.prog, 'uCamPos'),
       uFogColor: gl.getUniformLocation(this.prog, 'uFogColor'),
       uFogRange: gl.getUniformLocation(this.prog, 'uFogRange'),
+      uHdr: gl.getUniformLocation(this.prog, 'uHdr'),
     };
   }
 
@@ -27925,6 +28131,7 @@ class BuildingMeshBatch {
     gl.uniform3f(this._u.uCamPos, env.eye[0], env.eye[1], env.eye[2]);
     gl.uniform3fv(this._u.uFogColor, env.fogColor);
     gl.uniform2f(this._u.uFogRange, env.fogRange[0], env.fogRange[1]);
+    gl.uniform1f(this._u.uHdr, Number.isFinite(env.hdr) ? env.hdr : 1.0);
     gl.bindBuffer(gl.ARRAY_BUFFER, this._inst);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, arr.subarray(0, n * 8));
     gl.bindVertexArray(this.vao);
@@ -27976,6 +28183,8 @@ const GroundView = {
     this._fx = { slashes: [], beams: [], dig: [] };  // 瞬时视觉特效（每帧消费）
     this._strikeSeen = new Map();      // 单位打击拍检测（unitId → 上一帧 struck）
     this._buildMode = false;           // 技能 5：采掘/建造模式
+    this._shapeBrushOp = 'flatten';    // WP-4：工程刷子（F 键循环 flatten→smooth→lower）
+    this._selectedBuildDefId = null;   // WP-4：右键建造建筑型号（null = 默认采掘站）
     this._stanceIdx = 0;               // 技能 6：小队指令档位
     this._digCd = 0;
     this._placeCd = 0;
@@ -28309,6 +28518,19 @@ const GroundView = {
     // —— 人工任务核心蓝图实例化（doc7 TASK-2.2：SDF 三层关卡 + 首屏构图） ——
     const bp = blueprintsForPlanet(planet, planet.primaryThemeId || null)[0] || null;
     this._site = bp ? getSiteInstance(w, planet.id, bp.id) : null;
+    // —— WP-5 P1-G：扩展主题玩法规则接线（EXPANSION_GAMEPLAY，此前为孤岛死代码） ——
+    const themeId5 = planet.primaryThemeId || 'generic';
+    const gameplay5 = EXPANSION_GAMEPLAY[themeId5] || null;
+    this._expansion = gameplay5;
+    this._gravityScale = (gameplay5 && gameplay5.movementMod
+      && Number.isFinite(gameplay5.movementMod.gravityScale)) ? gameplay5.movementMod.gravityScale : 1.0;
+    this._windPush = (gameplay5 && gameplay5.movementMod
+      && Number.isFinite(gameplay5.movementMod.windPush)) ? gameplay5.movementMod.windPush : 0.0;
+    this._deckClamp = !!(gameplay5 && gameplay5.landingMode === 'atmospheric'); // 浮台甲板禁出
+    // —— WP-5 P1-F：biolume_canopy 荧光真菌脚步压感涟漪（8 槽环形缓冲驱动 uFootsteps） ——
+    this._footstepRing = new Float32Array(32);
+    this._footstepIdx = 0;
+    this._stepDist = 0;
     // —— 连续三角网格场域（doc7 §3；体素补丁仅作矿脉/结构数据底层，不再承担视觉） ——
     this.field = buildTerrainField(w, planet.id, {
       profile: this._site ? this._site.blueprint.terrainProfile : undefined,
@@ -28435,15 +28657,31 @@ const GroundView = {
         this.ps3d = new PlanetSurface3D(this.cm.glc, this.cm.tier);
         this.ps3d.init(this.sw);
         this.ps3d.setObjectOnly(true);            // 地形/天空权威移交 PlanetSurfaceScene
+        this.ps3d.hdrScale = this._hdrScaleOf();  // WP-5：RGBA8 模拟 HDR 预缩放对齐地形
         this.bmesh = new BuildingMeshBatch(this.cm.glc);
         // —— 主题载荷（doc7 TASK-3.1/3.2：planetThemes 九维色板 → 场景主题） ——
         //     对象/建筑 pass 与场景地形共用同一太阳/雾（THEME-02 一致性）。
         const gvPlanet = this.planet || {};
+        // WP-5 P1-F：permafrost_furnace 热源对位——中央供热塔取 primaryObjective
+        // 真实锚点（旧默认 (0,0) 着陆坪与 (0,-30) 地标错位），着陆坪追加 18m 保暖圈。
+        const heatOpts = { category: gvPlanet.category, fogRange: [90, 560] };
+        if (gvPlanet.primaryThemeId === 'permafrost_furnace'
+          && this._site && this._site.site && this._site.site.anchors) {
+          const pri = this._site.site.anchors.primaryObjective;
+          if (pri && Number.isFinite(pri.x) && Number.isFinite(pri.z)) {
+            heatOpts.heatZones = [
+              { x: pri.x, z: pri.z, radius: 45.0, intensity: 1.0 },   // 中央供热塔
+              { x: 0, z: 0, radius: 18.0, intensity: 0.8 },           // 着陆坪保暖圈
+            ];
+          }
+        }
         this._themePayload = buildThemePayload(
           gvPlanet.primaryThemeId || null, this.app.world, gvPlanet.id || 'unknown',
-          { category: gvPlanet.category, fogRange: [90, 560] },
+          heatOpts,
         );
         this.scene.setTheme(this._themePayload);
+        // —— WP-5 P1-G：18 主题合成环境音接线（主题层与场景层并行、独立 1.5s 交叉淡化） ——
+        if (this.app.audio) this.app.audio.setAmbientTheme(gvPlanet.primaryThemeId || 'generic');
         if (this.ps3d) {
           const env = this._themePayload;
           this.ps3d._sunDir = env.terrain.sun.dir.slice();
@@ -28520,6 +28758,8 @@ const GroundView = {
       this._unsubGL();
       this._unsubGL = null;
     }
+    // WP-5 P1-G：离开地表视图即停 18 主题环境音层
+    if (this.app && this.app.audio) this.app.audio.stopAmbientTheme();
     try { if (this.scene) this.scene.destroy(); } catch (_) { /* 忽略 */ }
     try { if (this.ps3d) this.ps3d.destroy(); } catch (_) { /* 忽略 */ }
     try { if (this.bmesh) this.bmesh.destroy(); } catch (_) { /* 忽略 */ }
@@ -28648,6 +28888,11 @@ const GroundView = {
       case 'KeyR':
         this._tryRestoreTerrain();
         break;
+      case 'KeyF':
+        // WP-4：工程刷子循环 flatten（压平地基）→ smooth（平滑坡道）→ lower（采掘刻槽）
+        this._shapeBrushOp = this._shapeBrushOp === 'flatten' ? 'smooth'
+          : this._shapeBrushOp === 'smooth' ? 'lower' : 'flatten';
+        break;
       case 'Tab':
         e.preventDefault();
         this._oneShot.switchUnit = true;
@@ -28673,9 +28918,13 @@ const GroundView = {
     if (e.button === 0) {
       this._mouse.lDown = true;
       if (this._buildMode) {
-        // 按下边沿立即采掘一格（按住由 _updateAim 按 DIG_INTERVAL 连挖）
+        // 按下边沿立即采掘一格（按住由 _updateAim 按 DIG_INTERVAL 连挖）；
+        // WP-4：场域模式走连续地形工程作业（ShapeTerrain/HarvestTerrainOre）
         this._digCd = DIG_INTERVAL;
-        if (this._aim) this._tryDig(this._aim);
+        if (this._aim) {
+          if (this.field) this._fieldDig(this._aim);
+          else this._tryDig(this._aim);
+        }
       } else {
         this._oneShot.attack = this._oneShot.attack || 'light';
       }
@@ -28685,9 +28934,13 @@ const GroundView = {
       this._mouse.lastX = e.clientX;
       this._mouse.lastY = e.clientY;
       if (this._buildMode) {
-        // 按下边沿立即放置一格（按住未拖拽时由 _updateAim 连放）
+        // 按下边沿立即放置一格（按住未拖拽时由 _updateAim 连放）；
+        // WP-4：场域模式走 PlaceBuilding 模块化建筑放置（坡度校验 + 地基承台）
         this._placeCd = PLACE_INTERVAL;
-        if (this._aim) this._tryPlace(this._aim);
+        if (this._aim) {
+          if (this.field) this._fieldPlace(this._aim);
+          else this._tryPlace(this._aim);
+        }
       }
     }
   },
@@ -28733,7 +28986,9 @@ const GroundView = {
   /** 行星重力（planet.gravity 缺省按 1.0g） */
   _gravity() {
     const g0 = this.planet && this.planet.gravity != null ? Number(this.planet.gravity) : 1.0;
-    return Math.max(0.2, g0) * 9.8;
+    // WP-5 EXPANSION：fractured_moon 等主题低重力倍率（movementMod.gravityScale）
+    const scale = Number.isFinite(this._gravityScale) ? this._gravityScale : 1.0;
+    return Math.max(0.2, g0) * 9.8 * scale;
   },
 
   /**
@@ -28886,8 +29141,8 @@ const GroundView = {
   _tryRestoreTerrain() {
     if (!this.field || !this._edits || !this.planet) return;
     const c = this.char3d;
-    const x = c.x - FIELD_OFFSET;               // 世界 → 场域坐标（命令口径）
-    const z = c.z - FIELD_OFFSET;
+    const x = c.x + FIELD_OFFSET;               // 世界 → 行星本地米（命令/applyEdit 口径）
+    const z = c.z + FIELD_OFFSET;
     const res = this.app.dispatch('RestoreTerrain', {
       planetId: this.planet.id, x, z, radius: 6, strength: 1,
     });
@@ -28898,6 +29153,64 @@ const GroundView = {
     applyEdit(this.field, this._edits, { kind: 'restore', x, z, radius: 6, strength: 1 });
     rebuildDirtyChunks(this.field);
     toast('地形已恢复自然状态（DSP 式）', { kind: 'ok' });
+  },
+
+  /**
+   * WP-4 场域工程作业：域侧 ShapeTerrain 命令 + 视图本地同参 applyEdit
+   * （命令写回 planet.terrainEdits 持久化；本地即时增量重建保证当帧可见）。
+   * @returns {object|null} 命令结果（ok/reason）
+   */
+  _shapeTerrainAt(fx, fz, op, radius, strength) {
+    if (!this.field || !this._edits || !this.planet) return null;
+    const res = this.app.dispatch('ShapeTerrain', {
+      planetId: this.planet.id, op, x: fx, z: fz, radius, strength,
+    });
+    if (res && res.ok) {
+      applyEdit(this.field, this._edits, { kind: op, x: fx, z: fz, radius, strength });
+      rebuildDirtyChunks(this.field);
+    }
+    return res || null;
+  },
+
+  /**
+   * WP-4 场域左键工程作业（技能 5 建造模式）：ORE 矿脉 → 地质采掘入账
+   * （HarvestTerrainOre 域命令，无矿脉静默跳过）；地形整形刷子（F 键切换
+   * flatten/smooth/lower）→ ShapeTerrain 连续雕刻，彻底取代体素占位盒
+   * （规范 6 §6.5 红线：挖方块 → 雕刻地表与工程作业）。
+   */
+  _fieldDig(hit) {
+    if (!this.field || !this.planet || !hit || !hit.hit) return;
+    const fx = hit.px + FIELD_OFFSET;          // 世界 → 行星本地米（命令口径）
+    const fz = hit.pz + FIELD_OFFSET;
+    const s = sampleTerrain(this.field, fx, fz);
+    if (s && (s.flags & TERRAIN_FLAGS.ORE) !== 0) {
+      this.app.dispatch('HarvestTerrainOre', { planetId: this.planet.id, x: fx, z: fz }, null, { silent: true });
+    }
+    const op = this._shapeBrushOp || 'flatten';
+    const radius = op === 'lower' ? 3.5 : 6.0;
+    const strength = op === 'lower' ? 0.6 : 0.8;
+    this._shapeTerrainAt(fx, fz, op, radius, strength);
+    if (this._aim) this._aim.dug = true;
+    this._fx.dig.push({ x: hit.px, y: hit.py, z: hit.pz, matId: 255 });
+    if (Number.isFinite(hit.vx) && Number.isFinite(hit.vz)) this._markFieldDirty(hit.vx, hit.vz);
+  },
+
+  /**
+   * WP-4 场域右键建造：派发 PlaceBuilding（9 点坡度校验 + 自动地基承台，
+   * 写入 planet.groundBuildings），成功后原地刷新 3D 建筑网格与传送带路径。
+   */
+  _fieldPlace(hit) {
+    if (!this.field || !this.planet || !hit || !hit.hit) return;
+    const fx = hit.px + FIELD_OFFSET;
+    const fz = hit.pz + FIELD_OFFSET;
+    const defId = this._selectedBuildDefId || 'bld_mine_ferro';
+    const res = this.app.dispatch('PlaceBuilding', { planetId: this.planet.id, defId, x: fx, z: fz });
+    if (res && res.ok) {
+      this._layoutColony();
+      this._conveyor = this._buildConveyorPaths();
+      this._fx.dig.push({ x: hit.px, y: hit.py + 0.5, z: hit.pz, matId: 255 });
+    }
+    // 失败原因（坡度过大/缺乏矿藏等）由 App.dispatch 统一 toast
   },
 
   /** 采掘后标记场域 Chunk 脏（下一帧 sync 增量重建；TERRAIN-06） */
@@ -29057,16 +29370,46 @@ const GroundView = {
     }
   },
 
-  /** E 键就近解析交互目标：交互半径（60px ≈ 2.5 格）内最近的未完成目标物 id */
+  /**
+   * 任务坐标 → 视图世界坐标（WP-1 统一度量；渲染/HUD/特效管线唯一换算出口）。
+   * 契约：
+   * 1. site_meters：实体 (x, y) 即 Planet-Local 场域米 → 世界 = 场域 - FIELD_OFFSET
+   *    （与 _setupScene 生成点 / _followMissionCharacter / 站点地标管线同口径）；
+   * 2. 旧版 grid_px 兜底（m.w/m.h 有效）：px → 世界线性映射（R-A 改造前语义）；
+   * 3. coordSpace 缺失或度量缺失一律按场域米直读（防 NaN 乘法），绝不返回非有限值。
+   */
+  _missionToWorld(m, mx, my) {
+    if (m && m.coordSpace !== 'site_meters' && m.w > 0 && m.h > 0) {
+      return {
+        x: mx * (SURFACE_SIZE.X / (m.w * TS)),
+        z: my * (SURFACE_SIZE.Z / (m.h * TS)),
+      };
+    }
+    return { x: mx - FIELD_OFFSET, z: my - FIELD_OFFSET };
+  },
+
+  /**
+   * 撤离点世界坐标（WP-1）：site_meters 下 extraction 为 { x, z, r }（纵向键 z），
+   * 旧版 grid_px 为 { x, y }；两口径在此归一，罗盘距离/角度不再产出 NaN。
+   */
+  _extractionWorldPos(m, view) {
+    const ext = (view && view.extraction) || (m && m.extraction) || null;
+    if (!ext) return this._missionToWorld(m, 0, 0);
+    const rawY = Number.isFinite(ext.z) ? ext.z : (Number.isFinite(ext.y) ? ext.y : 0);
+    return this._missionToWorld(m, Number.isFinite(ext.x) ? ext.x : 0, rawY);
+  },
+
+  /** E 键就近解析交互目标：site_meters 交互半径 3.0m（MISSION_UNIT_SCALE），旧版 60px 兜底 */
   _resolveInteract(m) {
     const u = m.playerUnits[m.activeIdx];
     if (!u || u.state === 'dead') return null;
     let best = null;
     let bd = Infinity;
+    const maxR = (m.coordSpace === 'site_meters') ? MISSION_UNIT_SCALE.interactRadius : 60;
     for (const t of m.targets) {
       if (t.done) continue;
       const d = Math.hypot(t.x - u.x, t.y - u.y);
-      if (d < 60 && d < bd) {
+      if (d < maxR && d < bd) {
         bd = d;
         best = t.targetId;
       }
@@ -29237,12 +29580,22 @@ const GroundView = {
     const diving = depth > FLUID_WADE_MAX;
     const fluidDamp = wading ? 0.65 : 1;   // 涉水水平移速 ×0.65 阻尼
 
+    // —— WP-5 EXPANSION：glassstorm_barrens 顺逆风推力（确定性时钟相位风场，无随机） ——
+    let windX = 0;
+    let windZ = 0;
+    if (this._windPush > 0 && !diving) {
+      const windPhase = this._clock * 0.23;
+      const windMag = (0.55 + 0.45 * Math.sin(windPhase * 1.7)) * this._windPush * 2.2;
+      windX = Math.sin(windPhase) * windMag * dt;
+      windZ = Math.cos(windPhase * 0.9) * windMag * dt;
+    }
+
     // —— XZ 位移（闪避爆发 + 常速移动，体素 AABB 轴分离碰撞 / 场域坡度阻断） ——
     if (c.dodgeT > 0) {
       c.dodgeT -= dt;
-      this._moveAABB(c.dodgeX * 8.0 * fluidDamp * dt, c.dodgeZ * 8.0 * fluidDamp * dt);
+      this._moveAABB(c.dodgeX * 8.0 * fluidDamp * dt + windX, c.dodgeZ * 8.0 * fluidDamp * dt + windZ);
     } else if (mv) {
-      this._moveAABB(mv.x * speed * fluidDamp * dt, mv.z * speed * fluidDamp * dt);
+      this._moveAABB(mv.x * speed * fluidDamp * dt + windX, mv.z * speed * fluidDamp * dt + windZ);
     }
 
     // —— 竖直物理（P0-1 接触冲量闭环 + P2-1 潜水动力学） ——
@@ -29336,16 +29689,48 @@ const GroundView = {
   _moveAABB(dx, dz) {
     const c = this.char3d;
     if (this.field) {
-      const h0 = this._groundAt(c.x, c.z);
+      // WP-1 P0-C：四象限全域可达（世界 [-222,+286] = 场域 [-254,+254] 内收 2m），
+      // 坡度按水平步长取真实正切（35° 极限），脚下 ROAD/BRIDGE_DECK 人工结构放行。
+      const foot = sampleTerrain(this.field, c.x + FIELD_OFFSET, c.z + FIELD_OFFSET);
+      const roadFoot = !!foot && (foot.flags & (TERRAIN_FLAGS.ROAD | TERRAIN_FLAGS.BRIDGE_DECK)) !== 0;
+      const h0 = (foot && Number.isFinite(foot.y)) ? foot.y : Infinity;
+      // WP-5 EXPANSION：cloud_giant_atolls 浮台甲板禁出（landingMode atmospheric
+      // → 落点必须带人工结构旗，严禁走出甲板坠入气态深渊）
+      const deckOk = (px, pz) => {
+        if (!this._deckClamp) return true;
+        const s = sampleTerrain(this.field, px + FIELD_OFFSET, pz + FIELD_OFFSET);
+        return !!s && (s.flags & (TERRAIN_FLAGS.FOUNDATION | TERRAIN_FLAGS.ROAD | TERRAIN_FLAGS.BRIDGE_DECK)) !== 0;
+      };
       if (dx) {
-        const nx = clamp(c.x + dx, 2, FIELD_WALK_MAX);
+        const nx = clamp(c.x + dx, FIELD_WALK_MIN, FIELD_WALK_MAX);
         const h1 = this._groundAt(nx, c.z);
-        if (Number.isFinite(h1) && h1 - h0 < WALK_SLOPE_BLOCK) c.x = nx;
+        const step = Math.max(0.02, Math.abs(dx));
+        const climbable = Number.isFinite(h1)
+          && (!Number.isFinite(h0) || (h1 - h0) / step <= FIELD_MAX_SLOPE_TAN);
+        if ((roadFoot || climbable) && deckOk(nx, c.z)) c.x = nx;
       }
       if (dz) {
-        const nz = clamp(c.z + dz, 2, FIELD_WALK_MAX);
+        const nz = clamp(c.z + dz, FIELD_WALK_MIN, FIELD_WALK_MAX);
         const h1 = this._groundAt(c.x, nz);
-        if (Number.isFinite(h1) && h1 - h0 < WALK_SLOPE_BLOCK) c.z = nz;
+        const step = Math.max(0.02, Math.abs(dz));
+        const climbable = Number.isFinite(h1)
+          && (!Number.isFinite(h0) || (h1 - h0) / step <= FIELD_MAX_SLOPE_TAN);
+        if ((roadFoot || climbable) && deckOk(c.x, nz)) c.z = nz;
+      }
+      // WP-5：biolume_canopy 荧光真菌压感涟漪——世界坐标 8 槽环形缓冲驱动
+      // uFootsteps（着色器在 worldPos = aPos + uWorldOffset 空间比较）
+      if ((dx !== 0 || dz !== 0) && this._footstepRing && this.scene) {
+        this._stepDist = (this._stepDist || 0) + Math.hypot(dx, dz);
+        if (this._stepDist >= 1.5) {
+          this._stepDist = 0;
+          const off = this._footstepIdx * 4;
+          this._footstepRing[off] = c.x;
+          this._footstepRing[off + 1] = c.z;
+          this._footstepRing[off + 2] = this._clock;
+          this._footstepRing[off + 3] = 1.0;
+          this._footstepIdx = (this._footstepIdx + 1) % 8;
+          this.scene.setFootsteps(this._footstepRing);
+        }
       }
       return;
     }
@@ -29479,12 +29864,16 @@ const GroundView = {
     // —— 采掘（建造模式按住左键，节流 DIG_INTERVAL） ——
     if (this._buildMode && this._mouse.lDown && this._digCd <= 0 && this._aim) {
       this._digCd = DIG_INTERVAL;
-      this._tryDig(this._aim);
+      // WP-4：场域模式走连续地形工程作业；体素兜底保持原 digVoxel 路径
+      if (this.field) this._fieldDig(this._aim);
+      else this._tryDig(this._aim);
     }
     // —— 建造（建造模式按住右键且未拖拽旋转相机，节流 PLACE_INTERVAL） ——
     if (this._buildMode && this._mouse.rDown && !this._mouse.dragged && this._placeCd <= 0) {
       this._placeCd = PLACE_INTERVAL;
-      this._tryPlace(this._aim);
+      // WP-4：场域模式走 PlaceBuilding 模块化建筑放置
+      if (this.field) this._fieldPlace(this._aim);
+      else this._tryPlace(this._aim);
     }
   },
 
@@ -29569,31 +29958,36 @@ const GroundView = {
   /** 任务打击特效：近战刀光（伤害 22/×2 对应弧度一致）或远程光束 */
   _emitMissionStrike(view, u) {
     const m = this.mission;
-    const kx = SURFACE_SIZE.X / (m.w * TS);
-    const kz = SURFACE_SIZE.Z / (m.h * TS);
-    const wx = u.x * kx;
-    const wz = u.y * kz;
+    // WP-1：统一经 _missionToWorld 换算（site_meters 米制直读；旧版 px 线性映射），
+    // 根除 kx/kz = 64/(undefined*24) = NaN 的全场隐形故障。
+    const src = this._missionToWorld(m, u.x, u.y);
+    const wx = src.x;
+    const wz = src.z;
     const yaw = -u.facing;
+    // 旧版 px 制下射程/曳光随坐标比例缩放；米制下 u.range 本身即米
+    const legacyK = (m && m.coordSpace !== 'site_meters' && m.w > 0 && m.h > 0)
+      ? (SURFACE_SIZE.X / (m.w * TS)) : 1;
     if (u.attackKind === 'ranged') {
       let tgt = null;
       let bd = Infinity;
-      const rangeW = u.range * kx;
+      const rangeW = u.range * legacyK;
       for (const e of view.enemies) {
         if (e.state === 'dead') continue;
-        const d = Math.hypot(e.x * kx - wx, e.y * kz - wz);
+        const ep = this._missionToWorld(m, e.x, e.y);
+        const d = Math.hypot(ep.x - wx, ep.z - wz);
         if (d <= rangeW && d < bd) {
           bd = d;
-          tgt = e;
+          tgt = { x: ep.x, z: ep.z };
         }
       }
       const a = [wx, this.char3d.y + 1.25, wz];
       let b;
       if (tgt) {
-        const gy = this._groundAt(tgt.x * kx, tgt.y * kz);
-        b = [tgt.x * kx, (gy === Infinity ? this.char3d.y : gy) + 0.8, tgt.y * kz];
+        const gy = this._groundAt(tgt.x, tgt.z);
+        b = [tgt.x, (gy === Infinity ? this.char3d.y : gy) + 0.8, tgt.z];
       } else {
         // 空放：沿任务朝向（像素系 atan2 → 世界 x/z）打出一道曳光
-        b = [wx + Math.cos(u.facing) * 18 * kx, this.char3d.y + 1.25, wz + Math.sin(u.facing) * 18 * kz];
+        b = [wx + Math.cos(u.facing) * 18 * legacyK, this.char3d.y + 1.25, wz + Math.sin(u.facing) * 18 * legacyK];
       }
       this._fx.beams.push({ a, b, age: 0, life: 0.12 });
     } else {
@@ -29650,21 +30044,26 @@ const GroundView = {
   _layoutColony() {
     this._buildingLayout = [];
     this._buildingColonists = [];
-    const colony = this.colony;
-    if (!colony) return;
     // —— P1-2（doc8 §3.2 议题 B2 裁决）：废除黄金角盲盒螺旋，等高线感知选址 ——
     // groundBuildings（PlaceBuilding 双轨）原样合并；未定坐标建筑由
     // planColonyLayout 在过渡环带 22-75m 内按 9 点坡度校验确定性寻址。
     const w = this.app.world;
     const planetEntity = w ? w.entities.planets[this.planet.id] : null;
-    const centerFx = 32.5 - FIELD_OFFSET;   // 体素出生点 → 场域坐标
-    const centerFz = 32.5 - FIELD_OFFSET;
+    const groundBuildings = (planetEntity && planetEntity.groundBuildings) || [];
+    const colony = this.colony;
+    // WP-4：无殖民地时 groundBuildings（PlaceBuilding 双轨）仍需渲染（自由探索工程作业）
+    if (!colony && groundBuildings.length === 0) return;
+    // 体素出生点 (32.5, 32.5) → 行星本地米（32.5 + FIELD_OFFSET = 0.5，着陆坪中心）
+    const centerFx = 32.5 + FIELD_OFFSET;   // 世界/体素 → 场域坐标（+FIELD_OFFSET，勿反转）
+    const centerFz = 32.5 + FIELD_OFFSET;
     const plan = planColonyLayout(this.field, {
-      entries: [
-        ...(colony.buildings || []),
-        ...(colony.constructionQueue || []).map((j) => ({ defId: j.defId, state: 'construction' })),
-      ],
-      groundBuildings: (planetEntity && planetEntity.groundBuildings) || [],
+      entries: colony
+        ? [
+          ...(colony.buildings || []),
+          ...(colony.constructionQueue || []).map((j) => ({ defId: j.defId, state: 'construction' })),
+        ]
+        : [],
+      groundBuildings,
       center: [centerFx, centerFz],
       categoryOf: (defId) => {
         const def = BUILDINGS.find((x) => x.id === defId);
@@ -29862,21 +30261,19 @@ const GroundView = {
     if (!view) return rd;
 
     const m = this.mission;
-    const kx = SURFACE_SIZE.X / (m.w * TS);
-    const kz = SURFACE_SIZE.Z / (m.h * TS);
+    // WP-1：统一经 _missionToWorld 换算，实体坐标恒为有限值（根除 NaN 隐形）
     // 敌人（≤40，kind 与任务 type 同名；闪白取 lastHitAt 衰减）
     const fallY = this.char3d.y || 0;
     for (const e of view.enemies) {
       if (e.state === 'dead') continue;
-      const ex = e.x * kx;
-      const ez = e.y * kz;
-      const gy = this._groundAt(ex, ez);
+      const ep = this._missionToWorld(m, e.x, e.y);
+      const gy = this._groundAt(ep.x, ep.z);
       const hitAge = m.time - e.lastHitAt;
       rd.enemies.push({
         kind: e.type,
-        x: ex,
+        x: ep.x,
         y: gy === Infinity ? fallY : gy,   // 悬浮平台虚空列回退到角色高度
-        z: ez,
+        z: ep.z,
         yaw: -e.facing,
         phase: e.phase || 0,
         flash: hitAge < 0.25 ? clamp(1 - hitAge / 0.25, 0, 1) : 0,
@@ -29887,8 +30284,8 @@ const GroundView = {
       // 前摇期红色预警贴花（AoE 落点 = 面向前方 2 格）
       if (e.state === 'windup') {
         rd.effects.aoe.push({
-          x: ex + Math.cos(e.facing) * 2.0,
-          z: ez + Math.sin(e.facing) * 2.0,
+          x: ep.x + Math.cos(e.facing) * 2.0,
+          z: ep.z + Math.sin(e.facing) * 2.0,
           r: 1.9,
           t: clamp(e.stateTime / Math.max(0.01, e.windupS), 0, 1),
         });
@@ -29898,22 +30295,20 @@ const GroundView = {
     const activeId = view.activeUnitId;
     for (const u of view.playerUnits) {
       if (u.state === 'dead' || u.unitId === activeId) continue;
-      const ux = u.x * kx;
-      const uz = u.y * kz;
-      const gy = this._groundAt(ux, uz);
+      const up = this._missionToWorld(m, u.x, u.y);
+      const gy = this._groundAt(up.x, up.z);
       rd.colonists.push({
-        x: ux, y: gy === Infinity ? fallY : gy, z: uz,
+        x: up.x, y: gy === Infinity ? fallY : gy, z: up.z,
         rotY: -u.facing, walk: u.state === 'move', phase: 0.5,
       });
     }
     // 任务 NPC（救援/工程队）
     for (const n of view.npcs) {
       if (n.state === 'safe') continue;
-      const nx = n.x * kx;
-      const nz = n.y * kz;
-      const gy = this._groundAt(nx, nz);
+      const np = this._missionToWorld(m, n.x, n.y);
+      const gy = this._groundAt(np.x, np.z);
       rd.colonists.push({
-        x: nx, y: gy === Infinity ? fallY : gy, z: nz,
+        x: np.x, y: gy === Infinity ? fallY : gy, z: np.z,
         rotY: 0, walk: n.state === 'follow', phase: 0.5,
       });
     }
@@ -29927,16 +30322,14 @@ const GroundView = {
     const view = this._lastView;
     if (view && this.mode === 'mission') {
       const m = this.mission;
-      const kx = SURFACE_SIZE.X / (m.w * TS);
-      const kz = SURFACE_SIZE.Z / (m.h * TS);
+      // WP-1：目标物/拾取物统一经 _missionToWorld 换算（根除 NaN 隐形）
       for (const t of view.targets) {
         if (t.done) continue;
-        const tx = t.x * kx;
-        const tz = t.y * kz;
-        const gy = this._groundAt(tx, tz);
+        const tp = this._missionToWorld(m, t.x, t.y);
+        const gy = this._groundAt(tp.x, tp.z);
         const hurt = t.hp < t.hpMax;
         list.push({
-          x: tx, y: gy === Infinity ? fallY : gy, z: tz,
+          x: tp.x, y: gy === Infinity ? fallY : gy, z: tp.z,
           rotY: 0.7, scale: 0.8, meshId: MESH_OF_CATEGORY('military'),
           emit: hurt ? 0.15 : 0,
           flash: hurt && (m.time % 0.5) < 0.25 ? 0.3 : 0,
@@ -29944,11 +30337,10 @@ const GroundView = {
       }
       for (const it of view.items) {
         if (it.done) continue;
-        const ix = it.x * kx;
-        const iz = it.y * kz;
-        const gy = this._groundAt(ix, iz);
+        const ip = this._missionToWorld(m, it.x, it.y);
+        const gy = this._groundAt(ip.x, ip.z);
         list.push({
-          x: ix, y: (gy === Infinity ? fallY : gy) + 0.5, z: iz,
+          x: ip.x, y: (gy === Infinity ? fallY : gy) + 0.5, z: ip.z,
           rotY: this._clock * 0.8, scale: 0.38, meshId: MESH_OF_CATEGORY('selector'),
           emit: 0.9,
         });
@@ -30034,7 +30426,17 @@ const GroundView = {
       fogColor: (p && p._fogColor) || FALLBACK_ENV.fogColor,
       fogRange: (p && p._fogRange) || FALLBACK_ENV.fogRange,
       eye: p ? p.camera.eye : this._eye,
+      hdr: this._hdrScaleOf(),
     };
+  },
+
+  /**
+   * WP-5 P1-F：RGBA8 模拟 HDR 预缩放因子（浮点 FBO 时为 1.0）。
+   * 对象/建筑 pass 与 PlanetSurfaceScene 地形（scene.draw 内部自算）同口径。
+   */
+  _hdrScaleOf() {
+    const post = this.cm && this.cm.post;
+    return (post && post.hdrSimulated) ? 1.0 / Math.max(1e-3, post.hdrRange || 4.0) : 1.0;
   },
 
   // —— HUD（2D 层） ————————————————
@@ -30192,10 +30594,11 @@ const GroundView = {
     }
 
     // —— 撤离点罗盘（顶部中央箭头 + 距离；下移避开顶栏） ——
-    const kx = SURFACE_SIZE.X / (m.w * TS);
-    const kz = SURFACE_SIZE.Z / (m.h * TS);
-    const ex = view.extraction.x * kx;
-    const ez = view.extraction.y * kz;
+    // WP-1：site_meters 下 extraction 纵向键为 z（旧版 grid_px 为 y），统一经
+    // _extractionWorldPos 归一换算，根除「撤离区 NaNm」与罗盘箭头失效。
+    const extPos = this._extractionWorldPos(m, view);
+    const ex = extPos.x;
+    const ez = extPos.z;
     const c = this.char3d;
     const camFwd = this._camForward();
     const camAng = Math.atan2(camFwd[2], camFwd[0]);
@@ -30254,7 +30657,9 @@ const GroundView = {
     ctx.fillText(`自由探索 · ${this.planet ? this.planet.name : ''}`, 22, 82);
     ctx.fillStyle = '#9fb6c9';
     ctx.font = '11px "Segoe UI", system-ui, sans-serif';
-    ctx.fillText(`采掘/建造模式：${this._buildMode ? '开' : '关'} · Esc 升空返回`, 22, 100);
+    // WP-4：工程刷子状态（F 键循环）随建造模式明示
+    const brushZh = this._shapeBrushOp === 'smooth' ? '平滑' : this._shapeBrushOp === 'lower' ? '采掘' : '压平';
+    ctx.fillText(`采掘/建造模式：${this._buildMode ? `开（${brushZh}刷）` : '关'} · F 切换工程刷 · Esc 升空返回`, 22, 100);
     // —— 最近未勘探 POI 罗盘（doc5 P1-04：方位 + 距离 + E 采样提示） ——
     if (this._pois) {
       let best = null;
@@ -31584,6 +31989,7 @@ __register("src/render/gl/themePayload.js", function (__exports, __require) {
  */
 
 const { derivePlanetSeeds: derivePlanetSeeds } = __require("src/domain/ground/planetSeeds.js");
+const { PLANET_THEMES: PLANET_THEMES } = __require("src/content/planetThemes.js");
 
 // ———— 色板（doc6 §4.4 / doc7 §4.0；sRGB HEX，输出前统一转线性） ————
 
@@ -31744,7 +32150,9 @@ const THEME_RENDER = {
     heat: false,
   },
   sulfur_marsh: {
-    waterLevel: WATERLEVEL_NONE,
+    // WP-5 P1-F：低洼毒池给液面（海拔 <3.8m 渲染黄绿酸液；危险旗仍由剖面
+    // hazardLevel 4.5 决定——液面纯视觉，域侧扣血口径不变）
+    waterLevel: 3.8,
     fogRange: [24, 180],
     sky: { skyMode: 2, stars: 0, gasHeightM: 4.5 },
     sun: { az: 3.6, el: 0.55, color: [0.44, 0.52, 0.22] },
@@ -32037,6 +32445,15 @@ function resolveStarColor(world, planetId) {
 /** 外部色板源槽位（D1 planetThemes.js 落地后由主代理注入；fn(themeId) → palette|null） */
 let externalPaletteSource = null;
 
+// —— WP-5 P1-F：权威色板源接线（此前 setThemePaletteSource 全仓 0 调用） ——
+// content/planetThemes.js 为 18 主题九维色板的唯一权威注册表（doc6 §4.4），
+// 本文件 FLAGSHIP_PALETTES 仅作其未就绪期的本地兜底；resolvePalette 优先级
+// opts.palette → 外部源 → FLAGSHIP 兜底，接线后全主题自动走权威色板。
+setThemePaletteSource((id) => {
+  const t = PLANET_THEMES[id];
+  return (t && t.palette) ? t.palette : null;
+});
+
 /**
  * 注册外部主题色板源（集成点：planetThemes.js 就绪后
  * `setThemePaletteSource((id) => planetThemes[id]?.palette ?? null)`）。
@@ -32186,6 +32603,709 @@ function buildThemePayload(themeId, world, planetId, opts = {}) {
 Object.assign(__exports, { FLAGSHIP_PALETTES, CATEGORY_PALETTES, WATERLEVEL_NONE, EXPANSION_GAMEPLAY, srgbToLinear, setThemePaletteSource, buildThemePayload });
 
 });
+__register("src/content/planetThemes.js", function (__exports, __require) {
+/**
+ * content/planetThemes.js — 18 大行星主题注册表（doc6 §4.4/§10.1 / doc7 TASK-3.1）
+ *
+ * 主题是完整的世界身份而非颜色字段（doc6 §4.1）：每条目覆盖九维规范
+ * （轮廓/地貌/材质/色板/光照/天气/地标/玩法/经济）。色板为 sRGB 十六进制
+ * （doc6 §4.4 艺术指导起点），渲染前经 srgbToLinear 转线性空间。
+ *
+ * 红线（doc6 §4.3 / doc7 红线 4）：
+ *  - assignTheme 只消费 derivePlanetSeeds(world, planetId).themeSeed 派生子流，
+ *    绝不读写 world.rng、绝不 Math.random()（保 52/52 与金快照序列）。
+ *  - 主题服从天体物理：categoryConstraints ∩ planet.category 为硬约束
+ *    （例如海洋主题永远不会落在熔岩行星上）。
+ *  - 同星系去重：galaxyGen 传入 per-system takenThemes Set，旗舰主题
+ *    在仍有可用候选时绝不重复出现（doc7 THEME-06）。
+ *
+ * 类别口径：categoryConstraints 使用 galaxyGen.PLANET_CATEGORIES 的 8 个
+ * 类别 id（rocky/ocean/ice/desert/gasGiant/lava/toxic/artificial）；
+ * doc6 §4.4 表中的 "ice_moon" 规范化为 'ice'。
+ */
+
+const { seedFromNumber: seedFromNumber, float: float, int: int, chance: chance } = __require("src/core/rng.js");
+const { derivePlanetSeeds: derivePlanetSeeds } = __require("src/domain/ground/planetSeeds.js");
+
+/** 主题分配算法版本（进存档；语义变更必须递增） */
+const THEME_ASSIGNMENT_VERSION = 1;
+
+/** sRGB hex(#rgb/#rrggbb) → 线性空间 [r,g,b] 浮点（pow 2.2 近似，doc7 §3.2/5）。
+ *  解析失败回退中性灰；导出供测试与渲染侧共用。 */
+function srgbToLinear(hex) {
+  let h = String(hex || '');
+  if (h.startsWith('#')) h = h.slice(1);
+  if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+  const n = parseInt(h, 16);
+  if (!Number.isFinite(n) || h.length !== 6) return [0.5, 0.5, 0.5];
+  const c = [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+  return c.map((v) => Math.pow(v, 2.2));
+}
+
+/** 组装 paletteLinear（模块加载期一次性预计算，运行时零解析开销） */
+function linearize(pal) {
+  return {
+    base: srgbToLinear(pal.base),
+    shadow: srgbToLinear(pal.shadow),
+    highlight: srgbToLinear(pal.highlight),
+    danger: srgbToLinear(pal.danger),
+    emissive: srgbToLinear(pal.emissive),
+    atmosphere: srgbToLinear(pal.atmosphere),
+  };
+}
+
+/* ========================= 18 主题注册表（doc6 §4.4 全表） ========================= */
+
+const PLANET_THEMES = {
+  /* ———— 首批 P3 旗舰七主题（doc7 §4.1） ———— */
+
+  abyssal_ocean: {
+    id: 'abyssal_ocean',
+    version: 1,
+    labelZh: '碧渊海洋',
+    tier: 'flagship',
+    categoryConstraints: ['ocean', 'ice'],
+    palette: {
+      base: '#042A46', shadow: '#021522', highlight: '#5DEBDF',
+      danger: '#E6A34A', emissive: '#B77BFF', atmosphere: '#087F95',
+    },
+    geomorphology: 'ocean_basin_reef_trench',
+    materials: ['abyssal_sediment', 'reef_coral', 'basalt_cliff', 'glow_kelp', 'pearl_alloy'],
+    atmosphereProfile: 'dense_blue_scattering',
+    weatherProfile: 'tidal_storms',
+    landmarkSet: ['reef_dome_ruin', 'tide_spire', 'biolume_kelp_arch'],
+    poiPool: ['subsurface_ocean', 'bio_trace', 'crashed_ship'],
+    gameplayProfile: 'underwater_pressure_expedition',
+    buildingKit: 'abyssal_outpost',
+    audioProfile: 'abyssal_deep_ocean',
+    orbital: {
+      bandColors: ['#087F95', '#042A46', '#5DEBDF'],
+      iceCap: 0.25, cloudCover: 0.55, cloudColor: '#DFF4F2',
+      nightLights: 0.30, ringChance: 0.0,
+      glow: { tint: '#087F95', power: 0.95, shellScale: 1.06 },
+    },
+    hazardMechanism: '水深>8m 进入高压区持续消耗耐压护盾，潮汐窗口每 90 秒升降海平面控制通道开闭',
+    economyHook: '产深海生物质、重氢与耐压材料科技',
+  },
+
+  permafrost_furnace: {
+    id: 'permafrost_furnace',
+    version: 1,
+    labelZh: '永冬炉境',
+    tier: 'flagship',
+    categoryConstraints: ['ice'],
+    palette: {
+      base: '#EAF5FF', shadow: '#14293E', highlight: '#91BBD1',
+      danger: '#466D8A', emissive: '#F2A85D', atmosphere: '#91BBD1',
+    },
+    geomorphology: 'glacial_basin_crevasse',
+    materials: ['snow_ice_white', 'blue_ice_cliff', 'wet_frozen_soil', 'heated_steel'],
+    atmosphereProfile: 'cold_clear_thin',
+    weatherProfile: 'whiteout_blizzards',
+    landmarkSet: ['central_furnace_tower', 'heated_span_bridge', 'buried_outpost'],
+    poiPool: ['subsurface_ocean', 'deep_vein', 'lost_station'],
+    gameplayProfile: 'heat_network_survival',
+    buildingKit: 'thermal_hearth_hold',
+    audioProfile: 'frostwind_hum_embers',
+    orbital: {
+      bandColors: ['#EAF5FF', '#91BBD1', '#466D8A'],
+      iceCap: 0.85, cloudCover: 0.50, cloudColor: '#F2F7FB',
+      nightLights: 0.35, ringChance: 0.0,
+      glow: { tint: '#9FC4E8', power: 0.50, shellScale: 1.05 },
+    },
+    hazardMechanism: '离开热源覆盖圈体温槽下降并冻伤，Whiteout 暴风雪期间热源半径收缩 40%',
+    economyHook: '产富水冰、冷冻基因样本与超导隔热合金科技',
+  },
+
+  red_regolith_frontier: {
+    id: 'red_regolith_frontier',
+    version: 1,
+    labelZh: '赤砾边疆',
+    tier: 'flagship',
+    categoryConstraints: ['desert', 'rocky'],
+    palette: {
+      base: '#C66B3B', shadow: '#5A2E1C', highlight: '#D4A36A',
+      danger: '#8B4F36', emissive: '#F0C78D', atmosphere: '#D4A36A',
+    },
+    geomorphology: 'mesa_canyon_crater_steppe',
+    materials: ['red_regolith', 'sandstone_strata', 'sand_gold_scrub', 'iron_dust'],
+    atmosphereProfile: 'thin_dust_haze',
+    weatherProfile: 'red_dust_storms',
+    landmarkSet: ['sandstone_arch', 'mesa_overlook_platform', 'deepwell_tower'],
+    poiPool: ['crashed_ship', 'deep_vein', 'ancient_ruin'],
+    gameplayProfile: 'frontier_mining_expansion',
+    buildingKit: 'frontier_dome_yard',
+    audioProfile: 'dry_gale_regolith',
+    orbital: {
+      bandColors: ['#C66B3B', '#8B4F36', '#D4A36A'],
+      iceCap: 0.08, cloudCover: 0.12, cloudColor: '#E8C79A',
+      nightLights: 0.05, ringChance: 0.0,
+      glow: { tint: '#D8A15E', power: 0.38, shellScale: 1.05 },
+    },
+    hazardMechanism: '沙尘暴来袭能见度骤降、太阳能出力跌至 15%，户外人员机械受风沙磨损',
+    economyHook: '产铁族金属、硅酸盐与基础工业产能',
+  },
+
+  dry_night_polar: {
+    id: 'dry_night_polar',
+    version: 1,
+    labelZh: '永夜晶荒',
+    tier: 'flagship',
+    categoryConstraints: ['ice', 'rocky'],
+    palette: {
+      base: '#101421', shadow: '#070A12', highlight: '#D8DCE8',
+      danger: '#77718F', emissive: '#BDA4FF', atmosphere: '#77718F',
+    },
+    geomorphology: 'dry_salt_polar',
+    materials: ['dark_frozen_rock', 'moon_white_salt', 'grey_purple_strata', 'violet_beacon'],
+    atmosphereProfile: 'airless_night_static',
+    weatherProfile: 'meteor_nights',
+    landmarkSet: ['salt_polygon_basin', 'radar_beacon_spire', 'aurora_intercept_laser'],
+    poiPool: ['lost_station', 'crashed_ship', 'magnetic_anomaly'],
+    gameplayProfile: 'dark_energy_storage_ops',
+    buildingKit: 'polar_salt_vault',
+    audioProfile: 'polar_silence_hum',
+    orbital: {
+      bandColors: ['#101421', '#77718F', '#D8DCE8'],
+      iceCap: 0.15, cloudCover: 0.03, cloudColor: '#6A6E86',
+      nightLights: 0.12, ringChance: 0.0,
+      glow: { tint: '#BDA4FF', power: 0.75, shellScale: 1.05 },
+    },
+    hazardMechanism: '极夜无光热依赖储能设施，缺大气保护偶发高能陨石坠落需激光网拦截',
+    economyHook: '产工业盐晶、稀有同位素与低温超导元件',
+  },
+
+  sulfur_marsh: {
+    id: 'sulfur_marsh',
+    version: 1,
+    labelZh: '硫雾沼泽',
+    tier: 'flagship',
+    categoryConstraints: ['toxic'],
+    palette: {
+      base: '#1D341B', shadow: '#0B160A', highlight: '#B7D84C',
+      danger: '#B7D84C', emissive: '#D9FF76', atmosphere: '#748F2B',
+    },
+    geomorphology: 'fumarole_acid_terraces',
+    materials: ['charred_rock', 'sulfur_crust', 'acid_pool', 'altered_strata'],
+    atmosphereProfile: 'acid_green_haze',
+    weatherProfile: 'fumarole_gas_jets',
+    landmarkSet: ['giant_fumarole_cone', 'acid_pipe_bridge', 'corroded_drill_rig'],
+    poiPool: ['bio_trace', 'lost_station', 'magnetic_anomaly'],
+    gameplayProfile: 'chemical_hazard_chemistry',
+    buildingKit: 'acid_proof_stilt_base',
+    audioProfile: 'marsh_bubble_hiss',
+    orbital: {
+      bandColors: ['#1D341B', '#748F2B', '#B7D84C'],
+      iceCap: 0.0, cloudCover: 0.70, cloudColor: '#9BB83B',
+      nightLights: 0.06, ringChance: 0.0,
+      glow: { tint: '#8FAE33', power: 1.35, shellScale: 1.09 },
+    },
+    hazardMechanism: '低洼毒气湖持续腐蚀防护层与地基，浓沼气遇明火爆燃',
+    economyHook: '产挥发性气体、硫化物与化工链产物',
+  },
+
+  biolume_canopy: {
+    id: 'biolume_canopy',
+    version: 1,
+    labelZh: '星辉生物圈',
+    tier: 'flagship',
+    categoryConstraints: ['rocky', 'ocean'],
+    palette: {
+      base: '#082B3D', shadow: '#03141E', highlight: '#42D8C6',
+      danger: '#A981FF', emissive: '#42D8C6', atmosphere: '#007E91',
+    },
+    geomorphology: 'biolume_rainforest',
+    materials: ['deep_canopy_floor', 'wet_moss_cliff', 'glow_flora', 'biolume_vein'],
+    atmosphereProfile: 'humid_blue_cyan',
+    weatherProfile: 'biolume_rain_pulses',
+    landmarkSet: ['magnetic_stone_arch', 'soul_willow_tree', 'glow_root_bridge'],
+    poiPool: ['bio_trace', 'subsurface_ocean'],
+    gameplayProfile: 'reactive_ecology_sampling',
+    buildingKit: 'biolume_grove_camp',
+    audioProfile: 'biolume_night_choir',
+    orbital: {
+      bandColors: ['#082B3D', '#007E91', '#42D8C6'],
+      iceCap: 0.05, cloudCover: 0.45, cloudColor: '#A8D8E0',
+      nightLights: 0.50, ringChance: 0.0,
+      glow: { tint: '#3AA8B8', power: 0.70, shellScale: 1.06 },
+    },
+    hazardMechanism: '夜间荧光生态有掠食者语义，压感涟漪会暴露小队行踪',
+    economyHook: '产再生生物质、神经纤维与医疗前体',
+  },
+
+  obsidian_lava: {
+    id: 'obsidian_lava',
+    version: 1,
+    labelZh: '黑曜熔海',
+    tier: 'flagship',
+    categoryConstraints: ['lava'],
+    palette: {
+      base: '#160F14', shadow: '#0A0709', highlight: '#E54B24',
+      danger: '#E54B24', emissive: '#FFAA3C', atmosphere: '#5B171D',
+    },
+    geomorphology: 'obsidian_ridge_lava',
+    materials: ['obsidian_black', 'basalt_hex_strata', 'scoria_red', 'magma_glow'],
+    atmosphereProfile: 'ash_ember_thin',
+    weatherProfile: 'lava_eruption_cycles',
+    landmarkSet: ['obsidian_arch_bridge', 'basalt_hex_pillars', 'lava_geothermal_siphon'],
+    poiPool: ['deep_vein', 'magnetic_anomaly', 'ancient_ruin'],
+    gameplayProfile: 'bridge_route_engineering',
+    buildingKit: 'obsidian_basalt_forge',
+    audioProfile: 'magma_rumble_crack',
+    orbital: {
+      bandColors: ['#160F14', '#5B171D', '#E54B24'],
+      iceCap: 0.0, cloudCover: 0.08, cloudColor: '#3A2226',
+      nightLights: 0.02, ringChance: 0.0,
+      glow: { tint: '#E0561F', power: 0.55, shellScale: 1.05 },
+    },
+    hazardMechanism: '岩浆河谷热辐射防护，拱桥断裂需工程抢修才能通行',
+    economyHook: '产重金属、稀土与耐热装甲',
+  },
+
+  /* ———— 扩展 P4 十一主题（doc7 §4.0 矩阵） ———— */
+
+  prism_crystal: {
+    id: 'prism_crystal',
+    version: 1,
+    labelZh: '棱镜晶原',
+    tier: 'expansion',
+    categoryConstraints: ['rocky', 'ice'],
+    palette: {
+      base: '#DCEFF7', shadow: '#5A7484', highlight: '#56CBE5',
+      danger: '#9A83D8', emissive: '#FFB7EC', atmosphere: '#56CBE5',
+    },
+    geomorphology: 'generic_rocky',
+    materials: ['crystal_quartz', 'prism_strata', 'refraction_sand', 'lattice_road'],
+    atmosphereProfile: 'crystalline_cold_clear',
+    weatherProfile: 'refraction_light_bands',
+    landmarkSet: ['hex_crystal_spire', 'refraction_canyon', 'resonance_relay'],
+    poiPool: ['magnetic_anomaly', 'deep_vein', 'ancient_ruin'],
+    gameplayProfile: 'resonance_optics_ops',
+    buildingKit: 'prism_lattice_works',
+    audioProfile: 'crystal_ring_resonance',
+    orbital: {
+      bandColors: ['#DCEFF7', '#56CBE5', '#9A83D8'],
+      iceCap: 0.30, cloudCover: 0.20, cloudColor: '#EAF6FB',
+      nightLights: 0.15, ringChance: 0.15,
+      glow: { tint: '#8FD8EC', power: 0.60, shellScale: 1.06 },
+    },
+    hazardMechanism: '晶体干扰无线电，折射光路需谐振校准导航',
+    economyHook: '产量子水晶、光学晶体与高能激光组件',
+  },
+
+  salt_mirror_desert: {
+    id: 'salt_mirror_desert',
+    version: 1,
+    labelZh: '镜盐荒原',
+    tier: 'expansion',
+    categoryConstraints: ['desert'],
+    palette: {
+      base: '#E8E1CD', shadow: '#8A8270', highlight: '#C7A8A2',
+      danger: '#8B6C88', emissive: '#D9B86C', atmosphere: '#C7A8A2',
+    },
+    geomorphology: 'generic_desert',
+    materials: ['salt_crust_white', 'pink_dust', 'mirror_brine', 'purple_rock'],
+    atmosphereProfile: 'bright_mirror_haze',
+    weatherProfile: 'salt_mirage_static',
+    landmarkSet: ['mirror_salt_flat', 'brine_extraction_plant', 'lone_inselberg'],
+    poiPool: ['ancient_ruin', 'crashed_ship', 'lost_station'],
+    gameplayProfile: 'brine_solar_concentration',
+    buildingKit: 'mirror_concentrator_array',
+    audioProfile: 'mirror_flat_winds',
+    orbital: {
+      bandColors: ['#E8E1CD', '#C7A8A2', '#D9B86C'],
+      iceCap: 0.05, cloudCover: 0.10, cloudColor: '#F2E9D8',
+      nightLights: 0.04, ringChance: 0.0,
+      glow: { tint: '#E0C9A0', power: 0.40, shellScale: 1.05 },
+    },
+    hazardMechanism: '强反光造成光学测距误差，卤水壳下暗藏塌陷水腔',
+    economyHook: '产轻金属、高能蓄电池与聚光太阳能',
+  },
+
+  cryomethane_sea: {
+    id: 'cryomethane_sea',
+    version: 1,
+    labelZh: '甲烷雾海',
+    tier: 'expansion',
+    categoryConstraints: ['ice', 'ocean'],
+    palette: {
+      base: '#082B32', shadow: '#031418', highlight: '#56C6C2',
+      danger: '#B8E7E2', emissive: '#B8E7E2', atmosphere: '#167C87',
+    },
+    geomorphology: 'generic_ocean',
+    materials: ['methane_ice_coast', 'dark_hydrocarbon_sea', 'frost_rock', 'fog_band'],
+    atmosphereProfile: 'cryo_hydrocarbon_fog',
+    weatherProfile: 'cryo_fog_drifts',
+    landmarkSet: ['methane_floating_platform', 'ice_shelf_harbor', 'cryo_pipeline'],
+    poiPool: ['subsurface_ocean', 'crashed_ship', 'lost_station'],
+    gameplayProfile: 'cryo_hydrocarbon_ops',
+    buildingKit: 'cryo_hull_dock',
+    audioProfile: 'cryosea_fog_drone',
+    orbital: {
+      bandColors: ['#082B32', '#167C87', '#56C6C2'],
+      iceCap: 0.45, cloudCover: 0.50, cloudColor: '#B8E7E2',
+      nightLights: 0.05, ringChance: 0.0,
+      glow: { tint: '#4FA8AC', power: 0.60, shellScale: 1.06 },
+    },
+    hazardMechanism: '薄冰承重随机断裂，低温使外骨骼与船体性能衰减',
+    economyHook: '产液态甲烷燃料、重氢与推进剂',
+  },
+
+  tidal_lock_dusk: {
+    id: 'tidal_lock_dusk',
+    version: 1,
+    labelZh: '晨昏环带',
+    tier: 'expansion',
+    categoryConstraints: ['rocky', 'lava', 'ice'],
+    palette: {
+      base: '#E2A05A', shadow: '#31445F', highlight: '#CDA978',
+      danger: '#CDA06B', emissive: '#80BCD5', atmosphere: '#80BCD5',
+    },
+    geomorphology: 'generic_rocky',
+    materials: ['scorched_regolith', 'twilight_sand', 'night_ice', 'melt_water'],
+    atmosphereProfile: 'banded_twilight_gradient',
+    weatherProfile: 'terminator_winds',
+    landmarkSet: ['terminator_strip_city', 'dual_zone_powerline', 'dusk_farmland'],
+    poiPool: ['ancient_ruin', 'deep_vein', 'subsurface_ocean'],
+    gameplayProfile: 'dual_zone_thermal_logistics',
+    buildingKit: 'dusk_belt_terminus',
+    audioProfile: 'dusk_belt_breeze',
+    orbital: {
+      bandColors: ['#E2A05A', '#CDA978', '#31445F'],
+      iceCap: 0.20, cloudCover: 0.35, cloudColor: '#D9C9A8',
+      nightLights: 0.20, ringChance: 0.0,
+      glow: { tint: '#C8A878', power: 0.55, shellScale: 1.06 },
+    },
+    hazardMechanism: '昼侧灼热夜侧深寒，跨温区输送必须沿暮光带布局',
+    economyHook: '产温差热电与双极特殊矿物',
+  },
+
+  cloud_giant_atolls: {
+    id: 'cloud_giant_atolls',
+    version: 1,
+    labelZh: '云海浮岛',
+    tier: 'expansion',
+    categoryConstraints: ['gasGiant'],
+    palette: {
+      base: '#E5A65A', shadow: '#6E4A2E', highlight: '#F2D6AA',
+      danger: '#5D618F', emissive: '#C87E67', atmosphere: '#F2D6AA',
+    },
+    geomorphology: 'generic_gas_giant',
+    materials: ['cloud_deck', 'storm_strata', 'atoll_hull', 'skyway'],
+    atmosphereProfile: 'deep_storm_layers',
+    weatherProfile: 'storm_wall_rotation',
+    landmarkSet: ['floating_atoll_ring', 'sky_gondola', 'storm_probe_station'],
+    poiPool: ['storm_vortex'],
+    gameplayProfile: 'high_altitude_platform_ops',
+    buildingKit: 'sky_atoll_mooring',
+    audioProfile: 'storm_altitude_roar',
+    orbital: {
+      bandColors: ['#E5A65A', '#C87E67', '#F2D6AA'],
+      iceCap: 0.0, cloudCover: 1.0, cloudColor: '#F2D6AA',
+      nightLights: 0.03, ringChance: 0.55,
+      glow: { tint: '#E0B070', power: 0.60, shellScale: 1.09 },
+    },
+    hazardMechanism: '严禁常规地表登陆，风暴墙周期性撕毁浮台锚链',
+    economyHook: '独占高产氦-3 与氘采集',
+  },
+
+  fungal_catacombs: {
+    id: 'fungal_catacombs',
+    version: 1,
+    labelZh: '菌海深渊',
+    tier: 'expansion',
+    categoryConstraints: ['toxic', 'rocky'],
+    palette: {
+      base: '#160F2C', shadow: '#0A0716', highlight: '#9B4DCA',
+      danger: '#9B4DCA', emissive: '#5AD3A8', atmosphere: '#4B2A71',
+    },
+    geomorphology: 'generic_toxic',
+    materials: ['cave_rock', 'fungal_mat', 'spore_glow', 'mycelium_net'],
+    atmosphereProfile: 'spore_purple_haze',
+    weatherProfile: 'spore_falls',
+    landmarkSet: ['giant_cap_dome', 'spore_falls', 'mycelium_lift'],
+    poiPool: ['bio_trace', 'subsurface_ocean', 'ancient_ruin'],
+    gameplayProfile: 'spore_filter_caving',
+    buildingKit: 'spore_sanctum',
+    audioProfile: 'spore_cave_drip',
+    orbital: {
+      bandColors: ['#160F2C', '#4B2A71', '#9B4DCA'],
+      iceCap: 0.0, cloudCover: 0.55, cloudColor: '#7A5CA0',
+      nightLights: 0.35, ringChance: 0.0,
+      glow: { tint: '#8A5CB8', power: 0.85, shellScale: 1.07 },
+    },
+    hazardMechanism: '孢子浓雾需过滤通风，巨菌盖崩落封闭通道',
+    economyHook: '产特效药物、生物质与菌丝材料',
+  },
+
+  ancient_megastructure: {
+    id: 'ancient_megastructure',
+    version: 1,
+    labelZh: '机械圣骸',
+    tier: 'expansion',
+    categoryConstraints: ['artificial'],
+    palette: {
+      base: '#161F29', shadow: '#0A0F14', highlight: '#6D7F8C',
+      danger: '#6D7F8C', emissive: '#42C3D6', atmosphere: '#42C3D6',
+    },
+    geomorphology: 'generic_artificial',
+    materials: ['hull_plate', 'oxidized_steel', 'energy_conduit', 'relay_alloy'],
+    atmosphereProfile: 'controlled_venting',
+    weatherProfile: 'dormant_vent_cycles',
+    landmarkSet: ['sunken_hex_armor', 'energy_spine_ridge', 'collapsed_turbine_tower'],
+    poiPool: ['ancient_ruin', 'magnetic_anomaly', 'lost_station'],
+    gameplayProfile: 'ancient_grid_reactivation',
+    buildingKit: 'relic_salvage_yard',
+    audioProfile: 'machine_requiem_drone',
+    orbital: {
+      bandColors: ['#161F29', '#6D7F8C', '#42C3D6'],
+      iceCap: 0.0, cloudCover: 0.02, cloudColor: '#3A4A56',
+      nightLights: 0.60, ringChance: 0.35,
+      glow: { tint: '#42C3D6', power: 0.45, shellScale: 1.05 },
+    },
+    hazardMechanism: '古代哨卫机甲与协议锁仍在线，能源脊短路电弧伤人',
+    economyHook: '产远古数据、现成合金与奇异物质',
+  },
+
+  glassstorm_barrens: {
+    id: 'glassstorm_barrens',
+    version: 1,
+    labelZh: '硅晶风暴',
+    tier: 'expansion',
+    categoryConstraints: ['desert', 'rocky'],
+    palette: {
+      base: '#33262E', shadow: '#15100F', highlight: '#9C735D',
+      danger: '#E2BE93', emissive: '#F5E0BB', atmosphere: '#9C735D',
+    },
+    geomorphology: 'generic_desert',
+    materials: ['vitrified_sand', 'silica_ridge', 'glass_dust', 'etched_rock'],
+    atmosphereProfile: 'abrasive_silica_wind',
+    weatherProfile: 'glassstorm_gales',
+    landmarkSet: ['vitrified_dune_field', 'blade_silica_ridge', 'wind_shelter_bunker'],
+    poiPool: ['crashed_ship', 'deep_vein', 'magnetic_anomaly'],
+    gameplayProfile: 'abrasion_storm_tactics',
+    buildingKit: 'glass_etched_bunker',
+    audioProfile: 'glass_sand_barrage',
+    orbital: {
+      bandColors: ['#33262E', '#9C735D', '#E2BE93'],
+      iceCap: 0.0, cloudCover: 0.25, cloudColor: '#D8C4A8',
+      nightLights: 0.03, ringChance: 0.0,
+      glow: { tint: '#C8A888', power: 0.42, shellScale: 1.05 },
+    },
+    hazardMechanism: '高速碎玻璃风暴磨蚀装备，顺风逆风移速差异显著',
+    economyHook: '产高纯光学硅晶与装甲玻璃',
+  },
+
+  magnetar_aurora: {
+    id: 'magnetar_aurora',
+    version: 1,
+    labelZh: '磁暴极光荒原',
+    tier: 'expansion',
+    categoryConstraints: ['rocky', 'artificial'],
+    palette: {
+      base: '#091729', shadow: '#040B16', highlight: '#1A3F69',
+      danger: '#6A56C4', emissive: '#B9FFEB', atmosphere: '#6A56C4',
+    },
+    geomorphology: 'generic_rocky',
+    materials: ['magnetite_hill', 'arc_crack', 'ionized_rock', 'shielded_road'],
+    atmosphereProfile: 'magnetosphere_curtains',
+    weatherProfile: 'periodic_magnetic_pulses',
+    landmarkSet: ['spiral_magnetite_hill', 'lightning_shield_tower', 'arc_rift'],
+    poiPool: ['magnetic_anomaly', 'lost_station', 'ancient_ruin'],
+    gameplayProfile: 'pulse_window_operations',
+    buildingKit: 'faraday_redoubt',
+    audioProfile: 'aurora_pulse_whine',
+    orbital: {
+      bandColors: ['#091729', '#1A3F69', '#6A56C4'],
+      iceCap: 0.12, cloudCover: 0.06, cloudColor: '#2A3A5A',
+      nightLights: 0.10, ringChance: 0.0,
+      glow: { tint: '#6A56C4', power: 0.90, shellScale: 1.06 },
+    },
+    hazardMechanism: '磁暴脉冲峰值期电子护盾与喷气背包静默，需依托屏蔽塔窗口行动',
+    economyHook: '产超导体与磁性矿',
+  },
+
+  canopy_colossus: {
+    id: 'canopy_colossus',
+    version: 1,
+    labelZh: '巨木云冠',
+    tier: 'expansion',
+    categoryConstraints: ['rocky'],
+    palette: {
+      base: '#123D32', shadow: '#081B16', highlight: '#2F8D69',
+      danger: '#2F8D69', emissive: '#F4D979', atmosphere: '#2F8D69',
+    },
+    geomorphology: 'generic_rocky',
+    materials: ['bark_armor', 'canopy_platform', 'root_valley', 'vine_bridge'],
+    atmosphereProfile: 'wet_green_canopy',
+    weatherProfile: 'canopy_updrafts',
+    landmarkSet: ['colossal_canopy_deck', 'vine_suspension_bridge', 'canopy_elevator'],
+    poiPool: ['bio_trace', 'subsurface_ocean', 'ancient_ruin'],
+    gameplayProfile: 'vertical_canopy_logistics',
+    buildingKit: 'canopy_arbor_station',
+    audioProfile: 'canopy_leaf_swell',
+    orbital: {
+      bandColors: ['#123D32', '#2F8D69', '#A9C85B'],
+      iceCap: 0.04, cloudCover: 0.40, cloudColor: '#C8E0C0',
+      nightLights: 0.18, ringChance: 0.0,
+      glow: { tint: '#4FA07A', power: 0.60, shellScale: 1.06 },
+    },
+    hazardMechanism: '林冠掠食者沿树冠巡逻，垂直落差坠落即死',
+    economyHook: '产高强度生物木质复合材料',
+  },
+
+  fractured_moon: {
+    id: 'fractured_moon',
+    version: 1,
+    labelZh: '碎环月',
+    tier: 'expansion',
+    categoryConstraints: ['rocky', 'ice'],
+    palette: {
+      base: '#39414B', shadow: '#181C22', highlight: '#8B7967',
+      danger: '#D99A62', emissive: '#B6C4D9', atmosphere: '#8A98AC',
+    },
+    geomorphology: 'generic_rocky',
+    materials: ['lunar_regolith', 'rubble_slope', 'fracture_ice', 'alloy_wreck'],
+    atmosphereProfile: 'airless_vacuum',
+    weatherProfile: 'micrometeor_showers',
+    landmarkSet: ['great_rift_chasm', 'wreck_field', 'shattered_ring_overhead'],
+    poiPool: ['crashed_ship', 'ancient_ruin', 'lost_station'],
+    gameplayProfile: 'lowg_salvage_ops',
+    buildingKit: 'wreck_orbit_yard',
+    audioProfile: 'vacuum_bone_conduction',
+    orbital: {
+      bandColors: ['#39414B', '#8B7967', '#B6C4D9'],
+      iceCap: 0.10, cloudCover: 0.0, cloudColor: '#888888',
+      nightLights: 0.02, ringChance: 0.85,
+      glow: { tint: '#8A98AC', power: 0.20, shellScale: 1.04 },
+    },
+    hazardMechanism: '0.25g 低重力跳跃过冲，真空中无声音警示只有骨传导',
+    economyHook: '产合金、模块与氦-3',
+  },
+};
+
+// 模块加载期预计算线性色板（paletteLinear 为派生字段，不进存档）
+for (const id of Object.keys(PLANET_THEMES)) {
+  const t = PLANET_THEMES[id];
+  t.paletteLinear = linearize(t.palette);
+}
+
+/* ========================= 查表与分配（纯函数，只读 world.seed） ========================= */
+
+/** 主题 id → 主题条目（未知 id 返回 null） */
+function getTheme(id) {
+  return (id && PLANET_THEMES[id]) || null;
+}
+
+/** 类别 → 兼容主题条目数组（约束交集；确定性顺序 = 注册表键序） */
+function themesForCategory(cat) {
+  const out = [];
+  for (const id of Object.keys(PLANET_THEMES)) {
+    if (PLANET_THEMES[id].categoryConstraints.indexOf(cat) >= 0) out.push(PLANET_THEMES[id]);
+  }
+  return out;
+}
+
+/**
+ * 主题-天体物理相容守卫（doc6 §4.3：主题服从基础天体参数）。
+ * categoryConstraints 是第一道硬约束；此处追加物理参数级守卫。
+ * 全部为「否决式」检查——守卫永不至于清空候选池（每类别至少一个无守卫主题）。
+ */
+function themePhysicsOk(theme, planet) {
+  const water = Number(planet.water) || 0;
+  const hab = Number(planet.habitability) || 0;
+  if ((theme.id === 'abyssal_ocean' || theme.id === 'cryomethane_sea') && water < 30) return false;
+  if ((theme.id === 'biolume_canopy' || theme.id === 'canopy_colossus') && hab < 15) return false;
+  return true;
+}
+
+/**
+ * 次级修饰器池（doc6 §4.6 配对示例：永夜+晶柱、海洋+硫喷口、荒原+远古巨构等）。
+ * id 与主题 id 同名者（prism_crystal/ancient_megastructure/magnetar_aurora）
+ * 表示该主题以次级身份叠加；其余为独立地貌修饰。
+ */
+const SECONDARY_MODIFIERS = [
+  { id: 'sulfur_vents', labelZh: '硫化喷口', categories: ['ocean', 'toxic', 'rocky'] },
+  { id: 'ancient_megastructure', labelZh: '远古巨构残骸', categories: ['rocky', 'desert', 'ice', 'artificial'] },
+  { id: 'prism_crystal', labelZh: '折射晶柱群', categories: ['ice', 'rocky'] },
+  { id: 'glassstorm', labelZh: '硅玻璃风暴带', categories: ['desert', 'rocky'] },
+  { id: 'magnetar_aurora', labelZh: '磁暴极光幕', categories: ['rocky', 'ice', 'ocean', 'artificial'] },
+];
+
+/** 旗舰权重 / 扩展权重（doc6 §4.3 生成权重） */
+const TIER_WEIGHT = { flagship: 3.0, expansion: 1.0 };
+
+/**
+ * 为行星确定性地抽取主主题 + 0-2 个次级修饰器。
+ *
+ * 确定性契约（doc7 红线 4 / SITE-06）：
+ *  - 只消费 derivePlanetSeeds(world, planet.id).themeSeed → seedFromNumber 子流；
+ *    绝不读写 world.rng（主 RNG 消费顺序不受影响）。
+ *  - 纯函数 of (world.seed, planet 字段, star.danger, takenThemes)。
+ *
+ * 同星系去重（doc7 THEME-06）：takenThemes 为 galaxyGen 维护的 per-system
+ * Set；已抽中的旗舰主题在「仍存在其他候选」时被整体移出候选池。
+ *
+ * @param {{seed:number}} world 世界实体（只读 world.seed）
+ * @param {{id:string|number, category:string, water?:number, habitability?:number}} planet 行星档案
+ * @param {{danger?:number}|null} [star] 恒星档案（高危险恒星微幅加权磁暴主题）
+ * @param {Set<string>} [takenThemes] 本星系已分配主题 id（可省略）
+ * @returns {{primaryThemeId:string, secondaryThemeModifiers:string[]}}
+ */
+function assignTheme(world, planet, star, takenThemes) {
+  const seeds = derivePlanetSeeds(world, planet.id);
+  const sub = seedFromNumber(seeds.themeSeed);
+  const cat = String((planet && planet.category) || 'rocky');
+
+  // 1) 类别约束交集（硬约束）
+  let pool = themesForCategory(cat);
+  if (pool.length === 0) pool = [PLANET_THEMES.red_regolith_frontier]; // 兜底（8 类均有覆盖，实际不可达）
+
+  // 2) 物理守卫否决；全灭则回退未守卫池
+  const guarded = pool.filter((t) => themePhysicsOk(t, planet));
+  if (guarded.length > 0) pool = guarded;
+
+  // 3) 同星系旗舰去重：已被抽中的旗舰主题让位（仅当仍有替代候选）
+  if (takenThemes && takenThemes.size > 0 && pool.length > 1) {
+    const alt = pool.filter((t) => !(t.tier === 'flagship' && takenThemes.has(t.id)));
+    if (alt.length > 0) pool = alt;
+  }
+
+  // 4) 加权抽选：旗舰 ×3；高危险恒星（danger≥5）磁暴主题 ×2 微偏置
+  const danger = star && Number.isFinite(star.danger) ? star.danger : 0;
+  let total = 0;
+  const weights = pool.map((t) => {
+    let w = TIER_WEIGHT[t.tier] || 1.0;
+    if (t.id === 'magnetar_aurora' && danger >= 5) w += TIER_WEIGHT.flagship;
+    total += w;
+    return w;
+  });
+  let r = float(sub) * total;
+  let primary = pool[pool.length - 1];
+  for (let i = 0; i < pool.length; i++) {
+    r -= weights[i];
+    if (r <= 0) { primary = pool[i]; break; }
+  }
+
+  // 5) 次级修饰器 0-2 个（与主主题去重；类别相容者中确定性抽选）
+  const modifiers = [];
+  const compatibleMods = SECONDARY_MODIFIERS.filter(
+    (m) => m.categories.indexOf(cat) >= 0 && m.id !== primary.id
+  );
+  if (compatibleMods.length > 0 && chance(sub, 0.34)) {
+    modifiers.push(compatibleMods[int(sub, compatibleMods.length)].id);
+    if (chance(sub, 0.42)) {
+      const rest = compatibleMods.filter((m) => m.id !== modifiers[0]);
+      if (rest.length > 0) modifiers.push(rest[int(sub, rest.length)].id);
+    }
+  }
+
+  return { primaryThemeId: primary.id, secondaryThemeModifiers: modifiers };
+}
+
+Object.assign(__exports, { THEME_ASSIGNMENT_VERSION, srgbToLinear, PLANET_THEMES, getTheme, themesForCategory, SECONDARY_MODIFIERS, assignTheme });
+
+});
 __register("src/render/gl/PlanetSurfaceScene.js", function (__exports, __require) {
 /**
  * render/gl/PlanetSurfaceScene.js — 行星地表场景编排器（doc7 TASK-1.3，Phase 1 切片）
@@ -32258,6 +33378,7 @@ class PlanetSurfaceScene {
     this._lastThemeRef = null;
     this._planetInfo = null;
     this._worldOffset = null;
+    this._themePayload = null;   // WP-5：最近一次 setTheme 的载荷（水体主题色提取）
     this._fogColor = [0.62, 0.65, 0.70];
     this._fogRange = [60.0, 420.0];
 
@@ -32371,6 +33492,16 @@ class PlanetSurfaceScene {
     return this;
   }
 
+  /**
+   * WP-5 P1-F：脚步压感涟漪注入（biolume_canopy uFootsteps 8 槽环形缓冲）。
+   * @param {Float32Array|Array} ring 8 组 [x, z, triggerTime, strength] 四元组
+   * @returns {PlanetSurfaceScene} this
+   */
+  setFootsteps(ring) {
+    if (this._terrain) this._terrain.setTheme({ footsteps: ring });
+    return this;
+  }
+
   /** 地形背面剔除开关透传（默认 true；诊断对照视图用） */
   setCullEnabled(enabled) {
     if (this._terrain) this._terrain.setCullEnabled(enabled);
@@ -32436,6 +33567,7 @@ class PlanetSurfaceScene {
     if (rd.theme && rd.theme !== this._lastThemeRef) {
       this.setTheme(rd.theme);
       this._lastThemeRef = rd.theme;
+      this._themePayload = rd.theme;   // WP-5：保留载荷供水体主题色提取
     }
     if (rd.sun) this.setSunOnly(rd.sun);
     if (rd.fog) this.setFogOnly(rd.fog);
@@ -32463,7 +33595,15 @@ class PlanetSurfaceScene {
     if (this._water && baseWl > -90.0) {
       const liveLv = tideWaterLevel(baseWl, time);
       this._terrain._themeFx[0] = liveLv;
-      this._water.sync({ field: this._field, waterLevel: baseWl, fogRange: this._fogRange });
+      // WP-5 P1-F：水体主题色同步（deep=崖壁通道色 / shallow=地表基色 / foam=生态高光；
+      // 此前从未传入 → 硫雾/甲烷海等全部渲染成默认亚特兰蒂斯亮蓝）
+      const waterOpts = { field: this._field, waterLevel: baseWl, fogRange: this._fogRange };
+      const mc = this._themePayload && this._themePayload.terrain
+        && this._themePayload.terrain.matColors;
+      if (Array.isArray(mc) && mc.length >= 3) {
+        waterOpts.colors = { deep: mc[1], shallow: mc[0], foam: mc[2] };
+      }
+      this._water.sync(waterOpts);
       dc += this._water.draw(gl, {
         vp: cam.vp,
         eye: cam.eye,
@@ -34773,6 +35913,7 @@ uniform vec3 uSunColor;
 uniform vec3 uCamPos;
 uniform vec3 uFogColor;
 uniform vec2 uFogRange;
+uniform float uHdr; /* WP-5 P1-F：RGBA8 模拟 HDR 时场景预缩放（对象/建筑 pass 与地形同口径） */
 out vec4 fragColor;
 float hash31(vec3 p) {
   p = fract(p * 0.1031);
@@ -34800,7 +35941,7 @@ void main() {
            + baseAlbedo * vE * 1.35;
   col = mix(col, vec3(2.0, 2.0, 2.1), vF);
   float fog = smoothstep(uFogRange.x, uFogRange.y, distance(vW, uCamPos));
-  fragColor = vec4(mix(col, uFogColor, fog), 1.0);
+  fragColor = vec4(mix(col, uFogColor, fog) * uHdr, 1.0);
 }`;
 
 /** 角色七部件：逐实例模型矩阵 + 部件号失配退化 */
@@ -34971,6 +36112,7 @@ class PlanetSurface3D {
     this._vh = 1;
     this._springDist = -1;          // 弹簧臂当前臂长（首帧吸附）
     this._spawnSeq = 0;             // 挖掘粒子批次序号（确定性初速源）
+    this.hdrScale = 1.0;            // WP-5：RGBA8 模拟 HDR 预缩放（调用方按 cm.post 下发）
     // 场景化集成（doc7 TASK-1.2/1.4）：地形/天空/天气改由 PlanetSurfaceScene 绘制，
     // 本渲染器经 setExternalCamera() 进入「对象独占」模式 —— 仅绘制
     // 箱体/actor/角色七部件/贴花/特效/挖掘粒子，相机与 VP 由调用方直供。
@@ -34990,9 +36132,9 @@ class PlanetSurface3D {
     this._u = {
       sky: locMap(gl, this.progSky, ['uInvVP', 'uCamPos', 'uZenith', 'uHorizon', 'uGround', 'uSunDir', 'uSunColor', 'uStars', 'uTime']),
       terrain: locMap(gl, this.progTerrain, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange', 'uDebugMode']),
-      box: locMap(gl, this.progBox, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange']),
-      actor: locMap(gl, this.progActor, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange']),
-      char: locMap(gl, this.progChar, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange']),
+      box: locMap(gl, this.progBox, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange', 'uHdr']),
+      actor: locMap(gl, this.progActor, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange', 'uHdr']),
+      char: locMap(gl, this.progChar, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange', 'uHdr']),
       quadc: locMap(gl, this.progQuadC, ['uVP', 'uTime', 'uPulse']),
       part: locMap(gl, this.progPart, ['uVP', 'uPointScale']),
     };
@@ -35721,6 +36863,7 @@ class PlanetSurface3D {
       gl.uniform3f(u.uCamPos, eye[0], eye[1], eye[2]);
       gl.uniform3fv(u.uFogColor, this._fogColor);
       gl.uniform2f(u.uFogRange, this._fogRange[0], this._fogRange[1]);
+      gl.uniform1f(u.uHdr, this.hdrScale);
       gl.bindVertexArray(this._box.vao);
       gl.drawArraysInstanced(gl.TRIANGLES, 0, this._box.meshCount, this._box.count);
       dc++;
@@ -35738,6 +36881,7 @@ class PlanetSurface3D {
       gl.uniform3f(u.uCamPos, eye[0], eye[1], eye[2]);
       gl.uniform3fv(u.uFogColor, this._fogColor);
       gl.uniform2f(u.uFogRange, this._fogRange[0], this._fogRange[1]);
+      gl.uniform1f(u.uHdr, this.hdrScale);
       gl.bindVertexArray(this._actor.vao);
       gl.drawArraysInstanced(gl.TRIANGLES, 0, this._actor.meshCount, this._actor.count);
       dc++;
@@ -35756,6 +36900,7 @@ class PlanetSurface3D {
       gl.uniform3f(u.uCamPos, eye[0], eye[1], eye[2]);
       gl.uniform3fv(u.uFogColor, this._fogColor);
       gl.uniform2f(u.uFogRange, this._fogRange[0], this._fogRange[1]);
+      gl.uniform1f(u.uHdr, this.hdrScale);
       gl.bindVertexArray(this._char.vao);
       gl.drawArraysInstanced(gl.TRIANGLES, 0, this._char.meshCount, this._char.count);
       dc++;
@@ -44237,709 +45382,6 @@ class System3D {
 Object.assign(__exports, { orbitalUniformsFor, System3D });
 
 });
-__register("src/content/planetThemes.js", function (__exports, __require) {
-/**
- * content/planetThemes.js — 18 大行星主题注册表（doc6 §4.4/§10.1 / doc7 TASK-3.1）
- *
- * 主题是完整的世界身份而非颜色字段（doc6 §4.1）：每条目覆盖九维规范
- * （轮廓/地貌/材质/色板/光照/天气/地标/玩法/经济）。色板为 sRGB 十六进制
- * （doc6 §4.4 艺术指导起点），渲染前经 srgbToLinear 转线性空间。
- *
- * 红线（doc6 §4.3 / doc7 红线 4）：
- *  - assignTheme 只消费 derivePlanetSeeds(world, planetId).themeSeed 派生子流，
- *    绝不读写 world.rng、绝不 Math.random()（保 52/52 与金快照序列）。
- *  - 主题服从天体物理：categoryConstraints ∩ planet.category 为硬约束
- *    （例如海洋主题永远不会落在熔岩行星上）。
- *  - 同星系去重：galaxyGen 传入 per-system takenThemes Set，旗舰主题
- *    在仍有可用候选时绝不重复出现（doc7 THEME-06）。
- *
- * 类别口径：categoryConstraints 使用 galaxyGen.PLANET_CATEGORIES 的 8 个
- * 类别 id（rocky/ocean/ice/desert/gasGiant/lava/toxic/artificial）；
- * doc6 §4.4 表中的 "ice_moon" 规范化为 'ice'。
- */
-
-const { seedFromNumber: seedFromNumber, float: float, int: int, chance: chance } = __require("src/core/rng.js");
-const { derivePlanetSeeds: derivePlanetSeeds } = __require("src/domain/ground/planetSeeds.js");
-
-/** 主题分配算法版本（进存档；语义变更必须递增） */
-const THEME_ASSIGNMENT_VERSION = 1;
-
-/** sRGB hex(#rgb/#rrggbb) → 线性空间 [r,g,b] 浮点（pow 2.2 近似，doc7 §3.2/5）。
- *  解析失败回退中性灰；导出供测试与渲染侧共用。 */
-function srgbToLinear(hex) {
-  let h = String(hex || '');
-  if (h.startsWith('#')) h = h.slice(1);
-  if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
-  const n = parseInt(h, 16);
-  if (!Number.isFinite(n) || h.length !== 6) return [0.5, 0.5, 0.5];
-  const c = [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
-  return c.map((v) => Math.pow(v, 2.2));
-}
-
-/** 组装 paletteLinear（模块加载期一次性预计算，运行时零解析开销） */
-function linearize(pal) {
-  return {
-    base: srgbToLinear(pal.base),
-    shadow: srgbToLinear(pal.shadow),
-    highlight: srgbToLinear(pal.highlight),
-    danger: srgbToLinear(pal.danger),
-    emissive: srgbToLinear(pal.emissive),
-    atmosphere: srgbToLinear(pal.atmosphere),
-  };
-}
-
-/* ========================= 18 主题注册表（doc6 §4.4 全表） ========================= */
-
-const PLANET_THEMES = {
-  /* ———— 首批 P3 旗舰七主题（doc7 §4.1） ———— */
-
-  abyssal_ocean: {
-    id: 'abyssal_ocean',
-    version: 1,
-    labelZh: '碧渊海洋',
-    tier: 'flagship',
-    categoryConstraints: ['ocean', 'ice'],
-    palette: {
-      base: '#042A46', shadow: '#021522', highlight: '#5DEBDF',
-      danger: '#E6A34A', emissive: '#B77BFF', atmosphere: '#087F95',
-    },
-    geomorphology: 'ocean_basin_reef_trench',
-    materials: ['abyssal_sediment', 'reef_coral', 'basalt_cliff', 'glow_kelp', 'pearl_alloy'],
-    atmosphereProfile: 'dense_blue_scattering',
-    weatherProfile: 'tidal_storms',
-    landmarkSet: ['reef_dome_ruin', 'tide_spire', 'biolume_kelp_arch'],
-    poiPool: ['subsurface_ocean', 'bio_trace', 'crashed_ship'],
-    gameplayProfile: 'underwater_pressure_expedition',
-    buildingKit: 'abyssal_outpost',
-    audioProfile: 'abyssal_deep_ocean',
-    orbital: {
-      bandColors: ['#087F95', '#042A46', '#5DEBDF'],
-      iceCap: 0.25, cloudCover: 0.55, cloudColor: '#DFF4F2',
-      nightLights: 0.30, ringChance: 0.0,
-      glow: { tint: '#087F95', power: 0.95, shellScale: 1.06 },
-    },
-    hazardMechanism: '水深>8m 进入高压区持续消耗耐压护盾，潮汐窗口每 90 秒升降海平面控制通道开闭',
-    economyHook: '产深海生物质、重氢与耐压材料科技',
-  },
-
-  permafrost_furnace: {
-    id: 'permafrost_furnace',
-    version: 1,
-    labelZh: '永冬炉境',
-    tier: 'flagship',
-    categoryConstraints: ['ice'],
-    palette: {
-      base: '#EAF5FF', shadow: '#14293E', highlight: '#91BBD1',
-      danger: '#466D8A', emissive: '#F2A85D', atmosphere: '#91BBD1',
-    },
-    geomorphology: 'glacial_basin_crevasse',
-    materials: ['snow_ice_white', 'blue_ice_cliff', 'wet_frozen_soil', 'heated_steel'],
-    atmosphereProfile: 'cold_clear_thin',
-    weatherProfile: 'whiteout_blizzards',
-    landmarkSet: ['central_furnace_tower', 'heated_span_bridge', 'buried_outpost'],
-    poiPool: ['subsurface_ocean', 'deep_vein', 'lost_station'],
-    gameplayProfile: 'heat_network_survival',
-    buildingKit: 'thermal_hearth_hold',
-    audioProfile: 'frostwind_hum_embers',
-    orbital: {
-      bandColors: ['#EAF5FF', '#91BBD1', '#466D8A'],
-      iceCap: 0.85, cloudCover: 0.50, cloudColor: '#F2F7FB',
-      nightLights: 0.35, ringChance: 0.0,
-      glow: { tint: '#9FC4E8', power: 0.50, shellScale: 1.05 },
-    },
-    hazardMechanism: '离开热源覆盖圈体温槽下降并冻伤，Whiteout 暴风雪期间热源半径收缩 40%',
-    economyHook: '产富水冰、冷冻基因样本与超导隔热合金科技',
-  },
-
-  red_regolith_frontier: {
-    id: 'red_regolith_frontier',
-    version: 1,
-    labelZh: '赤砾边疆',
-    tier: 'flagship',
-    categoryConstraints: ['desert', 'rocky'],
-    palette: {
-      base: '#C66B3B', shadow: '#5A2E1C', highlight: '#D4A36A',
-      danger: '#8B4F36', emissive: '#F0C78D', atmosphere: '#D4A36A',
-    },
-    geomorphology: 'mesa_canyon_crater_steppe',
-    materials: ['red_regolith', 'sandstone_strata', 'sand_gold_scrub', 'iron_dust'],
-    atmosphereProfile: 'thin_dust_haze',
-    weatherProfile: 'red_dust_storms',
-    landmarkSet: ['sandstone_arch', 'mesa_overlook_platform', 'deepwell_tower'],
-    poiPool: ['crashed_ship', 'deep_vein', 'ancient_ruin'],
-    gameplayProfile: 'frontier_mining_expansion',
-    buildingKit: 'frontier_dome_yard',
-    audioProfile: 'dry_gale_regolith',
-    orbital: {
-      bandColors: ['#C66B3B', '#8B4F36', '#D4A36A'],
-      iceCap: 0.08, cloudCover: 0.12, cloudColor: '#E8C79A',
-      nightLights: 0.05, ringChance: 0.0,
-      glow: { tint: '#D8A15E', power: 0.38, shellScale: 1.05 },
-    },
-    hazardMechanism: '沙尘暴来袭能见度骤降、太阳能出力跌至 15%，户外人员机械受风沙磨损',
-    economyHook: '产铁族金属、硅酸盐与基础工业产能',
-  },
-
-  dry_night_polar: {
-    id: 'dry_night_polar',
-    version: 1,
-    labelZh: '永夜晶荒',
-    tier: 'flagship',
-    categoryConstraints: ['ice', 'rocky'],
-    palette: {
-      base: '#101421', shadow: '#070A12', highlight: '#D8DCE8',
-      danger: '#77718F', emissive: '#BDA4FF', atmosphere: '#77718F',
-    },
-    geomorphology: 'dry_salt_polar',
-    materials: ['dark_frozen_rock', 'moon_white_salt', 'grey_purple_strata', 'violet_beacon'],
-    atmosphereProfile: 'airless_night_static',
-    weatherProfile: 'meteor_nights',
-    landmarkSet: ['salt_polygon_basin', 'radar_beacon_spire', 'aurora_intercept_laser'],
-    poiPool: ['lost_station', 'crashed_ship', 'magnetic_anomaly'],
-    gameplayProfile: 'dark_energy_storage_ops',
-    buildingKit: 'polar_salt_vault',
-    audioProfile: 'polar_silence_hum',
-    orbital: {
-      bandColors: ['#101421', '#77718F', '#D8DCE8'],
-      iceCap: 0.15, cloudCover: 0.03, cloudColor: '#6A6E86',
-      nightLights: 0.12, ringChance: 0.0,
-      glow: { tint: '#BDA4FF', power: 0.75, shellScale: 1.05 },
-    },
-    hazardMechanism: '极夜无光热依赖储能设施，缺大气保护偶发高能陨石坠落需激光网拦截',
-    economyHook: '产工业盐晶、稀有同位素与低温超导元件',
-  },
-
-  sulfur_marsh: {
-    id: 'sulfur_marsh',
-    version: 1,
-    labelZh: '硫雾沼泽',
-    tier: 'flagship',
-    categoryConstraints: ['toxic'],
-    palette: {
-      base: '#1D341B', shadow: '#0B160A', highlight: '#B7D84C',
-      danger: '#B7D84C', emissive: '#D9FF76', atmosphere: '#748F2B',
-    },
-    geomorphology: 'fumarole_acid_terraces',
-    materials: ['charred_rock', 'sulfur_crust', 'acid_pool', 'altered_strata'],
-    atmosphereProfile: 'acid_green_haze',
-    weatherProfile: 'fumarole_gas_jets',
-    landmarkSet: ['giant_fumarole_cone', 'acid_pipe_bridge', 'corroded_drill_rig'],
-    poiPool: ['bio_trace', 'lost_station', 'magnetic_anomaly'],
-    gameplayProfile: 'chemical_hazard_chemistry',
-    buildingKit: 'acid_proof_stilt_base',
-    audioProfile: 'marsh_bubble_hiss',
-    orbital: {
-      bandColors: ['#1D341B', '#748F2B', '#B7D84C'],
-      iceCap: 0.0, cloudCover: 0.70, cloudColor: '#9BB83B',
-      nightLights: 0.06, ringChance: 0.0,
-      glow: { tint: '#8FAE33', power: 1.35, shellScale: 1.09 },
-    },
-    hazardMechanism: '低洼毒气湖持续腐蚀防护层与地基，浓沼气遇明火爆燃',
-    economyHook: '产挥发性气体、硫化物与化工链产物',
-  },
-
-  biolume_canopy: {
-    id: 'biolume_canopy',
-    version: 1,
-    labelZh: '星辉生物圈',
-    tier: 'flagship',
-    categoryConstraints: ['rocky', 'ocean'],
-    palette: {
-      base: '#082B3D', shadow: '#03141E', highlight: '#42D8C6',
-      danger: '#A981FF', emissive: '#42D8C6', atmosphere: '#007E91',
-    },
-    geomorphology: 'biolume_rainforest',
-    materials: ['deep_canopy_floor', 'wet_moss_cliff', 'glow_flora', 'biolume_vein'],
-    atmosphereProfile: 'humid_blue_cyan',
-    weatherProfile: 'biolume_rain_pulses',
-    landmarkSet: ['magnetic_stone_arch', 'soul_willow_tree', 'glow_root_bridge'],
-    poiPool: ['bio_trace', 'subsurface_ocean'],
-    gameplayProfile: 'reactive_ecology_sampling',
-    buildingKit: 'biolume_grove_camp',
-    audioProfile: 'biolume_night_choir',
-    orbital: {
-      bandColors: ['#082B3D', '#007E91', '#42D8C6'],
-      iceCap: 0.05, cloudCover: 0.45, cloudColor: '#A8D8E0',
-      nightLights: 0.50, ringChance: 0.0,
-      glow: { tint: '#3AA8B8', power: 0.70, shellScale: 1.06 },
-    },
-    hazardMechanism: '夜间荧光生态有掠食者语义，压感涟漪会暴露小队行踪',
-    economyHook: '产再生生物质、神经纤维与医疗前体',
-  },
-
-  obsidian_lava: {
-    id: 'obsidian_lava',
-    version: 1,
-    labelZh: '黑曜熔海',
-    tier: 'flagship',
-    categoryConstraints: ['lava'],
-    palette: {
-      base: '#160F14', shadow: '#0A0709', highlight: '#E54B24',
-      danger: '#E54B24', emissive: '#FFAA3C', atmosphere: '#5B171D',
-    },
-    geomorphology: 'obsidian_ridge_lava',
-    materials: ['obsidian_black', 'basalt_hex_strata', 'scoria_red', 'magma_glow'],
-    atmosphereProfile: 'ash_ember_thin',
-    weatherProfile: 'lava_eruption_cycles',
-    landmarkSet: ['obsidian_arch_bridge', 'basalt_hex_pillars', 'lava_geothermal_siphon'],
-    poiPool: ['deep_vein', 'magnetic_anomaly', 'ancient_ruin'],
-    gameplayProfile: 'bridge_route_engineering',
-    buildingKit: 'obsidian_basalt_forge',
-    audioProfile: 'magma_rumble_crack',
-    orbital: {
-      bandColors: ['#160F14', '#5B171D', '#E54B24'],
-      iceCap: 0.0, cloudCover: 0.08, cloudColor: '#3A2226',
-      nightLights: 0.02, ringChance: 0.0,
-      glow: { tint: '#E0561F', power: 0.55, shellScale: 1.05 },
-    },
-    hazardMechanism: '岩浆河谷热辐射防护，拱桥断裂需工程抢修才能通行',
-    economyHook: '产重金属、稀土与耐热装甲',
-  },
-
-  /* ———— 扩展 P4 十一主题（doc7 §4.0 矩阵） ———— */
-
-  prism_crystal: {
-    id: 'prism_crystal',
-    version: 1,
-    labelZh: '棱镜晶原',
-    tier: 'expansion',
-    categoryConstraints: ['rocky', 'ice'],
-    palette: {
-      base: '#DCEFF7', shadow: '#5A7484', highlight: '#56CBE5',
-      danger: '#9A83D8', emissive: '#FFB7EC', atmosphere: '#56CBE5',
-    },
-    geomorphology: 'generic_rocky',
-    materials: ['crystal_quartz', 'prism_strata', 'refraction_sand', 'lattice_road'],
-    atmosphereProfile: 'crystalline_cold_clear',
-    weatherProfile: 'refraction_light_bands',
-    landmarkSet: ['hex_crystal_spire', 'refraction_canyon', 'resonance_relay'],
-    poiPool: ['magnetic_anomaly', 'deep_vein', 'ancient_ruin'],
-    gameplayProfile: 'resonance_optics_ops',
-    buildingKit: 'prism_lattice_works',
-    audioProfile: 'crystal_ring_resonance',
-    orbital: {
-      bandColors: ['#DCEFF7', '#56CBE5', '#9A83D8'],
-      iceCap: 0.30, cloudCover: 0.20, cloudColor: '#EAF6FB',
-      nightLights: 0.15, ringChance: 0.15,
-      glow: { tint: '#8FD8EC', power: 0.60, shellScale: 1.06 },
-    },
-    hazardMechanism: '晶体干扰无线电，折射光路需谐振校准导航',
-    economyHook: '产量子水晶、光学晶体与高能激光组件',
-  },
-
-  salt_mirror_desert: {
-    id: 'salt_mirror_desert',
-    version: 1,
-    labelZh: '镜盐荒原',
-    tier: 'expansion',
-    categoryConstraints: ['desert'],
-    palette: {
-      base: '#E8E1CD', shadow: '#8A8270', highlight: '#C7A8A2',
-      danger: '#8B6C88', emissive: '#D9B86C', atmosphere: '#C7A8A2',
-    },
-    geomorphology: 'generic_desert',
-    materials: ['salt_crust_white', 'pink_dust', 'mirror_brine', 'purple_rock'],
-    atmosphereProfile: 'bright_mirror_haze',
-    weatherProfile: 'salt_mirage_static',
-    landmarkSet: ['mirror_salt_flat', 'brine_extraction_plant', 'lone_inselberg'],
-    poiPool: ['ancient_ruin', 'crashed_ship', 'lost_station'],
-    gameplayProfile: 'brine_solar_concentration',
-    buildingKit: 'mirror_concentrator_array',
-    audioProfile: 'mirror_flat_winds',
-    orbital: {
-      bandColors: ['#E8E1CD', '#C7A8A2', '#D9B86C'],
-      iceCap: 0.05, cloudCover: 0.10, cloudColor: '#F2E9D8',
-      nightLights: 0.04, ringChance: 0.0,
-      glow: { tint: '#E0C9A0', power: 0.40, shellScale: 1.05 },
-    },
-    hazardMechanism: '强反光造成光学测距误差，卤水壳下暗藏塌陷水腔',
-    economyHook: '产轻金属、高能蓄电池与聚光太阳能',
-  },
-
-  cryomethane_sea: {
-    id: 'cryomethane_sea',
-    version: 1,
-    labelZh: '甲烷雾海',
-    tier: 'expansion',
-    categoryConstraints: ['ice', 'ocean'],
-    palette: {
-      base: '#082B32', shadow: '#031418', highlight: '#56C6C2',
-      danger: '#B8E7E2', emissive: '#B8E7E2', atmosphere: '#167C87',
-    },
-    geomorphology: 'generic_ocean',
-    materials: ['methane_ice_coast', 'dark_hydrocarbon_sea', 'frost_rock', 'fog_band'],
-    atmosphereProfile: 'cryo_hydrocarbon_fog',
-    weatherProfile: 'cryo_fog_drifts',
-    landmarkSet: ['methane_floating_platform', 'ice_shelf_harbor', 'cryo_pipeline'],
-    poiPool: ['subsurface_ocean', 'crashed_ship', 'lost_station'],
-    gameplayProfile: 'cryo_hydrocarbon_ops',
-    buildingKit: 'cryo_hull_dock',
-    audioProfile: 'cryosea_fog_drone',
-    orbital: {
-      bandColors: ['#082B32', '#167C87', '#56C6C2'],
-      iceCap: 0.45, cloudCover: 0.50, cloudColor: '#B8E7E2',
-      nightLights: 0.05, ringChance: 0.0,
-      glow: { tint: '#4FA8AC', power: 0.60, shellScale: 1.06 },
-    },
-    hazardMechanism: '薄冰承重随机断裂，低温使外骨骼与船体性能衰减',
-    economyHook: '产液态甲烷燃料、重氢与推进剂',
-  },
-
-  tidal_lock_dusk: {
-    id: 'tidal_lock_dusk',
-    version: 1,
-    labelZh: '晨昏环带',
-    tier: 'expansion',
-    categoryConstraints: ['rocky', 'lava', 'ice'],
-    palette: {
-      base: '#E2A05A', shadow: '#31445F', highlight: '#CDA978',
-      danger: '#CDA06B', emissive: '#80BCD5', atmosphere: '#80BCD5',
-    },
-    geomorphology: 'generic_rocky',
-    materials: ['scorched_regolith', 'twilight_sand', 'night_ice', 'melt_water'],
-    atmosphereProfile: 'banded_twilight_gradient',
-    weatherProfile: 'terminator_winds',
-    landmarkSet: ['terminator_strip_city', 'dual_zone_powerline', 'dusk_farmland'],
-    poiPool: ['ancient_ruin', 'deep_vein', 'subsurface_ocean'],
-    gameplayProfile: 'dual_zone_thermal_logistics',
-    buildingKit: 'dusk_belt_terminus',
-    audioProfile: 'dusk_belt_breeze',
-    orbital: {
-      bandColors: ['#E2A05A', '#CDA978', '#31445F'],
-      iceCap: 0.20, cloudCover: 0.35, cloudColor: '#D9C9A8',
-      nightLights: 0.20, ringChance: 0.0,
-      glow: { tint: '#C8A878', power: 0.55, shellScale: 1.06 },
-    },
-    hazardMechanism: '昼侧灼热夜侧深寒，跨温区输送必须沿暮光带布局',
-    economyHook: '产温差热电与双极特殊矿物',
-  },
-
-  cloud_giant_atolls: {
-    id: 'cloud_giant_atolls',
-    version: 1,
-    labelZh: '云海浮岛',
-    tier: 'expansion',
-    categoryConstraints: ['gasGiant'],
-    palette: {
-      base: '#E5A65A', shadow: '#6E4A2E', highlight: '#F2D6AA',
-      danger: '#5D618F', emissive: '#C87E67', atmosphere: '#F2D6AA',
-    },
-    geomorphology: 'generic_gas_giant',
-    materials: ['cloud_deck', 'storm_strata', 'atoll_hull', 'skyway'],
-    atmosphereProfile: 'deep_storm_layers',
-    weatherProfile: 'storm_wall_rotation',
-    landmarkSet: ['floating_atoll_ring', 'sky_gondola', 'storm_probe_station'],
-    poiPool: ['storm_vortex'],
-    gameplayProfile: 'high_altitude_platform_ops',
-    buildingKit: 'sky_atoll_mooring',
-    audioProfile: 'storm_altitude_roar',
-    orbital: {
-      bandColors: ['#E5A65A', '#C87E67', '#F2D6AA'],
-      iceCap: 0.0, cloudCover: 1.0, cloudColor: '#F2D6AA',
-      nightLights: 0.03, ringChance: 0.55,
-      glow: { tint: '#E0B070', power: 0.60, shellScale: 1.09 },
-    },
-    hazardMechanism: '严禁常规地表登陆，风暴墙周期性撕毁浮台锚链',
-    economyHook: '独占高产氦-3 与氘采集',
-  },
-
-  fungal_catacombs: {
-    id: 'fungal_catacombs',
-    version: 1,
-    labelZh: '菌海深渊',
-    tier: 'expansion',
-    categoryConstraints: ['toxic', 'rocky'],
-    palette: {
-      base: '#160F2C', shadow: '#0A0716', highlight: '#9B4DCA',
-      danger: '#9B4DCA', emissive: '#5AD3A8', atmosphere: '#4B2A71',
-    },
-    geomorphology: 'generic_toxic',
-    materials: ['cave_rock', 'fungal_mat', 'spore_glow', 'mycelium_net'],
-    atmosphereProfile: 'spore_purple_haze',
-    weatherProfile: 'spore_falls',
-    landmarkSet: ['giant_cap_dome', 'spore_falls', 'mycelium_lift'],
-    poiPool: ['bio_trace', 'subsurface_ocean', 'ancient_ruin'],
-    gameplayProfile: 'spore_filter_caving',
-    buildingKit: 'spore_sanctum',
-    audioProfile: 'spore_cave_drip',
-    orbital: {
-      bandColors: ['#160F2C', '#4B2A71', '#9B4DCA'],
-      iceCap: 0.0, cloudCover: 0.55, cloudColor: '#7A5CA0',
-      nightLights: 0.35, ringChance: 0.0,
-      glow: { tint: '#8A5CB8', power: 0.85, shellScale: 1.07 },
-    },
-    hazardMechanism: '孢子浓雾需过滤通风，巨菌盖崩落封闭通道',
-    economyHook: '产特效药物、生物质与菌丝材料',
-  },
-
-  ancient_megastructure: {
-    id: 'ancient_megastructure',
-    version: 1,
-    labelZh: '机械圣骸',
-    tier: 'expansion',
-    categoryConstraints: ['artificial'],
-    palette: {
-      base: '#161F29', shadow: '#0A0F14', highlight: '#6D7F8C',
-      danger: '#6D7F8C', emissive: '#42C3D6', atmosphere: '#42C3D6',
-    },
-    geomorphology: 'generic_artificial',
-    materials: ['hull_plate', 'oxidized_steel', 'energy_conduit', 'relay_alloy'],
-    atmosphereProfile: 'controlled_venting',
-    weatherProfile: 'dormant_vent_cycles',
-    landmarkSet: ['sunken_hex_armor', 'energy_spine_ridge', 'collapsed_turbine_tower'],
-    poiPool: ['ancient_ruin', 'magnetic_anomaly', 'lost_station'],
-    gameplayProfile: 'ancient_grid_reactivation',
-    buildingKit: 'relic_salvage_yard',
-    audioProfile: 'machine_requiem_drone',
-    orbital: {
-      bandColors: ['#161F29', '#6D7F8C', '#42C3D6'],
-      iceCap: 0.0, cloudCover: 0.02, cloudColor: '#3A4A56',
-      nightLights: 0.60, ringChance: 0.35,
-      glow: { tint: '#42C3D6', power: 0.45, shellScale: 1.05 },
-    },
-    hazardMechanism: '古代哨卫机甲与协议锁仍在线，能源脊短路电弧伤人',
-    economyHook: '产远古数据、现成合金与奇异物质',
-  },
-
-  glassstorm_barrens: {
-    id: 'glassstorm_barrens',
-    version: 1,
-    labelZh: '硅晶风暴',
-    tier: 'expansion',
-    categoryConstraints: ['desert', 'rocky'],
-    palette: {
-      base: '#33262E', shadow: '#15100F', highlight: '#9C735D',
-      danger: '#E2BE93', emissive: '#F5E0BB', atmosphere: '#9C735D',
-    },
-    geomorphology: 'generic_desert',
-    materials: ['vitrified_sand', 'silica_ridge', 'glass_dust', 'etched_rock'],
-    atmosphereProfile: 'abrasive_silica_wind',
-    weatherProfile: 'glassstorm_gales',
-    landmarkSet: ['vitrified_dune_field', 'blade_silica_ridge', 'wind_shelter_bunker'],
-    poiPool: ['crashed_ship', 'deep_vein', 'magnetic_anomaly'],
-    gameplayProfile: 'abrasion_storm_tactics',
-    buildingKit: 'glass_etched_bunker',
-    audioProfile: 'glass_sand_barrage',
-    orbital: {
-      bandColors: ['#33262E', '#9C735D', '#E2BE93'],
-      iceCap: 0.0, cloudCover: 0.25, cloudColor: '#D8C4A8',
-      nightLights: 0.03, ringChance: 0.0,
-      glow: { tint: '#C8A888', power: 0.42, shellScale: 1.05 },
-    },
-    hazardMechanism: '高速碎玻璃风暴磨蚀装备，顺风逆风移速差异显著',
-    economyHook: '产高纯光学硅晶与装甲玻璃',
-  },
-
-  magnetar_aurora: {
-    id: 'magnetar_aurora',
-    version: 1,
-    labelZh: '磁暴极光荒原',
-    tier: 'expansion',
-    categoryConstraints: ['rocky', 'artificial'],
-    palette: {
-      base: '#091729', shadow: '#040B16', highlight: '#1A3F69',
-      danger: '#6A56C4', emissive: '#B9FFEB', atmosphere: '#6A56C4',
-    },
-    geomorphology: 'generic_rocky',
-    materials: ['magnetite_hill', 'arc_crack', 'ionized_rock', 'shielded_road'],
-    atmosphereProfile: 'magnetosphere_curtains',
-    weatherProfile: 'periodic_magnetic_pulses',
-    landmarkSet: ['spiral_magnetite_hill', 'lightning_shield_tower', 'arc_rift'],
-    poiPool: ['magnetic_anomaly', 'lost_station', 'ancient_ruin'],
-    gameplayProfile: 'pulse_window_operations',
-    buildingKit: 'faraday_redoubt',
-    audioProfile: 'aurora_pulse_whine',
-    orbital: {
-      bandColors: ['#091729', '#1A3F69', '#6A56C4'],
-      iceCap: 0.12, cloudCover: 0.06, cloudColor: '#2A3A5A',
-      nightLights: 0.10, ringChance: 0.0,
-      glow: { tint: '#6A56C4', power: 0.90, shellScale: 1.06 },
-    },
-    hazardMechanism: '磁暴脉冲峰值期电子护盾与喷气背包静默，需依托屏蔽塔窗口行动',
-    economyHook: '产超导体与磁性矿',
-  },
-
-  canopy_colossus: {
-    id: 'canopy_colossus',
-    version: 1,
-    labelZh: '巨木云冠',
-    tier: 'expansion',
-    categoryConstraints: ['rocky'],
-    palette: {
-      base: '#123D32', shadow: '#081B16', highlight: '#2F8D69',
-      danger: '#2F8D69', emissive: '#F4D979', atmosphere: '#2F8D69',
-    },
-    geomorphology: 'generic_rocky',
-    materials: ['bark_armor', 'canopy_platform', 'root_valley', 'vine_bridge'],
-    atmosphereProfile: 'wet_green_canopy',
-    weatherProfile: 'canopy_updrafts',
-    landmarkSet: ['colossal_canopy_deck', 'vine_suspension_bridge', 'canopy_elevator'],
-    poiPool: ['bio_trace', 'subsurface_ocean', 'ancient_ruin'],
-    gameplayProfile: 'vertical_canopy_logistics',
-    buildingKit: 'canopy_arbor_station',
-    audioProfile: 'canopy_leaf_swell',
-    orbital: {
-      bandColors: ['#123D32', '#2F8D69', '#A9C85B'],
-      iceCap: 0.04, cloudCover: 0.40, cloudColor: '#C8E0C0',
-      nightLights: 0.18, ringChance: 0.0,
-      glow: { tint: '#4FA07A', power: 0.60, shellScale: 1.06 },
-    },
-    hazardMechanism: '林冠掠食者沿树冠巡逻，垂直落差坠落即死',
-    economyHook: '产高强度生物木质复合材料',
-  },
-
-  fractured_moon: {
-    id: 'fractured_moon',
-    version: 1,
-    labelZh: '碎环月',
-    tier: 'expansion',
-    categoryConstraints: ['rocky', 'ice'],
-    palette: {
-      base: '#39414B', shadow: '#181C22', highlight: '#8B7967',
-      danger: '#D99A62', emissive: '#B6C4D9', atmosphere: '#8A98AC',
-    },
-    geomorphology: 'generic_rocky',
-    materials: ['lunar_regolith', 'rubble_slope', 'fracture_ice', 'alloy_wreck'],
-    atmosphereProfile: 'airless_vacuum',
-    weatherProfile: 'micrometeor_showers',
-    landmarkSet: ['great_rift_chasm', 'wreck_field', 'shattered_ring_overhead'],
-    poiPool: ['crashed_ship', 'ancient_ruin', 'lost_station'],
-    gameplayProfile: 'lowg_salvage_ops',
-    buildingKit: 'wreck_orbit_yard',
-    audioProfile: 'vacuum_bone_conduction',
-    orbital: {
-      bandColors: ['#39414B', '#8B7967', '#B6C4D9'],
-      iceCap: 0.10, cloudCover: 0.0, cloudColor: '#888888',
-      nightLights: 0.02, ringChance: 0.85,
-      glow: { tint: '#8A98AC', power: 0.20, shellScale: 1.04 },
-    },
-    hazardMechanism: '0.25g 低重力跳跃过冲，真空中无声音警示只有骨传导',
-    economyHook: '产合金、模块与氦-3',
-  },
-};
-
-// 模块加载期预计算线性色板（paletteLinear 为派生字段，不进存档）
-for (const id of Object.keys(PLANET_THEMES)) {
-  const t = PLANET_THEMES[id];
-  t.paletteLinear = linearize(t.palette);
-}
-
-/* ========================= 查表与分配（纯函数，只读 world.seed） ========================= */
-
-/** 主题 id → 主题条目（未知 id 返回 null） */
-function getTheme(id) {
-  return (id && PLANET_THEMES[id]) || null;
-}
-
-/** 类别 → 兼容主题条目数组（约束交集；确定性顺序 = 注册表键序） */
-function themesForCategory(cat) {
-  const out = [];
-  for (const id of Object.keys(PLANET_THEMES)) {
-    if (PLANET_THEMES[id].categoryConstraints.indexOf(cat) >= 0) out.push(PLANET_THEMES[id]);
-  }
-  return out;
-}
-
-/**
- * 主题-天体物理相容守卫（doc6 §4.3：主题服从基础天体参数）。
- * categoryConstraints 是第一道硬约束；此处追加物理参数级守卫。
- * 全部为「否决式」检查——守卫永不至于清空候选池（每类别至少一个无守卫主题）。
- */
-function themePhysicsOk(theme, planet) {
-  const water = Number(planet.water) || 0;
-  const hab = Number(planet.habitability) || 0;
-  if ((theme.id === 'abyssal_ocean' || theme.id === 'cryomethane_sea') && water < 30) return false;
-  if ((theme.id === 'biolume_canopy' || theme.id === 'canopy_colossus') && hab < 15) return false;
-  return true;
-}
-
-/**
- * 次级修饰器池（doc6 §4.6 配对示例：永夜+晶柱、海洋+硫喷口、荒原+远古巨构等）。
- * id 与主题 id 同名者（prism_crystal/ancient_megastructure/magnetar_aurora）
- * 表示该主题以次级身份叠加；其余为独立地貌修饰。
- */
-const SECONDARY_MODIFIERS = [
-  { id: 'sulfur_vents', labelZh: '硫化喷口', categories: ['ocean', 'toxic', 'rocky'] },
-  { id: 'ancient_megastructure', labelZh: '远古巨构残骸', categories: ['rocky', 'desert', 'ice', 'artificial'] },
-  { id: 'prism_crystal', labelZh: '折射晶柱群', categories: ['ice', 'rocky'] },
-  { id: 'glassstorm', labelZh: '硅玻璃风暴带', categories: ['desert', 'rocky'] },
-  { id: 'magnetar_aurora', labelZh: '磁暴极光幕', categories: ['rocky', 'ice', 'ocean', 'artificial'] },
-];
-
-/** 旗舰权重 / 扩展权重（doc6 §4.3 生成权重） */
-const TIER_WEIGHT = { flagship: 3.0, expansion: 1.0 };
-
-/**
- * 为行星确定性地抽取主主题 + 0-2 个次级修饰器。
- *
- * 确定性契约（doc7 红线 4 / SITE-06）：
- *  - 只消费 derivePlanetSeeds(world, planet.id).themeSeed → seedFromNumber 子流；
- *    绝不读写 world.rng（主 RNG 消费顺序不受影响）。
- *  - 纯函数 of (world.seed, planet 字段, star.danger, takenThemes)。
- *
- * 同星系去重（doc7 THEME-06）：takenThemes 为 galaxyGen 维护的 per-system
- * Set；已抽中的旗舰主题在「仍存在其他候选」时被整体移出候选池。
- *
- * @param {{seed:number}} world 世界实体（只读 world.seed）
- * @param {{id:string|number, category:string, water?:number, habitability?:number}} planet 行星档案
- * @param {{danger?:number}|null} [star] 恒星档案（高危险恒星微幅加权磁暴主题）
- * @param {Set<string>} [takenThemes] 本星系已分配主题 id（可省略）
- * @returns {{primaryThemeId:string, secondaryThemeModifiers:string[]}}
- */
-function assignTheme(world, planet, star, takenThemes) {
-  const seeds = derivePlanetSeeds(world, planet.id);
-  const sub = seedFromNumber(seeds.themeSeed);
-  const cat = String((planet && planet.category) || 'rocky');
-
-  // 1) 类别约束交集（硬约束）
-  let pool = themesForCategory(cat);
-  if (pool.length === 0) pool = [PLANET_THEMES.red_regolith_frontier]; // 兜底（8 类均有覆盖，实际不可达）
-
-  // 2) 物理守卫否决；全灭则回退未守卫池
-  const guarded = pool.filter((t) => themePhysicsOk(t, planet));
-  if (guarded.length > 0) pool = guarded;
-
-  // 3) 同星系旗舰去重：已被抽中的旗舰主题让位（仅当仍有替代候选）
-  if (takenThemes && takenThemes.size > 0 && pool.length > 1) {
-    const alt = pool.filter((t) => !(t.tier === 'flagship' && takenThemes.has(t.id)));
-    if (alt.length > 0) pool = alt;
-  }
-
-  // 4) 加权抽选：旗舰 ×3；高危险恒星（danger≥5）磁暴主题 ×2 微偏置
-  const danger = star && Number.isFinite(star.danger) ? star.danger : 0;
-  let total = 0;
-  const weights = pool.map((t) => {
-    let w = TIER_WEIGHT[t.tier] || 1.0;
-    if (t.id === 'magnetar_aurora' && danger >= 5) w += TIER_WEIGHT.flagship;
-    total += w;
-    return w;
-  });
-  let r = float(sub) * total;
-  let primary = pool[pool.length - 1];
-  for (let i = 0; i < pool.length; i++) {
-    r -= weights[i];
-    if (r <= 0) { primary = pool[i]; break; }
-  }
-
-  // 5) 次级修饰器 0-2 个（与主主题去重；类别相容者中确定性抽选）
-  const modifiers = [];
-  const compatibleMods = SECONDARY_MODIFIERS.filter(
-    (m) => m.categories.indexOf(cat) >= 0 && m.id !== primary.id
-  );
-  if (compatibleMods.length > 0 && chance(sub, 0.34)) {
-    modifiers.push(compatibleMods[int(sub, compatibleMods.length)].id);
-    if (chance(sub, 0.42)) {
-      const rest = compatibleMods.filter((m) => m.id !== modifiers[0]);
-      if (rest.length > 0) modifiers.push(rest[int(sub, rest.length)].id);
-    }
-  }
-
-  return { primaryThemeId: primary.id, secondaryThemeModifiers: modifiers };
-}
-
-Object.assign(__exports, { THEME_ASSIGNMENT_VERSION, srgbToLinear, PLANET_THEMES, getTheme, themesForCategory, SECONDARY_MODIFIERS, assignTheme });
-
-});
 __register("src/render/gl/NoiseGLSL.js", function (__exports, __require) {
 /**
  * render/gl/NoiseGLSL.js — 可拼接的 GLSL ES 3.0 噪声/工具片段库（全部原创手写）
@@ -49298,6 +49740,7 @@ __register("src/simulation/HourlySystems.js", function (__exports, __require) {
 const { registerHourly: registerHourly } = __require("src/simulation/TickPipeline.js");
 const { BAL: BAL } = __require("src/content/constants.js");
 const { stepBattles: stepBattles } = __require("src/domain/combat/BattleSimulation.js");
+const { stepMission: stepMission } = __require("src/domain/ground/GroundMission.js");
 const { checkEngagements: checkEngagements } = __require("src/domain/combat/engagement.js");
 const { advanceFleets: advanceFleets } = __require("src/domain/fleets/navigation.js");
 const { runDiplomacyTimers: runDiplomacyTimers } = __require("src/domain/diplomacy/war.js");
@@ -49392,10 +49835,12 @@ registerHourly('ground', (world) => {
   while (seconds > 0) {
     const step = Math.min(1 / 30, seconds);
     for (const m of missions) {
-      if (m.state !== 'active') continue;
+      // P0-C：GroundMission 状态键为 status；保留 state 读取以兼容旧存档口径
+      if ((m.status || m.state) !== 'active') continue;
       try {
         stepMission(world, m, dt);
       } catch (e) {
+        m.status = 'failed';
         m.state = 'failed';
         m.results = { outcome: 'failed', error: String(e && e.message) };
       }

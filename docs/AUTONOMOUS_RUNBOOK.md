@@ -324,3 +324,24 @@
 - **提交**：`a956336` `0d38fb9` + 本报告 `docs/reports/report-rework-planets.md`。
 - **实机复测**：任务模式 site_abyssal_dome_01 着陆 4.5s + 移动 soak——y === ground、
   vy=0、零穿地（原数秒坠渊场景不复现）。
+
+## 终审返工轮（docs 10/11，2026-11-07）— 专家终审 6.4/10 有条件驳回的全链路根治
+
+- **背景**：领域专家穿透式审计（`docs/specs/10`）裁定 4 项 P0（全场 NaN 隐形 /
+  97MB 存档炸弹 / 时钟与交互失真 / 58 星开局暴毙）+ 4 项 P1/P2（体素残留 / HDR 与
+  水色失真 / 音效孤岛 / 目标罚款陷阱），定性「只修门禁断言覆盖的半截链路」。
+- **整改**：WP-1..WP-6 全量施工（详见 `docs/reports/report-final-rework.md`
+  逐项对映 + doc10/doc11 勘误 6 条）：GroundView `_missionToWorld` 统一度量根除
+  NaN；GroundMission `_runtimeField` 不可枚举剥离（5850B/0.44ms）+ 读档幂等重建；
+  HourlySystems `m.status` 对齐；terrainField `clearFlags` 契约 + 海洋坪面抬升；
+  GroundView 技能 5 接 ShapeTerrain/PlaceBuilding/HarvestTerrainOre（新命令）；
+  uHdr/主题水色/权威色板/热源对位/脚步涟漪/18 主题音/EXPANSION_GAMEPLAY 全接线；
+  `checkAndProgressObjectives` 五结算点闭环。
+- **门禁**：GATE-01 升 300 帧（10s）全银河仿真 + HAZARD 因果断言 + 存档健康度
+  （HEAD 基线 worktree 对照：hazardFrames 52413 → **0**，战损逐位复现为既有平衡）；
+  GATE-02 升级运行态全管线（真实 GroundView 方法 0-NaN 扫描 + 交互/边界/坡度/
+  工程坐标契约）。**42 套件 84/84 全绿（2 轮）**；金快照 68462446 零漂移。
+- **实机复测**（IAB，硫雾沼泽 plt_3 遗迹调查）：撤离罗盘 46m（原 NaNm）、队友/目标
+  可见（原全隐形）、HP 100/100@12s（原 21.7s 团灭类行星）、主题音 sulfur_marsh
+  激活（原全静音）、工程模式 5/F 可用、0 帧错误。
+- **提交**：本次返工单体提交 + `docs/reports/report-final-rework.md`。

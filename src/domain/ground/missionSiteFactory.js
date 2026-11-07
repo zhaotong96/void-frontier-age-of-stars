@@ -20,6 +20,9 @@
  *     「两端岸高 + 拱升」抛物线抬高桥面（岩浆河/裂隙跨越）。
  *  C. 语义旗：CORE_PROTECTED（r ≤ coreRadius）、HAZARD（蓝图 hazardZones 圆域）、
  *     FOUNDATION（地标/锚点坪心）。
+ *  clearFlags 契约（P0-D）：siteModifier 可输出 clearFlags 位掩码，evalPoint 在 flags
+ *  合入后按位清除——坪面有效覆盖区（w ≥ 0.5）与高架桥面强制抹除自然环境危险旗
+ *  （HAZARD），蓝图显式战术危险仅在坪面外生效。
  *  D. 过渡带融合：走廊高度/材质影响乘 s(r)=1-smoothstep(86.4,112.4,r)，权重平滑归零，
  *     无「人工/随机」突变边界（SITE-04）。
  *
@@ -398,7 +401,7 @@ function padMask(d, inner, outer) {
 }
 
 /**
- * 构建 terrainField 的 siteModifier（(wx, wz, base) => {dy, flags, weights}|null）。
+ * 构建 terrainField 的 siteModifier（(wx, wz, base) => {dy, flags, clearFlags, weights}|null）。
  * 调用方将返回值传入 createTerrainField(world, planetId, { siteModifier, profile })；
  * field 的 profile 必须与 blueprint.terrainProfile 一致（坪目标高/无缝基准取自同一剖面）。
  *
@@ -417,6 +420,14 @@ export function buildSiteModifier(world, planetId, blueprint, opts = {}) {
   const targetY = (x, z) => clamp(macro ? macro.heightAt(x, z) : 0, TARGET_CLAMP_LO, TARGET_CLAMP_HI);
   /** 精确自然高（含与 evalPoint 相同的预算钳制；无缝检查基准） */
   const naturalYExact = (x, z) => clamp(macro ? macro.heightAt(x, z) : 0, MIN_HEIGHT, MAX_HEIGHT);
+  /**
+   * 人工结构坪目标高（P0-D）：海洋/流体主题（profile.seaLevel != null）的着陆坪/撤离坪
+   * 抬升出海面（浮台/耐压船坞基座，防淹没）；主/次目标坪与地标保持自然主题（水下设施
+   * 属主题设计，坪面危险旗由 clearFlags 清除）。
+   */
+  const padTargetY = (x, z, lift) => (profile && profile.seaLevel != null && lift)
+    ? Math.max(targetY(x, z), profile.seaLevel + 0.6)
+    : targetY(x, z);
 
   // A. 锚点坪：着陆坪（平地半径 ≥12m）、主/次目标坪、撤离坪 + 地标地基
   const pads = [];
@@ -427,12 +438,12 @@ export function buildSiteModifier(world, planetId, blueprint, opts = {}) {
   ];
   for (let i = 0; i < padSpecs.length; i++) {
     const a = site.anchors[padSpecs[i][0]];
-    pads.push({ x: a.x, z: a.z, inner: padSpecs[i][1], outer: padSpecs[i][2], H: targetY(a.x, a.z) });
+    pads.push({ x: a.x, z: a.z, inner: padSpecs[i][1], outer: padSpecs[i][2], H: padTargetY(a.x, a.z, padSpecs[i][0] === 'landing') });
   }
   const exInner = clamp(num(site.extraction.radius, 8) + 1, 8, 12);
   pads.push({
     x: site.anchors.extraction.x, z: site.anchors.extraction.z,
-    inner: exInner, outer: exInner + 12, H: targetY(site.anchors.extraction.x, site.anchors.extraction.z),
+    inner: exInner, outer: exInner + 12, H: padTargetY(site.anchors.extraction.x, site.anchors.extraction.z, true),
   });
   for (let i = 0; i < site.landmarks.length; i++) {
     const lm = site.landmarks[i];
@@ -542,6 +553,7 @@ export function buildSiteModifier(world, planetId, blueprint, opts = {}) {
     const r = Math.sqrt(r2);
     let dy = 0;
     let flags = 0;
+    let clearFlags = 0; // P0-D：人工结构显式清除的自然危险旗（与 flags 同位掩码语义）
     let roadTake = 0;
 
     // A. 锚点坪 / 地标地基：取权重最高者的整平贡献（互叠时优先坪面）
@@ -559,6 +571,7 @@ export function buildSiteModifier(world, planetId, blueprint, opts = {}) {
         const auth = 6 + 34 * w; // 坪心权限 40m（填平陨坑/河道/裂隙等局部特征），裙边收敛回 ±6m
         bestDy = clamp((p.H - base.y) * w, -auth, auth);
         if (w >= 0.999) flags |= FLAG_FOUNDATION;
+        if (w >= 0.5) clearFlags |= FLAG_HAZARD; // 坪面有效覆盖区强制抹除自然环境危害（P0-D）
       }
     }
     if (bestW > 0.0001) dy = bestDy;
@@ -590,6 +603,7 @@ export function buildSiteModifier(world, planetId, blueprint, opts = {}) {
       corrW = 1 - smoothstep(bs.half * 0.45, bs.half, d);
       flags |= FLAG_ROAD;
       if (bs.deck) flags |= FLAG_BRIDGE_DECK;
+      if (bs.deck) clearFlags |= FLAG_HAZARD; // 人工高架桥面免受桥下毒液/岩浆侵蚀（P0-D）
       // D. 过渡带融合：走廊高度/材质影响随 r 平滑衰减（86.4m → 112.4m → 0）
       const sFade = 1 - smoothstep(transOuter, transOuter + TRANSITION_FADE_WIDTH, r);
       const auth = bs.deck ? 18 : 6; // 桥面为人工结构，允许跨越河道的拱升
@@ -600,26 +614,32 @@ export function buildSiteModifier(world, planetId, blueprint, opts = {}) {
       roadTake = Math.max(roadTake, Math.round(200 * corrW * sFade));
     }
 
-    // C. 语义旗：任务核心保护区 / 蓝图危险域
+    // C. 语义旗：任务核心保护区 / 蓝图危险域（蓝图显式战术危险优先，
+    //    坪面有效覆盖区 bestW ≥ 0.3 内豁免且不阻断后续危险域判定）
     if (r <= coreRadius) flags |= FLAG_CORE_PROTECTED;
     for (let i = 0; i < hazards.length; i++) {
       const hz = hazards[i];
       const ddx = wx - hz.x;
       const ddz = wz - hz.z;
       if (ddx * ddx + ddz * ddz <= hz.radius * hz.radius) {
-        flags |= FLAG_HAZARD;
-        break;
+        if (bestW < 0.3) {
+          flags |= FLAG_HAZARD;
+          clearFlags &= ~FLAG_HAZARD; // 战术危险优先，抵消坪面/桥面的清除位
+          break;
+        }
+        continue; // 命中但在坪面上：豁免，继续查下一个危险域
       }
     }
 
     const hasDy = dy !== 0;
     const w0 = base.weights ? base.weights[0] : 255;
     const take = Math.min(roadTake, w0);
-    if (!hasDy && flags === 0 && take <= 0) return null;
+    if (!hasDy && flags === 0 && clearFlags === 0 && take <= 0) return null;
 
     const mod = {};
     if (hasDy) mod.dy = dy;
     if (flags !== 0) mod.flags = flags;
+    if (clearFlags !== 0) mod.clearFlags = clearFlags;
     if (take > 0 && base.weights) {
       const w = [base.weights[0], base.weights[1], base.weights[2], base.weights[3]];
       w[0] -= take;

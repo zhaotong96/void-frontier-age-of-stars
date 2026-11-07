@@ -21,6 +21,20 @@ import { L, setLanguage } from '../core/i18n.js';
 import { AudioManager } from '../render/AudioManager.js';
 import { recentLog } from '../core/eventBus.js';
 
+/**
+ * WP-5 P1-G：路由 → 场景环境音层映射（AudioManager.startAmbient 六场景声库；
+ * 此前 setScene 全仓 0 调用，场景层环境音为孤岛死代码）。未列出的次要屏
+ * 落到 'planet' 基准层；AMBIENT_BUILDERS 对未知 id 静默忽略，不致命。
+ */
+const AMBIENT_ROUTE_SCENE = {
+  menu: 'menu', settings: 'menu', diagnostics: 'menu',
+  galaxy: 'deepSpace', chronicle: 'deepSpace', events: 'deepSpace',
+  diplomacy: 'deepSpace', market: 'deepSpace', government: 'deepSpace',
+  system: 'starCorona', designer: 'starCorona', fleet: 'starCorona', research: 'starCorona',
+  colony: 'planet',
+  ground: 'ground', combat: 'combat',
+};
+
 import { MenuView } from '../ui/screens/MenuView.js';
 import { GalaxyView } from '../ui/screens/GalaxyView.js';
 import { SystemView } from '../ui/screens/SystemView.js';
@@ -517,6 +531,8 @@ export class App {
   _onRoute(route) {
     this._route = route.screen;
     this._routeParam = route.param; // 供 refreshLocaleUI 原地重挂当前视图
+    // WP-5 P1-G：场景环境音层随路由流转（与主题层 setAmbientTheme 并行独立）
+    if (this.audio) this.audio.setScene(AMBIENT_ROUTE_SCENE[route.screen] || 'planet');
     // 主菜单路由隐藏战略顶栏与遥测条（.vf-shell.in-menu，见 styles.css）
     if (this.shellEl) this.shellEl.classList.toggle('in-menu', route.screen === 'menu');
     // 战役外白名单：菜单 / 设置 / 诊断可直达，其余一律弹回菜单

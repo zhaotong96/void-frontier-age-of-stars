@@ -11,17 +11,18 @@ import { canScanTarget, startScan, scanPower } from '../domain/exploration/scan.
 import { orderMove, addShipToFleet, createFleet } from '../domain/fleets/fleet.js';
 import { orderRetreat, findAttackTarget } from '../domain/combat/engagement.js';
 import { foundColony, buildingDef } from '../domain/planets/colony.js';
-import { canAfford, pay, debit, credit, balance } from '../domain/economy/ledger.js';
+import { canAfford, pay, debit, credit, balance, creditColony } from '../domain/economy/ledger.js';
 import { canStart, startResearch } from '../domain/research/research.js';
 import { marketBuy, marketSell } from '../domain/economy/market.js';
 import { validateFit, hullDef, computeShipStats } from '../domain/ships/ship.js';
 import { getMod } from '../domain/factions/modifiers.js';
 import { declareWar, createTreaty, treatyAcceptanceScore, getRelation, resolvePeaceProposal, annexOccupiedSystem, warScore, OCCUPATION_ANNEX_THRESHOLD } from '../domain/diplomacy/war.js';
-import { buildTerrainField } from '../domain/ground/terrainField.js';
+import { buildTerrainField, TERRAIN_FLAGS } from '../domain/ground/terrainField.js';
 import {
   applyEdit, attachTerrainEdits, serializeEdits, deserializeEdits,
   checkBuildingPlacement, rebuildDirtyChunks, BRUSH_LIMITS,
 } from '../domain/ground/terrainEdits.js';
+import { sampleTerrain } from '../domain/ground/surfaceQueries.js';
 import { RNG } from '../core/rng.js';
 import { emit } from '../core/eventBus.js';
 
@@ -738,6 +739,46 @@ registerCommand('PlaceBuilding', {
       z: entry.z,
       foundation: entry.foundation,
       index: planet.groundBuildings.length - 1,
+    }, 'ground');
+  },
+});
+
+// —— WP-4 地质采掘（场域工程作业闭环） ————————————————————————————
+
+/** 行星矿藏 → 采掘资源 id（与 miningDepositOk 同一优先序；缺省 ferro） */
+function fieldOreResIdOf(planet) {
+  const priority = ['ferro', 'silicate', 'heavyMetal', 'rareEarth'];
+  for (let i = 0; i < priority.length; i++) {
+    if (planet.deposits && planet.deposits[priority[i]] > 0) return priority[i];
+  }
+  return 'ferro';
+}
+
+registerCommand('HarvestTerrainOre', {
+  desc: '地质采掘：场域 ORE 旗点位采矿（amount=1）入殖民地仓储（WP-4 工程作业）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    if (!Number.isFinite(cmd.params.x) || !Number.isFinite(cmd.params.z)) {
+      return { ok: false, code: 'BAD_COORD', reason: '场域坐标非法' };
+    }
+    const { field } = loadLiveEdits(ctx.world, planet.id);
+    const s = sampleTerrain(field, cmd.params.x, cmd.params.z);
+    if (!s || (s.flags & TERRAIN_FLAGS.ORE) === 0) {
+      return { ok: false, code: 'NO_ORE', reason: '此处无矿脉' };
+    }
+    return { ok: true, planet, resId: fieldOreResIdOf(planet) };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    const resId = fieldOreResIdOf(planet);
+    const colony = Object.values(ctx.world.entities.colonies || {})
+      .find((c) => c.planetId === planet.id) || null;
+    if (colony) {
+      creditColony(ctx.world, colony, resId, 1, 'terrainHarvest', colony.id);
+    }
+    emit(ctx.world, 'TerrainOreHarvested', {
+      planetId: planet.id, x: cmd.params.x, z: cmd.params.z, resId, credited: !!colony,
     }, 'ground');
   },
 });

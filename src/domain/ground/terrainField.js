@@ -299,6 +299,7 @@ export function evalPoint(field, wx, wz) {
       if (Number.isFinite(mod.dy)) y += mod.dy;
       if (Number.isFinite(mod.biomeId)) biomeId = mod.biomeId;
       if (Number.isFinite(mod.flags)) flags |= mod.flags;
+      if (Number.isFinite(mod.clearFlags)) flags &= ~mod.clearFlags; // 人工结构显式清除自然危险旗（P0-D）
       if (mod.weights) {
         let m0 = clampByte(mod.weights[0]);
         let m1 = clampByte(mod.weights[1]);

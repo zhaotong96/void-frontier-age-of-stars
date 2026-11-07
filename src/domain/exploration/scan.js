@@ -13,6 +13,7 @@ import { ANOMALY_TEMPLATES } from '../../content/anomalies.js';
 import { createEntity, getEntity } from '../entities/registry.js';
 import { getMod } from '../factions/modifiers.js';
 import { getRelation } from '../diplomacy/war.js';
+import { checkAndProgressObjectives } from '../events/objectives.js';
 
 /** 分层阈值（扫描点） */
 export const LEVEL_THRESHOLDS = [0, 14, 36, 72, 120];
@@ -120,6 +121,9 @@ export function revealSurveyLevel(world, sys, factionId, newLevel) {
       }
       emit(world, 'SystemSurveyed', { systemId: sys.id, factionId, researchData: data }, 'exploration');
     }
+    // WP-6：调查层级升满推进空间目标（investigate_system 锚定目标星系，调查完成即溯源达成）
+    checkAndProgressObjectives(world, (o) =>
+      o.kind === 'investigate_system' && o.factionId === factionId && o.targetSystemId === sys.id);
     if (fleetId) {
       const fleet = world.entities.fleets[fleetId];
       if (fleet && fleet.orders?.kind === 'scan' && fleet.orders.targetSystemId === sys.id) {
