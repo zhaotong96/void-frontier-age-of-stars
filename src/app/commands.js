@@ -23,8 +23,18 @@ import {
   checkBuildingPlacement, rebuildDirtyChunks, BRUSH_LIMITS,
 } from '../domain/ground/terrainEdits.js';
 import { sampleTerrain } from '../domain/ground/surfaceQueries.js';
+import { BUILDINGS } from '../content/buildings.js';
 import { RNG } from '../core/rng.js';
 import { emit } from '../core/eventBus.js';
+import { advanceSpeciesDiscovery, collectSpecimenSample, ensurePlanetEco } from '../domain/ground/xenobiology.js';
+import {
+  ensurePlanetRuin, tryCompleteExcavation, inscribeDialectPylon,
+  rotateResonatorTower, reportGuardianDefeated, extractMonolithCore,
+} from '../domain/ground/monolithRuins.js';
+import {
+  ensurePlanetInd, rebuildPowerGrids, createBeltTuple, NODE_IDX, NODE_STATE, BELT_IDX,
+} from '../domain/industry/planetaryLogistics.js';
+import { feedCatapult, resIdToIdx } from '../domain/industry/catapult.js';
 
 function ownFleet(world, cmd) {
   const fleet = getEntity(world, 'fleets', cmd.params.fleetId || cmd.targetId);
@@ -740,6 +750,20 @@ registerCommand('PlaceBuilding', {
       foundation: entry.foundation,
       index: planet.groundBuildings.length - 1,
     }, 'ground');
+    // —— doc19 WP-1：L2 工业节点双写（电网/加工/分流/弹射定义的建筑同时入 planet.ind.nodes） ——
+    const defIdx = BUILDINGS.findIndex((b) => b.id === entry.defId);
+    const def2 = BUILDINGS[defIdx];
+    if (defIdx >= 0 && def2 && (def2.wireRadiusM > 0 || def2.indRecipe || def2.splitter || def2.catapult)) {
+      const ind = ensurePlanetInd(planet);
+      ind.nodes.push([
+        ind.nodes.reduce((m, n) => Math.max(m, n[NODE_IDX.ID]), 0) + 1,
+        defIdx,
+        Math.round(cmd.params.x * 10), Math.round(cmd.params.z * 10),
+        Math.round((chk.ok ? entry.foundation.etaHeightM || 0 : 0) * 10),
+        0, NODE_STATE.OFFLINE, 0, 0, 0, 0, 0, 0,
+      ]);
+      rebuildPowerGrids(ind, BUILDINGS);
+    }
   },
 });
 
@@ -780,6 +804,167 @@ registerCommand('HarvestTerrainOre', {
     emit(ctx.world, 'TerrainOreHarvested', {
       planetId: planet.id, x: cmd.params.x, z: cmd.params.z, resId, credited: !!colony,
     }, 'ground');
+  },
+});
+
+// —— doc19 v0.4：行星级工业与天地物流命令（WP-1/WP-2/WP-4） ——————————————
+
+registerCommand('BuildConveyorBelt', {
+  desc: '铺设样条传送带（FFF #176 12 元组；O(1) 步进；doc19 WP-2）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    const ind = ensurePlanetInd(planet);
+    const from = ind.nodes.find((n) => n[NODE_IDX.ID] === cmd.params.fromNodeId);
+    const to = ind.nodes.find((n) => n[NODE_IDX.ID] === cmd.params.toNodeId);
+    if (!from || !to) return { ok: false, code: 'NO_NODE', reason: '工业节点不存在' };
+    if (from[NODE_IDX.ID] === to[NODE_IDX.ID]) return { ok: false, code: 'SELF_LINK', reason: '不可自连' };
+    const tier = cmd.params.tier || 1;
+    if (!(tier >= 1 && tier <= 3)) return { ok: false, code: 'BAD_TIER', reason: '传送带档位 1..3' };
+    const dx = (from[NODE_IDX.X_DM] - to[NODE_IDX.X_DM]) / 10;
+    const dz = (from[NODE_IDX.Z_DM] - to[NODE_IDX.Z_DM]) / 10;
+    const lenM = Math.hypot(dx, dz);
+    if (lenM < 1 || lenM > 128) return { ok: false, code: 'BAD_LEN', reason: `带长 1~128m（实测 ${lenM.toFixed(1)}m）` };
+    if (ind.belts.length >= 96) return { ok: false, code: 'TOO_MANY', reason: '单星传送带预算上限 96 条' };
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    const ind = ensurePlanetInd(planet);
+    const tier = cmd.params.tier || 1;
+    const from = ind.nodes.find((n) => n[NODE_IDX.ID] === cmd.params.fromNodeId);
+    const to = ind.nodes.find((n) => n[NODE_IDX.ID] === cmd.params.toNodeId);
+    const lenM = Math.hypot((from[NODE_IDX.X_DM] - to[NODE_IDX.X_DM]) / 10, (from[NODE_IDX.Z_DM] - to[NODE_IDX.Z_DM]) / 10);
+    const belt = createBeltTuple(ind, {
+      fromNode: from[NODE_IDX.ID], fromSlot: cmd.params.fromSlot | 0,
+      toNode: to[NODE_IDX.ID], toSlot: cmd.params.toSlot | 0,
+      tier, lengthM: lenM, resTypeIdx: cmd.params.resTypeIdx | 0,
+    });
+    ind.belts.push(belt);
+    emit(ctx.world, 'ConveyorBeltBuilt', { planetId: planet.id, beltId: belt[BELT_IDX.ID], lengthM }, 'ground');
+  },
+});
+
+registerCommand('ConfigureSplitter', {
+  desc: '设置分流器路由模式（0 轮询/1 优先/2 过滤 + 过滤资源；doc19 WP-3）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet || !planet.ind) return { ok: false, code: 'NO_TARGET', reason: '行星无工业层' };
+    const node = planet.ind.nodes.find((n) => n[NODE_IDX.ID] === cmd.params.nodeId);
+    if (!node) return { ok: false, code: 'NO_NODE', reason: '分流器节点不存在' };
+    const def = BUILDINGS[node[NODE_IDX.DEF]];
+    if (!def || !def.splitter) return { ok: false, code: 'NOT_SPLITTER', reason: '目标不是分流器' };
+    const mode = cmd.params.mode | 0;
+    if (!(mode >= 0 && mode <= 2)) return { ok: false, code: 'BAD_MODE', reason: '模式 0..2' };
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    const node = planet.ind.nodes.find((n) => n[NODE_IDX.ID] === cmd.params.nodeId);
+    node[NODE_IDX.ROT] = (node[NODE_IDX.ROT] & ~0b11) | ((cmd.params.mode | 0) & 0b11);
+    node[NODE_IDX.RECIPE] = cmd.params.filterResIdx | 0;
+    emit(ctx.world, 'SplitterConfigured', { planetId: planet.id, nodeId: node[NODE_IDX.ID], mode: cmd.params.mode | 0 }, 'ground');
+  },
+});
+
+registerCommand('CatapultFeed', {
+  desc: '货运弹射井物资汇集（每 50 单位装配 1 舱；doc19 WP-4）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet || !planet.ind) return { ok: false, code: 'NO_TARGET', reason: '行星无工业层' };
+    const node = planet.ind.nodes.find((n) => n[NODE_IDX.ID] === cmd.params.nodeId);
+    if (!node) return { ok: false, code: 'NO_NODE', reason: '弹射井节点不存在' };
+    const def = BUILDINGS[node[NODE_IDX.DEF]];
+    if (!def || !def.catapult) return { ok: false, code: 'NOT_CATAPULT', reason: '目标不是弹射井' };
+    const units = cmd.params.units | 0;
+    if (!(units > 0)) return { ok: false, code: 'BAD_UNITS', reason: '汇集单位须 > 0' };
+    const resId = cmd.params.resId || 'alloy';
+    const colony = Object.values(ctx.world.entities.colonies || {}).find((cc) => cc.planetId === planet.id);
+    if (colony && (colony.stockpile || {})[resId] !== undefined) {
+      if ((colony.stockpile[resId] || 0) < units) return { ok: false, code: 'NO_FUNDS', reason: `${resId} 库存不足` };
+    }
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    const resId = cmd.params.resId || 'alloy';
+    const units = cmd.params.units | 0;
+    const colony = Object.values(ctx.world.entities.colonies || {}).find((cc) => cc.planetId === planet.id);
+    if (colony && (colony.stockpile || {})[resId] !== undefined) {
+      colony.stockpile[resId] -= units;   // 从殖民地仓储扣料
+    }
+    feedCatapult(planet.ind, resIdToIdx(resId), units);
+    emit(ctx.world, 'CatapultFed', { planetId: planet.id, resId, units }, 'ground');
+  },
+});
+
+// —— 外交战争终局（doc5 TD2 / DIP-02：和谈与占领吞并） ——————————————————
+
+// —— WP-2/WP-3（doc18 v0.2）：异星生态科考与五阶段遗迹命令 ————————————————
+
+registerCommand('ScanPlanetarySpecimens', {
+  desc: '科考分析面罩：推进物种图鉴档位（1 Observed / 2 Identified；doc18 WP-2）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    const stage = cmd.params.targetStage || 1;
+    if (!(stage >= 1 && stage <= 3)) return { ok: false, code: 'BAD_STAGE', reason: '档位非法' };
+    if (!Number.isInteger(cmd.params.speciesIdx) || cmd.params.speciesIdx < 0) {
+      return { ok: false, code: 'BAD_SPECIES', reason: '物种序号非法' };
+    }
+    return { ok: true, planet, stage };
+  },
+  execute(ctx, cmd) {
+    const res = advanceSpeciesDiscovery(ctx.world, cmd.params.planetId || cmd.targetId, cmd.params.speciesIdx, cmd.params.targetStage || 1);
+    if (!res.ok) throw new Error(res.reason || 'ScanPlanetarySpecimens 失败');
+    return res;
+  },
+});
+
+registerCommand('SamplePlanetarySpecimen', {
+  desc: '活体采样（Analyzed 里程碑）：入账科研点/生物质并标记 sampleMask（doc16 §4.3）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    if (!Number.isInteger(cmd.params.speciesIdx) || cmd.params.speciesIdx < 0) {
+      return { ok: false, code: 'BAD_SPECIES', reason: '物种序号非法' };
+    }
+    return { ok: true, planet };
+  },
+  execute(ctx, cmd) {
+    const res = collectSpecimenSample(ctx.world, cmd.params.planetId || cmd.targetId, cmd.params.speciesIdx);
+    if (!res.ok) throw new Error(res.reason || 'SamplePlanetarySpecimen 失败');
+    return res;
+  },
+});
+
+registerCommand('AdvanceMonolithStage', {
+  desc: '五阶段巨石遗迹推进：excavate 除障 / inscribe 拓印 / rotate 对光 / guardian 守卫战果 / extract 核心破译（doc18 WP-3）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    const actions = ['excavate', 'inscribe', 'rotate', 'guardianDefeated', 'extract'];
+    if (!actions.includes(cmd.params.action)) {
+      return { ok: false, code: 'BAD_ACTION', reason: '未知遗迹动作' };
+    }
+    return { ok: true, planet };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet.eco) ensurePlanetEco(ctx.world, planet);
+    const { field } = loadLiveEdits(ctx.world, planet.id);
+    ensurePlanetRuin(ctx.world, planet, field);
+    let res;
+    switch (cmd.params.action) {
+      case 'excavate': res = tryCompleteExcavation(ctx.world, planet, field); break;
+      case 'inscribe': res = inscribeDialectPylon(ctx.world, planet, cmd.params.pylonIdx | 0); break;
+      case 'rotate': res = rotateResonatorTower(ctx.world, planet, cmd.params.towerIdx | 0, field); break;
+      case 'guardianDefeated': res = reportGuardianDefeated(ctx.world, planet); break;
+      case 'extract': res = extractMonolithCore(ctx.world, planet); break;
+      default: res = { ok: false, reason: 'BadAction' };
+    }
+    if (!res.ok) throw new Error(res.reason || 'AdvanceMonolithStage 失败');
+    return res;
   },
 });
 

@@ -214,7 +214,8 @@ class MockSurfaceGL {
       'NEAREST', 'LINEAR', 'CLAMP_TO_EDGE', 'TEXTURE_2D', 'TEXTURE_MIN_FILTER',
       'TEXTURE_MAG_FILTER', 'TEXTURE_WRAP_S', 'TEXTURE_WRAP_T', 'RGBA', 'RGBA8',
       'HALF_FLOAT', 'COLOR_ATTACHMENT0', 'FRAMEBUFFER', 'RENDERBUFFER',
-      'DEPTH_COMPONENT24', 'DEPTH_ATTACHMENT', 'FRAMEBUFFER_COMPLETE'];
+      'DEPTH_COMPONENT24', 'DEPTH_ATTACHMENT', 'FRAMEBUFFER_COMPLETE',
+      'DYNAMIC_DRAW', 'UNSIGNED_SHORT', 'CURRENT_PROGRAM'];
     for (const k of K) this[k] = Symbol(k);
     this.NO_ERROR = 0;
     this.MAX_TEXTURE_SIZE = 3379;
@@ -280,6 +281,7 @@ class MockSurfaceGL {
   bufferData() {}
   enableVertexAttribArray() {}
   vertexAttribPointer() {}
+  vertexAttribDivisor() {}  // doc18 BioFloraPass 实例属性步进
   // —— uniform / 状态 / 绘制 ——
   useProgram() {}
   getUniformLocation() { return {}; } // 真值对象；mock 不校验激活 uniform
@@ -289,6 +291,8 @@ class MockSurfaceGL {
   drawElements() { this.drawElementsCalls++; }
   drawArrays() { this.drawArraysCalls++; }
   drawArraysInstanced() { this.drawArraysCalls++; }
+  drawElementsInstanced() { this.drawElementsCalls++; }  // doc18 BioFloraPass 双通道
+  isEnabled() { return true; }
   // —— 纹理/FBO（本场景路径不触达；实现以保持 GLCore 兜底路径可用） ——
   bindTexture() {} texImage2D() {} texParameteri() {}
   createTexture() { return this._new('texture'); }

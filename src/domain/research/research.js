@@ -57,6 +57,8 @@ export function canStart(world, factionId, techId) {
   const rs = world.research[factionId];
   const tech = techIndex.get(techId);
   if (!tech) return { ok: false, reason: '未知科技' };
+  // doc18 WP-3：先驱者遗落科技仅能由五阶段巨石遗迹核心破译解锁，常规科研拒启动
+  if (tech.special === 'precursor') return { ok: false, reason: '先驱者遗落科技：需在地表破译先驱者巨石核心' };
   if (!rs) return { ok: false, reason: '科研状态未初始化' };
   if (rs.completed.includes(techId)) return { ok: false, reason: '已研究完成' };
   if (rs.active.some((a) => a.techId === techId)) return { ok: false, reason: '已在研究中' };

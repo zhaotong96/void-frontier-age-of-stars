@@ -63,6 +63,16 @@ import { blueprintsForPlanet } from '../../content/missionSites.js';
 import { creditColony, debitColony } from '../../domain/economy/ledger.js';
 import { MISSION_TEMPLATES, findMissionTemplate } from '../../content/missions.js';
 import { BUILDINGS } from '../../content/buildings.js';
+// —— doc18 WP-2/3/4：异星生态科考与五阶段遗迹（域层纯函数 + 确定性相位插值） ——
+import {
+  derivePlanetEcology, ensurePlanetEco, getPlanetSpeciesCount, getSpeciesStage,
+  SPECIES_STAGE, ecoSurveyProgress,
+} from '../../domain/ground/xenobiology.js';
+import {
+  ensurePlanetRuin, deriveRuinLayout, towerRotOf, RUIN_STAGE,
+} from '../../domain/ground/monolithRuins.js';
+import { derivePlanetSeedsExtended } from '../../domain/ground/planetSeeds.js';
+import { faunaPhaseOffset } from '../../render/gl/BioFloraPass.js';
 
 // ———— 常量 ————————————————————————————————————————————————
 
@@ -1016,6 +1026,20 @@ export const GroundView = {
     this._layoutColony();
     this._conveyor = this._buildConveyorPaths();
 
+    // —— doc18 WP-2/3/4：异星生态物种名录 + 五阶段遗迹实例化（确定性派生，零 rng 消费） ——
+    this._species = derivePlanetEcology(w, planet);   // null = 不育天体（气态巨行星/碎环月）
+    ensurePlanetEco(w, planet);
+    ensurePlanetRuin(w, planet, this.field);
+    this._ruinLayout = deriveRuinLayout(w, planet);
+    // 分析面罩（V 键）：锁定计时/目标物种/档位进度；扫描波环经 uFootsteps 槽位 7
+    this._visorOn = false;
+    this._visorLockT = 0;
+    this._visorTarget = -1;
+    this._visorObserved = false;
+    this._pendingMastery = [];       // 采样后基因逆向延时队列 [{speciesIdx, t}]
+    this._warden = null;             // 阶段 4 机偶守卫（视图侧遭遇战，域侧仅存战果位）
+    this._buildBioInstances();
+
     // —— P0-1 修复（doc9 §3.1）：首帧初始位置对齐真实地表 ——
     //     任务模式按 coordSpace 映射（site_meters = 场域米制直读，体素 = 线性映射）；
     //     R-A 改造前的 GroundMission 无 coordSpace 字段 → 防御性回退体素映射。
@@ -1330,6 +1354,11 @@ export const GroundView = {
         break;
       case 'KeyE':
         this._oneShot.interact = true;
+        break;
+      case 'KeyV':
+        // doc18 WP-4：科考分析面罩开关（60m 目击 / 25m 光谱识别锁定）
+        this._visorOn = !this._visorOn;
+        this._visorLockT = 0;
         break;
       case 'KeyR':
         this._tryRestoreTerrain();
@@ -1646,6 +1675,314 @@ export const GroundView = {
   },
 
   /**
+   * doc18 WP-4：构建 BioFloraPass 实例集（确定性派生，mount 时一次上传；
+   * 渲染循环零分配——实例锚点静态，动物游荡在 VS 内按相位方程求值）。
+   * 通道 A：植被十字片（每物种 12 株，5 斑块散布，≤1024）；通道 B：动物
+   * 每物种 8 只 × 4 部件（躯干/头/双足），游荡锚点锁定植被簇 12m 环带（doc17 §2.1）。
+   */
+  _buildBioInstances() {
+    const FLORA_MAX = 1024;
+    const FAUNA_MAX = 128;
+    this._bioFloraBuf = new Float32Array(FLORA_MAX * 8);
+    this._bioFaunaBuf = new Float32Array(FAUNA_MAX * 9);
+    this._faunaAgents = [];
+    const floraCount = this._species ? this._species.species.filter((s) => s.trophic === 1).length : 0;
+    if (!this._species || !this.field) {
+      this._bioInstances = { flora: this._bioFloraBuf, floraCount: 0, fauna: this._bioFaunaBuf, faunaCount: 0 };
+      return;
+    }
+    // 5 斑块锚点（与 ensurePlanetEco 斑块一一对应：72° 均布 + 种子扰动，场域坐标）
+    const seedsHere = derivePlanetSeedsExtended(this.app.world, this.planet.id);
+    const patchAnchors = [];
+    for (let p = 0; p < 5; p++) {
+      const ang = (p * 72 / 180) * Math.PI + (seedsHere.biomeSeed >>> (p * 3)) % 157 / 100;
+      const rad = 110 + ((seedsHere.biomeSeed >>> (10 + p * 4)) % 90);
+      patchAnchors.push({ x: 256 + Math.cos(ang) * rad, z: 256 + Math.sin(ang) * rad });
+    }
+    let nf = 0;
+    for (const sp of this._species.species) {
+      if (sp.trophic !== 1) continue;
+      const hue = sp.genome.hueIdx;
+      const glow = sp.genome.biolume ? 0.9 : 0.15;
+      const hM = 0.6 + sp.genome.sizeClass * 0.8;      // 0.6m ~ 3.8m
+      for (let k = 0; k < 12 && nf < FLORA_MAX; k++) {
+        // 确定性散布：物种 idx 与株序号共同驱动（零 rng）
+        const h1 = (seedsHere.floraSeed(sp.idx + k * 16) >>> 8) / 4294967296;
+        const h2 = (seedsHere.floraSeed(sp.idx + k * 16 + 1) >>> 8) / 4294967296;
+        const patch = patchAnchors[(sp.idx + k) % 5];
+        const fx = patch.x + (h1 - 0.5) * 56;
+        const fz = patch.z + (h2 - 0.5) * 56;
+        const s = sampleTerrain(this.field, fx, fz);
+        if (!s || Number.isFinite(s.y) === false) continue;
+        const o = nf * 8;
+        this._bioFloraBuf[o] = fx; this._bioFloraBuf[o + 1] = s.y;
+        this._bioFloraBuf[o + 2] = fz;
+        this._bioFloraBuf[o + 3] = hM;
+        this._bioFloraBuf[o + 4] = h1 * 62.8;          // 相位
+        this._bioFloraBuf[o + 5] = h2 * 6.28;          // 朝向
+        this._bioFloraBuf[o + 6] = hue;
+        this._bioFloraBuf[o + 7] = glow;
+        nf++;
+      }
+    }
+    let na = 0;
+    for (const sp of this._species.species) {
+      if (sp.trophic === 1) continue;
+      const bodyLen = 0.6 + sp.genome.sizeClass * 0.45;
+      const speed = 0.25 + (seedsHere.faunaSeed(sp.idx) % 40) / 100;   // 0.25~0.65 rad/s
+      for (let k = 0; k < 8 && na + 4 <= FAUNA_MAX; k++) {
+        // 锚点 = 某植被簇锚（环带 12m，doc17 §2.1 确定性圆周相位方程）
+        const fl = this._species.species[k % Math.max(1, floraCount)];
+        const h1 = (seedsHere.faunaSeed(sp.idx + k * 8) >>> 8) / 4294967296;
+        const h2 = (seedsHere.faunaSeed(sp.idx + k * 8 + 3) >>> 8) / 4294967296;
+        const patch = patchAnchors[(sp.idx + k) % 5];
+        const ax = patch.x + (h1 - 0.5) * 44;
+        const az = patch.z + (h2 - 0.5) * 44;
+        const s = sampleTerrain(this.field, ax, az);
+        if (!s || !Number.isFinite(s.y)) continue;
+        const radius = 5 + h2 * 7;                     // ≤12m 环带
+        const phase0 = h1 * 62.8;
+        this._faunaAgents.push({ speciesIdx: sp.idx, ax, az, ay: s.y, radius, phase0, speed, name: sp.name });
+        // 4 部件实例（躯干 0 / 头 3 / 足 1,2）——limb 编码进 iExtra.y
+        const parts = [[0, 0], [3, 0], [1, -0.35], [2, 0.35]];
+        for (const [limb] of parts) {
+          const o = na * 9;
+          this._bioFaunaBuf[o] = ax; this._bioFaunaBuf[o + 1] = s.y; this._bioFaunaBuf[o + 2] = az;
+          this._bioFaunaBuf[o + 3] = bodyLen;
+          this._bioFaunaBuf[o + 4] = phase0;
+          this._bioFaunaBuf[o + 5] = speed;
+          this._bioFaunaBuf[o + 6] = radius;
+          this._bioFaunaBuf[o + 7] = sp.genome.hueIdx;
+          this._bioFaunaBuf[o + 8] = limb;
+          na++;
+        }
+      }
+    }
+    this._bioInstances = {
+      flora: this._bioFloraBuf, floraCount: nf,
+      fauna: this._bioFaunaBuf, faunaCount: na,
+    };
+  },
+
+  /**
+   * doc18 WP-4：动物当前世界坐标（CPU 与 VS 同源相位方程——faunaPhaseOffset）。
+   * 扫描锁定与采样交互的唯一坐标来源（零 per-creature 持久对象，FFF #176 纪律）。
+   */
+  _faunaWorldPos(agent) {
+    const off = faunaPhaseOffset(agent.ax, agent.az, agent.radius, agent.phase0, agent.speed, this._clock);
+    return { x: agent.ax + off.dx, z: agent.az + off.dz, y: agent.ay };
+  },
+
+  /**
+   * doc18 WP-4：分析面罩逐帧推进（60m 1.0s Observed / 25m 持续至 3.0s Identified；
+   * 扫描触发时向 uFootsteps 槽位 7 写入高斯扩张扫描波环）+ 采样后基因逆向延时。
+   */
+  _updateVisor(dt) {
+    if (!this._species || !this.planet) return;
+    // 1) 采样 → Mastered 延时队列（基因逆向 1.5s，无殖民星球亦可完成）
+    for (let i = this._pendingMastery.length - 1; i >= 0; i--) {
+      const pm = this._pendingMastery[i];
+      pm.t += dt;
+      if (pm.t >= 1.5) {
+        this._pendingMastery.splice(i, 1);
+        const wasAwarded = this.planet.eco.surveyAwarded;
+        this.app.dispatch('ScanPlanetarySpecimens', {
+          planetId: this.planet.id, speciesIdx: pm.speciesIdx, targetStage: 3,
+        });
+        if (!wasAwarded && this.planet.eco.surveyAwarded) {
+          toast('行星生态完全测绘达成！奖励已入账（+500 信用点 / +60 科研）', { kind: 'ok' });
+        }
+      }
+    }
+    // 2) 面罩锁定
+    if (!this._visorOn) { this._visorLockT = 0; this._visorTarget = -1; this._visorObserved = false; return; }
+    const c = this.char3d;
+    let best = null;
+    let bd = 60;
+    for (const ag of this._faunaAgents) {
+      const p = this._faunaWorldPos(ag);
+      const d = Math.hypot(p.x - c.x, p.z - c.z);
+      if (d < bd) { bd = d; best = ag; }
+    }
+    if (!best) { this._visorLockT = 0; this._visorTarget = -1; return; }
+    if (best.speciesIdx !== this._visorTarget) {
+      this._visorTarget = best.speciesIdx;
+      this._visorLockT = 0;
+      this._visorObserved = false;
+    }
+    this._visorLockT += dt;
+    if (!this._visorObserved && this._visorLockT >= 1.0) {
+      this._visorObserved = true;
+      const res = this.app.dispatch('ScanPlanetarySpecimens', {
+        planetId: this.planet.id, speciesIdx: best.speciesIdx, targetStage: 1,
+      });
+      if (res.ok) this._fireScanPulse(c);
+    }
+    if (bd <= 25 && this._visorLockT >= 3.0) {
+      const stage = getSpeciesStage(this.planet, best.speciesIdx);
+      if (stage === SPECIES_STAGE.OBSERVED) {
+        const res = this.app.dispatch('ScanPlanetarySpecimens', {
+          planetId: this.planet.id, speciesIdx: best.speciesIdx, targetStage: 2,
+        });
+        if (res.ok) this._fireScanPulse(c);
+        this._visorLockT = 0;   // 已识别：重新积累（避免逐帧重发）
+      }
+    }
+  },
+
+  /** uFootsteps 槽位 7：高斯扩张扫描波环（doc18 WP-4；场域坐标 + 双倍强度） */
+  _fireScanPulse(c) {
+    if (!this._footstepRing || !this.scene) return;
+    const o = 7 * 4;
+    this._footstepRing[o] = c.x + FIELD_OFFSET;
+    this._footstepRing[o + 1] = c.z + FIELD_OFFSET;
+    this._footstepRing[o + 2] = this._clock;
+    this._footstepRing[o + 3] = 1.8;
+    this.scene.setFootsteps(this._footstepRing);
+  },
+
+  /**
+   * doc18 WP-2/3：E 键生态/遗迹交互（优先级：遗迹副碑/导流塔/主碑 > 活体采样 > POI）。
+   * 全部经 CommandBus 命令（ScanPlanetarySpecimens/SamplePlanetarySpecimen/AdvanceMonolithStage）。
+   */
+  _tryEcoInteract() {
+    if (!this.planet || !this.planet.eco) return false;
+    const c = this.char3d;
+    const ruin = this.planet.eco.ruin;
+    const L = this._ruinLayout;
+    if (ruin && L) {
+      const stage = ruin[0];
+      // 副碑拓印（stage 2）
+      if (stage === RUIN_STAGE.DIALECT) {
+        for (let i = 0; i < 3; i++) {
+          if ((ruin[1] & (1 << i)) !== 0) continue;
+          const d = Math.hypot(L.pylons[i].x - c.x, L.pylons[i].z - c.z);
+          if (d <= 4.0) {
+            const res = this.app.dispatch('AdvanceMonolithStage', { planetId: this.planet.id, action: 'inscribe', pylonIdx: i });
+            toast(res.ok ? (res.advanced ? '方言拓印完成：三碑齐拓，谐振导流塔已激活' : `方言拓印成功（语素 ${i + 1}/3）`) : (res.reason || '拓印失败'), { kind: res.ok ? 'ok' : 'warn' });
+            return true;
+          }
+        }
+      }
+      // 导流塔旋转（stage 3）
+      if (stage === RUIN_STAGE.RESONANCE) {
+        for (let i = 0; i < 3; i++) {
+          const d = Math.hypot(L.towers[i].x - c.x, L.towers[i].z - c.z);
+          if (d <= 4.0) {
+            const ruinNow = this.planet.eco.ruin;
+            this.app.dispatch('AdvanceMonolithStage', { planetId: this.planet.id, action: 'rotate', towerIdx: i });
+            const st2 = ruinNow[0];
+            if (st2 >= RUIN_STAGE.GUARDIAN) {
+              toast('光路合龙！先驱者机偶守卫苏醒——准备战斗', { kind: 'warn' });
+              this._spawnWarden();
+            } else if (st2 === RUIN_STAGE.RESONANCE) {
+              toast(`导流塔已旋转至 ${towerRotOf(ruinNow, i) * 45}°（E 继续调整）`, { kind: 'info' });
+            }
+            return true;
+          }
+        }
+      }
+      // 主碑交互（stage 1 除障检测 / stage 5 核心提取）
+      const dCore = Math.hypot(L.coreX - c.x, L.coreZ - c.z);
+      if (dCore <= 4.5 && stage === RUIN_STAGE.EXCAVATION) {
+        this.app.dispatch('AdvanceMonolithStage', { planetId: this.planet.id, action: 'excavate' });
+        const st2 = this.planet.eco.ruin[0];
+        toast(st2 >= RUIN_STAGE.DIALECT ? '覆土清除完毕：主碑激活，外围三座方言副碑已点亮' : '主碑仍被覆土掩埋：用工程刻槽刷（F→采掘）削平基座周边岩土', { kind: st2 >= RUIN_STAGE.DIALECT ? 'ok' : 'warn' });
+        return true;
+      }
+      if (dCore <= 4.5 && stage === RUIN_STAGE.CORE && !ruin[4]) {
+        this.app.dispatch('AdvanceMonolithStage', { planetId: this.planet.id, action: 'extract' });
+        const harvested = this.planet.eco.ruin[4];
+        toast(harvested ? '先驱者核心破译完成（遗落科技已点亮，+15 ancientData）' : '核心提取条件未满足', { kind: harvested ? 'ok' : 'warn' });
+        return true;
+      }
+    }
+    // 活体采样（Analyzed 里程碑：已识别物种 3m 内按 E）
+    let bestAg = null;
+    let bd = 3.0;
+    for (const ag of this._faunaAgents) {
+      const p = this._faunaWorldPos(ag);
+      const d = Math.hypot(p.x - c.x, p.z - c.z);
+      if (d < bd) { bd = d; bestAg = ag; }
+    }
+    if (bestAg) {
+      const stage = getSpeciesStage(this.planet, bestAg.speciesIdx);
+      if (stage >= SPECIES_STAGE.IDENTIFIED) {
+        const eco = this.planet.eco;
+        const wasSampled = !!(eco.sampleMask & (1 << bestAg.speciesIdx));
+        const res = this.app.dispatch('SamplePlanetarySpecimen', { planetId: this.planet.id, speciesIdx: bestAg.speciesIdx });
+        if (res.ok && !wasSampled) {
+          toast(`已采集 ${bestAg.name} 组织样本（基因逆向中…）`, { kind: 'ok' });
+          this._pendingMastery.push({ speciesIdx: bestAg.speciesIdx, t: 0 });
+        } else if (res.ok) {
+          toast(`再次采样 ${bestAg.name}（图鉴档位已锁定）`, { kind: 'info' });
+        }
+        return true;
+      }
+      toast('目标未完成光谱识别：先用 V 面罩在 25m 内锁定扫描', { kind: 'info' });
+      return true;
+    }
+    return false; // 未消费：回退 POI 采样
+  },
+
+  /** doc18 WP-3：阶段 4 机偶守卫（视图侧遭遇战实体；域侧仅存战果位） */
+  _spawnWarden() {
+    const L = this._ruinLayout;
+    if (!L) return;
+    const gy = this._groundAt(L.coreX, L.coreZ);
+    this._warden = {
+      x: L.coreX + 6, z: L.coreZ + 6, y: Number.isFinite(gy) ? gy : 0,
+      hp: 600, hpMax: 600, facing: 0, state: 'chase',
+      atkCd: 1.0, flash: 0, aggroR: 40, attackR: 5.0, speed: 1.6,
+    };
+  },
+
+  /** doc18 WP-3：机偶守卫遭遇战逐帧推进（近战/射击伤害 + 守卫冲撞反击） */
+  _updateWarden(dt) {
+    const wd = this._warden;
+    if (!wd) return;
+    const c = this.char3d;
+    wd.flash = Math.max(0, wd.flash - dt * 3);
+    const d = Math.hypot(wd.x - c.x, wd.z - c.z);
+    // 玩家攻击（one-shot 意图：任务态由 FSM 消费，自由态在此消费）
+    if (this._oneShot.attack) {
+      const kind = this._oneShot.attack;
+      this._oneShot.attack = null;
+      const reach = kind === 'ranged' ? 14 : 4.2;
+      if (d <= reach) {
+        const dmg = kind === 'light' ? 25 : kind === 'heavy' ? 45 : 30;
+        wd.hp -= dmg;
+        wd.flash = 1;
+        if (wd.hp <= 0) {
+          this.app.dispatch('AdvanceMonolithStage', { planetId: this.planet.id, action: 'guardianDefeated' });
+          const defeated = this.planet.eco.ruin[3] === 1;
+          this._warden = null;
+          toast(defeated ? '机偶守卫已瘫痪！主碑核心可提取（靠近按 E）' : '守卫战果上报失败', { kind: defeated ? 'ok' : 'warn' });
+          return;
+        }
+      }
+    }
+    // 守卫 AI：追逐 + 冲撞
+    if (d > wd.attackR && d < wd.aggroR) {
+      const nx = wd.x + ((c.x - wd.x) / d) * wd.speed * dt;
+      const nz = wd.z + ((c.z - wd.z) / d) * wd.speed * dt;
+      wd.x = clamp(nx, FIELD_WALK_MIN, FIELD_WALK_MAX);
+      wd.z = clamp(nz, FIELD_WALK_MIN, FIELD_WALK_MAX);
+      const gy = this._groundAt(wd.x, wd.z);
+      if (Number.isFinite(gy)) wd.y = gy;
+      wd.facing = Math.atan2(c.z - wd.z, c.x - wd.x);
+    } else if (d <= wd.attackR) {
+      wd.atkCd -= dt;
+      if (wd.atkCd <= 0) {
+        wd.atkCd = 1.5;
+        c.hp = Math.max(0, c.hp - 12);
+        c.flash = 1;
+        if (c.hp <= 0) toast('警告：先驱者机偶重创外骨骼（撤离或继续交战）', { kind: 'warn' });
+      }
+    }
+  },
+
+  /**
    * WP-4 场域左键工程作业（技能 5 建造模式）：ORE 矿脉 → 地质采掘入账
    * （HarvestTerrainOre 域命令，无矿脉静默跳过）；地形整形刷子（F 键切换
    * flatten/smooth/lower）→ ShapeTerrain 连续雕刻，彻底取代体素占位盒
@@ -1663,6 +2000,20 @@ export const GroundView = {
     const radius = op === 'lower' ? 3.5 : 6.0;
     const strength = op === 'lower' ? 0.6 : 0.8;
     this._shapeTerrainAt(fx, fz, op, radius, strength);
+    // doc18 WP-3：主碑除障联动——刻槽作业后自动检验阶段 1 覆土清除（世界记住工程行为）
+    if (op === 'lower' && this.planet && this.planet.eco && this.planet.eco.ruin
+      && this.planet.eco.ruin[0] === RUIN_STAGE.EXCAVATION) {
+      const rz = this.planet.eco.ruin;
+      const fxWorld = fx - FIELD_OFFSET;   // 场域 → 世界（ruin 布局持世界坐标）
+      const fzWorld = fz - FIELD_OFFSET;
+      const dCore = Math.hypot(rz[5] / 10 - fxWorld, rz[6] / 10 - fzWorld);
+      if (dCore <= 10) {
+        this.app.dispatch('AdvanceMonolithStage', { planetId: this.planet.id, action: 'excavate' }, null, { silent: true });
+        if (this.planet.eco.ruin[0] >= RUIN_STAGE.DIALECT) {
+          toast('主碑基座覆土清除完毕：遗迹激活，方言副碑已点亮', { kind: 'ok' });
+        }
+      }
+    }
     if (this._aim) this._aim.dug = true;
     this._fx.dig.push({ x: hit.px, y: hit.py, z: hit.pz, matId: 255 });
     if (Number.isFinite(hit.vx) && Number.isFinite(hit.vz)) this._markFieldDirty(hit.vx, hit.vz);
@@ -1764,8 +2115,11 @@ export const GroundView = {
     this._updateAim(dt);
     if (this._oneShot.interact) {
       this._oneShot.interact = false;
-      this._tryHarvestPoi();
+      // doc18 WP-2/3：生态采样/遗迹交互优先（未消费回退 POI 采样）
+      if (!this._tryEcoInteract()) this._tryHarvestPoi();
     }
+    this._updateVisor(dt);
+    this._updateWarden(dt);
     this._freePhysics(dt);
     this._updateFx(dt);
     this._renderFrame(null, dt);
@@ -2697,6 +3051,7 @@ export const GroundView = {
           dt,
           camera: { eye, target: tgt },
           actors: rd,
+          bioInstances: this._bioInstances,   // doc18 WP-4：生态双通道实例集（≤2 DC）
         }, {});
 
         // —— 2. 对象 pass：敌人/殖民者/传送带/角色七部件/贴花/特效（外部相机） ——
@@ -2734,6 +3089,17 @@ export const GroundView = {
         digEvents: this._fx.dig,
       },
     };
+    // doc18 WP-3：阶段 4 机偶守卫（自由探索遭遇战；世界坐标直读，域侧仅存战果位）
+    if (this._warden) {
+      const wd = this._warden;
+      rd.enemies.push({
+        kind: 'automata_warden',
+        x: wd.x, y: wd.y, z: wd.z,
+        yaw: -wd.facing, phase: 0,
+        flash: wd.flash, hp: wd.hp, hpMax: wd.hpMax,
+        state: 'chase',
+      });
+    }
     if (!view) return rd;
 
     const m = this.mission;
@@ -3164,6 +3530,86 @@ export const GroundView = {
       ctx.fillStyle = '#9fb6c9';
       ctx.font = '11px "Segoe UI", system-ui, sans-serif';
       ctx.fillText(`造价 ${costTxt} · ${depTxt}`, px + 10, 94);
+    }
+
+    // —— doc18 WP-4：科考分析面罩 HUD（V 键；青色测距六边形阵列 + 声谱波形 + 目标档案） ——
+    if (this._visorOn) {
+      const hx = W / 2;
+      const hy = H / 2;
+      ctx.strokeStyle = 'rgba(93,235,223,0.55)';
+      ctx.lineWidth = 1;
+      for (let ring = 1; ring <= 3; ring++) {
+        const r = 22 * ring + (this._clock * 6) % 22;
+        ctx.beginPath();
+        for (let k = 0; k <= 6; k++) {
+          const a = (k / 6) * Math.PI * 2;
+          const vx = hx + Math.cos(a) * r;
+          const vy = hy + Math.sin(a) * r * 0.62;
+          if (k === 0) ctx.moveTo(vx, vy); else ctx.lineTo(vx, vy);
+        }
+        ctx.stroke();
+      }
+      // 声谱波形
+      ctx.beginPath();
+      for (let x = 0; x <= 120; x += 4) {
+        const yv = hy + 46 + Math.sin(x * 0.35 + this._clock * 9) * 6 * Math.sin(x * 0.045 + this._clock * 2.2);
+        if (x === 0) ctx.moveTo(hx - 60 + x, yv); else ctx.lineTo(hx - 60 + x, yv);
+      }
+      ctx.stroke();
+      // 目标档案卡
+      const tgt2 = this._visorTarget >= 0 ? this._faunaAgents.find((ag) => ag.speciesIdx === this._visorTarget) : null;
+      const totalSp = getPlanetSpeciesCount(this.planet || {});
+      const progress = this.planet ? ecoSurveyProgress(this.planet) : 1;
+      ctx.fillStyle = 'rgba(6,26,30,0.78)';
+      ctx.fillRect(12, 62, 250, 40);
+      ctx.strokeStyle = 'rgba(93,235,223,0.5)';
+      ctx.strokeRect(12.5, 62.5, 249.5, 39.5);
+      ctx.fillStyle = '#5debdf';
+      ctx.font = 'bold 12px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText(`分析面罩 · 图鉴 ${Math.round(progress * 100)}%（${totalSp} 种）· V 关闭`, 22, 78);
+      ctx.fillStyle = '#9fb6c9';
+      ctx.font = '11px "Segoe UI", system-ui, sans-serif';
+      if (tgt2) {
+        const stage = getSpeciesStage(this.planet, tgt2.speciesIdx);
+        const stageZh = ['未发现', '目击', '识别', '掌握'][stage] || '?';
+        const lockPct = Math.min(100, Math.round(this._visorLockT / 3.0 * 100));
+        ctx.fillText(`锁定：${tgt2.name}［${stageZh}］· 距离 ${Math.round(Math.hypot(tgt2.ax - this.char3d.x, tgt2.az - this.char3d.z))}m · ${lockPct}%`, 22, 94);
+      } else {
+        ctx.fillText('视野内无生命信号：靠近荧光生物群落扫描', 22, 94);
+      }
+    }
+
+    // —— doc18 WP-3：五阶段遗迹追踪（阶段名 + 当前目标提示） ——
+    if (this.planet && this.planet.eco && this.planet.eco.ruin) {
+      const rz = this.planet.eco.ruin;
+      const stageNames = ['', '除障：刻槽清除主碑覆土', '方言拓印：寻找 3 座副碑（120m 环带）', '谐振对光：旋转 3 座导流塔对准主碑', '守卫战：瘫痪先驱者机偶（600 HP）', '核心破译：提取先驱者核心'];
+      const stageTxt = rz[4] ? '遗迹已破译（先驱者科技点亮）' : stageNames[rz[0]] || '';
+      if (stageTxt) {
+        ctx.fillStyle = 'rgba(40,26,10,0.75)';
+        ctx.fillRect(W / 2 - 150, 62, 300, 22);
+        ctx.strokeStyle = 'rgba(230,180,90,0.4)';
+        ctx.strokeRect(W / 2 - 149.5, 62.5, 299.5, 21.5);
+        ctx.fillStyle = '#e6c88a';
+        ctx.font = 'bold 11px "Segoe UI", system-ui, sans-serif';
+        ctx.fillText(`先驱者巨石遗迹 · ${stageTxt}`, W / 2 - 140, 77);
+      }
+    }
+
+    // —— doc18 WP-3：机偶守卫血条 ——
+    if (this._warden) {
+      const wd = this._warden;
+      const bw = 260;
+      const bx = W / 2 - bw / 2;
+      const by = 90;
+      ctx.fillStyle = 'rgba(8,14,22,0.75)';
+      ctx.fillRect(bx, by, bw, 14);
+      ctx.fillStyle = '#c05a5a';
+      ctx.fillRect(bx + 1, by + 1, (bw - 2) * Math.max(0, wd.hp / wd.hpMax), 12);
+      ctx.strokeStyle = 'rgba(230,120,90,0.6)';
+      ctx.strokeRect(bx + 0.5, by + 0.5, bw - 1, 13);
+      ctx.fillStyle = '#f2d8c8';
+      ctx.font = 'bold 10px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText(`先驱者机偶守卫 ${Math.max(0, Math.round(wd.hp))}/${wd.hpMax}`, bx + 8, by + 10);
     }
     // —— 最近未勘探 POI 罗盘（doc5 P1-04：方位 + 距离 + E 采样提示） ——
     if (this._pois) {

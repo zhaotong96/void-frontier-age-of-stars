@@ -891,4 +891,25 @@ export const TECHNOLOGIES = [
     ],
     unlocks: [], special: 'crisis',
   },
+  // ── 先驱者遗落科技（doc18 WP-3：仅能由五阶段巨石遗迹核心破译解锁，常规科研不可研发） ──
+  {
+    id: 'tech_precursor_shield_harmonics',
+    nameZh: '先驱者谐振护盾',
+    nameEn: 'Precursor Shield Harmonics',
+    descZh: '先驱者遗落科技：逆向先驱者核心的谐振波形，为全体舰船叠加一层相位护盾谐振。',
+    descEn: 'Precursor tech: reverse-engineering resonant waveforms from a Precursor core to phase-harmonize all ship shields.',
+    category: 'society', tier: 4, cost: 0, prereqs: [],
+    effects: [{ stat: 'damageReduction', mode: 'add', value: 0.05 }],
+    unlocks: [], special: 'precursor',
+  },
+  {
+    id: 'tech_precursor_mass_catapult',
+    nameZh: '先驱者零点能质量弹射器',
+    nameEn: 'Precursor Mass Catapult',
+    descZh: '先驱者遗落科技：零点能场驱动的质量弹射结构，大幅降低舰队推进燃料损耗。',
+    descEn: 'Precursor tech: zero-point mass catapult structures slashing fleet propulsion fuel losses.',
+    category: 'propulsion', tier: 4, cost: 0, prereqs: [],
+    effects: [{ stat: 'fuelEfficiency', mode: 'mult', value: 1.15 }],
+    unlocks: [], special: 'precursor',
+  },
 ];

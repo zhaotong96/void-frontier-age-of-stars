@@ -10,6 +10,30 @@
 
 ### Added
 
+- **v0.2 异星博物志（docs 18 WP-1..WP-5）**：Planetary Living World System 支柱一落地。
+  **确定性雪崩子流树** `derivePlanetSeedsExtended`/`mix32`/`createSubRng`
+  （`src/domain/ground/planetSeeds.js`，SALT_FLORA/FAUNA/RUIN/WEATHER/DILEMMA 五盐互撞消除；
+  既有 `derivePlanetSeeds` 逐位不动——金快照 68462446 零漂移）。
+  **异星生态** `xenobiology.js`：生态斑块轻量统计模型（5 斑块 × ΔN_i=B−D+M+ΣI 日结算，
+  严禁逐草逐兽建对象）+ 四阶段物种图鉴（Observed→Identified→Analyzed→Mastered，
+  2-bit discoveryMask + sampleMask 里程碑，未扫描物种 0 存档字节）+ 全满贯测绘大奖幂等。
+  **五阶段巨石遗迹** `monolithRuins.js`：除障→方言拓印（world.narrative.lexiconMask
+  语素位）→谐振对光（raycastTerrain 山脊遮挡校验）→机偶守卫战→核心破译反哺
+  （`tech_precursor_shield_harmonics`/`tech_precursor_mass_catapult` 遗落科技，
+  canStart 拒常规科研启动）。**渲染** `BioFloraPass.js`：双通道实例化（植被风摆 1 DC +
+  动物相位游荡 1 DC，≤1024/128 实例，VS 内四足迈步代数，CPU 零骨骼）挂载
+  PlanetSurfaceScene。**GroundView**：V 键科考分析面罩（60m 目击/25m 光谱识别锁定 +
+  uFootsteps 槽 7 扫描波环）、E 键生态采样/遗迹交互、遗迹追踪 HUD、守卫遭遇战。
+  **命令** ScanPlanetarySpecimens/SamplePlanetarySpecimen/AdvanceMonolithStage。
+  **阻断门禁 PLAYTEST-GATE-05**（XENO-01 零污染/XENO-02 满贯幂等/XENO-03 五阶段严苛链/
+  XENO-04 eco≤3KB+克隆增量<0.5ms/XENO-05 三旗舰 PCDI≥85）与 PCDI 评分器
+  （`src/domain/ground/pcdi.js`，doc16 §9 七维权重表）。
+- **v0.1.1 基线淬火（docs 18 WP-0）**：PlanetTerrainMesh `setTheme` Float32Array(32)
+  环形缓冲直通（uFootsteps 静默拦截修复）；GroundView `_moveAABB` 脚步坐标改场域偏移
+  （world→field 内收，防二次叠加）；siteModifier 包装链语义旗完整透传
+  （flags/clearFlags/weights/biomeId，GroundView + `attachTerrainEdits` 双侧——
+  增量重建区块不再丢失坪面材质与 clearFlags 安全豁免位）；工程模式 `[`/`]`/`B`
+  建筑型号循环（矿脉过滤面板 + 自由探索 HUD 造价明示）。
 - **终审返工（docs 10/11，WP-1..WP-6）**：专家终审 6.4/10 有条件驳回的全链路根治。
   **地质采掘命令** `HarvestTerrainOre`（ORE 旗点位采样 + 殖民地仓储入账，
   `src/app/commands.js:757`）接入 GroundView 工程作业闭环（`_fieldDig`/`_fieldPlace`
