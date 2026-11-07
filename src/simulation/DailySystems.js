@@ -9,6 +9,7 @@ import { dailyObjectiveSweep } from '../domain/events/objectives.js';
 import { dailyPolicySettlement } from '../domain/politics/policy.js';
 import { buildingDef } from '../domain/planets/colony.js';
 import { dailyPopulation } from '../domain/planets/colony.js';
+import { tickColonySociety, maybeTriggerDilemma } from '../domain/planets/colonyGovernance.js';
 import { closeDailyLedgers, applyDecay } from '../domain/economy/ledger.js';
 import { updateMarketPrices } from '../domain/economy/market.js';
 import { dailyColonyCommerce, restockMarkets } from '../domain/economy/colonyTrade.js';
@@ -23,6 +24,12 @@ registerDaily('population', (world) => {
     const r = dailyPopulation(world, colony);
     if (r.after <= 0 && r.before > 0) {
       emit(world, 'ColonyLost', { colonyId: id, planetId: colony.planetId }, 'colony');
+    }
+    // doc21 v0.8 WP-2：社会微模拟日结算——仅 planet.soc 已初始化的行星（金快照零漂移）
+    const planet = world.entities.planets[colony.planetId];
+    if (planet && planet.soc && planet.soc.v === 1) {
+      tickColonySociety(world, planet, colony);
+      maybeTriggerDilemma(world, planet, colony);
     }
   }
 });

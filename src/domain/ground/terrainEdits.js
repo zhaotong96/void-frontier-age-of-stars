@@ -445,6 +445,70 @@ export function foundationTypeForTheme(themeId) {
  *             foundation?:{ kind:'flat'|'graded', piling:string, etaHeightM:number } }}
  * 通过时 foundation.etaHeightM = 9 点均高（承台基准高），piling 按主题解析。
  */
+/**
+ * doc22 WP-2：地形显著度（Topographic Prominence）严苛物理校验扩展。
+ * 对空离子加农炮严禁在盆地低洼处盲目落位：
+ *   1) 落位基准高程必须 ≥ 场域平均海拔 + 14.0m（平顶桌山/高脊）；
+ *   2) 上方 60° 锥角视界内无更高山体遮挡（checkSkyOcclusionCone）。
+ * @returns {{ok:boolean, reason?:string, code?:string, maxSlopeDeg?:number, maxHeightDeltaM?:number}}
+ */
+export function checkBuildingPlacementExtended(field, x, z, opts = {}) {
+  const baseCheck = checkBuildingPlacement(field, x, z, opts);
+  if (!baseCheck.ok) return baseCheck;
+
+  if (opts.defId === 'bld_ion_battery') {
+    const centerS = sampleTerrain(field, x, z);
+    const centerElev = centerS && Number.isFinite(centerS.y) ? centerS.y : 0.0;
+    const meanElev = fieldMeanElevation(field);
+
+    // 1. 相对高程必须高出全图平均海拔 14.0 米以上（平顶桌山或高脊）
+    if (centerElev < meanElev + 14.0) {
+      return {
+        ok: false,
+        code: 'ProminenceTooLow',
+        reason: `ProminenceTooLow: 必须修筑在平顶桌山或高脊之上（${centerElev.toFixed(1)}m < 均值 ${meanElev.toFixed(1)}m + 14m）`,
+      };
+    }
+
+    // 2. 上方 60 度锥角视界校验（无更高山体遮挡射界）
+    const blocked = fieldSkyOcclusionCone(field, x, z, centerElev, 60.0);
+    if (blocked) {
+      return { ok: false, code: 'SkyObstructed', reason: 'SkyObstructed: 射界被上方高耸山体阻挡' };
+    }
+  }
+  return { ok: true };
+}
+
+/** 场域平均海拔（4m 步长抽样；确定性 O(N)） */
+export function fieldMeanElevation(field) {
+  if (!field) return 0.0;
+  let sum = 0;
+  let n = 0;
+  for (let z = field.originZ + 8; z < field.originZ + field.sizeMeters; z += 16) {
+    for (let x = field.originX + 8; x < field.originX + field.sizeMeters; x += 16) {
+      const s = sampleTerrain(field, x, z);
+      if (s && Number.isFinite(s.y)) { sum += s.y; n++; }
+    }
+  }
+  return n > 0 ? sum / n : 0.0;
+}
+
+/** 60° 天顶锥角遮挡校验（8 方向 × 逐 8m 步进射线，任一方向仰角阻挡即 true） */
+export function fieldSkyOcclusionCone(field, x, z, elevM, coneDeg) {
+  const tanHalf = Math.tan((coneDeg / 2) * Math.PI / 180);
+  const maxDist = 96;
+  for (let a = 0; a < 8; a++) {
+    const ang = (a / 8) * Math.PI * 2;
+    const dx = Math.cos(ang);
+    const dz = Math.sin(ang);
+    for (let d = 8; d <= maxDist; d += 8) {
+      const s = sampleTerrain(field, x + dx * d, z + dz * d);
+      if (s && Number.isFinite(s.y) && s.y > elevM + tanHalf * d) return true;
+    }
+  }
+  return false;
+}
+
 export function checkBuildingPlacement(field, x, z, opts = {}) {
   const half = num(opts.footprintHalfM, BUILDING_PLACEMENT.footprintHalfM);
   const maxSlope = num(opts.maxSlopeDeg, BUILDING_PLACEMENT.maxSlopeDeg);

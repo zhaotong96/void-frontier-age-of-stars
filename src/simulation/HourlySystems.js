@@ -43,6 +43,16 @@ registerHourly('navigation', (world) => {
 });
 
 registerHourly('combat', (world) => {
+  // doc22 WP-3：高地离子炮越级齐射（仅 planet.fort 已初始化的行星；金快照零漂移）
+  for (const pid of Object.keys(world.entities.planets).sort()) {
+    const planet = world.entities.planets[pid];
+    if (!planet.fort || planet.fort.v !== 1) continue;
+    const hostiles = hostileFleetsInSystemOf(world, planet);
+    if (hostiles.length > 0) {
+      const hits = firePlanetaryIonBatteries(world, planet, hostiles);
+      announceIonSalvo(world, planet, hits);
+    }
+  }
   checkEngagements(world);
   stepBattles(world);
   settleCombatCharacterFx(world);

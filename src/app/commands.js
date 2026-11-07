@@ -40,6 +40,11 @@ import {
   ensurePlanetSoc, deriveColonyAgents, resolveColonyDilemma, reportRebellionSuppressed,
   COLONY_EDICTS,
 } from '../domain/planets/colonyGovernance.js';
+import {
+  ensurePlanetFort, callOrbitalSupport, firePlanetaryIonBatteries,
+  hostileFleetsInSystemOf, announceIonSalvo,
+} from '../domain/strategic/orbitalSynergy.js';
+import { checkBuildingPlacementExtended } from '../domain/ground/terrainEdits.js';
 
 function ownFleet(world, cmd) {
   const fleet = getEntity(world, 'fleets', cmd.params.fleetId || cmd.targetId);
@@ -675,6 +680,11 @@ function executeShape(ctx, cmd, op) {
   }, 'ground');
 }
 
+/** doc22：loadLiveEdits 域内引用（CallOrbitalSupport 激光开山复用同一口径） */
+function liveEditsFor(world, planetId) {
+  return loadLiveEdits(world, planetId);
+}
+
 registerCommand('ShapeTerrain', {
   desc: '地形整形器：raise/lower/smooth/flatten 刷子与植被移植（TERRAIN-06 增量重建）',
   validate(ctx, cmd) {
@@ -718,6 +728,11 @@ registerCommand('PlaceBuilding', {
       footprintHalfM: cmd.params.footprintHalfM,
       themeId: planet.primaryThemeId,
     });
+    // doc22 WP-2：对空离子炮显著度扩展校验（桌山高脊 + 60° 天顶锥角）
+    if (defId && buildingDef(defId) && buildingDef(defId).prominence) {
+      const ext = checkBuildingPlacementExtended(field, cmd.params.x, cmd.params.z, { defId });
+      if (!ext.ok) return { ok: false, code: ext.code || 'PROMINENCE', reason: ext.reason };
+    }
     if (!chk.ok) {
       const reason = chk.code === 'SLOPE_TOO_STEEP'
         ? `坡度过大（${chk.maxSlopeDeg.toFixed(1)}° > 阈值），请先整地推平或改用主题桩基`
@@ -768,6 +783,22 @@ registerCommand('PlaceBuilding', {
         0, NODE_STATE.OFFLINE, 0, 0, 0, 0, 0, 0,
       ]);
       rebuildPowerGrids(ind, BUILDINGS);
+    }
+    // doc22 WP-2/WP-3：离子炮入 fort 台账（7 元组 [id, defIdx, x_dm, z_dm, y_dm, online, cdHours]）
+    const defF = BUILDINGS.find((b) => b.id === entry.defId);
+    if (defF && defF.ionBattery) {
+      const fort = ensurePlanetFort(planet);
+      fort.ionBatteries.push([
+        fort.ionBatteries.reduce((m, b) => Math.max(m, b[0]), 0) + 1,
+        defIdx,
+        Math.round(cmd.params.x * 10), Math.round(cmd.params.z * 10),
+        Math.round((entry.foundation && Number.isFinite(entry.foundation.etaHeightM) ? entry.foundation.etaHeightM : 0) * 10),
+        1, 0,
+      ]);
+    }
+    if (defF && defF.planetaryShield) {
+      const fort = ensurePlanetFort(planet);
+      fort.planetaryShield = { hp: 3000, hpMax: 3000 };
     }
   },
 });
@@ -1028,6 +1059,49 @@ registerCommand('ReportRebellionSuppressed', {
     const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
     const res = reportRebellionSuppressed(ctx.world, planet);
     if (!res.ok) throw new Error(res.reason || '平叛上报失败');
+  },
+});
+
+// —— doc22 v1.0：天地一体协同命令（WP-1/WP-3） ——————————————————————————
+
+registerCommand('CallOrbitalSupport', {
+  desc: '轨道五大战术支援呼叫（激光洗地开山/动能打击/EW/机甲空投/补给舱；doc22 WP-1）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    const kinds = ['support_orbital_laser', 'support_kinetic_strike', 'support_electronic_warfare', 'support_mech_drop', 'support_supply_pod'];
+    if (!kinds.includes(cmd.params.kind)) return { ok: false, code: 'BAD_KIND', reason: '未知支援类型' };
+    if (!Number.isFinite(cmd.params.x) || !Number.isFinite(cmd.params.z)) {
+      return { ok: false, code: 'BAD_COORD', reason: '信标坐标非法' };
+    }
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    const res = callOrbitalSupport(ctx.world, planet, cmd.params.kind, cmd.params.x, cmd.params.z);
+    if (!res.ok) throw new Error(res.reason || '支援呼叫失败');
+    // 激光洗地：扫过区域真实开山（ShapeTerrain lower + HarvestTerrainOre——doc22 WP-1.2）
+    if (cmd.params.kind === 'support_orbital_laser') {
+      const { field: fL, edits: eL } = liveEditsFor(ctx.world, planet.id);
+      applyEdit(fL, eL, { kind: 'lower', x: cmd.params.x, z: cmd.params.z, radius: 5, strength: 1.5 });
+      ctx.world.entities.planets[planet.id].terrainEdits = JSON.parse(serializeEdits(eL));
+      emit(ctx.world, 'OrbitalLaserDug', { planetId: planet.id, x: cmd.params.x, z: cmd.params.z }, 'ground');
+    }
+  },
+});
+
+registerCommand('FirePlanetaryIonBattery', {
+  desc: '高地离子炮越级齐射（HourlySystems combat 阶段亦自动触发；doc22 WP-3）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    const hostiles = hostileFleetsInSystemOf(ctx.world, planet);
+    const hits = firePlanetaryIonBatteries(ctx.world, planet, hostiles);
+    announceIonSalvo(ctx.world, planet, hits);
   },
 });
 
