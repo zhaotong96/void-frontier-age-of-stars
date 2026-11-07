@@ -90,6 +90,24 @@ export function pcdiEvaluate(world, planet) {
   }
   if (totalSp >= 6) dims.replay += 3;
 
+  // —— 工业与物流维度注入（doc19 WP-6 IND-05：跨入 activity/systemInteraction/
+  //    persistence/replay 四维计分；只计真实 planet.ind 状态） ——
+  const ind = planet.ind && planet.ind.v === 1 ? planet.ind : null;
+  if (ind) {
+    const nNodes = (ind.nodes || []).length;
+    const nBelts = (ind.belts || []).length;
+    if (nNodes > 0) dims.activity = Math.min(20, dims.activity + 2.5);
+    if (nBelts > 0) dims.activity = Math.min(20, dims.activity + 2.5);
+    if (ind.catapult) dims.activity = Math.min(20, dims.activity + 2.5);
+    if (nNodes > 0) dims.systemInteraction = Math.min(20, dims.systemInteraction + 20 / 7);
+    if (nBelts > 0) dims.systemInteraction = Math.min(20, dims.systemInteraction + 20 / 7);
+    if (ind.catapult && ind.orbitalBuffer) dims.systemInteraction = Math.min(20, dims.systemInteraction + 20 / 7);
+    if (nNodes > 0) dims.persistence += 3;
+    if (nBelts > 0) dims.persistence += 2;
+    if (ind.catapult) dims.persistence += 2;
+    if (nBelts >= 4) dims.replay = Math.min(10, dims.replay + 2);
+  }
+
   // —— Theme Uniqueness（0..10）：主题身份 + 环境危险签名 ——
   if (planet.primaryThemeId) dims.themeUniqueness += 6;
   if (FLAGSHIP_THEMES.includes(planet.primaryThemeId)) dims.themeUniqueness += 2;

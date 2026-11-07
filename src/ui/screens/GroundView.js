@@ -72,6 +72,7 @@ import {
   ensurePlanetRuin, deriveRuinLayout, towerRotOf, RUIN_STAGE,
 } from '../../domain/ground/monolithRuins.js';
 import { derivePlanetSeedsExtended } from '../../domain/ground/planetSeeds.js';
+import { NODE_IDX, BELT_IDX, beltIsCrossed } from '../../domain/industry/planetaryLogistics.js';
 import { faunaPhaseOffset } from '../../render/gl/BioFloraPass.js';
 
 // ———— 常量 ————————————————————————————————————————————————
@@ -280,6 +281,8 @@ const BUILD_CATEGORY_IDS = [
   'mining', 'refining', 'industry', 'agri', 'science',
   'service', 'military', 'admin', 'energy', 'default', 'selector',
   ...LANDMARK_PREFAB_IDS,
+  // doc19 WP-5：工业槽位追加（18..20；0..17 索引稳定不动）
+  'pylon', 'splitter', 'catapult',
 ];
 const MESH_OF_CATEGORY = (cat) => {
   const i = BUILD_CATEGORY_IDS.indexOf(String(cat || 'default'));
@@ -455,7 +458,7 @@ class BuildingMeshBatch {
   constructor(glc) {
     this.glc = glc;
     this.gl = glc.gl;
-    this.cap = 192;                       // 实例容量（建筑 + 目标物 + 拾取物 + 地标 + 选择框）
+    this.cap = 384;                       // doc19 WP-5：扩容（建筑 + 目标物 + 拾取物 + 地标 + 选择框 + 工业节点）
     this._count = 0;
 
     // —— 网格图集（逐顶点 aMesh）：九大类 + 兜底 + 选择框 + 七大旗舰地标 ——
@@ -2896,6 +2899,9 @@ export const GroundView = {
       groundBuildings,
       center: [centerFx, centerFz],
       categoryOf: (defId) => {
+        // doc19 WP-5：工业建筑专用图集槽位（输电塔/分流器/弹射井）
+        const SLOT_OF = { bld_power_pylon: 'pylon', bld_splitter: 'splitter', bld_freight_catapult: 'catapult' };
+        if (SLOT_OF[defId]) return SLOT_OF[defId];
         const def = BUILDINGS.find((x) => x.id === defId);
         return def ? def.category : 'default';
       },
@@ -2971,6 +2977,39 @@ export const GroundView = {
         pts.push([x, y, z]);
       }
       paths.push({ pts, speed: 1.6, spacing: 1.1 });
+    }
+    // —— doc19 WP-5.2：planet.ind.belts 实体带（FFF #176 元组 → 渲染折线；
+    //    货箱视觉数由 itemCount 驱动，立体交叉带 y +1.8m 立柱） ——
+    if (this.planet && this.planet.ind && Array.isArray(this.planet.ind.belts)) {
+      const nodes = this.planet.ind.nodes || [];
+      for (const belt of this.planet.ind.belts) {
+        if (paths.length >= 24) break;
+        const a = nodes.find((nn) => nn[NODE_IDX.ID] === belt[BELT_IDX.FROM]);
+        const b = nodes.find((nn) => nn[NODE_IDX.ID] === belt[BELT_IDX.TO]);
+        if (!a || !b) continue;
+        const ax = a[NODE_IDX.X_DM] / 10, az = a[NODE_IDX.Z_DM] / 10;
+        const bx = b[NODE_IDX.X_DM] / 10, bz = b[NODE_IDX.Z_DM] / 10;
+        const len = Math.hypot(bx - ax, bz - az);
+        if (!(len >= 1)) continue;
+        const raised = beltIsCrossed(this.planet.ind, belt);
+        const n = Math.max(4, Math.ceil(len));
+        const pts = [];
+        for (let k = 0; k <= n; k++) {
+          const t = k / n;
+          const x = ax + (bx - ax) * t;
+          const z = az + (bz - az) * t;
+          const h = this._groundAt(x, z);
+          const y = (Number.isFinite(h) ? h + 0.15 : 0) + (raised ? 1.8 : 0);
+          pts.push([x, y, z]);
+        }
+        const tier = belt[BELT_IDX.TIER] || 1;
+        paths.push({
+          pts,
+          speed: 1.2 + tier * 0.7,
+          spacing: 1.0,
+          count: belt[BELT_IDX.COUNT],   // 货箱视觉数 = 真实带载（FFF #176 视觉同源）
+        });
+      }
     }
     return paths;
   },

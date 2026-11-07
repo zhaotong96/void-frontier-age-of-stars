@@ -51,6 +51,8 @@ uniform float uTime;
 uniform float uHdr;
 uniform int uSkyMode;      /* 0=clear 1=aurora 2=gas 3=dust */
 uniform vec3 uModeParams;  /* x=auroraStrength y=gasHeight(仰角阈值) z=dustDensity */
+/* doc20 WP-1.3：uStormFront = (cos(dir), sin(dir), frontAdvanceMeters, intensity 0..1) */
+uniform vec4 uStormFront;
 out vec4 fragColor;
 float hash12(vec2 p) {
   vec3 p3 = fract(vec3(p.x, p.y, p.x) * 0.1031);
@@ -112,6 +114,12 @@ void main() {
     float band = smoothstep(-0.05, 0.35, up) * smoothstep(0.9, 0.2, up);
     col = mix(col, mix(col, vec3(0.62, 0.47, 0.30), streak), dens * band * (0.35 + 0.65 * streak));
     col = mix(col, vec3(0.55, 0.42, 0.28), dens * smoothstep(0.12, -0.2, up) * 0.6);
+  }
+  /* doc20 WP-1.3：锋面方向天幕压暗（朝向锋面一侧；dir 由反投影重构） */
+  if (uStormFront.w > 0.01) {
+    float toStorm = clamp(dot(normalize(dir.xz), uStormFront.xy), 0.0, 1.0);
+    float skyStorm = uStormFront.w * (0.35 + 0.65 * toStorm);
+    col = mix(col, col * vec3(0.75, 0.62, 0.55), skyStorm * 0.75);
   }
   fragColor = vec4(col * uHdr, 1.0);
 }`;
@@ -203,13 +211,15 @@ export class PlanetAtmosphere {
     this.tier = tier;
     this._destroyed = false;
     this.stats = { drawCalls: 0, weatherCount: 0 };
+    // doc20：风暴锋面状态（setStormFront；缺省 = 无风暴）
+    this._stormFront = [0, 0, -400, 0.0];
     const gl = this.gl;
 
     this.progSky = glc.createProgram(SKY_VS, SKY_FS, { label: 'atmosphere:sky', attributes: { aPos: 0 } });
     this.progWeather = glc.createProgram(WEATHER_VS, WEATHER_FS, { label: 'atmosphere:weather', attributes: { aPos: 0 } });
     this._uSky = locMap(gl, this.progSky, [
       'uInvVP', 'uCamPos', 'uZenith', 'uHorizon', 'uGround', 'uSunDir', 'uSunColor',
-      'uStars', 'uTime', 'uHdr', 'uSkyMode', 'uModeParams',
+      'uStars', 'uTime', 'uHdr', 'uSkyMode', 'uModeParams', 'uStormFront',
     ]);
     this._uWx = locMap(gl, this.progWeather, [
       'uVP', 'uCamPos', 'uBox', 'uWind', 'uTime', 'uFall', 'uSize', 'uRight', 'uUp',
@@ -307,6 +317,17 @@ export class PlanetAtmosphere {
    * @param {WebGL2RenderingContext} gl
    * @param {{invVp:Float32Array, eye:Array<number>, time:number, hdr:number}} view
    */
+  /**
+   * doc20 WP-1.3：风暴锋面天幕 uniform（[cos(dir), sin(dir), frontM, intensity]）。
+   * @private 状态槽在构造器初始化
+   */
+  setStormFront(v) {
+    if (Array.isArray(v) && v.length >= 4 && v.every(Number.isFinite)) {
+      this._stormFront = [v[0], v[1], v[2], v[3]];
+    }
+    return this;
+  }
+
   drawSky(gl, view) {
     if (this._destroyed || this.tier >= 3 || !gl || gl.isContextLost()) return 0;
     const v = view || {};
@@ -331,6 +352,9 @@ export class PlanetAtmosphere {
     gl.uniform1f(u.uHdr, v.hdr != null ? v.hdr : 1.0);
     gl.uniform1i(u.uSkyMode, this._skyMode);
     gl.uniform3fv(u.uModeParams, this._modeParams);
+    if (u.uStormFront) {
+      gl.uniform4f(u.uStormFront, this._stormFront[0], this._stormFront[1], this._stormFront[2], this._stormFront[3]);
+    }
     gl.bindVertexArray(this._skyVao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.bindVertexArray(null);

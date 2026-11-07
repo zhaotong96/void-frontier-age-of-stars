@@ -667,3 +667,239 @@ export const suite05 = {
     };
   },
 };
+
+// ———— PLAYTEST-GATE-06（doc19 v0.4 WP-6：工业物流与天地弹射阻断门禁） ————————
+
+import {
+  ensurePlanetInd, rebuildPowerGrids, stepPlanetIndustry, createBeltTuple,
+  computeProductionEfficiency, routeSplitter, stepTransportLineO1, NODE_IDX, NODE_STATE, BELT_IDX, SLOT_CAP,
+} from '../../src/domain/industry/planetaryLogistics.js';
+import {
+  feedCatapult, stepCatapult, settleOrbitalBuffer, launchEnergyMWh,
+  resIdToIdx, POD_CAPACITY_UNITS, TITAN_ARMOR_PODS, TITAN_QUANTUM_PODS,
+} from '../../src/domain/industry/catapult.js';
+
+/** 工业门禁假 buildingDefs（离 BUILDINGS 内容契约同形：powerUse 正 = 发电） */
+function indDefs() {
+  return [
+    { id: 'test_pylon', wireRadiusM: 24.0 },
+    { id: 'test_reactor', powerUse: 60, wireRadiusM: 18.0 },            // +60MW 发电
+    { id: 'test_smelter', powerUse: -8, wireRadiusM: 10.0, indRecipe: { cycleS: 6, in0: null, out: 'alloy' } },
+    { id: 'test_splitter', splitter: true, wireRadiusM: 0 },
+    { id: 'test_catapult', catapult: true, wireRadiusM: 12.0 },
+    { id: 'test_sink', powerUse: -30, wireRadiusM: 10.0, indRecipe: { cycleS: 4, in0: 'alloy', out: null } },
+  ];
+}
+
+export const suite06 = {
+  id: 'PLAYTEST-06',
+  name: '工业物流与天地弹射阻断门禁（GATE-06 IND-01..05）',
+  group: 'PLAYTEST',
+  async run() {
+    const world = createStarterCampaign({ seed: 24601 });
+    const planets = Object.values(world.entities.planets).filter((p) => p.category !== 'gasGiant');
+    const p = planets.find((x) => x.primaryThemeId === 'red_regolith_frontier') || planets[0];
+    const ind = ensurePlanetInd(p);
+    const defs = indDefs();
+
+    // —— IND-01：FFF #176 物流质量守恒（64 节点 + 48 带 × 1000 战略 tick） ——
+    // 拓扑：发电 1 → pylon 环网；smelter(8) → splitter(8) → sink(8) 汇流链；
+    // 48 条带覆盖全部连接；源端 out0 由步进器生产喂带。
+    ind.nodes = [];
+    ind.belts = [];
+    ind.grids = [];
+    ind.splitterParity = {};
+    const idSeq = [];
+    const addNode = (defIdx, x, z, state) => {
+      const id = ind.nodes.length + 1;
+      ind.nodes.push([id, defIdx, Math.round(x * 10), Math.round(z * 10), 0, 0, state, 0, 0, 0, 0, 0, 0]);
+      idSeq.push(id);
+      return id;
+    };
+    const reactorId = addNode(1, 0, 0, NODE_STATE.ACTIVE);
+    const smelterIds = [];
+    for (let i = 0; i < 8; i++) smelterIds.push(addNode(2, 30 + i * 10, 10, NODE_STATE.ACTIVE));
+    const splitterIds = [];
+    for (let i = 0; i < 8; i++) splitterIds.push(addNode(3, 30 + i * 10, 60, NODE_STATE.ACTIVE));
+    const sinkIds = [];
+    for (let i = 0; i < 8; i++) sinkIds.push(addNode(5, 30 + i * 10, 110, NODE_STATE.ACTIVE));
+    const catapultId = addNode(4, 0, 160, NODE_STATE.ACTIVE);
+    // 剩余节点补齐 64：附挂 pylon 环网（不影响守恒计数）
+    while (ind.nodes.length < 64) addNode(0, (ind.nodes.length % 16) * 12 - 90, 170 + Math.floor(ind.nodes.length / 16) * 12, NODE_STATE.OFFLINE);
+    rebuildPowerGrids(ind, defs);
+    if ((ind.grids || []).length < 1) throw new Error('IND-01 电网未连通');
+
+    // 48 条带：smelter→splitter、splitter→sink 直连 + pylon 环网装饰带
+    for (let i = 0; i < 8; i++) {
+      ind.belts.push(createBeltTuple(ind, { fromNode: smelterIds[i], fromSlot: 0, toNode: splitterIds[i], toSlot: 0, tier: 1, lengthM: 50, resTypeIdx: resIdToIdx('alloy') }));
+      ind.belts.push(createBeltTuple(ind, { fromNode: splitterIds[i], fromSlot: 0, toNode: sinkIds[i], toSlot: 0, tier: 1, lengthM: 50, resTypeIdx: resIdToIdx('alloy') }));
+    }
+    for (let i = 0; i < 24; i++) {
+      const a = 8 + (i % 56) + 1;
+      const b = 8 + ((i + 1) % 56) + 1;
+      if (a === b) continue;
+      ind.belts.push(createBeltTuple(ind, { fromNode: Math.min(a, ind.nodes.length), fromSlot: 0, toNode: Math.min(b, ind.nodes.length), toSlot: 0, tier: 1, lengthM: 30, resTypeIdx: resIdToIdx('ferro') }));
+      if (ind.belts.length >= 48) break;
+    }
+    while (ind.belts.length < 48) {
+      ind.belts.push(createBeltTuple(ind, { fromNode: reactorId, fromSlot: 0, toNode: smelterIds[0], toSlot: 0, tier: 2, lengthM: 30, resTypeIdx: resIdToIdx('ferro') }));
+    }
+    if (ind.nodes.length !== 64 || ind.belts.length !== 48) {
+      throw new Error(`IND-01 拓扑规模不符：nodes=${ind.nodes.length} belts=${ind.belts.length}`);
+    }
+
+    // —— 守恒口径（unit-equivalents）：U = Σ节点缓冲 + Σ带载 + 弹射舱×50 + 轨道缓冲。
+    //     不变式：U(1000) − U(0) === produced − consumed + feed(50 单位)。
+    //     带转移/弹射发射均为内部搬运（净 0）；sink 配方 out:null 为合法销毁项。
+    const unitEquiv = (st) => {
+      let u = 0;
+      for (const n of st.nodes) u += n[NODE_IDX.OUT0] + n[NODE_IDX.IN0] + n[NODE_IDX.IN1];
+      for (const b of st.belts) u += b[BELT_IDX.COUNT];
+      if (st.catapult) u += st.catapult[1] * 50;
+      for (const v of Object.values(st.orbitalBuffer || {})) u += v;
+      return u;
+    };
+    const u0 = unitEquiv(ind);
+    let producedTotal = 0;
+    let consumedTotal = 0;
+    for (let tick = 0; tick < 1000; tick++) {
+      const stats = stepPlanetIndustry(world, p, ind, defs, 1);
+      producedTotal += stats.produced;
+      consumedTotal += stats.consumed;
+      if (tick === 500) feedCatapult(ind, resIdToIdx('alloy'), 50); // 外部注入 50 单位 = 1 舱
+    }
+    const u1 = unitEquiv(ind);
+    const drift = Math.abs((u1 - u0) - (producedTotal - consumedTotal + 50));
+    if (drift > 0.0) {
+      throw new Error(`IND-01 守恒漂移：${drift}（ΔU=${(u1 - u0)} produced=${producedTotal} consumed=${consumedTotal}）`);
+    }
+    // 600 帧 3D 步进等价：600 × 逐带 dt=0 纯视觉帧步进（带载守恒不变）
+    const beltLoad0 = ind.belts.reduce((a, b) => a + b[BELT_IDX.COUNT], 0);
+    for (let f = 0; f < 600; f++) {
+      for (const b of ind.belts) {
+        const src = ind.nodes.find((n) => n[NODE_IDX.ID] === b[BELT_IDX.FROM]);
+        const dst = ind.nodes.find((n) => n[NODE_IDX.ID] === b[BELT_IDX.TO]);
+        stepTransportLineO1(b, src, dst, 0, 1000);
+      }
+    }
+    const beltLoad1 = ind.belts.reduce((a, b) => a + b[BELT_IDX.COUNT], 0);
+    if (beltLoad0 !== beltLoad1) throw new Error('IND-01 600 帧步进带载漂移');
+
+    // —— IND-02：电网拓扑分裂与透明效率分解 ——
+    const substationFar = addNode(0, 300, 300, NODE_STATE.ACTIVE); // 超出 24m 链接半径
+    rebuildPowerGrids(ind, defs);
+    const gids = new Set(ind.nodes.slice(0, 64).map((n) => n[NODE_IDX.GRID]));
+    if (gids.size < 2) throw new Error(`IND-02 电网未分裂：gridIds=${gids.size}`);
+    const reactorNode = ind.nodes.find((n) => n[NODE_IDX.ID] === reactorId);
+    const reactorGrid = (ind.grids || []).find((g) => g.id === reactorNode[NODE_IDX.GRID]);
+    reactorGrid.loadKW = 90000; // 90MW 负载 > 60MW 发电
+    reactorGrid.genKW = 60000;
+    reactorGrid.etaPermille = Math.round((60000 / 90000) * 1000);
+    const smelterNode = ind.nodes.find((n) => n[NODE_IDX.ID] === smelterIds[0]);
+    const eff = computeProductionEfficiency(smelterNode, reactorGrid, p);
+    if (!(eff.factors.fPower < 1.0)) throw new Error(`IND-02 fPower=${eff.factors.fPower} 未 < 1`);
+    if (!(eff.actual < 1.0)) throw new Error('IND-02 实际效率未降速');
+    void substationFar;
+
+    // —— IND-03：分流器三模式路由确定性（各 100 箱） ——
+    const feed100 = (mode, filterRes) => {
+      let p0 = 0;
+      let p1 = 0;
+      let parity = 0;
+      for (let i = 0; i < 100; i++) {
+        const r = routeSplitter(mode, parity, 0, filterRes);
+        if (r.port === 0) p0++;
+        else p1++;
+        parity = r.parity;
+      }
+      return { p0, p1 };
+    };
+    const rr = feed100(0, 0);
+    if (rr.p0 !== 50 || rr.p1 !== 50) throw new Error(`IND-03 轮询期望 50/50：${rr.p0}/${rr.p1}`);
+    const pr = feed100(1, 0);
+    if (pr.p0 !== 100 || pr.p1 !== 0) throw new Error(`IND-03 优先期望 100/0：${pr.p0}/${pr.p1}`);
+    const fl = feed100(2, 7);   // 资源 0 vs 过滤目标 7：不匹配 → 全走副路
+    if (fl.p0 !== 0 || fl.p1 !== 100) throw new Error(`IND-03 过滤副路分布异常：${JSON.stringify(fl)}`);
+    const rr2 = feed100(0, 0);
+    if (rr2.p0 !== rr.p0 || rr2.p1 !== rr.p1) throw new Error('IND-03 轮询序列不确定');
+
+    // —— IND-04：弹射井能耗与泰坦舰建造闭环 ——
+    const eHigh = launchEnergyMWh({ gravity: 1.8, atmosphere: { density: 0.9 } });
+    const eLow = launchEnergyMWh({ gravity: 0.25, atmosphere: { density: 0.0 } });
+    if (!(eHigh > eLow * 2)) throw new Error(`IND-04 能耗物理失效：high=${eHigh.toFixed(1)} low=${eLow.toFixed(1)}`);
+    const sysId = p.systemId;
+    const station = {
+      id: 'st_test_shipyard', kind: 'shipyard', systemId: sysId, factionId: world.playerFactionId,
+      titanAssembly: { armorPods: 0, quantumPods: 0 },
+    };
+    world.entities.stations[station.id] = station;
+    // 隔离 IND-01 残留（tick-500 试喂舱）：弹射井/缓冲仓/装配台账清零再开始闭环核账
+    ind.catapult = [0, 0, 0, resIdToIdx('alloy')];
+    ind.orbitalBuffer = {};
+    station.titanAssembly = { armorPods: 0, quantumPods: 0 };
+    feedCatapult(ind, resIdToIdx('alloy'), TITAN_ARMOR_PODS * POD_CAPACITY_UNITS);
+    const gridC = (ind.grids || []).find((g) => g.id === ind.nodes.find((n) => n[NODE_IDX.ID] === catapultId)[NODE_IDX.GRID]);
+    gridC.genKW = 400000;  // 400MW 富余：充电速率远超单舱能耗（门禁只核物理与账目）
+    gridC.loadKW = 0;
+    let launched = 0;
+    for (let h = 0; h < 40 && launched < TITAN_ARMOR_PODS; h++) {
+      const r = stepCatapult(world, p, ind, gridC, 1);
+      launched += r.launched;
+    }
+    if (launched !== TITAN_ARMOR_PODS) throw new Error(`IND-04 装甲舱发射数 ${launched} !== ${TITAN_ARMOR_PODS}`);
+    feedCatapult(ind, resIdToIdx('quantumCore'), TITAN_QUANTUM_PODS * POD_CAPACITY_UNITS);
+    for (let h = 0; h < 20 && (ind.orbitalBuffer.quantumCore || 0) < TITAN_QUANTUM_PODS * POD_CAPACITY_UNITS; h++) {
+      stepCatapult(world, p, ind, gridC, 1);
+    }
+    const settle = settleOrbitalBuffer(world, p, ind);
+    if (!settle.titanLaid) throw new Error('IND-04 泰坦龙骨未合拢');
+    const titan = world.entities.ships[settle.shipId];
+    if (!titan || titan.hullId !== 'hull_titan') throw new Error('IND-04 hull_titan 未入列');
+    // 精确扣减核账：装甲 20 舱/量子 5 舱 恰等于泰坦需求 → 台账双零（零吞没零凭空）
+    if (station.titanAssembly.armorPods !== 0 || station.titanAssembly.quantumPods !== 0) {
+      throw new Error(`IND-04 泰坦装配台账异常：armor=${station.titanAssembly.armorPods} quantum=${station.titanAssembly.quantumPods}（期望 0/0）`);
+    }
+    if (Math.abs(ind.catapult[1]) > 1e-9) throw new Error(`IND-04 弹射井余舱异常：${ind.catapult[1]}（期望 0）`);
+
+    // —— IND-05：性能/存档预算 + 工业旗舰 PCDI ——
+    const indBytes = Buffer.byteLength(JSON.stringify(ind), 'utf8');
+    if (indBytes >= 15 * 1024) throw new Error(`IND-05 planet.ind 序列化 ${indBytes}B >= 15KB 红线`);
+    const shots = [];
+    for (let r = 0; r < 3; r++) {
+      const tA = performance.now();
+      deepClone(ind);
+      shots.push(performance.now() - tA);
+    }
+    shots.sort((a, b) => a - b);
+    if (shots[1] >= 0.5) throw new Error(`IND-05 planet.ind 克隆增量 ${shots[1].toFixed(3)}ms >= 0.5ms`);
+    // 工业旗舰 PCDI：生态满贯 + 遗迹速通 + 工业满载（复用 GATE-05 链路）
+    ensurePlanetEco(world, p);
+    completeSurvey(world, p);
+    const fI = buildTerrainField(world, p.id, {});
+    ensurePlanetRuin(world, p, fI);
+    tryCompleteExcavation(world, p, fI);
+    for (let i = 0; i < 3; i++) inscribeDialectPylon(world, p, i);
+    for (let i = 0; i < 3; i++) {
+      const target = towerTargetRot(world, p, i);
+      for (let k = 0; k < 8; k++) {
+        if (((p.eco.ruin[2] >>> (i * 3)) & 0b111) === target) break;
+        rotateResonatorTower(world, p, i, null);
+      }
+    }
+    tryAlignResonators(world, p, null);
+    reportGuardianDefeated(world, p);
+    extractMonolithCore(world, p);
+    const pois6 = Object.values(p.pois || {});
+    if (pois6.length > 0) runCmd(world, 'HarvestPlanetPOI', { planetId: p.id, poiId: pois6[0].id });
+    runCmd(world, 'ShapeTerrain', { planetId: p.id, op: 'lower', x: 60, z: 60, radius: 6, strength: 1 });
+    const score6 = pcdiEvaluate(world, p);
+    if (score6.total < 85) {
+      throw new Error(`IND-05 工业旗舰 PCDI=${score6.total} < 85（dims=${JSON.stringify(score6.dimensions)}）`);
+    }
+
+    return {
+      ok: true,
+      detail: `GATE-06 PASS：IND-01 守恒漂移 0（64 节点/48 带 x 1000 tick + 600 帧）· IND-02 分裂 ${gids.size} 子网 fPower=${eff.factors.fPower.toFixed(2)} · IND-03 三模式 50/50|100/0|过滤 · IND-04 E(g1.8)=${eHigh.toFixed(1)}MWh -> hull_titan 合拢 · IND-05 planet.ind ${indBytes}B/15KB + 克隆 ${shots[1].toFixed(3)}ms + PCDI=${score6.total}`,
+    };
+  },
+};

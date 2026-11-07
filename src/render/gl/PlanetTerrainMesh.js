@@ -112,6 +112,8 @@ uniform vec3 uMatCol2;
 uniform vec3 uMatCol3;
 uniform vec4 uThemeFx;      /* x=waterLevel y=biolumePulse z=lavaEmissive w=debugMode */
 uniform vec4 uFootsteps[8]; /* (x, z, triggerTime, strength) */
+/* doc20 WP-1.3：uStormFront = (cos(dir), sin(dir), frontAdvanceMeters, intensity 0..1) */
+uniform vec4 uStormFront;
 out vec4 fragColor;
 
 float hash31(vec3 p) {
@@ -229,8 +231,20 @@ void main() {
     lit *= exp(-depth * vec3(0.12, 0.038, 0.014)); /* 红衰减最快，蓝青穿透最深 */
   }
 
-  /* ———— 距离雾 ———— */
-  float fog = smoothstep(uFogRange.x, uFogRange.y, distance(vWorldPos, uCamPos));
+  /* ———— doc20 WP-1.3：动态风暴锋面（连续平面波，GPU 解析求值，零粒子对象） ———— */
+  float stormStrength = uStormFront.w;
+  float localStorm = 0.0;
+  if (stormStrength > 0.01) {
+    float proj = vWorldPos.x * uStormFront.x + vWorldPos.z * uStormFront.y;
+    localStorm = smoothstep(-28.0, 28.0, uStormFront.z - proj) * stormStrength;
+    float gust = noise3D(vec3(vWorldPos.xz * 0.25 - uStormFront.xy * uTime * 3.8, uTime * 0.9));
+    vec3 stormTint = mix(uFogColor, uMatCol3, 0.35);
+    lit = mix(lit, stormTint * (0.65 + 0.35 * gust), localStorm * 0.55);
+  }
+
+  /* ———— 距离雾（锋面内视距压缩至 22%） ———— */
+  vec2 effectiveFogRange = mix(uFogRange, uFogRange * vec2(0.18, 0.22), localStorm);
+  float fog = smoothstep(effectiveFogRange.x, effectiveFogRange.y, distance(vWorldPos, uCamPos));
   fragColor = vec4(mix(lit, uFogColor, fog) * uHdr, 1.0);
 }`;
 
@@ -279,6 +293,8 @@ export class PlanetTerrainMesh {
     this._heatZoneCount = 0;
     this._themeFx = new Float32Array([-1000.0, 0.0, 0.0, 0.0]); // 水位默认关闭（<-90 视为无水）
     this._footsteps = new Float32Array(32);
+    // doc20：风暴锋面状态（setStormFront 下发；[cx, cz, frontM, intensity]）
+    this._stormFront = [0, 0, -400, 0.0];
     this._fogColor = [0.62, 0.65, 0.70];
     this._fogRange = [60.0, 420.0];
     this._sunDir = [0.42, 0.78, 0.32];
@@ -295,7 +311,7 @@ export class PlanetTerrainMesh {
     this._u = locMap(gl, this.progTerrain, [
       'uVP', 'uCamPos', 'uWorldOffset', 'uPlanetCurveInv2R', 'uHeatZoneCount', 'uHeatZones', 'uMorphT',
       'uSunDir', 'uSunColor', 'uFogColor', 'uFogRange', 'uTime', 'uHdr',
-      'uMatCol0', 'uMatCol1', 'uMatCol2', 'uMatCol3', 'uThemeFx', 'uFootsteps',
+      'uMatCol0', 'uMatCol1', 'uMatCol2', 'uMatCol3', 'uThemeFx', 'uFootsteps', 'uStormFront',
     ]);
 
     // —— 逐 Chunk GPU 缓存（sync 惰性填充；下标 = cx*4096+cz 不可靠（外部数组序），
@@ -314,6 +330,17 @@ export class PlanetTerrainMesh {
    * GroundView 集成：offset (-224,0,-224) → 场域中心 (256,256) 对齐体素 (32,32)。
    * @param {Array<number>} o [x,y,z]
    */
+  /**
+   * doc20 WP-1.3：风暴锋面 uniform 下发。
+   * @param {Array<number>} v [cos(dir), sin(dir), frontAdvanceMeters, intensity 0..1]
+   */
+  setStormFront(v) {
+    if (Array.isArray(v) && v.length >= 4 && v.every(Number.isFinite)) {
+      this._stormFront = [v[0], v[1], v[2], v[3]];
+    }
+    return this;
+  }
+
   setWorldOffset(o) {
     if (Array.isArray(o) && o.length >= 3 && o.every(Number.isFinite)) {
       this._worldOffset = [o[0], o[1], o[2]];
@@ -877,6 +904,9 @@ export class PlanetTerrainMesh {
     } else {
       gl.uniform4fv(u.uHeatZones, this._heatZones);
       gl.uniform4fv(u.uFootsteps, this._footsteps);
+    }
+    if (u.uStormFront) {
+      gl.uniform4f(u.uStormFront, this._stormFront[0], this._stormFront[1], this._stormFront[2], this._stormFront[3]);
     }
     gl.uniform3fv(u.uSunDir, this._sunDir);
     gl.uniform3fv(u.uSunColor, this._sunColor);

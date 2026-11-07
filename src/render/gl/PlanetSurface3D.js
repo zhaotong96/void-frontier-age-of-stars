@@ -1417,7 +1417,12 @@ export class PlanetSurface3D {
         total += l;
       }
       if (!(total > 0)) continue;
-      const count = Math.min(Math.floor(total / spacing), CAP_CRATES - crates);
+      // doc19 WP-5.2：path.count 存在时货箱视觉数 = 实体带载（FFF #176 视觉同源；
+      // 缺省维持相位满铺口径以兼容 v0.1 采掘装饰带）
+      const wantCount = path.count != null
+        ? Math.min(path.count, Math.floor(total / spacing))
+        : Math.floor(total / spacing);
+      const count = Math.min(wantCount, CAP_CRATES - crates);
       for (let k = 0; k < count; k++) {
         let s = (time * speed + k * spacing) % total;
         let i = 0;

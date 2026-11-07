@@ -15,6 +15,7 @@
 import { emit, chronicle } from '../../core/eventBus.js';
 import { clamp } from '../../core/math.js';
 import { createShip } from '../ships/ship.js';
+import { spikeCatapultLaunch } from '../ground/planetaryThreat.js';
 
 /** 标准轨道货舱容量（单位物资/舱，doc19 WP-4） */
 export const POD_CAPACITY_UNITS = 50;
@@ -81,6 +82,7 @@ export function stepCatapult(world, planet, indState, grid, dtHours = 1) {
     buf[resKey] = (buf[resKey] || 0) + units;
     pods.push({ resTypeIdx: cat[CATAPULT_IDX.RES], resId: resKey, units });
     grid.accMWh = Math.max(0, grid.accMWh - energyNeed); // 电网放电扣能
+    spikeCatapultLaunch(planet); // doc20 WP-3：弹射电磁/地震信号 → PTI +25（hourly 结算入账）
     emit(world, 'FreightCatapultLaunched', { planetId: planet.id, resId: resKey, units, energyMWh: energyNeed }, 'ground');
     if (cat[CATAPULT_IDX.LAUNCHED] === 1) {
       chronicle(world, 'economy', `行星 ${planet.name} 货运弹射井首舱入轨（冷青电弧音爆）`, { planetId: planet.id });
@@ -118,16 +120,21 @@ export function settleOrbitalBuffer(world, planet, indState) {
     .find((st) => st.kind === 'shipyard' && st.systemId === sys.id && st.factionId === fid) : null;
   if (shipyard) {
     shipyard.titanAssembly ||= { armorPods: 0, quantumPods: 0 };
+    // 缓冲仓持「单位」（50 单位/舱）→ 吸收时换算为整舱，零头单位留在缓冲仓
     const armorRes = ['alloy', 'shipModule'];
     for (const r of armorRes) {
       if (buf[r] > 0) {
-        shipyard.titanAssembly.armorPods += buf[r];
-        buf[r] = 0;
+        const pods = Math.floor(buf[r] / POD_CAPACITY_UNITS);
+        if (pods > 0) {
+          shipyard.titanAssembly.armorPods += pods;
+          buf[r] -= pods * POD_CAPACITY_UNITS;
+        }
       }
     }
-    if (buf.quantumCore > 0) {
-      shipyard.titanAssembly.quantumPods += buf.quantumCore;
-      buf.quantumCore = 0;
+    if (buf.quantumCore >= POD_CAPACITY_UNITS) {
+      const pods = Math.floor(buf.quantumCore / POD_CAPACITY_UNITS);
+      shipyard.titanAssembly.quantumPods += pods;
+      buf.quantumCore -= pods * POD_CAPACITY_UNITS;
     }
     const ta = shipyard.titanAssembly;
     if (ta.armorPods >= TITAN_ARMOR_PODS && ta.quantumPods >= TITAN_QUANTUM_PODS && !shipyard.titanBuilt) {

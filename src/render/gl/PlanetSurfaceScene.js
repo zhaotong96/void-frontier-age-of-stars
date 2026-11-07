@@ -177,6 +177,17 @@ export class PlanetSurfaceScene {
     this._lastThemeRef = null; // 强制下一帧重新合并 sceneData.theme
   }
 
+  /**
+   * doc20 WP-1.3：风暴锋面统一下发（地形 FS 锋面/雾距收窄 + 天幕方向压暗）。
+   * @param {Array<number>} v [cos(dir), sin(dir), frontAdvanceMeters, intensity 0..1]
+   * @returns {PlanetSurfaceScene} this
+   */
+  setStormFront(v) {
+    if (this._terrain) this._terrain.setStormFront(v);
+    if (this._atmosphere) this._atmosphere.setStormFront(v);
+    return this;
+  }
+
   /** 视觉行星半径（米）透传（默认 1800，doc7 曲率公式） */
   setPlanetRadius(r) {
     if (this._terrain) this._terrain.setPlanetRadius(r);
