@@ -304,6 +304,7 @@ uniform vec3 uSunColor;
 uniform vec3 uCamPos;
 uniform vec3 uFogColor;
 uniform vec2 uFogRange;
+uniform float uHdr; /* WP-5 P1-F：RGBA8 模拟 HDR 时场景预缩放（对象/建筑 pass 与地形同口径） */
 out vec4 fragColor;
 float hash31(vec3 p) {
   p = fract(p * 0.1031);
@@ -331,7 +332,7 @@ void main() {
            + baseAlbedo * vE * 1.35;
   col = mix(col, vec3(2.0, 2.0, 2.1), vF);
   float fog = smoothstep(uFogRange.x, uFogRange.y, distance(vW, uCamPos));
-  fragColor = vec4(mix(col, uFogColor, fog), 1.0);
+  fragColor = vec4(mix(col, uFogColor, fog) * uHdr, 1.0);
 }`;
 
 /** 角色七部件：逐实例模型矩阵 + 部件号失配退化 */
@@ -502,6 +503,7 @@ export class PlanetSurface3D {
     this._vh = 1;
     this._springDist = -1;          // 弹簧臂当前臂长（首帧吸附）
     this._spawnSeq = 0;             // 挖掘粒子批次序号（确定性初速源）
+    this.hdrScale = 1.0;            // WP-5：RGBA8 模拟 HDR 预缩放（调用方按 cm.post 下发）
     // 场景化集成（doc7 TASK-1.2/1.4）：地形/天空/天气改由 PlanetSurfaceScene 绘制，
     // 本渲染器经 setExternalCamera() 进入「对象独占」模式 —— 仅绘制
     // 箱体/actor/角色七部件/贴花/特效/挖掘粒子，相机与 VP 由调用方直供。
@@ -521,9 +523,9 @@ export class PlanetSurface3D {
     this._u = {
       sky: locMap(gl, this.progSky, ['uInvVP', 'uCamPos', 'uZenith', 'uHorizon', 'uGround', 'uSunDir', 'uSunColor', 'uStars', 'uTime']),
       terrain: locMap(gl, this.progTerrain, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange', 'uDebugMode']),
-      box: locMap(gl, this.progBox, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange']),
-      actor: locMap(gl, this.progActor, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange']),
-      char: locMap(gl, this.progChar, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange']),
+      box: locMap(gl, this.progBox, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange', 'uHdr']),
+      actor: locMap(gl, this.progActor, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange', 'uHdr']),
+      char: locMap(gl, this.progChar, ['uVP', 'uSunDir', 'uSunColor', 'uCamPos', 'uFogColor', 'uFogRange', 'uHdr']),
       quadc: locMap(gl, this.progQuadC, ['uVP', 'uTime', 'uPulse']),
       part: locMap(gl, this.progPart, ['uVP', 'uPointScale']),
     };
@@ -1252,6 +1254,7 @@ export class PlanetSurface3D {
       gl.uniform3f(u.uCamPos, eye[0], eye[1], eye[2]);
       gl.uniform3fv(u.uFogColor, this._fogColor);
       gl.uniform2f(u.uFogRange, this._fogRange[0], this._fogRange[1]);
+      gl.uniform1f(u.uHdr, this.hdrScale);
       gl.bindVertexArray(this._box.vao);
       gl.drawArraysInstanced(gl.TRIANGLES, 0, this._box.meshCount, this._box.count);
       dc++;
@@ -1269,6 +1272,7 @@ export class PlanetSurface3D {
       gl.uniform3f(u.uCamPos, eye[0], eye[1], eye[2]);
       gl.uniform3fv(u.uFogColor, this._fogColor);
       gl.uniform2f(u.uFogRange, this._fogRange[0], this._fogRange[1]);
+      gl.uniform1f(u.uHdr, this.hdrScale);
       gl.bindVertexArray(this._actor.vao);
       gl.drawArraysInstanced(gl.TRIANGLES, 0, this._actor.meshCount, this._actor.count);
       dc++;
@@ -1287,6 +1291,7 @@ export class PlanetSurface3D {
       gl.uniform3f(u.uCamPos, eye[0], eye[1], eye[2]);
       gl.uniform3fv(u.uFogColor, this._fogColor);
       gl.uniform2f(u.uFogRange, this._fogRange[0], this._fogRange[1]);
+      gl.uniform1f(u.uHdr, this.hdrScale);
       gl.bindVertexArray(this._char.vao);
       gl.drawArraysInstanced(gl.TRIANGLES, 0, this._char.meshCount, this._char.count);
       dc++;

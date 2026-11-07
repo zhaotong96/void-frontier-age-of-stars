@@ -46,6 +46,7 @@
  */
 
 import { derivePlanetSeeds } from '../../domain/ground/planetSeeds.js';
+import { PLANET_THEMES } from '../../content/planetThemes.js';
 
 // ———— 色板（doc6 §4.4 / doc7 §4.0；sRGB HEX，输出前统一转线性） ————
 
@@ -206,7 +207,9 @@ const THEME_RENDER = {
     heat: false,
   },
   sulfur_marsh: {
-    waterLevel: WATERLEVEL_NONE,
+    // WP-5 P1-F：低洼毒池给液面（海拔 <3.8m 渲染黄绿酸液；危险旗仍由剖面
+    // hazardLevel 4.5 决定——液面纯视觉，域侧扣血口径不变）
+    waterLevel: 3.8,
     fogRange: [24, 180],
     sky: { skyMode: 2, stars: 0, gasHeightM: 4.5 },
     sun: { az: 3.6, el: 0.55, color: [0.44, 0.52, 0.22] },
@@ -498,6 +501,15 @@ function resolveStarColor(world, planetId) {
 
 /** 外部色板源槽位（D1 planetThemes.js 落地后由主代理注入；fn(themeId) → palette|null） */
 let externalPaletteSource = null;
+
+// —— WP-5 P1-F：权威色板源接线（此前 setThemePaletteSource 全仓 0 调用） ——
+// content/planetThemes.js 为 18 主题九维色板的唯一权威注册表（doc6 §4.4），
+// 本文件 FLAGSHIP_PALETTES 仅作其未就绪期的本地兜底；resolvePalette 优先级
+// opts.palette → 外部源 → FLAGSHIP 兜底，接线后全主题自动走权威色板。
+setThemePaletteSource((id) => {
+  const t = PLANET_THEMES[id];
+  return (t && t.palette) ? t.palette : null;
+});
 
 /**
  * 注册外部主题色板源（集成点：planetThemes.js 就绪后

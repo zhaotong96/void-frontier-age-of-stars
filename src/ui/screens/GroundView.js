@@ -45,7 +45,7 @@ import { L } from '../../core/i18n.js';
 import { CanvasManager } from '../../render/CanvasManager.js';
 import { PlanetSurface3D } from '../../render/gl/PlanetSurface3D.js';
 import { PlanetSurfaceScene } from '../../render/gl/PlanetSurfaceScene.js';
-import { buildThemePayload } from '../../render/gl/themePayload.js';
+import { buildThemePayload, EXPANSION_GAMEPLAY } from '../../render/gl/themePayload.js';
 import { mat4, mat4Perspective, mat4LookAt, mat4Multiply } from '../../render/gl/Mat4.js';
 import { buildBuildingMesh, buildUnitBox } from '../../render/meshes/GroundMeshes.js';
 import { buildLandmarkMesh, LANDMARK_PREFAB_IDS } from '../../render/meshes/landmarkMeshes.js';
@@ -53,11 +53,11 @@ import {
   createSurfaceWorld, digVoxel, placeVoxel, getVoxel, ddaRaycast, getSurfaceHeight,
   SURFACE_SIZE, SURFACE_MAT,
 } from '../../domain/ground/SurfaceSandbox.js';
-import { buildTerrainField } from '../../domain/ground/terrainField.js';
+import { buildTerrainField, TERRAIN_FLAGS } from '../../domain/ground/terrainField.js';
 import { ensurePlanetPois, unexploredPoiCount } from '../../domain/ground/planetPOI.js';
 import { createTerrainEdits, applyEdit, attachTerrainEdits, deserializeEdits, rebuildDirtyChunks, planColonyLayout } from '../../domain/ground/terrainEdits.js';
 import { sampleTerrain, raycastTerrain } from '../../domain/ground/surfaceQueries.js';
-import { createGroundMission, stepMission, getMissionView } from '../../domain/ground/GroundMission.js';
+import { createGroundMission, stepMission, getMissionView, MISSION_UNIT_SCALE } from '../../domain/ground/GroundMission.js';
 import { getSiteInstance } from '../../domain/ground/missionSiteFactory.js';
 import { blueprintsForPlanet } from '../../content/missionSites.js';
 import { creditColony, debitColony } from '../../domain/economy/ledger.js';
@@ -202,10 +202,15 @@ export function computeSpringArm(o) {
 
 /** 采掘凹陷每击深度（米）：场域地形雕刻（TERRAIN-06 增量重建演示） */
 const DIG_DENT_DEPTH = 1.2;
-/** 场域行走坡度阻断阈值（Δh/Δx > 此值的陡壁不可步行） */
-const WALK_SLOPE_BLOCK = 1.6;
-/** 场域可行走范围（体素坐标；对应场域 [−256,+256] 边界内收 2m） */
+/**
+ * 场域可行走范围（世界坐标；WP-1 P0-C）：世界 = 场域 - FIELD_OFFSET（FIELD_OFFSET=-32
+ * → 世界 = 场域 + 32），场域 [-256,+256] 对应世界 [-224,+288]，内收 2m 保护带得
+ * [-222,+286] —— 西/北半场（旧 clamp 下限 2）与东/南半场全域四象限可达。
+ */
+const FIELD_WALK_MIN = -222;
 const FIELD_WALK_MAX = 286;
+/** 场域行走极限坡度正切（35°；Δh / 水平步长超过即陡壁物理阻断，P0-C 垂直断崖修复） */
+const FIELD_MAX_SLOPE_TAN = Math.tan((35 * Math.PI) / 180);
 
 /** 喷气背包（本地燃料池；任务模式的耐力由 domain 权威，视图不回写） */
 const JET_DRAIN = 22;
@@ -399,6 +404,7 @@ uniform vec3 uSunColor;
 uniform vec3 uCamPos;
 uniform vec3 uFogColor;
 uniform vec2 uFogRange;
+uniform float uHdr; /* WP-5 P1-F：RGBA8 模拟 HDR 预缩放（与 PlanetSurface3D.LIT_FS 同口径） */
 out vec4 fragColor;
 float hash31(vec3 p) {
   p = fract(p * 0.1031);
@@ -426,7 +432,7 @@ void main() {
            + baseAlbedo * vE * 1.35;
   col = mix(col, vec3(2.0, 2.0, 2.1), vF);
   float fog = smoothstep(uFogRange.x, uFogRange.y, distance(vW, uCamPos));
-  fragColor = vec4(mix(col, uFogColor, fog), 1.0);
+  fragColor = vec4(mix(col, uFogColor, fog) * uHdr, 1.0);
 }`;
 
 /**
@@ -509,6 +515,7 @@ class BuildingMeshBatch {
       uCamPos: gl.getUniformLocation(this.prog, 'uCamPos'),
       uFogColor: gl.getUniformLocation(this.prog, 'uFogColor'),
       uFogRange: gl.getUniformLocation(this.prog, 'uFogRange'),
+      uHdr: gl.getUniformLocation(this.prog, 'uHdr'),
     };
   }
 
@@ -544,6 +551,7 @@ class BuildingMeshBatch {
     gl.uniform3f(this._u.uCamPos, env.eye[0], env.eye[1], env.eye[2]);
     gl.uniform3fv(this._u.uFogColor, env.fogColor);
     gl.uniform2f(this._u.uFogRange, env.fogRange[0], env.fogRange[1]);
+    gl.uniform1f(this._u.uHdr, Number.isFinite(env.hdr) ? env.hdr : 1.0);
     gl.bindBuffer(gl.ARRAY_BUFFER, this._inst);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, arr.subarray(0, n * 8));
     gl.bindVertexArray(this.vao);
@@ -595,6 +603,8 @@ export const GroundView = {
     this._fx = { slashes: [], beams: [], dig: [] };  // 瞬时视觉特效（每帧消费）
     this._strikeSeen = new Map();      // 单位打击拍检测（unitId → 上一帧 struck）
     this._buildMode = false;           // 技能 5：采掘/建造模式
+    this._shapeBrushOp = 'flatten';    // WP-4：工程刷子（F 键循环 flatten→smooth→lower）
+    this._selectedBuildDefId = null;   // WP-4：右键建造建筑型号（null = 默认采掘站）
     this._stanceIdx = 0;               // 技能 6：小队指令档位
     this._digCd = 0;
     this._placeCd = 0;
@@ -928,6 +938,19 @@ export const GroundView = {
     // —— 人工任务核心蓝图实例化（doc7 TASK-2.2：SDF 三层关卡 + 首屏构图） ——
     const bp = blueprintsForPlanet(planet, planet.primaryThemeId || null)[0] || null;
     this._site = bp ? getSiteInstance(w, planet.id, bp.id) : null;
+    // —— WP-5 P1-G：扩展主题玩法规则接线（EXPANSION_GAMEPLAY，此前为孤岛死代码） ——
+    const themeId5 = planet.primaryThemeId || 'generic';
+    const gameplay5 = EXPANSION_GAMEPLAY[themeId5] || null;
+    this._expansion = gameplay5;
+    this._gravityScale = (gameplay5 && gameplay5.movementMod
+      && Number.isFinite(gameplay5.movementMod.gravityScale)) ? gameplay5.movementMod.gravityScale : 1.0;
+    this._windPush = (gameplay5 && gameplay5.movementMod
+      && Number.isFinite(gameplay5.movementMod.windPush)) ? gameplay5.movementMod.windPush : 0.0;
+    this._deckClamp = !!(gameplay5 && gameplay5.landingMode === 'atmospheric'); // 浮台甲板禁出
+    // —— WP-5 P1-F：biolume_canopy 荧光真菌脚步压感涟漪（8 槽环形缓冲驱动 uFootsteps） ——
+    this._footstepRing = new Float32Array(32);
+    this._footstepIdx = 0;
+    this._stepDist = 0;
     // —— 连续三角网格场域（doc7 §3；体素补丁仅作矿脉/结构数据底层，不再承担视觉） ——
     this.field = buildTerrainField(w, planet.id, {
       profile: this._site ? this._site.blueprint.terrainProfile : undefined,
@@ -1054,15 +1077,31 @@ export const GroundView = {
         this.ps3d = new PlanetSurface3D(this.cm.glc, this.cm.tier);
         this.ps3d.init(this.sw);
         this.ps3d.setObjectOnly(true);            // 地形/天空权威移交 PlanetSurfaceScene
+        this.ps3d.hdrScale = this._hdrScaleOf();  // WP-5：RGBA8 模拟 HDR 预缩放对齐地形
         this.bmesh = new BuildingMeshBatch(this.cm.glc);
         // —— 主题载荷（doc7 TASK-3.1/3.2：planetThemes 九维色板 → 场景主题） ——
         //     对象/建筑 pass 与场景地形共用同一太阳/雾（THEME-02 一致性）。
         const gvPlanet = this.planet || {};
+        // WP-5 P1-F：permafrost_furnace 热源对位——中央供热塔取 primaryObjective
+        // 真实锚点（旧默认 (0,0) 着陆坪与 (0,-30) 地标错位），着陆坪追加 18m 保暖圈。
+        const heatOpts = { category: gvPlanet.category, fogRange: [90, 560] };
+        if (gvPlanet.primaryThemeId === 'permafrost_furnace'
+          && this._site && this._site.site && this._site.site.anchors) {
+          const pri = this._site.site.anchors.primaryObjective;
+          if (pri && Number.isFinite(pri.x) && Number.isFinite(pri.z)) {
+            heatOpts.heatZones = [
+              { x: pri.x, z: pri.z, radius: 45.0, intensity: 1.0 },   // 中央供热塔
+              { x: 0, z: 0, radius: 18.0, intensity: 0.8 },           // 着陆坪保暖圈
+            ];
+          }
+        }
         this._themePayload = buildThemePayload(
           gvPlanet.primaryThemeId || null, this.app.world, gvPlanet.id || 'unknown',
-          { category: gvPlanet.category, fogRange: [90, 560] },
+          heatOpts,
         );
         this.scene.setTheme(this._themePayload);
+        // —— WP-5 P1-G：18 主题合成环境音接线（主题层与场景层并行、独立 1.5s 交叉淡化） ——
+        if (this.app.audio) this.app.audio.setAmbientTheme(gvPlanet.primaryThemeId || 'generic');
         if (this.ps3d) {
           const env = this._themePayload;
           this.ps3d._sunDir = env.terrain.sun.dir.slice();
@@ -1139,6 +1178,8 @@ export const GroundView = {
       this._unsubGL();
       this._unsubGL = null;
     }
+    // WP-5 P1-G：离开地表视图即停 18 主题环境音层
+    if (this.app && this.app.audio) this.app.audio.stopAmbientTheme();
     try { if (this.scene) this.scene.destroy(); } catch (_) { /* 忽略 */ }
     try { if (this.ps3d) this.ps3d.destroy(); } catch (_) { /* 忽略 */ }
     try { if (this.bmesh) this.bmesh.destroy(); } catch (_) { /* 忽略 */ }
@@ -1267,6 +1308,11 @@ export const GroundView = {
       case 'KeyR':
         this._tryRestoreTerrain();
         break;
+      case 'KeyF':
+        // WP-4：工程刷子循环 flatten（压平地基）→ smooth（平滑坡道）→ lower（采掘刻槽）
+        this._shapeBrushOp = this._shapeBrushOp === 'flatten' ? 'smooth'
+          : this._shapeBrushOp === 'smooth' ? 'lower' : 'flatten';
+        break;
       case 'Tab':
         e.preventDefault();
         this._oneShot.switchUnit = true;
@@ -1292,9 +1338,13 @@ export const GroundView = {
     if (e.button === 0) {
       this._mouse.lDown = true;
       if (this._buildMode) {
-        // 按下边沿立即采掘一格（按住由 _updateAim 按 DIG_INTERVAL 连挖）
+        // 按下边沿立即采掘一格（按住由 _updateAim 按 DIG_INTERVAL 连挖）；
+        // WP-4：场域模式走连续地形工程作业（ShapeTerrain/HarvestTerrainOre）
         this._digCd = DIG_INTERVAL;
-        if (this._aim) this._tryDig(this._aim);
+        if (this._aim) {
+          if (this.field) this._fieldDig(this._aim);
+          else this._tryDig(this._aim);
+        }
       } else {
         this._oneShot.attack = this._oneShot.attack || 'light';
       }
@@ -1304,9 +1354,13 @@ export const GroundView = {
       this._mouse.lastX = e.clientX;
       this._mouse.lastY = e.clientY;
       if (this._buildMode) {
-        // 按下边沿立即放置一格（按住未拖拽时由 _updateAim 连放）
+        // 按下边沿立即放置一格（按住未拖拽时由 _updateAim 连放）；
+        // WP-4：场域模式走 PlaceBuilding 模块化建筑放置（坡度校验 + 地基承台）
         this._placeCd = PLACE_INTERVAL;
-        if (this._aim) this._tryPlace(this._aim);
+        if (this._aim) {
+          if (this.field) this._fieldPlace(this._aim);
+          else this._tryPlace(this._aim);
+        }
       }
     }
   },
@@ -1352,7 +1406,9 @@ export const GroundView = {
   /** 行星重力（planet.gravity 缺省按 1.0g） */
   _gravity() {
     const g0 = this.planet && this.planet.gravity != null ? Number(this.planet.gravity) : 1.0;
-    return Math.max(0.2, g0) * 9.8;
+    // WP-5 EXPANSION：fractured_moon 等主题低重力倍率（movementMod.gravityScale）
+    const scale = Number.isFinite(this._gravityScale) ? this._gravityScale : 1.0;
+    return Math.max(0.2, g0) * 9.8 * scale;
   },
 
   /**
@@ -1505,8 +1561,8 @@ export const GroundView = {
   _tryRestoreTerrain() {
     if (!this.field || !this._edits || !this.planet) return;
     const c = this.char3d;
-    const x = c.x - FIELD_OFFSET;               // 世界 → 场域坐标（命令口径）
-    const z = c.z - FIELD_OFFSET;
+    const x = c.x + FIELD_OFFSET;               // 世界 → 行星本地米（命令/applyEdit 口径）
+    const z = c.z + FIELD_OFFSET;
     const res = this.app.dispatch('RestoreTerrain', {
       planetId: this.planet.id, x, z, radius: 6, strength: 1,
     });
@@ -1517,6 +1573,64 @@ export const GroundView = {
     applyEdit(this.field, this._edits, { kind: 'restore', x, z, radius: 6, strength: 1 });
     rebuildDirtyChunks(this.field);
     toast('地形已恢复自然状态（DSP 式）', { kind: 'ok' });
+  },
+
+  /**
+   * WP-4 场域工程作业：域侧 ShapeTerrain 命令 + 视图本地同参 applyEdit
+   * （命令写回 planet.terrainEdits 持久化；本地即时增量重建保证当帧可见）。
+   * @returns {object|null} 命令结果（ok/reason）
+   */
+  _shapeTerrainAt(fx, fz, op, radius, strength) {
+    if (!this.field || !this._edits || !this.planet) return null;
+    const res = this.app.dispatch('ShapeTerrain', {
+      planetId: this.planet.id, op, x: fx, z: fz, radius, strength,
+    });
+    if (res && res.ok) {
+      applyEdit(this.field, this._edits, { kind: op, x: fx, z: fz, radius, strength });
+      rebuildDirtyChunks(this.field);
+    }
+    return res || null;
+  },
+
+  /**
+   * WP-4 场域左键工程作业（技能 5 建造模式）：ORE 矿脉 → 地质采掘入账
+   * （HarvestTerrainOre 域命令，无矿脉静默跳过）；地形整形刷子（F 键切换
+   * flatten/smooth/lower）→ ShapeTerrain 连续雕刻，彻底取代体素占位盒
+   * （规范 6 §6.5 红线：挖方块 → 雕刻地表与工程作业）。
+   */
+  _fieldDig(hit) {
+    if (!this.field || !this.planet || !hit || !hit.hit) return;
+    const fx = hit.px + FIELD_OFFSET;          // 世界 → 行星本地米（命令口径）
+    const fz = hit.pz + FIELD_OFFSET;
+    const s = sampleTerrain(this.field, fx, fz);
+    if (s && (s.flags & TERRAIN_FLAGS.ORE) !== 0) {
+      this.app.dispatch('HarvestTerrainOre', { planetId: this.planet.id, x: fx, z: fz }, null, { silent: true });
+    }
+    const op = this._shapeBrushOp || 'flatten';
+    const radius = op === 'lower' ? 3.5 : 6.0;
+    const strength = op === 'lower' ? 0.6 : 0.8;
+    this._shapeTerrainAt(fx, fz, op, radius, strength);
+    if (this._aim) this._aim.dug = true;
+    this._fx.dig.push({ x: hit.px, y: hit.py, z: hit.pz, matId: 255 });
+    if (Number.isFinite(hit.vx) && Number.isFinite(hit.vz)) this._markFieldDirty(hit.vx, hit.vz);
+  },
+
+  /**
+   * WP-4 场域右键建造：派发 PlaceBuilding（9 点坡度校验 + 自动地基承台，
+   * 写入 planet.groundBuildings），成功后原地刷新 3D 建筑网格与传送带路径。
+   */
+  _fieldPlace(hit) {
+    if (!this.field || !this.planet || !hit || !hit.hit) return;
+    const fx = hit.px + FIELD_OFFSET;
+    const fz = hit.pz + FIELD_OFFSET;
+    const defId = this._selectedBuildDefId || 'bld_mine_ferro';
+    const res = this.app.dispatch('PlaceBuilding', { planetId: this.planet.id, defId, x: fx, z: fz });
+    if (res && res.ok) {
+      this._layoutColony();
+      this._conveyor = this._buildConveyorPaths();
+      this._fx.dig.push({ x: hit.px, y: hit.py + 0.5, z: hit.pz, matId: 255 });
+    }
+    // 失败原因（坡度过大/缺乏矿藏等）由 App.dispatch 统一 toast
   },
 
   /** 采掘后标记场域 Chunk 脏（下一帧 sync 增量重建；TERRAIN-06） */
@@ -1676,16 +1790,46 @@ export const GroundView = {
     }
   },
 
-  /** E 键就近解析交互目标：交互半径（60px ≈ 2.5 格）内最近的未完成目标物 id */
+  /**
+   * 任务坐标 → 视图世界坐标（WP-1 统一度量；渲染/HUD/特效管线唯一换算出口）。
+   * 契约：
+   * 1. site_meters：实体 (x, y) 即 Planet-Local 场域米 → 世界 = 场域 - FIELD_OFFSET
+   *    （与 _setupScene 生成点 / _followMissionCharacter / 站点地标管线同口径）；
+   * 2. 旧版 grid_px 兜底（m.w/m.h 有效）：px → 世界线性映射（R-A 改造前语义）；
+   * 3. coordSpace 缺失或度量缺失一律按场域米直读（防 NaN 乘法），绝不返回非有限值。
+   */
+  _missionToWorld(m, mx, my) {
+    if (m && m.coordSpace !== 'site_meters' && m.w > 0 && m.h > 0) {
+      return {
+        x: mx * (SURFACE_SIZE.X / (m.w * TS)),
+        z: my * (SURFACE_SIZE.Z / (m.h * TS)),
+      };
+    }
+    return { x: mx - FIELD_OFFSET, z: my - FIELD_OFFSET };
+  },
+
+  /**
+   * 撤离点世界坐标（WP-1）：site_meters 下 extraction 为 { x, z, r }（纵向键 z），
+   * 旧版 grid_px 为 { x, y }；两口径在此归一，罗盘距离/角度不再产出 NaN。
+   */
+  _extractionWorldPos(m, view) {
+    const ext = (view && view.extraction) || (m && m.extraction) || null;
+    if (!ext) return this._missionToWorld(m, 0, 0);
+    const rawY = Number.isFinite(ext.z) ? ext.z : (Number.isFinite(ext.y) ? ext.y : 0);
+    return this._missionToWorld(m, Number.isFinite(ext.x) ? ext.x : 0, rawY);
+  },
+
+  /** E 键就近解析交互目标：site_meters 交互半径 3.0m（MISSION_UNIT_SCALE），旧版 60px 兜底 */
   _resolveInteract(m) {
     const u = m.playerUnits[m.activeIdx];
     if (!u || u.state === 'dead') return null;
     let best = null;
     let bd = Infinity;
+    const maxR = (m.coordSpace === 'site_meters') ? MISSION_UNIT_SCALE.interactRadius : 60;
     for (const t of m.targets) {
       if (t.done) continue;
       const d = Math.hypot(t.x - u.x, t.y - u.y);
-      if (d < 60 && d < bd) {
+      if (d < maxR && d < bd) {
         bd = d;
         best = t.targetId;
       }
@@ -1856,12 +2000,22 @@ export const GroundView = {
     const diving = depth > FLUID_WADE_MAX;
     const fluidDamp = wading ? 0.65 : 1;   // 涉水水平移速 ×0.65 阻尼
 
+    // —— WP-5 EXPANSION：glassstorm_barrens 顺逆风推力（确定性时钟相位风场，无随机） ——
+    let windX = 0;
+    let windZ = 0;
+    if (this._windPush > 0 && !diving) {
+      const windPhase = this._clock * 0.23;
+      const windMag = (0.55 + 0.45 * Math.sin(windPhase * 1.7)) * this._windPush * 2.2;
+      windX = Math.sin(windPhase) * windMag * dt;
+      windZ = Math.cos(windPhase * 0.9) * windMag * dt;
+    }
+
     // —— XZ 位移（闪避爆发 + 常速移动，体素 AABB 轴分离碰撞 / 场域坡度阻断） ——
     if (c.dodgeT > 0) {
       c.dodgeT -= dt;
-      this._moveAABB(c.dodgeX * 8.0 * fluidDamp * dt, c.dodgeZ * 8.0 * fluidDamp * dt);
+      this._moveAABB(c.dodgeX * 8.0 * fluidDamp * dt + windX, c.dodgeZ * 8.0 * fluidDamp * dt + windZ);
     } else if (mv) {
-      this._moveAABB(mv.x * speed * fluidDamp * dt, mv.z * speed * fluidDamp * dt);
+      this._moveAABB(mv.x * speed * fluidDamp * dt + windX, mv.z * speed * fluidDamp * dt + windZ);
     }
 
     // —— 竖直物理（P0-1 接触冲量闭环 + P2-1 潜水动力学） ——
@@ -1955,16 +2109,48 @@ export const GroundView = {
   _moveAABB(dx, dz) {
     const c = this.char3d;
     if (this.field) {
-      const h0 = this._groundAt(c.x, c.z);
+      // WP-1 P0-C：四象限全域可达（世界 [-222,+286] = 场域 [-254,+254] 内收 2m），
+      // 坡度按水平步长取真实正切（35° 极限），脚下 ROAD/BRIDGE_DECK 人工结构放行。
+      const foot = sampleTerrain(this.field, c.x + FIELD_OFFSET, c.z + FIELD_OFFSET);
+      const roadFoot = !!foot && (foot.flags & (TERRAIN_FLAGS.ROAD | TERRAIN_FLAGS.BRIDGE_DECK)) !== 0;
+      const h0 = (foot && Number.isFinite(foot.y)) ? foot.y : Infinity;
+      // WP-5 EXPANSION：cloud_giant_atolls 浮台甲板禁出（landingMode atmospheric
+      // → 落点必须带人工结构旗，严禁走出甲板坠入气态深渊）
+      const deckOk = (px, pz) => {
+        if (!this._deckClamp) return true;
+        const s = sampleTerrain(this.field, px + FIELD_OFFSET, pz + FIELD_OFFSET);
+        return !!s && (s.flags & (TERRAIN_FLAGS.FOUNDATION | TERRAIN_FLAGS.ROAD | TERRAIN_FLAGS.BRIDGE_DECK)) !== 0;
+      };
       if (dx) {
-        const nx = clamp(c.x + dx, 2, FIELD_WALK_MAX);
+        const nx = clamp(c.x + dx, FIELD_WALK_MIN, FIELD_WALK_MAX);
         const h1 = this._groundAt(nx, c.z);
-        if (Number.isFinite(h1) && h1 - h0 < WALK_SLOPE_BLOCK) c.x = nx;
+        const step = Math.max(0.02, Math.abs(dx));
+        const climbable = Number.isFinite(h1)
+          && (!Number.isFinite(h0) || (h1 - h0) / step <= FIELD_MAX_SLOPE_TAN);
+        if ((roadFoot || climbable) && deckOk(nx, c.z)) c.x = nx;
       }
       if (dz) {
-        const nz = clamp(c.z + dz, 2, FIELD_WALK_MAX);
+        const nz = clamp(c.z + dz, FIELD_WALK_MIN, FIELD_WALK_MAX);
         const h1 = this._groundAt(c.x, nz);
-        if (Number.isFinite(h1) && h1 - h0 < WALK_SLOPE_BLOCK) c.z = nz;
+        const step = Math.max(0.02, Math.abs(dz));
+        const climbable = Number.isFinite(h1)
+          && (!Number.isFinite(h0) || (h1 - h0) / step <= FIELD_MAX_SLOPE_TAN);
+        if ((roadFoot || climbable) && deckOk(c.x, nz)) c.z = nz;
+      }
+      // WP-5：biolume_canopy 荧光真菌压感涟漪——世界坐标 8 槽环形缓冲驱动
+      // uFootsteps（着色器在 worldPos = aPos + uWorldOffset 空间比较）
+      if ((dx !== 0 || dz !== 0) && this._footstepRing && this.scene) {
+        this._stepDist = (this._stepDist || 0) + Math.hypot(dx, dz);
+        if (this._stepDist >= 1.5) {
+          this._stepDist = 0;
+          const off = this._footstepIdx * 4;
+          this._footstepRing[off] = c.x;
+          this._footstepRing[off + 1] = c.z;
+          this._footstepRing[off + 2] = this._clock;
+          this._footstepRing[off + 3] = 1.0;
+          this._footstepIdx = (this._footstepIdx + 1) % 8;
+          this.scene.setFootsteps(this._footstepRing);
+        }
       }
       return;
     }
@@ -2098,12 +2284,16 @@ export const GroundView = {
     // —— 采掘（建造模式按住左键，节流 DIG_INTERVAL） ——
     if (this._buildMode && this._mouse.lDown && this._digCd <= 0 && this._aim) {
       this._digCd = DIG_INTERVAL;
-      this._tryDig(this._aim);
+      // WP-4：场域模式走连续地形工程作业；体素兜底保持原 digVoxel 路径
+      if (this.field) this._fieldDig(this._aim);
+      else this._tryDig(this._aim);
     }
     // —— 建造（建造模式按住右键且未拖拽旋转相机，节流 PLACE_INTERVAL） ——
     if (this._buildMode && this._mouse.rDown && !this._mouse.dragged && this._placeCd <= 0) {
       this._placeCd = PLACE_INTERVAL;
-      this._tryPlace(this._aim);
+      // WP-4：场域模式走 PlaceBuilding 模块化建筑放置
+      if (this.field) this._fieldPlace(this._aim);
+      else this._tryPlace(this._aim);
     }
   },
 
@@ -2188,31 +2378,36 @@ export const GroundView = {
   /** 任务打击特效：近战刀光（伤害 22/×2 对应弧度一致）或远程光束 */
   _emitMissionStrike(view, u) {
     const m = this.mission;
-    const kx = SURFACE_SIZE.X / (m.w * TS);
-    const kz = SURFACE_SIZE.Z / (m.h * TS);
-    const wx = u.x * kx;
-    const wz = u.y * kz;
+    // WP-1：统一经 _missionToWorld 换算（site_meters 米制直读；旧版 px 线性映射），
+    // 根除 kx/kz = 64/(undefined*24) = NaN 的全场隐形故障。
+    const src = this._missionToWorld(m, u.x, u.y);
+    const wx = src.x;
+    const wz = src.z;
     const yaw = -u.facing;
+    // 旧版 px 制下射程/曳光随坐标比例缩放；米制下 u.range 本身即米
+    const legacyK = (m && m.coordSpace !== 'site_meters' && m.w > 0 && m.h > 0)
+      ? (SURFACE_SIZE.X / (m.w * TS)) : 1;
     if (u.attackKind === 'ranged') {
       let tgt = null;
       let bd = Infinity;
-      const rangeW = u.range * kx;
+      const rangeW = u.range * legacyK;
       for (const e of view.enemies) {
         if (e.state === 'dead') continue;
-        const d = Math.hypot(e.x * kx - wx, e.y * kz - wz);
+        const ep = this._missionToWorld(m, e.x, e.y);
+        const d = Math.hypot(ep.x - wx, ep.z - wz);
         if (d <= rangeW && d < bd) {
           bd = d;
-          tgt = e;
+          tgt = { x: ep.x, z: ep.z };
         }
       }
       const a = [wx, this.char3d.y + 1.25, wz];
       let b;
       if (tgt) {
-        const gy = this._groundAt(tgt.x * kx, tgt.y * kz);
-        b = [tgt.x * kx, (gy === Infinity ? this.char3d.y : gy) + 0.8, tgt.y * kz];
+        const gy = this._groundAt(tgt.x, tgt.z);
+        b = [tgt.x, (gy === Infinity ? this.char3d.y : gy) + 0.8, tgt.z];
       } else {
         // 空放：沿任务朝向（像素系 atan2 → 世界 x/z）打出一道曳光
-        b = [wx + Math.cos(u.facing) * 18 * kx, this.char3d.y + 1.25, wz + Math.sin(u.facing) * 18 * kz];
+        b = [wx + Math.cos(u.facing) * 18 * legacyK, this.char3d.y + 1.25, wz + Math.sin(u.facing) * 18 * legacyK];
       }
       this._fx.beams.push({ a, b, age: 0, life: 0.12 });
     } else {
@@ -2269,21 +2464,26 @@ export const GroundView = {
   _layoutColony() {
     this._buildingLayout = [];
     this._buildingColonists = [];
-    const colony = this.colony;
-    if (!colony) return;
     // —— P1-2（doc8 §3.2 议题 B2 裁决）：废除黄金角盲盒螺旋，等高线感知选址 ——
     // groundBuildings（PlaceBuilding 双轨）原样合并；未定坐标建筑由
     // planColonyLayout 在过渡环带 22-75m 内按 9 点坡度校验确定性寻址。
     const w = this.app.world;
     const planetEntity = w ? w.entities.planets[this.planet.id] : null;
-    const centerFx = 32.5 - FIELD_OFFSET;   // 体素出生点 → 场域坐标
-    const centerFz = 32.5 - FIELD_OFFSET;
+    const groundBuildings = (planetEntity && planetEntity.groundBuildings) || [];
+    const colony = this.colony;
+    // WP-4：无殖民地时 groundBuildings（PlaceBuilding 双轨）仍需渲染（自由探索工程作业）
+    if (!colony && groundBuildings.length === 0) return;
+    // 体素出生点 (32.5, 32.5) → 行星本地米（32.5 + FIELD_OFFSET = 0.5，着陆坪中心）
+    const centerFx = 32.5 + FIELD_OFFSET;   // 世界/体素 → 场域坐标（+FIELD_OFFSET，勿反转）
+    const centerFz = 32.5 + FIELD_OFFSET;
     const plan = planColonyLayout(this.field, {
-      entries: [
-        ...(colony.buildings || []),
-        ...(colony.constructionQueue || []).map((j) => ({ defId: j.defId, state: 'construction' })),
-      ],
-      groundBuildings: (planetEntity && planetEntity.groundBuildings) || [],
+      entries: colony
+        ? [
+          ...(colony.buildings || []),
+          ...(colony.constructionQueue || []).map((j) => ({ defId: j.defId, state: 'construction' })),
+        ]
+        : [],
+      groundBuildings,
       center: [centerFx, centerFz],
       categoryOf: (defId) => {
         const def = BUILDINGS.find((x) => x.id === defId);
@@ -2481,21 +2681,19 @@ export const GroundView = {
     if (!view) return rd;
 
     const m = this.mission;
-    const kx = SURFACE_SIZE.X / (m.w * TS);
-    const kz = SURFACE_SIZE.Z / (m.h * TS);
+    // WP-1：统一经 _missionToWorld 换算，实体坐标恒为有限值（根除 NaN 隐形）
     // 敌人（≤40，kind 与任务 type 同名；闪白取 lastHitAt 衰减）
     const fallY = this.char3d.y || 0;
     for (const e of view.enemies) {
       if (e.state === 'dead') continue;
-      const ex = e.x * kx;
-      const ez = e.y * kz;
-      const gy = this._groundAt(ex, ez);
+      const ep = this._missionToWorld(m, e.x, e.y);
+      const gy = this._groundAt(ep.x, ep.z);
       const hitAge = m.time - e.lastHitAt;
       rd.enemies.push({
         kind: e.type,
-        x: ex,
+        x: ep.x,
         y: gy === Infinity ? fallY : gy,   // 悬浮平台虚空列回退到角色高度
-        z: ez,
+        z: ep.z,
         yaw: -e.facing,
         phase: e.phase || 0,
         flash: hitAge < 0.25 ? clamp(1 - hitAge / 0.25, 0, 1) : 0,
@@ -2506,8 +2704,8 @@ export const GroundView = {
       // 前摇期红色预警贴花（AoE 落点 = 面向前方 2 格）
       if (e.state === 'windup') {
         rd.effects.aoe.push({
-          x: ex + Math.cos(e.facing) * 2.0,
-          z: ez + Math.sin(e.facing) * 2.0,
+          x: ep.x + Math.cos(e.facing) * 2.0,
+          z: ep.z + Math.sin(e.facing) * 2.0,
           r: 1.9,
           t: clamp(e.stateTime / Math.max(0.01, e.windupS), 0, 1),
         });
@@ -2517,22 +2715,20 @@ export const GroundView = {
     const activeId = view.activeUnitId;
     for (const u of view.playerUnits) {
       if (u.state === 'dead' || u.unitId === activeId) continue;
-      const ux = u.x * kx;
-      const uz = u.y * kz;
-      const gy = this._groundAt(ux, uz);
+      const up = this._missionToWorld(m, u.x, u.y);
+      const gy = this._groundAt(up.x, up.z);
       rd.colonists.push({
-        x: ux, y: gy === Infinity ? fallY : gy, z: uz,
+        x: up.x, y: gy === Infinity ? fallY : gy, z: up.z,
         rotY: -u.facing, walk: u.state === 'move', phase: 0.5,
       });
     }
     // 任务 NPC（救援/工程队）
     for (const n of view.npcs) {
       if (n.state === 'safe') continue;
-      const nx = n.x * kx;
-      const nz = n.y * kz;
-      const gy = this._groundAt(nx, nz);
+      const np = this._missionToWorld(m, n.x, n.y);
+      const gy = this._groundAt(np.x, np.z);
       rd.colonists.push({
-        x: nx, y: gy === Infinity ? fallY : gy, z: nz,
+        x: np.x, y: gy === Infinity ? fallY : gy, z: np.z,
         rotY: 0, walk: n.state === 'follow', phase: 0.5,
       });
     }
@@ -2546,16 +2742,14 @@ export const GroundView = {
     const view = this._lastView;
     if (view && this.mode === 'mission') {
       const m = this.mission;
-      const kx = SURFACE_SIZE.X / (m.w * TS);
-      const kz = SURFACE_SIZE.Z / (m.h * TS);
+      // WP-1：目标物/拾取物统一经 _missionToWorld 换算（根除 NaN 隐形）
       for (const t of view.targets) {
         if (t.done) continue;
-        const tx = t.x * kx;
-        const tz = t.y * kz;
-        const gy = this._groundAt(tx, tz);
+        const tp = this._missionToWorld(m, t.x, t.y);
+        const gy = this._groundAt(tp.x, tp.z);
         const hurt = t.hp < t.hpMax;
         list.push({
-          x: tx, y: gy === Infinity ? fallY : gy, z: tz,
+          x: tp.x, y: gy === Infinity ? fallY : gy, z: tp.z,
           rotY: 0.7, scale: 0.8, meshId: MESH_OF_CATEGORY('military'),
           emit: hurt ? 0.15 : 0,
           flash: hurt && (m.time % 0.5) < 0.25 ? 0.3 : 0,
@@ -2563,11 +2757,10 @@ export const GroundView = {
       }
       for (const it of view.items) {
         if (it.done) continue;
-        const ix = it.x * kx;
-        const iz = it.y * kz;
-        const gy = this._groundAt(ix, iz);
+        const ip = this._missionToWorld(m, it.x, it.y);
+        const gy = this._groundAt(ip.x, ip.z);
         list.push({
-          x: ix, y: (gy === Infinity ? fallY : gy) + 0.5, z: iz,
+          x: ip.x, y: (gy === Infinity ? fallY : gy) + 0.5, z: ip.z,
           rotY: this._clock * 0.8, scale: 0.38, meshId: MESH_OF_CATEGORY('selector'),
           emit: 0.9,
         });
@@ -2653,7 +2846,17 @@ export const GroundView = {
       fogColor: (p && p._fogColor) || FALLBACK_ENV.fogColor,
       fogRange: (p && p._fogRange) || FALLBACK_ENV.fogRange,
       eye: p ? p.camera.eye : this._eye,
+      hdr: this._hdrScaleOf(),
     };
+  },
+
+  /**
+   * WP-5 P1-F：RGBA8 模拟 HDR 预缩放因子（浮点 FBO 时为 1.0）。
+   * 对象/建筑 pass 与 PlanetSurfaceScene 地形（scene.draw 内部自算）同口径。
+   */
+  _hdrScaleOf() {
+    const post = this.cm && this.cm.post;
+    return (post && post.hdrSimulated) ? 1.0 / Math.max(1e-3, post.hdrRange || 4.0) : 1.0;
   },
 
   // —— HUD（2D 层） ————————————————
@@ -2811,10 +3014,11 @@ export const GroundView = {
     }
 
     // —— 撤离点罗盘（顶部中央箭头 + 距离；下移避开顶栏） ——
-    const kx = SURFACE_SIZE.X / (m.w * TS);
-    const kz = SURFACE_SIZE.Z / (m.h * TS);
-    const ex = view.extraction.x * kx;
-    const ez = view.extraction.y * kz;
+    // WP-1：site_meters 下 extraction 纵向键为 z（旧版 grid_px 为 y），统一经
+    // _extractionWorldPos 归一换算，根除「撤离区 NaNm」与罗盘箭头失效。
+    const extPos = this._extractionWorldPos(m, view);
+    const ex = extPos.x;
+    const ez = extPos.z;
     const c = this.char3d;
     const camFwd = this._camForward();
     const camAng = Math.atan2(camFwd[2], camFwd[0]);
@@ -2873,7 +3077,9 @@ export const GroundView = {
     ctx.fillText(`自由探索 · ${this.planet ? this.planet.name : ''}`, 22, 82);
     ctx.fillStyle = '#9fb6c9';
     ctx.font = '11px "Segoe UI", system-ui, sans-serif';
-    ctx.fillText(`采掘/建造模式：${this._buildMode ? '开' : '关'} · Esc 升空返回`, 22, 100);
+    // WP-4：工程刷子状态（F 键循环）随建造模式明示
+    const brushZh = this._shapeBrushOp === 'smooth' ? '平滑' : this._shapeBrushOp === 'lower' ? '采掘' : '压平';
+    ctx.fillText(`采掘/建造模式：${this._buildMode ? `开（${brushZh}刷）` : '关'} · F 切换工程刷 · Esc 升空返回`, 22, 100);
     // —— 最近未勘探 POI 罗盘（doc5 P1-04：方位 + 距离 + E 采样提示） ——
     if (this._pois) {
       let best = null;

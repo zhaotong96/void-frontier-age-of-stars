@@ -3,6 +3,8 @@
  *
  * 固定步长 dt = 1/30s（与战术战斗一致）。任务实体是纯数据（Plain Data），
  * 挂在 world.entities.groundMissions 上，全部状态可 JSON 序列化。
+ * 例外约定（P0-B）：_runtimeField 为不可枚举运行时挂载（TerrainField 重型对象），
+ * 不进入实体树、不参与 JSON/structuredClone；读档后经 getMissionRuntimeField 幂等重建。
  *
  * 验收条目对照：
  *  - GROUND-01 确定性：地图生成使用独立 RNG 状态（不消耗世界主 RNG），
@@ -36,6 +38,7 @@ import { int, intRange, float, chance, pick, shuffle } from '../../core/rng.js';
 import { findMissionTemplate } from '../../content/missions.js';
 import { blueprintsForPlanet } from '../../content/missionSites.js';
 import { TERRAIN_FLAGS, buildTerrainField } from './terrainField.js';
+import { checkAndProgressObjectives } from '../events/objectives.js';
 import { sampleTerrain, raycastTerrain } from './surfaceQueries.js';
 import { getSiteInstance } from './missionSiteFactory.js';
 
@@ -196,7 +199,7 @@ function inExtraction(mission, x, y) {
  * （<1.5m 且高差 <1.6m）赋予 cover 防护（远程伤害 ×0.5）。返回 { clear, cover }。
  */
 function lineOfSightSite(mission, x0, y0, x1, y1) {
-  const field = mission.field;
+  const field = mission._runtimeField;
   if (!field) return { clear: true, cover: false };
   const s0 = sampleTerrain(field, x0, y0);
   const s1 = sampleTerrain(field, x1, y1);
@@ -512,6 +515,39 @@ export function getMissionField(world, planetId, siteCtx = null) {
   return field;
 }
 
+// 运行时场域注册表：mission → TerrainField。严禁进入可枚举实体树（P0-B）：
+// JSON/structuredClone 均跳过不可枚举属性，存档体积与 deepClone 耗时恢复常态；
+// 读档后经 getMissionRuntimeField 以 (world.seed, planetId) 幂等重建（getMissionField 确定性红线）。
+const _runtimeFieldMap = new Map();
+
+/**
+ * 取任务绑定的运行时 TerrainField（不可枚举属性 → 按 seed/planetId 重建）。
+ * 读档（decodeSave）后 mission 上无任何场域，首次 stepMission 前调用即可 100% 确定性续跑。
+ * 注意：注册表仅作写入侧台账（终结时成对 delete），不做 mission.id 键读取——
+ * 同进程多世界（e2e/探针/存档往返）中跨世界 mission.id 可碰撞，按 id 取场域会
+ * 串用他种子地形（探针 P0-B 实证）；确定性取场域必须经 getMissionField 的
+ * (world.seed, planetId) LRU 键。
+ */
+export function getMissionRuntimeField(world, mission) {
+  if (!mission) return null;
+  const held = mission._runtimeField;
+  if (held && typeof held.evalPoint === 'function') {
+    _runtimeFieldMap.set(mission.id, held);
+    return held;
+  }
+  if (mission.coordSpace === 'site_meters' && mission.planetId != null) {
+    const rebuilt = getMissionField(world, mission.planetId);
+    if (rebuilt) {
+      Object.defineProperty(mission, '_runtimeField', {
+        value: rebuilt, writable: true, enumerable: false, configurable: true,
+      });
+      _runtimeFieldMap.set(mission.id, rebuilt);
+      return rebuilt;
+    }
+  }
+  return null;
+}
+
 /** 场内高程采样（场外回退 0） */
 function spawnElev(field, x, z) {
   const s = sampleTerrain(field, x, z);
@@ -587,7 +623,7 @@ function columnBlocked(mission, self, x, z) {
 function moveSite(mission, u, nx, ny, speed, dt) {
   const step = speed * dt;
   if (!(step > 0)) return;
-  const field = mission.field;
+  const field = mission._runtimeField;
   if (!field) return;
   const tryTo = (tx, tz) => {
     const s = sitePassable(field, tx, tz);
@@ -648,7 +684,7 @@ function catmullRomPts(pts) {
  *  - 其余敌军 → route_main / route_flank 链等距巡逻（距着陆坪 ≥ 警戒距离逐级放宽）。
  */
 function populateSiteMission(mission, template) {
-  const field = mission.field;
+  const field = mission._runtimeField;
   const site = mission.site;
   const A = site.anchors;
 
@@ -885,7 +921,12 @@ export function createGroundMission(world, opts = {}) {
   if (siteCtx) {
     const field = fieldOpt || getMissionField(world, planetId, siteCtx);
     if (!field) throw new Error('ground: 站点地形场构建失败');
-    mission.field = field;
+    // P0-B：场域是重型运行时对象（TypedArray + 闭包），严禁挂可枚举属性进实体树；
+    // defineProperty 不可枚举 → JSON.stringify / structuredClone / Object.keys 全部跳过。
+    Object.defineProperty(mission, '_runtimeField', {
+      value: field, writable: true, enumerable: false, configurable: true,
+    });
+    _runtimeFieldMap.set(mission.id, field);
     const site = siteCtx.site;
     // 站点几何（锚点为 Planet-Local 场域米制坐标；doc8 P0-2 指令 1/2）
     mission.site = {
@@ -1141,6 +1182,11 @@ function makeEnemy(type, p, opts = {}, table = ENEMY_TYPES) {
  */
 export function stepMission(world, mission, dt = DT_DEFAULT) {
   if (!mission || mission.status !== 'active') return mission;
+  // P0-B：读档恢复路径——site_meters 任务首次步进前确保运行时场域就绪（按 seed 幂等重建）
+  if (mission.coordSpace === 'site_meters' && !mission._runtimeField) {
+    const field = getMissionRuntimeField(world, mission);
+    if (!field) throw new Error('ground: 运行时场域缺失且无法重建');
+  }
   mission.time += dt;
   const input = mission.input;
 
@@ -1529,7 +1575,7 @@ function bossPhaseCheck(mission, e) {
 /** boss 召唤护卫：boss 周身逐环扫描可通行位，受 UNIT_CAP 约束（确定性顺序） */
 function summonAdds(mission, e, count) {
   if (mission.coordSpace === 'site_meters') {
-    const field = mission.field;
+    const field = mission._runtimeField;
     if (!field) return;
     let spawned = 0;
     for (let r = 1; r <= 3 && spawned < count; r++) {
@@ -1716,7 +1762,7 @@ function updateObjectives(mission, dt) {
 /** 危险区判定：site_meters 按地表 HAZARD 旗采样，旧版按瓦片值 */
 function isHazardAt(mission, x, y) {
   if (mission.coordSpace === 'site_meters') {
-    const s = sampleTerrain(mission.field, x, y);
+    const s = sampleTerrain(mission._runtimeField, x, y);
     return !!(s && (s.flags & TERRAIN_FLAGS.HAZARD));
   }
   return tileAtPx(mission, x, y) === T_HAZARD;
@@ -1811,6 +1857,15 @@ export function finishMission(world, mission, outcome = 'success', reason = null
   mission.results = results;
   mission.status = outcome === 'success' ? 'success' : 'failed';
   mission.failReason = results.reason;
+  // WP-6：任务成功推进行星锚定空间目标（按 targetPlanetId 匹配：行星勘探/殖民地救援；
+  // 地面小队完成地表行动即达成，失败不推进。结算锁内执行，幂等由目标 status 保证）
+  if (outcome === 'success') {
+    checkAndProgressObjectives(world, (o) =>
+      o.targetPlanetId === mission.planetId && o.factionId === world.playerFactionId);
+  }
+  // P0-B：任务终结后释放运行时场域（Map 引用 + 不可枚举属性），防 64 Chunk 网格滞留内存
+  _runtimeFieldMap.delete(mission.id);
+  if (mission._runtimeField) delete mission._runtimeField;
   mlog(mission, outcome === 'success' ? '行动完成，小队撤离成功' : `行动失败（${results.reason || 'unknown'}）`);
   emit(world, 'GroundMissionEnded', {
     missionId: mission.id,
@@ -1828,6 +1883,9 @@ export function abortMission(world, mission) {
   mission.rewardPaid = true; // 结算锁（GROUND-03）
   mission.status = 'aborted';
   mission.failReason = 'aborted';
+  // P0-B：任务终结后释放运行时场域（Map 引用 + 不可枚举属性），防 64 Chunk 网格滞留内存
+  _runtimeFieldMap.delete(mission.id);
+  if (mission._runtimeField) delete mission._runtimeField;
   mission.results = {
     outcome: 'aborted',
     rewardsPaid: [],

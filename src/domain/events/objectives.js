@@ -17,7 +17,7 @@
 
 import { createEntity, getEntity, listEntities } from '../entities/registry.js';
 import { emit } from '../../core/eventBus.js';
-import { debit } from '../economy/ledger.js';
+import { credit, debit } from '../economy/ledger.js';
 import { orderMove } from '../fleets/fleet.js';
 
 /** 目标种类（doc5 §3.6） */
@@ -86,6 +86,50 @@ export function completeObjective(world, objectiveId) {
   o.completedTick = world.tick;
   emit(world, 'ObjectiveCompleted', { objectiveId: o.id, sourceEventId: o.sourceEventId }, 'world');
   return { ok: true };
+}
+
+/**
+ * WP-6（P1-H 闭环）：跨系统目标推进 —— 供战略动作与地表结算点调用
+ * （舰队抵达 navigation / 星系调查 scan / 地面任务 GroundMission / 殖民建立 colony /
+ * POI 采样 planetPOI）。凡 filterFn(o) 为真的活跃目标推进 delta 进度；
+ * progressObjective 满格自动 completeObjective，完成迁移的当次按目标自带
+ * rewards（[{resId, amount}] 资源表）入账 factionId 账本——completeObjective
+ * 本身不发奖，奖励只在此处迁移判定内发放一次（幂等：completed 目标不再进入枚举）。
+ * @param {Function} filterFn (objective) => boolean（按真实字段匹配：kind/targetSystemId/targetPlanetId/factionId）
+ * @param {number} delta 本次推进量（默认 100 = goalProgress，单次触发即完成）
+ * @returns {number} 本次实际推进（含完成）的目标数
+ */
+export function checkAndProgressObjectives(world, filterFn, delta = 100) {
+  let progressed = 0;
+  for (const o of activeObjectives(world)) {
+    let hit = false;
+    try {
+      hit = !!filterFn(o);
+    } catch (e) {
+      emit(world, 'ObjectiveFilterError', { objectiveId: o.id, message: String(e && e.message) }, 'system');
+      continue;
+    }
+    if (!hit) continue;
+    const res = progressObjective(world, o.id, delta);
+    if (res.ok) progressed++;
+    if (o.status === 'completed') grantObjectiveRewards(world, o);
+  }
+  return progressed;
+}
+
+/** 目标奖励入账（rewards: [{resId, amount}] → factionId 账本；审计 reason=objectiveReward） */
+function grantObjectiveRewards(world, o) {
+  const rewards = Array.isArray(o.rewards) ? o.rewards : [];
+  if (!rewards.length || !o.factionId) return;
+  const paid = [];
+  for (const r of rewards) {
+    if (!r || !r.resId || !(r.amount > 0)) continue;
+    credit(world, o.factionId, r.resId, r.amount, 'objectiveReward', o.id);
+    paid.push({ resId: r.resId, amount: r.amount });
+  }
+  if (paid.length) {
+    emit(world, 'ObjectiveRewarded', { objectiveId: o.id, factionId: o.factionId, rewards: paid }, 'world');
+  }
 }
 
 /**

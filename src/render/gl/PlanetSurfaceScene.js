@@ -71,6 +71,7 @@ export class PlanetSurfaceScene {
     this._lastThemeRef = null;
     this._planetInfo = null;
     this._worldOffset = null;
+    this._themePayload = null;   // WP-5：最近一次 setTheme 的载荷（水体主题色提取）
     this._fogColor = [0.62, 0.65, 0.70];
     this._fogRange = [60.0, 420.0];
 
@@ -184,6 +185,16 @@ export class PlanetSurfaceScene {
     return this;
   }
 
+  /**
+   * WP-5 P1-F：脚步压感涟漪注入（biolume_canopy uFootsteps 8 槽环形缓冲）。
+   * @param {Float32Array|Array} ring 8 组 [x, z, triggerTime, strength] 四元组
+   * @returns {PlanetSurfaceScene} this
+   */
+  setFootsteps(ring) {
+    if (this._terrain) this._terrain.setTheme({ footsteps: ring });
+    return this;
+  }
+
   /** 地形背面剔除开关透传（默认 true；诊断对照视图用） */
   setCullEnabled(enabled) {
     if (this._terrain) this._terrain.setCullEnabled(enabled);
@@ -249,6 +260,7 @@ export class PlanetSurfaceScene {
     if (rd.theme && rd.theme !== this._lastThemeRef) {
       this.setTheme(rd.theme);
       this._lastThemeRef = rd.theme;
+      this._themePayload = rd.theme;   // WP-5：保留载荷供水体主题色提取
     }
     if (rd.sun) this.setSunOnly(rd.sun);
     if (rd.fog) this.setFogOnly(rd.fog);
@@ -276,7 +288,15 @@ export class PlanetSurfaceScene {
     if (this._water && baseWl > -90.0) {
       const liveLv = tideWaterLevel(baseWl, time);
       this._terrain._themeFx[0] = liveLv;
-      this._water.sync({ field: this._field, waterLevel: baseWl, fogRange: this._fogRange });
+      // WP-5 P1-F：水体主题色同步（deep=崖壁通道色 / shallow=地表基色 / foam=生态高光；
+      // 此前从未传入 → 硫雾/甲烷海等全部渲染成默认亚特兰蒂斯亮蓝）
+      const waterOpts = { field: this._field, waterLevel: baseWl, fogRange: this._fogRange };
+      const mc = this._themePayload && this._themePayload.terrain
+        && this._themePayload.terrain.matColors;
+      if (Array.isArray(mc) && mc.length >= 3) {
+        waterOpts.colors = { deep: mc[1], shallow: mc[0], foam: mc[2] };
+      }
+      this._water.sync(waterOpts);
       dc += this._water.draw(gl, {
         vp: cam.vp,
         eye: cam.eye,

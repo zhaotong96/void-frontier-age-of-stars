@@ -22,6 +22,7 @@ import { getEntity } from '../entities/registry.js';
 import { emit } from '../../core/eventBus.js';
 import { credit, creditColony, debit, balance } from '../economy/ledger.js';
 import { createCharacter } from '../characters/crew.js';
+import { checkAndProgressObjectives } from '../events/objectives.js';
 
 /** 八类 POI 展示名（UI/日志用） */
 export const POI_KIND_ZH = {
@@ -297,6 +298,11 @@ export function harvestPlanetPoi(world, planetId, poiId, actorId) {
     rewards: { ...rewards },
     scientistId,
   }, 'world');
+
+  // WP-6：POI 采样推进行星锚定空间目标（按 targetPlanetId 匹配：行星勘探/殖民地救援，
+  // 地表采样勘探即达成；rewardPaid 锁保证采样幂等，目标侧幂等由 status 迁移保证）
+  checkAndProgressObjectives(world, (o) =>
+    o.targetPlanetId === planetId && o.factionId === factionId);
 
   return { ok: true, rewards, scientistId };
 }
