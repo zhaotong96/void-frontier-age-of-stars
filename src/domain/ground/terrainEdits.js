@@ -310,16 +310,25 @@ export function attachTerrainEdits(field, edits) {
     const baseY = num(base && base.y, 0);
     // 1) 既有 siteModifier（任务核心 SDF / 采掘凹陷）
     let siteDy = 0;
+    let baseRes = null;
     if (typeof underlying === 'function') {
-      const mod = underlying(fx, fz, base);
-      if (mod && Number.isFinite(mod.dy)) siteDy = mod.dy;
+      baseRes = underlying(fx, fz, base);
+      if (baseRes && Number.isFinite(baseRes.dy)) siteDy = baseRes.dy;
     }
     // 2) 编辑层（后评估：flatten/restore 可覆写凹陷；restore 清零 siteDy）
-    if (edits.ops.length === 0) {
-      return siteDy !== 0 ? { dy: siteDy } : null;
-    }
-    const total = evalEditsDy(field, edits, fx, fz, baseY, siteDy);
-    return Number.isFinite(baseY + total) && total !== 0 ? { dy: total } : null;
+    const total = edits.ops.length === 0
+      ? siteDy
+      : evalEditsDy(field, edits, fx, fz, baseY, siteDy);
+    if (!baseRes && total === 0) return null;
+    // WP-0（doc18 v0.1.1）：语义旗透传——增量重建区块时保留路面材质与 clearFlags 安全豁免位
+    return {
+      ...(baseRes || null),
+      dy: total,
+      flags: (baseRes && baseRes.flags) || 0,
+      clearFlags: (baseRes && baseRes.clearFlags) || 0,
+      weights: (baseRes && baseRes.weights) || null,
+      biomeId: (baseRes && baseRes.biomeId) != null ? baseRes.biomeId : null,
+    };
   };
   composed.__terrainEdits = true;
 
