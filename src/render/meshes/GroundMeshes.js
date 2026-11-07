@@ -438,7 +438,9 @@ export function buildColonistMesh() {
 /** 各类别建筑基底半宽（米/体素；与各 case 主体占地对齐，供基座裙边取值） */
 const FOOTPRINT_HALF = {
   mining: 2.0, refining: 2.0, industry: 1.9, agri: 1.85, science: 1.6,
-  service: 1.5, military: 1.6, admin: 1.0, energy: 1.9, default: 1.4,
+  service: 1.5, military: 1.6, admin: 1.0, energy: 1.9,
+  pylon: 1.0, splitter: 1.3, catapult: 2.4,  // doc19 WP-5 新槽位
+  default: 1.4,
 };
 
 /**
@@ -557,6 +559,48 @@ export function buildBuildingMesh(buildingCategory) {
       m.box(0, 1.85, 0, 0.6, 0.04, 0.6, COL.panel);
       m.beginPart('base');
       m.box(0, 0.1, 0, 1.9, 0.1, 1.9, COL.metalDark);
+      break;
+    }
+    case 'pylon': {
+      // doc19 WP-5：输电塔（四足桁架塔身 + 顶部横担 + 绝缘子对）
+      m.beginPart('legs');
+      m.box(-0.6, 1.4, -0.6, 0.09, 2.8, 0.09, COL.metal);
+      m.box(-0.6, 1.4, 0.6, 0.09, 2.8, 0.09, COL.metal);
+      m.box(0.6, 1.4, -0.6, 0.09, 2.8, 0.09, COL.metal);
+      m.box(0.6, 1.4, 0.6, 0.09, 2.8, 0.09, COL.metal);
+      m.beginPart('crossarm');
+      m.box(0, 2.85, 0, 1.7, 0.08, 0.08, COL.metalDark);
+      m.box(0, 2.65, 0, 0.08, 0.08, 1.2, COL.metalDark);
+      m.beginPart('insulators');
+      m.box(-0.8, 2.7, 0, 0.06, 0.22, 0.06, COL.panel);
+      m.box(0.8, 2.7, 0, 0.06, 0.22, 0.06, COL.panel);
+      m.box(0, 2.7, -0.55, 0.06, 0.22, 0.06, COL.panel);
+      m.box(0, 2.7, 0.55, 0.06, 0.22, 0.06, COL.panel);
+      break;
+    }
+    case 'splitter': {
+      // doc19 WP-5：四向分流器（低平枢纽 + 四向溜槽 + 状态灯）
+      m.beginPart('hub');
+      m.chamferBox(0, 0.35, 0, 1.0, 0.35, 1.0, 0.10, COL.metal);
+      m.beginPart('chutes');
+      m.box(0, 0.22, 1.1, 0.5, 0.16, 0.5, COL.turretDark);
+      m.box(0, 0.22, -1.1, 0.5, 0.16, 0.5, COL.turretDark);
+      m.box(1.1, 0.22, 0, 0.5, 0.16, 0.5, COL.turretDark);
+      m.box(-1.1, 0.22, 0, 0.5, 0.16, 0.5, COL.turretDark);
+      m.beginPart('lamp');
+      m.box(0, 0.85, 0, 0.10, 0.14, 0.10, COL.panel);
+      break;
+    }
+    case 'catapult': {
+      // doc19 WP-5：轨道货运弹射井（后倾发射导轨 + 配电基座 + 电容环）
+      m.beginPart('rail');
+      m.box(0, 2.4, -0.4, 0.5, 0.10, 4.2, COL.metal);
+      m.box(0, 1.35, 1.6, 0.5, 0.10, 0.5, COL.turretDark);
+      m.beginPart('tower');
+      m.box(0, 1.3, -1.2, 0.7, 2.6, 0.7, COL.metalDark);
+      m.beginPart('caps');
+      m.box(0, 2.75, -1.0, 0.5, 0.5, 0.5, COL.panel);
+      m.box(0, 0.25, 0, 2.2, 0.5, 1.2, COL.concrete);
       break;
     }
     default: {

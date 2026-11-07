@@ -101,6 +101,11 @@ registerHourly('production', (world) => {
       stepCatapult(world, planet, planet.ind, grid, 1);
       settleOrbitalBuffer(world, planet, planet.ind);
     }
+    // doc20 WP-3：PTI 微分推进——仅对已初始化 threat 的行星（曾登陆/激活威胁系统），
+    // 未触达星球零写入（金快照 68462446 零漂移红线）
+    if (planet.threat && planet.threat.v === 1) {
+      tickPlanetaryThreatIndex(world, planet);
+    }
     void fid;
   }
 });

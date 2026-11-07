@@ -180,7 +180,7 @@ export function computeProductionEfficiency(node, grid, planet) {
  * @returns {{transferred:number, produced:number}} 本小时物流统计（守恒审计用）
  */
 export function stepPlanetIndustry(world, planet, indState, buildingDefs, dtHours = 1) {
-  const out = { transferred: 0, produced: 0 };
+  const out = { transferred: 0, produced: 0, consumed: 0 };
   const nodes = indState.nodes || [];
   if (nodes.length === 0) return out;
   const nodeById = new Map(nodes.map((n) => [n[NODE_IDX.ID], n]));
@@ -240,10 +240,11 @@ export function stepPlanetIndustry(world, planet, indState, buildingDefs, dtHour
       n[NODE_IDX.PROG] += progressPerSub;
       if (n[NODE_IDX.PROG] >= 1000) {
         n[NODE_IDX.PROG] -= 1000;
-        if (needIn0) n[NODE_IDX.IN0] -= 1;
-        if (needIn1) n[NODE_IDX.IN1] -= 1;
+        if (needIn0) { n[NODE_IDX.IN0] -= 1; out.consumed++; }
+        if (needIn1) { n[NODE_IDX.IN1] -= 1; out.consumed++; }
         if (n[NODE_IDX.OUT0] < SLOT_CAP) {
           n[NODE_IDX.OUT0] += 1;
+          out.produced++;
           producedThisHour++;
         } else {
           n[NODE_IDX.STATE] = NODE_STATE.BLOCKED; // 输出堵塞（原料已耗，产物丢弃计数为 0）

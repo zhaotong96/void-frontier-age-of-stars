@@ -1221,10 +1221,13 @@ const { declareWar: declareWar, createTreaty: createTreaty, treatyAcceptanceScor
 const { buildTerrainField: buildTerrainField, TERRAIN_FLAGS: TERRAIN_FLAGS } = __require("src/domain/ground/terrainField.js");
 const { applyEdit: applyEdit, attachTerrainEdits: attachTerrainEdits, serializeEdits: serializeEdits, deserializeEdits: deserializeEdits, checkBuildingPlacement: checkBuildingPlacement, rebuildDirtyChunks: rebuildDirtyChunks, BRUSH_LIMITS: BRUSH_LIMITS } = __require("src/domain/ground/terrainEdits.js");
 const { sampleTerrain: sampleTerrain } = __require("src/domain/ground/surfaceQueries.js");
+const { BUILDINGS: BUILDINGS } = __require("src/content/buildings.js");
 const { RNG: RNG } = __require("src/core/rng.js");
 const { emit: emit } = __require("src/core/eventBus.js");
 const { advanceSpeciesDiscovery: advanceSpeciesDiscovery, collectSpecimenSample: collectSpecimenSample, ensurePlanetEco: ensurePlanetEco } = __require("src/domain/ground/xenobiology.js");
 const { ensurePlanetRuin: ensurePlanetRuin, tryCompleteExcavation: tryCompleteExcavation, inscribeDialectPylon: inscribeDialectPylon, rotateResonatorTower: rotateResonatorTower, reportGuardianDefeated: reportGuardianDefeated, extractMonolithCore: extractMonolithCore } = __require("src/domain/ground/monolithRuins.js");
+const { ensurePlanetInd: ensurePlanetInd, rebuildPowerGrids: rebuildPowerGrids, createBeltTuple: createBeltTuple, NODE_IDX: NODE_IDX, NODE_STATE: NODE_STATE, BELT_IDX: BELT_IDX } = __require("src/domain/industry/planetaryLogistics.js");
+const { feedCatapult: feedCatapult, resIdToIdx: resIdToIdx } = __require("src/domain/industry/catapult.js");
 
 function ownFleet(world, cmd) {
   const fleet = getEntity(world, 'fleets', cmd.params.fleetId || cmd.targetId);
@@ -1940,6 +1943,20 @@ registerCommand('PlaceBuilding', {
       foundation: entry.foundation,
       index: planet.groundBuildings.length - 1,
     }, 'ground');
+    // —— doc19 WP-1：L2 工业节点双写（电网/加工/分流/弹射定义的建筑同时入 planet.ind.nodes） ——
+    const defIdx = BUILDINGS.findIndex((b) => b.id === entry.defId);
+    const def2 = BUILDINGS[defIdx];
+    if (defIdx >= 0 && def2 && (def2.wireRadiusM > 0 || def2.indRecipe || def2.splitter || def2.catapult)) {
+      const ind = ensurePlanetInd(planet);
+      ind.nodes.push([
+        ind.nodes.reduce((m, n) => Math.max(m, n[NODE_IDX.ID]), 0) + 1,
+        defIdx,
+        Math.round(cmd.params.x * 10), Math.round(cmd.params.z * 10),
+        Math.round((chk.ok ? entry.foundation.etaHeightM || 0 : 0) * 10),
+        0, NODE_STATE.OFFLINE, 0, 0, 0, 0, 0, 0,
+      ]);
+      rebuildPowerGrids(ind, BUILDINGS);
+    }
   },
 });
 
@@ -1980,6 +1997,97 @@ registerCommand('HarvestTerrainOre', {
     emit(ctx.world, 'TerrainOreHarvested', {
       planetId: planet.id, x: cmd.params.x, z: cmd.params.z, resId, credited: !!colony,
     }, 'ground');
+  },
+});
+
+// —— doc19 v0.4：行星级工业与天地物流命令（WP-1/WP-2/WP-4） ——————————————
+
+registerCommand('BuildConveyorBelt', {
+  desc: '铺设样条传送带（FFF #176 12 元组；O(1) 步进；doc19 WP-2）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    const ind = ensurePlanetInd(planet);
+    const from = ind.nodes.find((n) => n[NODE_IDX.ID] === cmd.params.fromNodeId);
+    const to = ind.nodes.find((n) => n[NODE_IDX.ID] === cmd.params.toNodeId);
+    if (!from || !to) return { ok: false, code: 'NO_NODE', reason: '工业节点不存在' };
+    if (from[NODE_IDX.ID] === to[NODE_IDX.ID]) return { ok: false, code: 'SELF_LINK', reason: '不可自连' };
+    const tier = cmd.params.tier || 1;
+    if (!(tier >= 1 && tier <= 3)) return { ok: false, code: 'BAD_TIER', reason: '传送带档位 1..3' };
+    const dx = (from[NODE_IDX.X_DM] - to[NODE_IDX.X_DM]) / 10;
+    const dz = (from[NODE_IDX.Z_DM] - to[NODE_IDX.Z_DM]) / 10;
+    const lenM = Math.hypot(dx, dz);
+    if (lenM < 1 || lenM > 128) return { ok: false, code: 'BAD_LEN', reason: `带长 1~128m（实测 ${lenM.toFixed(1)}m）` };
+    if (ind.belts.length >= 96) return { ok: false, code: 'TOO_MANY', reason: '单星传送带预算上限 96 条' };
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    const ind = ensurePlanetInd(planet);
+    const tier = cmd.params.tier || 1;
+    const from = ind.nodes.find((n) => n[NODE_IDX.ID] === cmd.params.fromNodeId);
+    const to = ind.nodes.find((n) => n[NODE_IDX.ID] === cmd.params.toNodeId);
+    const lenM = Math.hypot((from[NODE_IDX.X_DM] - to[NODE_IDX.X_DM]) / 10, (from[NODE_IDX.Z_DM] - to[NODE_IDX.Z_DM]) / 10);
+    const belt = createBeltTuple(ind, {
+      fromNode: from[NODE_IDX.ID], fromSlot: cmd.params.fromSlot | 0,
+      toNode: to[NODE_IDX.ID], toSlot: cmd.params.toSlot | 0,
+      tier, lengthM: lenM, resTypeIdx: cmd.params.resTypeIdx | 0,
+    });
+    ind.belts.push(belt);
+    emit(ctx.world, 'ConveyorBeltBuilt', { planetId: planet.id, beltId: belt[BELT_IDX.ID], lengthM }, 'ground');
+  },
+});
+
+registerCommand('ConfigureSplitter', {
+  desc: '设置分流器路由模式（0 轮询/1 优先/2 过滤 + 过滤资源；doc19 WP-3）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet || !planet.ind) return { ok: false, code: 'NO_TARGET', reason: '行星无工业层' };
+    const node = planet.ind.nodes.find((n) => n[NODE_IDX.ID] === cmd.params.nodeId);
+    if (!node) return { ok: false, code: 'NO_NODE', reason: '分流器节点不存在' };
+    const def = BUILDINGS[node[NODE_IDX.DEF]];
+    if (!def || !def.splitter) return { ok: false, code: 'NOT_SPLITTER', reason: '目标不是分流器' };
+    const mode = cmd.params.mode | 0;
+    if (!(mode >= 0 && mode <= 2)) return { ok: false, code: 'BAD_MODE', reason: '模式 0..2' };
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    const node = planet.ind.nodes.find((n) => n[NODE_IDX.ID] === cmd.params.nodeId);
+    node[NODE_IDX.ROT] = (node[NODE_IDX.ROT] & ~0b11) | ((cmd.params.mode | 0) & 0b11);
+    node[NODE_IDX.RECIPE] = cmd.params.filterResIdx | 0;
+    emit(ctx.world, 'SplitterConfigured', { planetId: planet.id, nodeId: node[NODE_IDX.ID], mode: cmd.params.mode | 0 }, 'ground');
+  },
+});
+
+registerCommand('CatapultFeed', {
+  desc: '货运弹射井物资汇集（每 50 单位装配 1 舱；doc19 WP-4）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet || !planet.ind) return { ok: false, code: 'NO_TARGET', reason: '行星无工业层' };
+    const node = planet.ind.nodes.find((n) => n[NODE_IDX.ID] === cmd.params.nodeId);
+    if (!node) return { ok: false, code: 'NO_NODE', reason: '弹射井节点不存在' };
+    const def = BUILDINGS[node[NODE_IDX.DEF]];
+    if (!def || !def.catapult) return { ok: false, code: 'NOT_CATAPULT', reason: '目标不是弹射井' };
+    const units = cmd.params.units | 0;
+    if (!(units > 0)) return { ok: false, code: 'BAD_UNITS', reason: '汇集单位须 > 0' };
+    const resId = cmd.params.resId || 'alloy';
+    const colony = Object.values(ctx.world.entities.colonies || {}).find((cc) => cc.planetId === planet.id);
+    if (colony && (colony.stockpile || {})[resId] !== undefined) {
+      if ((colony.stockpile[resId] || 0) < units) return { ok: false, code: 'NO_FUNDS', reason: `${resId} 库存不足` };
+    }
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    const resId = cmd.params.resId || 'alloy';
+    const units = cmd.params.units | 0;
+    const colony = Object.values(ctx.world.entities.colonies || {}).find((cc) => cc.planetId === planet.id);
+    if (colony && (colony.stockpile || {})[resId] !== undefined) {
+      colony.stockpile[resId] -= units;   // 从殖民地仓储扣料
+    }
+    feedCatapult(planet.ind, resIdToIdx(resId), units);
+    emit(ctx.world, 'CatapultFed', { planetId: planet.id, resId, units }, 'ground');
   },
 });
 
@@ -12448,6 +12556,23 @@ const HULLS = [
     },
     slots: { high: 1, mid: 2, low: 2 },
   },
+  {
+    id: 'hull_titan',
+    nameZh: '泰坦级无畏巨舰',
+    nameEn: 'Titan Dreadnought',
+    descZh: '终局旗舰：仅能由行星货运弹射供应链（20 装甲模块舱 + 5 量子核心舱）合拢龙骨的超旗舰体，集舰队火力与指挥中枢于一身。',
+    descEn: 'Endgame flagship: keel laid only by the planetary freight-catapult supply chain (20 armor module pods + 5 quantum core pods).',
+    category: 'capital',
+    techReq: 'tech_precursor_mass_catapult',
+    cost: { credits: 20000, alloy: 1200 },
+    buildHours: 480,
+    baseStats: {
+      structure: 2600, armor: 160, shield: 120, power: 420, cpu: 160,
+      strategicSpeed: 2.0, fuelCap: 800, cargo: 600, crew: 90,
+      sensor: 90, signature: 120, lockons: 6, hangar: 2,
+    },
+    slots: { high: 6, mid: 5, low: 6 },
+  },
 ];
 
 Object.assign(__exports, { HULLS });
@@ -13958,6 +14083,140 @@ const BUILDINGS = [
     powerUse: -12,
     upkeep: { credits: 8 },
     recipe: { hours: 24, inputs: { alloy: 3, conductor: 2 }, outputs: { powerCell: 5 } },
+  },
+  // ── doc19 v0.4 WP-1：行星级电网基础设施（L2 局部电网拓扑；wireRadiusM = 连接半径） ──
+  {
+    id: 'bld_power_pylon',
+    nameZh: '输电塔',
+    nameEn: 'Power Pylon',
+    descZh: '行星地表电网骨干节点：24m 无线连接半径与 14m 环形供电覆盖，为局部工业集群输送子电网电力。',
+    descEn: 'Surface grid backbone: 24m link radius with 14m supply coverage feeding local industrial clusters.',
+    category: 'energy',
+    techReq: null,
+    cost: { credits: 120, alloy: 2 },
+    buildHours: 12,
+    jobs: 0,
+    powerUse: 0,
+    upkeep: { credits: 1 },
+    wireRadiusM: 24.0,
+    supplyRadiusM: 14.0,
+  },
+  {
+    id: 'bld_substation',
+    nameZh: '区域变电站',
+    nameEn: 'Regional Substation',
+    descZh: '区域配电枢纽：42m 连接半径与 28m 供电覆盖，是跨工业区组网的核心电力节点。',
+    descEn: 'Regional distribution hub: 42m link radius and 28m supply coverage for cross-district grids.',
+    category: 'energy',
+    techReq: null,
+    cost: { credits: 400, alloy: 6, conductor: 2 },
+    buildHours: 24,
+    jobs: 1,
+    powerUse: 0,
+    upkeep: { credits: 3 },
+    wireRadiusM: 42.0,
+    supplyRadiusM: 28.0,
+  },
+  {
+    id: 'bld_accumulator_bank',
+    nameZh: '蓄能电池阵列',
+    nameEn: 'Accumulator Bank',
+    descZh: '50 MWh 储能阵列：最大充放电功率 5 MW，平抑昼夜与风暴期电力峰谷，支撑弹射井瞬时高功率放电。',
+    descEn: '50 MWh storage array at 5 MW max charge/discharge, smoothing day-night and storm peaks for catapult launches.',
+    category: 'energy',
+    techReq: null,
+    cost: { credits: 600, alloy: 8, powerCell: 4 },
+    buildHours: 24,
+    jobs: 0,
+    powerUse: 0,
+    upkeep: { credits: 2 },
+    wireRadiusM: 18.0,
+    supplyRadiusM: 10.0,
+    accMaxMWh: 50,
+  },
+  // ── doc19 v0.4 WP-3：四向物料分流器（三模式确定性路由） ──
+  {
+    id: 'bld_splitter',
+    nameZh: '四向物料分流器',
+    nameEn: 'Four-Way Splitter',
+    descZh: '2m×2m 分流枢纽：奇偶轮询均分 / 主副路优先 / 资源过滤三模式（rot 低 2 位），保证绝对确定性路由。',
+    descEn: '2m splitter hub with round-robin / priority / filter routing modes for deterministic throughput.',
+    category: 'industry',
+    techReq: null,
+    cost: { credits: 150, alloy: 4 },
+    buildHours: 8,
+    jobs: 0,
+    powerUse: 0,
+    upkeep: { credits: 1 },
+    wireRadiusM: 0,
+    splitter: true,
+  },
+  // ── doc19 v0.4 WP-4：轨道货运弹射井（天地物流 L3 出口） ──
+  {
+    id: 'bld_freight_catapult',
+    nameZh: '轨道货运弹射井',
+    nameEn: 'Freight Catapult',
+    descZh: '每 50 单位物资装配 1 个标准轨道货舱，蓄能满 100% 触发冷青电弧音爆发射入近地中转站。',
+    descEn: 'Packs 50 units per orbital pod; at 100% charge fires a cold-arc sonic launch to the low-orbit buffer.',
+    category: 'industry',
+    techReq: null,
+    cost: { credits: 1200, alloy: 40, conductor: 12 },
+    buildHours: 48,
+    jobs: 2,
+    powerUse: 0,
+    upkeep: { credits: 6 },
+    wireRadiusM: 12.0,
+    supplyRadiusM: 0,
+    catapult: true,
+  },
+  // ── doc19 v0.4 WP-3：L2 加工节点配方（indRecipe：cycleS 秒级周期 + 槽位 I/O） ──
+  {
+    id: 'bld_arc_smelter',
+    nameZh: '电弧冶炼炉',
+    nameEn: 'Arc Smelter',
+    descZh: 'L2 局部加工节点：ferro×2 → alloy×1（6s 周期），传送带直连的初级冶炼梯队。',
+    descEn: 'L2 processing node: ferro x2 into alloy x1 per 6s cycle on the belt-fed smelting tier.',
+    category: 'refining',
+    techReq: null,
+    cost: { credits: 300, alloy: 10 },
+    buildHours: 18,
+    jobs: 1,
+    powerUse: -8,
+    upkeep: { credits: 2 },
+    wireRadiusM: 10.0,
+    indRecipe: { cycleS: 6, in0: 'ferro', in1: null, out: 'alloy', in0Ratio: 2, outQty: 1 },
+  },
+  {
+    id: 'bld_coil_assembler',
+    nameZh: '超导线圈厂',
+    nameEn: 'Superconductor Coil Works',
+    descZh: 'L2 中级合成节点：alloy + rareEarth → conductor（9s 周期），双输入口的装配梯队。',
+    descEn: 'L2 mid-tier assembly: alloy + rareEarth into conductor per 9s dual-input cycle.',
+    category: 'industry',
+    techReq: null,
+    cost: { credits: 500, alloy: 16, conductor: 4 },
+    buildHours: 30,
+    jobs: 2,
+    powerUse: -14,
+    upkeep: { credits: 4 },
+    wireRadiusM: 10.0,
+    indRecipe: { cycleS: 9, in0: 'alloy', in1: 'rareEarth', out: 'conductor' },
+  },
+  {
+    id: 'bld_quantum_lattice',
+    nameZh: '量子晶格共振仪',
+    nameEn: 'Quantum Lattice Resonator',
+    descZh: 'L2 高级总装节点：quantumCrystal + conductor + ancientData → quantumCore（24s 周期），泰坦供应链的终点工序。',
+    descEn: 'L2 advanced node: quantumCrystal + conductor + ancientData into quantumCore per 24s cycle.',
+    category: 'industry',
+    techReq: 'tech_precursor_shield_harmonics',
+    cost: { credits: 1600, alloy: 30, conductor: 18 },
+    buildHours: 60,
+    jobs: 3,
+    powerUse: -22,
+    upkeep: { credits: 10 },
+    wireRadiusM: 12.0,
+    indRecipe: { cycleS: 24, in0: 'quantumCrystal', in1: 'conductor', out: 'quantumCore' },
   },
 ];
 
@@ -16045,6 +16304,520 @@ function cancelByKind(world, kind, filterFn = null) {
 }
 
 Object.assign(__exports, { registerScheduled, schedule, popDue, runDue, cancelByKind });
+
+});
+__register("src/domain/industry/catapult.js", function (__exports, __require) {
+/**
+ * domain/industry/catapult.js — 轨道货运弹射井与近地中转站（doc19 v0.4 WP-4）
+ *
+ * 三级天地物流管线（doc16 §4.12）：地表打包弹射 → 近地轨道缓冲仓 →
+ * 船坞直供泰坦装配 / 跨星系货运班轮 / 星际市场倾销。
+ *
+ * 天体物理弹射能耗（doc19 WP-4）：
+ *   E_launch = E0 · (g / g0) · (1 + β · ρ_atm)
+ * 高重力/浓密大气行星弹射昂贵，碎环月（0.25g 真空）能耗趋近 E0 下限。
+ *
+ * 确定性红线：零 Math.random()、零 world.rng 消费。持久化增量：弹射井与
+ * 轨道缓冲仓为紧凑 JSON（≤1KB/星，GATE-06 IND-05 预算内）。
+ */
+
+const { emit: emit, chronicle: chronicle } = __require("src/core/eventBus.js");
+const { clamp: clamp } = __require("src/core/math.js");
+const { createShip: createShip } = __require("src/domain/ships/ship.js");
+
+/** 标准轨道货舱容量（单位物资/舱，doc19 WP-4） */
+const POD_CAPACITY_UNITS = 50;
+/** 泰坦装配硬性要求：累计 20 舱装甲模块 + 5 舱量子核心（doc19 WP-4.3） */
+const TITAN_ARMOR_PODS = 20;
+const TITAN_QUANTUM_PODS = 5;
+/** 弹射基准能耗（MWh）：g=g0 真空大气下的地板值 */
+const LAUNCH_E0_MWH = 12;
+/** 大气阻力系数 β（ρ_atm 0..1） */
+const LAUNCH_BETA = 1.6;
+
+/** 弹射井状态紧凑元组：[charged_permille, podsReady, launchedTotal, resTypeIdx] */
+const CATAPULT_IDX = Object.freeze({ CHARGE: 0, PODS: 1, LAUNCHED: 2, RES: 3 });
+
+/**
+ * 单次弹射能耗（MWh）：E0 · (g/g0) · (1 + β·ρ_atm)；g0 = 1.0。
+ * @param {object} planet 行星实体（gravity 0.3~1.9；atmosphere.density 0..1）
+ */
+function launchEnergyMWh(planet) {
+  const g = clamp(Number(planet && planet.gravity) || 1.0, 0.1, 3.0);
+  const atmo = planet && planet.atmosphere;
+  const rho = atmo && Number.isFinite(atmo.density) ? clamp(atmo.density, 0, 1) : 0.5;
+  return LAUNCH_E0_MWH * g * (1 + LAUNCH_BETA * rho);
+}
+
+/**
+ * 地表物资汇集：每 50 单位打包 1 舱（由 stepPlanetIndustry 输出口或手动输送调用）。
+ * @returns {{podsReady:number, launched:boolean}} 是否凑满整舱
+ */
+function feedCatapult(indState, resTypeIdx, units) {
+  const cat = indState.catapult || (indState.catapult = [0, 0, 0, resTypeIdx]);
+  cat[CATAPULT_IDX.RES] = resTypeIdx;
+  cat[CATAPULT_IDX.PODS] += units / POD_CAPACITY_UNITS;
+  const whole = Math.floor(cat[CATAPULT_IDX.PODS]);
+  return { podsReady: whole, launched: whole > 0 };
+}
+
+/**
+ * 弹射井蓄能推进（由所属子电网 accMWh 扣能；HourlySystems production 调用）。
+ * 蓄能达 100% 且舱位就绪 → 触发发射：物资入近地中转站缓冲仓，电网放电。
+ * @returns {{launched:number, pods:Array<{resTypeIdx:number, units:number}>}}
+ */
+function stepCatapult(world, planet, indState, grid, dtHours = 1) {
+  const cat = indState.catapult;
+  if (!cat || !grid) return { launched: 0, pods: [] };
+  const pods = [];
+  let launched = 0;
+  const wholePods = Math.floor(cat[CATAPULT_IDX.PODS]);
+  if (wholePods <= 0) return { launched: 0, pods };
+
+  const energyNeed = launchEnergyMWh(planet);
+  // 蓄能速率：电网富余功率 × dt（充入弹射井专用电容）
+  const surplusKW = Math.max(0, grid.genKW - grid.loadKW);
+  cat[CATAPULT_IDX.CHARGE] = clamp(cat[CATAPULT_IDX.CHARGE] + (surplusKW / 1000) * dtHours / energyNeed * 1000, 0, 1200);
+
+  if (cat[CATAPULT_IDX.CHARGE] >= 1000) {
+    cat[CATAPULT_IDX.CHARGE] -= 1000;
+    cat[CATAPULT_IDX.PODS] -= 1;
+    cat[CATAPULT_IDX.LAUNCHED] += 1;
+    launched = 1;
+    const units = POD_CAPACITY_UNITS;
+    const resKey = resIdxToId(cat[CATAPULT_IDX.RES]);
+    const buf = indState.orbitalBuffer || (indState.orbitalBuffer = {});
+    buf[resKey] = (buf[resKey] || 0) + units;
+    pods.push({ resTypeIdx: cat[CATAPULT_IDX.RES], resId: resKey, units });
+    grid.accMWh = Math.max(0, grid.accMWh - energyNeed); // 电网放电扣能
+    emit(world, 'FreightCatapultLaunched', { planetId: planet.id, resId: resKey, units, energyMWh: energyNeed }, 'ground');
+    if (cat[CATAPULT_IDX.LAUNCHED] === 1) {
+      chronicle(world, 'economy', `行星 ${planet.name} 货运弹射井首舱入轨（冷青电弧音爆）`, { planetId: planet.id });
+    }
+  }
+  return { launched, pods };
+}
+
+/** 资源 idx → 资源 id（与 content/resources.js 对齐的工业流小子集） */
+const IND_RES_IDS = ['ferro', 'silicate', 'alloy', 'conductor', 'shipModule', 'quantumCore'];
+function resIdxToId(idx) {
+  return IND_RES_IDS[idx] || 'alloy';
+}
+function resIdToIdx(resId) {
+  return IND_RES_IDS.indexOf(resId) >= 0 ? IND_RES_IDS.indexOf(resId) : 2;
+}
+
+/**
+ * 近地中转站三级分发（HourlySystems production 每战略小时结算；doc19 WP-4.3）。
+ * 1) 同星系轨道船坞直供 → 泰坦装配台账；2) 跨星系班轮（有母星系中转站则划拨）；
+ * 3) 星际市场倾销 → 信用点。确定性顺序结算。
+ * @returns {{titanLaid:boolean, shipId?:string, marketCredits:number}}
+ */
+function settleOrbitalBuffer(world, planet, indState) {
+  const out = { titanLaid: false, marketCredits: 0 };
+  const buf = indState.orbitalBuffer || {};
+  const fid = planet.colonyId
+    ? (world.entities.colonies[planet.colonyId] || {}).factionId
+    : world.playerFactionId;
+  if (!fid) return out;
+
+  // 1) 同星系轨道船坞直供：泰坦装配台账（装甲模块舱/量子核心舱）
+  const sys = world.entities.systems[planet.systemId];
+  const shipyard = sys ? Object.values(world.entities.stations || {})
+    .find((st) => st.kind === 'shipyard' && st.systemId === sys.id && st.factionId === fid) : null;
+  if (shipyard) {
+    shipyard.titanAssembly ||= { armorPods: 0, quantumPods: 0 };
+    // 缓冲仓持「单位」（50 单位/舱）→ 吸收时换算为整舱，零头单位留在缓冲仓
+    const armorRes = ['alloy', 'shipModule'];
+    for (const r of armorRes) {
+      if (buf[r] > 0) {
+        const pods = Math.floor(buf[r] / POD_CAPACITY_UNITS);
+        if (pods > 0) {
+          shipyard.titanAssembly.armorPods += pods;
+          buf[r] -= pods * POD_CAPACITY_UNITS;
+        }
+      }
+    }
+    if (buf.quantumCore >= POD_CAPACITY_UNITS) {
+      const pods = Math.floor(buf.quantumCore / POD_CAPACITY_UNITS);
+      shipyard.titanAssembly.quantumPods += pods;
+      buf.quantumCore -= pods * POD_CAPACITY_UNITS;
+    }
+    const ta = shipyard.titanAssembly;
+    if (ta.armorPods >= TITAN_ARMOR_PODS && ta.quantumPods >= TITAN_QUANTUM_PODS && !shipyard.titanBuilt) {
+      ta.armorPods -= TITAN_ARMOR_PODS;
+      ta.quantumPods -= TITAN_QUANTUM_PODS;
+      // 泰坦级无畏巨舰合拢龙骨（物料已由弹射舱直供，造舰不再扣账本）
+      const ship = createShip(world, {
+        factionId: fid,
+        hullId: 'hull_titan',
+        moduleIds: [],
+        name: '泰坦级无畏巨舰',
+        systemId: sys.id,
+      });
+      shipyard.titanBuilt = (shipyard.titanBuilt || 0) + 1;
+      out.titanLaid = true;
+      out.shipId = ship.id;
+      chronicle(world, 'economy', `泰坦级无畏巨舰龙骨合拢：行星货运弹射供应链打通天地造舰闭环`, { planetId: planet.id, shipId: ship.id });
+      emit(world, 'TitanKeelLaid', { planetId: planet.id, shipId: ship.id, systemId: sys.id }, 'fleet');
+    }
+  }
+
+  // 2/3) 余量：跨星系班轮占位（母星系无中转站时直接市场倾销——v0.4 先打通货币闭环）
+  const POD_VALUE = { ferro: 120, silicate: 90, alloy: 240, conductor: 320, shipModule: 900, quantumCore: 1500 };
+  for (const r of Object.keys(buf)) {
+    if (buf[r] > 0) {
+      out.marketCredits += (POD_VALUE[r] || 150) * buf[r];
+      buf[r] = 0;
+    }
+  }
+  if (out.marketCredits > 0) {
+    const led = world.economy.ledgers[fid];
+    if (led) led.balances.credits = (led.balances.credits || 0) + out.marketCredits;
+    emit(world, 'OrbitalBufferMarketSold', { planetId: planet.id, credits: out.marketCredits }, 'economy');
+  }
+  return out;
+}
+
+Object.assign(__exports, { POD_CAPACITY_UNITS, TITAN_ARMOR_PODS, TITAN_QUANTUM_PODS, LAUNCH_E0_MWH, LAUNCH_BETA, CATAPULT_IDX, launchEnergyMWh, feedCatapult, stepCatapult, resIdxToId, resIdToIdx, settleOrbitalBuffer });
+
+});
+__register("src/domain/industry/planetaryLogistics.js", function (__exports, __require) {
+/**
+ * domain/industry/planetaryLogistics.js — 行星局部空间物流（doc19 v0.4 WP-1/WP-2/WP-3）
+ *
+ * 三级工业模拟架构（doc16 §4.7）的 L2 层：行星局部电网 + 样条传送带 + 多级加工厂。
+ *
+ * FFF #176 铁律（doc17 §3.2 / doc19 红线 2）：传送带上的货箱严禁创建独立对象——
+ * 整条样条带仅以 12 元组紧凑整型数组持久化，步进只做首尾间距整数加减与
+ * 位掩码位移，复杂度严格 O(1)；并查集电网仅在放置/拆除时重建（非 60Hz）。
+ *
+ * 确定性红线：零 Math.random()、零 world.rng 消费。
+ * 持久化预算：满载 64 节点 + 48 带 planet.ind ≤ 15 KB（GATE-06 IND-05）。
+ */
+
+const { UnionFind: UnionFind } = __require("src/core/spatial.js");
+const { clamp: clamp } = __require("src/core/math.js");
+
+// ———— 紧凑元组下标契约（doc19 WP-1/WP-2；doc17 §5.2 原型 2 同表） ————————
+
+/** 工业节点 13 元组：[id, defIdx, x_dm, z_dm, y_dm, rot, state, recipeIdx, prog_permille, in0, in1, out0, gridId] */
+const NODE_IDX = Object.freeze({
+  ID: 0, DEF: 1, X_DM: 2, Z_DM: 3, Y_DM: 4, ROT: 5,
+  STATE: 6, RECIPE: 7, PROG: 8, IN0: 9, IN1: 10, OUT0: 11, GRID: 12,
+});
+
+/** 样条传送带 12 元组：[lineId, fromNode, fromSlot, toNode, toSlot, tier, length_dm, headGap_mm, tailGap_mm, resTypeIdx, itemCount, occupancyMask32] */
+const BELT_IDX = Object.freeze({
+  ID: 0, FROM: 1, FROM_SLOT: 2, TO: 3, TO_SLOT: 4, TIER: 5,
+  LEN_DM: 6, HEAD_MM: 7, TAIL_MM: 8, RES: 9, COUNT: 10, MASK: 11,
+});
+
+/** 节点状态位（state 字段） */
+const NODE_STATE = Object.freeze({ OFFLINE: 0, ACTIVE: 1, BLOCKED: 2, NO_POWER: 3 });
+
+/** 传送带档位速度（mm/s，Tier 1..3）与标准货箱间距（1m 一箱，32 槽位对应 mask32） */
+const ITEM_SPACING_MM = 1000;
+const BELT_SPEED_MM_S = Object.freeze([0, 1875, 3750, 5625]);
+const BELT_MAX_ITEMS = 32;
+
+/** 输入/输出槽容量（节点缓冲上限，doc19 IND-01 守恒口径） */
+const SLOT_CAP = 20;
+
+/** 惰性初始化 planet.ind（doc22 WP-4 v3 schema 同形；幂等） */
+function ensurePlanetInd(planet) {
+  if (planet.ind && planet.ind.v === 1) return planet.ind;
+  planet.ind = { v: 1, nodes: [], belts: [], grids: [], splitterParity: {}, catapult: null, orbitalBuffer: {} };
+  return planet.ind;
+}
+
+/**
+ * 并查集电网拓扑重建（仅放置/拆除电力建筑时调用一次，严禁每帧重算）。
+ * 连接半径取两端 wireRadiusM 最大值 ×10（米→分米）。
+ * @param {object} indState planet.ind
+ * @param {Array<object>} buildingDefs BUILDINGS 定义数组（含 wireRadiusM/supplyRadiusM）
+ */
+function rebuildPowerGrids(indState, buildingDefs) {
+  const nodes = indState.nodes || [];
+  const uf = new UnionFind(nodes.map((n) => n[NODE_IDX.ID]));
+
+  for (let i = 0; i < nodes.length; i++) {
+    const a = nodes[i];
+    const defA = buildingDefs[a[NODE_IDX.DEF]];
+    const rA = (defA && defA.wireRadiusM) || 0;
+    for (let j = i + 1; j < nodes.length; j++) {
+      const b = nodes[j];
+      const defB = buildingDefs[b[NODE_IDX.DEF]];
+      const rB = (defB && defB.wireRadiusM) || 0;
+      const maxLinkDm = Math.max(rA, rB) * 10;
+      if (maxLinkDm <= 0) continue;
+      const dx = a[NODE_IDX.X_DM] - b[NODE_IDX.X_DM];
+      const dz = a[NODE_IDX.Z_DM] - b[NODE_IDX.Z_DM];
+      if (dx * dx + dz * dz <= maxLinkDm * maxLinkDm) {
+        uf.union(a[NODE_IDX.ID], b[NODE_IDX.ID]);
+      }
+    }
+  }
+
+  const comps = uf.components();
+  const gridMap = new Map();
+  indState.grids = comps.map((memberIds, idx) => {
+    const gid = idx + 1;
+    for (const id of memberIds) gridMap.set(id, gid);
+    return { id: gid, genKW: 0, loadKW: 0, accMWh: 0, accMaxMWh: 0, etaPermille: 1000 };
+  });
+  for (const n of nodes) {
+    n[NODE_IDX.GRID] = gridMap.get(n[NODE_IDX.ID]) || 0;
+  }
+  return indState.grids;
+}
+
+/**
+ * FFF #176 O(1) 相对间距传送带步进器（严禁遍历带上每个货箱）。
+ * 整体推进仅 headGap_mm/tailGap_mm 两次整数加减；队首移交/队尾喂入各至多 1 箱/次。
+ * @param {Array<number>} belt 12 元组（原地修改）
+ * @param {Array<number>|null} srcNode 上游建筑元组（out0 喂入）
+ * @param {Array<number>|null} dstNode 下游建筑元组（in0/in1 接收）
+ * @param {number} dtSeconds 步进秒数
+ * @param {number} etaPermille 所属电网供电充足率（0..1000；0 = 停转）
+ */
+function stepTransportLineO1(belt, srcNode, dstNode, dtSeconds, etaPermille = 1000) {
+  const tier = belt[BELT_IDX.TIER] || 1;
+  const speedMm = (BELT_SPEED_MM_S[tier] || 1875) * (etaPermille / 1000);
+  const deltaMm = Math.round(speedMm * dtSeconds);
+  if (deltaMm <= 0) return;
+
+  const totalLenMm = belt[BELT_IDX.LEN_DM] * 100;
+  let count = belt[BELT_IDX.COUNT];
+
+  // 1. O(1) 整体推进：队首距终点 / 队尾距起点
+  if (count > 0) {
+    belt[BELT_IDX.HEAD_MM] = Math.max(0, belt[BELT_IDX.HEAD_MM] - deltaMm);
+    belt[BELT_IDX.TAIL_MM] = Math.min(totalLenMm, belt[BELT_IDX.TAIL_MM] + deltaMm);
+  } else {
+    belt[BELT_IDX.HEAD_MM] = totalLenMm;
+    belt[BELT_IDX.TAIL_MM] = totalLenMm;
+  }
+
+  // 2. 队首移交下游输入口（headGap 归零且下游缓冲未满）
+  const dstSlot = belt[BELT_IDX.TO_SLOT] === 1 ? NODE_IDX.IN1 : NODE_IDX.IN0;
+  if (count > 0 && belt[BELT_IDX.HEAD_MM] === 0 && dstNode && dstNode[dstSlot] < SLOT_CAP) {
+    dstNode[dstSlot] += 1;
+    count -= 1;
+    belt[BELT_IDX.COUNT] = count;
+    belt[BELT_IDX.MASK] = (belt[BELT_IDX.MASK] >>> 1) >>> 0;
+    belt[BELT_IDX.HEAD_MM] = count > 0 ? ITEM_SPACING_MM : totalLenMm;
+  }
+
+  // 3. 上游输出口喂入队尾（tailGap ≥ 1m 且上游有产物）
+  if (count < BELT_MAX_ITEMS && belt[BELT_IDX.TAIL_MM] >= ITEM_SPACING_MM && srcNode && srcNode[NODE_IDX.OUT0] > 0) {
+    srcNode[NODE_IDX.OUT0] -= 1;
+    belt[BELT_IDX.MASK] = (belt[BELT_IDX.MASK] | (1 << count)) >>> 0;
+    count += 1;
+    belt[BELT_IDX.COUNT] = count;
+    belt[BELT_IDX.TAIL_MM] = 0;
+    if (count === 1) belt[BELT_IDX.HEAD_MM] = totalLenMm;
+  }
+}
+
+/**
+ * 四向分流器单箱路由（doc19 WP-3；parity 1-bit 状态保证绝对确定性）。
+ * 模式 0 Round-Robin 奇偶轮询 / 模式 1 Priority 主副路 / 模式 2 ItemFilter 过滤。
+ * @param {number} mode 0/1/2
+ * @param {number} parityState 调用方维护的 1-bit 台账（按带独立）
+ * @param {number} resId 输入资源类型 idx（过滤模式比对 node RECIPE 槽）
+ * @param {number} filterResId 过滤模式的目标资源 idx
+ * @returns {{port:0|1, parity:number}} port: 0=主路(out0)，1=副路(in1 复用)；parity 回写
+ */
+function routeSplitter(mode, parityState, resId, filterResId) {
+  if (mode === 2) {
+    return { port: resId === filterResId ? 0 : 1, parity: parityState };
+  }
+  if (mode === 1) return { port: 0, parity: parityState }; // 主路优先（满载溢出由调用方判）
+  const p = parityState & 1;
+  return { port: p, parity: parityState ^ 1 };
+}
+
+/**
+ * 透明瓶颈效率分解公式（doc16 §4.10 / doc19 WP-3）：
+ * P_actual = P_base × F_power × F_input × F_transport × F_staff × F_environment
+ * UI 面板必须逐项展示（杜绝盲猜停工根因）。
+ */
+function computeProductionEfficiency(node, grid, planet) {
+  const fPower = grid ? grid.etaPermille / 1000 : 0.0;
+  const fInput = node[NODE_IDX.IN0] > 0 || node[NODE_IDX.IN1] > 0 ? 1.0 : 0.0;
+  const fTransport = node[NODE_IDX.OUT0] < SLOT_CAP ? 1.0 : 0.2; // 输出口未堵塞
+  const fStaff = planet && planet.colony && Number.isFinite(planet.colony.staffingEta)
+    ? clamp(planet.colony.staffingEta, 0, 1) : 1.0;
+  const fEnv = planet && planet.threat && planet.threat.storm && planet.threat.storm[0] ? 0.7 : 1.0;
+
+  const actual = fPower * fInput * fTransport * fStaff * fEnv;
+  return {
+    actual,
+    factors: { fPower, fInput, fTransport, fStaff, fEnv },
+  };
+}
+
+/**
+ * 单星工业小时步进（HourlySystems production 阶段调用；仅遍历已激活工业星）。
+ * 1) 电网 etaPermille 结算（发电-负载-蓄电池）；2) 加工节点配方推进；
+ * 3) 传送带 O(1) 步进（12 子步/小时，保证多箱吞吐）；4) 分流器路由。
+ * @returns {{transferred:number, produced:number}} 本小时物流统计（守恒审计用）
+ */
+function stepPlanetIndustry(world, planet, indState, buildingDefs, dtHours = 1) {
+  const out = { transferred: 0, produced: 0, consumed: 0 };
+  const nodes = indState.nodes || [];
+  if (nodes.length === 0) return out;
+  const nodeById = new Map(nodes.map((n) => [n[NODE_IDX.ID], n]));
+
+  // 1) 电网供电充足率：genKW（发电类 def.powerUse>0 视为发电）− loadKW（<0 用电）
+  for (const g of indState.grids || []) {
+    g.genKW = 0;
+    g.loadKW = 0;
+    g.accMaxMWh = 0;
+  }
+  for (const n of nodes) {
+    const def = buildingDefs[n[NODE_IDX.DEF]];
+    const g = (indState.grids || []).find((x) => x.id === n[NODE_IDX.GRID]);
+    if (!g || !def) continue;
+    if (def.powerUse > 0) g.genKW += def.powerUse * 1000;
+    else g.loadKW += -def.powerUse * 1000;
+    if (def.accMaxMWh) g.accMaxMWh += def.accMaxMWh;
+  }
+  for (const g of indState.grids || []) {
+    if (g.loadKW <= 0) g.etaPermille = 1000;
+    else {
+      const supply = g.genKW + (g.accMWh > 0 ? 5000 : 0); // 蓄电池最大放电 5MW 兜底
+      g.etaPermille = Math.round(clamp(supply / g.loadKW, 0, 1) * 1000);
+      if (g.genKW < g.loadKW && g.accMWh > 0) {
+        g.accMWh = Math.max(0, g.accMWh - (g.loadKW - g.genKW) / 1000 * dtHours);
+      } else if (g.genKW > g.loadKW && g.accMaxMWh > 0) {
+        g.accMWh = Math.min(g.accMaxMWh, g.accMWh + (g.genKW - g.loadKW) / 1000 * dtHours * 0.5);
+      }
+    }
+  }
+
+  // 2) 加工节点配方推进（电网 etaPermille 线性降速；doc19 WP-3）
+  const SUB = 12; // 小时子步（传送带多箱吞吐）
+  for (const n of nodes) {
+    const def = buildingDefs[n[NODE_IDX.DEF]];
+    if (!def || !def.indRecipe) continue;
+    const g = (indState.grids || []).find((x) => x.id === n[NODE_IDX.GRID]);
+    const eta = g ? g.etaPermille : 0;
+    if (eta <= 0) { n[NODE_IDX.STATE] = NODE_STATE.NO_POWER; continue; }
+    const rec = def.indRecipe;
+    const needIn0 = rec.in0 || null;
+    const needIn1 = rec.in1 || null;
+    // 输入缓冲检查
+    if ((needIn0 && n[NODE_IDX.IN0] <= 0) || (needIn1 && n[NODE_IDX.IN1] <= 0)) {
+      n[NODE_IDX.STATE] = NODE_STATE.BLOCKED;
+      continue;
+    }
+    n[NODE_IDX.STATE] = NODE_STATE.ACTIVE;
+    const cycleS = rec.cycleS || 6;
+    const progressPerSub = (3600 / SUB) / cycleS * 1000 * (eta / 1000);
+    let producedThisHour = 0;
+    for (let k = 0; k < SUB; k++) {
+      if ((needIn0 && n[NODE_IDX.IN0] <= 0) || (needIn1 && n[NODE_IDX.IN1] <= 0)) {
+        n[NODE_IDX.STATE] = NODE_STATE.BLOCKED;
+        break;
+      }
+      n[NODE_IDX.PROG] += progressPerSub;
+      if (n[NODE_IDX.PROG] >= 1000) {
+        n[NODE_IDX.PROG] -= 1000;
+        if (needIn0) { n[NODE_IDX.IN0] -= 1; out.consumed++; }
+        if (needIn1) { n[NODE_IDX.IN1] -= 1; out.consumed++; }
+        if (n[NODE_IDX.OUT0] < SLOT_CAP) {
+          n[NODE_IDX.OUT0] += 1;
+          out.produced++;
+          producedThisHour++;
+        } else {
+          n[NODE_IDX.STATE] = NODE_STATE.BLOCKED; // 输出堵塞（原料已耗，产物丢弃计数为 0）
+        }
+      }
+    }
+    out.produced += producedThisHour;
+  }
+
+  // 3) 传送带 O(1) 步进 × 子步 + 分流器确定性路由
+  for (const belt of indState.belts || []) {
+    const src = nodeById.get(belt[BELT_IDX.FROM]) || null;
+    const dst = nodeById.get(belt[BELT_IDX.TO]) || null;
+    const srcGrid = src ? (indState.grids || []).find((x) => x.id === src[NODE_IDX.GRID]) : null;
+    const eta = srcGrid ? srcGrid.etaPermille : 1000; // 带由上游电网供电
+    for (let k = 0; k < SUB; k++) {
+      const before = belt[BELT_IDX.COUNT];
+      stepTransportLineO1(belt, src, dst, 3600 / SUB, eta);
+      if (belt[BELT_IDX.COUNT] < before) out.transferred++;
+    }
+    // 分流器消费：mode 存于 toNode.rot 低 2 位；parity 台账 indState.splitterParity[lineId]。
+    // 每子步自 in0 取 1 箱按模式路由至 out0（主路）/in1（副路复用为第二输出口）
+    if (dst) {
+      const def = buildingDefs[dst[NODE_IDX.DEF]];
+      if (def && def.splitter && dst[NODE_IDX.IN0] > 0) {
+        const mode = dst[NODE_IDX.ROT] & 0b11;
+        const parityKey = `s${belt[BELT_IDX.ID]}`;
+        const r = routeSplitter(mode, indState.splitterParity[parityKey] || 0, belt[BELT_IDX.RES], dst[NODE_IDX.RECIPE] || 0);
+        const outSlot = r.port === 0 ? NODE_IDX.OUT0 : NODE_IDX.IN1;
+        if (dst[outSlot] < SLOT_CAP) {
+          dst[NODE_IDX.IN0] -= 1;
+          dst[outSlot] += 1;
+          indState.splitterParity[parityKey] = r.parity;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * 新建样条传送带 12 元组（BuildConveyorBelt 命令执行体）。
+ * 立体交叉（doc19 WP-2.4）：与既有带水平相交时后铺带渲染层 y +1.8m + 微型立柱
+ * （纯渲染偏移，由 beltIsCrossed 渲染时重算，不占持久化元组）。
+ */
+function createBeltTuple(indState, { fromNode, fromSlot, toNode, toSlot, tier, lengthM, resTypeIdx }) {
+  const nextId = (indState.belts || []).reduce((m, b) => Math.max(m, b[BELT_IDX.ID]), 0) + 1;
+  return [
+    nextId,
+    fromNode, fromSlot, toNode, toSlot, tier,
+    Math.round(lengthM * 10),          // length_dm
+    Math.round(lengthM * 10 * 100),    // headGap_mm 初值 = 全长（空带）
+    Math.round(lengthM * 10 * 100),    // tailGap_mm 初值 = 全长
+    resTypeIdx, 0, 0,
+  ];
+}
+
+/** 传送带立体交叉判定（渲染层每帧重算；水平投影线段相交） */
+function beltIsCrossed(indState, belt) {
+  const a1 = nodePosOf(indState, belt[BELT_IDX.FROM]);
+  const a2 = nodePosOf(indState, belt[BELT_IDX.TO]);
+  if (!a1 || !a2) return false;
+  for (const other of indState.belts || []) {
+    if (other[BELT_IDX.ID] === belt[BELT_IDX.ID]) continue;
+    if (other[BELT_IDX.ID] > belt[BELT_IDX.ID]) continue; // 后铺带抬升（id 大者为后）
+    const b1 = nodePosOf(indState, other[BELT_IDX.FROM]);
+    const b2 = nodePosOf(indState, other[BELT_IDX.TO]);
+    if (!b1 || !b2) continue;
+    if (segIntersect(a1, a2, b1, b2)) return true;
+  }
+  return false;
+}
+
+function nodePosOf(indState, nodeId) {
+  const n = (indState.nodes || []).find((x) => x[NODE_IDX.ID] === nodeId);
+  return n ? { x: n[NODE_IDX.X_DM] / 10, z: n[NODE_IDX.Z_DM] / 10 } : null;
+}
+
+/** 线段相交判定（立体交叉检测用，水平投影） */
+function segIntersect(a1, a2, b1, b2) {
+  const d = (a2.x - a1.x) * (b2.z - b1.z) - (a2.z - a1.z) * (b2.x - b1.x);
+  if (Math.abs(d) < 1e-9) return false;
+  const t = ((b1.x - a1.x) * (b2.z - b1.z) - (b1.z - a1.z) * (b2.x - b1.x)) / d;
+  const u = ((b1.x - a1.x) * (a2.z - a1.z) - (b1.z - a1.z) * (a2.x - a1.x)) / d;
+  return t > 0.02 && t < 0.98 && u > 0.02 && u < 0.98;
+}
+
+Object.assign(__exports, { NODE_IDX, BELT_IDX, NODE_STATE, ITEM_SPACING_MM, BELT_SPEED_MM_S, BELT_MAX_ITEMS, SLOT_CAP, ensurePlanetInd, rebuildPowerGrids, stepTransportLineO1, routeSplitter, computeProductionEfficiency, stepPlanetIndustry, createBeltTuple, beltIsCrossed });
 
 });
 __register("src/domain/ground/monolithRuins.js", function (__exports, __require) {
@@ -28423,6 +29196,7 @@ const { BUILDINGS: BUILDINGS } = __require("src/content/buildings.js");
 const { derivePlanetEcology: derivePlanetEcology, ensurePlanetEco: ensurePlanetEco, getPlanetSpeciesCount: getPlanetSpeciesCount, getSpeciesStage: getSpeciesStage, SPECIES_STAGE: SPECIES_STAGE, ecoSurveyProgress: ecoSurveyProgress } = __require("src/domain/ground/xenobiology.js");
 const { ensurePlanetRuin: ensurePlanetRuin, deriveRuinLayout: deriveRuinLayout, towerRotOf: towerRotOf, RUIN_STAGE: RUIN_STAGE } = __require("src/domain/ground/monolithRuins.js");
 const { derivePlanetSeedsExtended: derivePlanetSeedsExtended } = __require("src/domain/ground/planetSeeds.js");
+const { NODE_IDX: NODE_IDX, BELT_IDX: BELT_IDX, beltIsCrossed: beltIsCrossed } = __require("src/domain/industry/planetaryLogistics.js");
 const { faunaPhaseOffset: faunaPhaseOffset } = __require("src/render/gl/BioFloraPass.js");
 
 // ———— 常量 ————————————————————————————————————————————————
@@ -28631,6 +29405,8 @@ const BUILD_CATEGORY_IDS = [
   'mining', 'refining', 'industry', 'agri', 'science',
   'service', 'military', 'admin', 'energy', 'default', 'selector',
   ...LANDMARK_PREFAB_IDS,
+  // doc19 WP-5：工业槽位追加（18..20；0..17 索引稳定不动）
+  'pylon', 'splitter', 'catapult',
 ];
 const MESH_OF_CATEGORY = (cat) => {
   const i = BUILD_CATEGORY_IDS.indexOf(String(cat || 'default'));
@@ -28806,7 +29582,7 @@ class BuildingMeshBatch {
   constructor(glc) {
     this.glc = glc;
     this.gl = glc.gl;
-    this.cap = 192;                       // 实例容量（建筑 + 目标物 + 拾取物 + 地标 + 选择框）
+    this.cap = 384;                       // doc19 WP-5：扩容（建筑 + 目标物 + 拾取物 + 地标 + 选择框 + 工业节点）
     this._count = 0;
 
     // —— 网格图集（逐顶点 aMesh）：九大类 + 兜底 + 选择框 + 七大旗舰地标 ——
@@ -31247,6 +32023,9 @@ const GroundView = {
       groundBuildings,
       center: [centerFx, centerFz],
       categoryOf: (defId) => {
+        // doc19 WP-5：工业建筑专用图集槽位（输电塔/分流器/弹射井）
+        const SLOT_OF = { bld_power_pylon: 'pylon', bld_splitter: 'splitter', bld_freight_catapult: 'catapult' };
+        if (SLOT_OF[defId]) return SLOT_OF[defId];
         const def = BUILDINGS.find((x) => x.id === defId);
         return def ? def.category : 'default';
       },
@@ -31322,6 +32101,39 @@ const GroundView = {
         pts.push([x, y, z]);
       }
       paths.push({ pts, speed: 1.6, spacing: 1.1 });
+    }
+    // —— doc19 WP-5.2：planet.ind.belts 实体带（FFF #176 元组 → 渲染折线；
+    //    货箱视觉数由 itemCount 驱动，立体交叉带 y +1.8m 立柱） ——
+    if (this.planet && this.planet.ind && Array.isArray(this.planet.ind.belts)) {
+      const nodes = this.planet.ind.nodes || [];
+      for (const belt of this.planet.ind.belts) {
+        if (paths.length >= 24) break;
+        const a = nodes.find((nn) => nn[NODE_IDX.ID] === belt[BELT_IDX.FROM]);
+        const b = nodes.find((nn) => nn[NODE_IDX.ID] === belt[BELT_IDX.TO]);
+        if (!a || !b) continue;
+        const ax = a[NODE_IDX.X_DM] / 10, az = a[NODE_IDX.Z_DM] / 10;
+        const bx = b[NODE_IDX.X_DM] / 10, bz = b[NODE_IDX.Z_DM] / 10;
+        const len = Math.hypot(bx - ax, bz - az);
+        if (!(len >= 1)) continue;
+        const raised = beltIsCrossed(this.planet.ind, belt);
+        const n = Math.max(4, Math.ceil(len));
+        const pts = [];
+        for (let k = 0; k <= n; k++) {
+          const t = k / n;
+          const x = ax + (bx - ax) * t;
+          const z = az + (bz - az) * t;
+          const h = this._groundAt(x, z);
+          const y = (Number.isFinite(h) ? h + 0.15 : 0) + (raised ? 1.8 : 0);
+          pts.push([x, y, z]);
+        }
+        const tier = belt[BELT_IDX.TIER] || 1;
+        paths.push({
+          pts,
+          speed: 1.2 + tier * 0.7,
+          spacing: 1.0,
+          count: belt[BELT_IDX.COUNT],   // 货箱视觉数 = 真实带载（FFF #176 视觉同源）
+        });
+      }
     }
     return paths;
   },
@@ -33436,7 +34248,9 @@ function buildColonistMesh() {
 /** 各类别建筑基底半宽（米/体素；与各 case 主体占地对齐，供基座裙边取值） */
 const FOOTPRINT_HALF = {
   mining: 2.0, refining: 2.0, industry: 1.9, agri: 1.85, science: 1.6,
-  service: 1.5, military: 1.6, admin: 1.0, energy: 1.9, default: 1.4,
+  service: 1.5, military: 1.6, admin: 1.0, energy: 1.9,
+  pylon: 1.0, splitter: 1.3, catapult: 2.4,  // doc19 WP-5 新槽位
+  default: 1.4,
 };
 
 /**
@@ -33555,6 +34369,48 @@ function buildBuildingMesh(buildingCategory) {
       m.box(0, 1.85, 0, 0.6, 0.04, 0.6, COL.panel);
       m.beginPart('base');
       m.box(0, 0.1, 0, 1.9, 0.1, 1.9, COL.metalDark);
+      break;
+    }
+    case 'pylon': {
+      // doc19 WP-5：输电塔（四足桁架塔身 + 顶部横担 + 绝缘子对）
+      m.beginPart('legs');
+      m.box(-0.6, 1.4, -0.6, 0.09, 2.8, 0.09, COL.metal);
+      m.box(-0.6, 1.4, 0.6, 0.09, 2.8, 0.09, COL.metal);
+      m.box(0.6, 1.4, -0.6, 0.09, 2.8, 0.09, COL.metal);
+      m.box(0.6, 1.4, 0.6, 0.09, 2.8, 0.09, COL.metal);
+      m.beginPart('crossarm');
+      m.box(0, 2.85, 0, 1.7, 0.08, 0.08, COL.metalDark);
+      m.box(0, 2.65, 0, 0.08, 0.08, 1.2, COL.metalDark);
+      m.beginPart('insulators');
+      m.box(-0.8, 2.7, 0, 0.06, 0.22, 0.06, COL.panel);
+      m.box(0.8, 2.7, 0, 0.06, 0.22, 0.06, COL.panel);
+      m.box(0, 2.7, -0.55, 0.06, 0.22, 0.06, COL.panel);
+      m.box(0, 2.7, 0.55, 0.06, 0.22, 0.06, COL.panel);
+      break;
+    }
+    case 'splitter': {
+      // doc19 WP-5：四向分流器（低平枢纽 + 四向溜槽 + 状态灯）
+      m.beginPart('hub');
+      m.chamferBox(0, 0.35, 0, 1.0, 0.35, 1.0, 0.10, COL.metal);
+      m.beginPart('chutes');
+      m.box(0, 0.22, 1.1, 0.5, 0.16, 0.5, COL.turretDark);
+      m.box(0, 0.22, -1.1, 0.5, 0.16, 0.5, COL.turretDark);
+      m.box(1.1, 0.22, 0, 0.5, 0.16, 0.5, COL.turretDark);
+      m.box(-1.1, 0.22, 0, 0.5, 0.16, 0.5, COL.turretDark);
+      m.beginPart('lamp');
+      m.box(0, 0.85, 0, 0.10, 0.14, 0.10, COL.panel);
+      break;
+    }
+    case 'catapult': {
+      // doc19 WP-5：轨道货运弹射井（后倾发射导轨 + 配电基座 + 电容环）
+      m.beginPart('rail');
+      m.box(0, 2.4, -0.4, 0.5, 0.10, 4.2, COL.metal);
+      m.box(0, 1.35, 1.6, 0.5, 0.10, 0.5, COL.turretDark);
+      m.beginPart('tower');
+      m.box(0, 1.3, -1.2, 0.7, 2.6, 0.7, COL.metalDark);
+      m.beginPart('caps');
+      m.box(0, 2.75, -1.0, 0.5, 0.5, 0.5, COL.panel);
+      m.box(0, 0.25, 0, 2.2, 0.5, 1.2, COL.concrete);
       break;
     }
     default: {
@@ -38729,7 +39585,12 @@ class PlanetSurface3D {
         total += l;
       }
       if (!(total > 0)) continue;
-      const count = Math.min(Math.floor(total / spacing), CAP_CRATES - crates);
+      // doc19 WP-5.2：path.count 存在时货箱视觉数 = 实体带载（FFF #176 视觉同源；
+      // 缺省维持相位满铺口径以兼容 v0.1 采掘装饰带）
+      const wantCount = path.count != null
+        ? Math.min(path.count, Math.floor(total / spacing))
+        : Math.floor(total / spacing);
+      const count = Math.min(wantCount, CAP_CRATES - crates);
       for (let k = 0; k < count; k++) {
         let s = (time * speed + k * spacing) % total;
         let i = 0;
@@ -51514,6 +52375,29 @@ registerHourly('production', (world) => {
     tickColonyConstruction(world, colony);
   }
   tickShipyards(world);
+  // —— doc19 v0.4 WP-4：行星局部工业 + 货运弹射井 + 近地中转站三级分发 ——
+  //   仅遍历已激活工业星（planet.ind），零 planet.ind 星球为 0 开销（金快照零漂移）
+  for (const pid of Object.keys(world.entities.planets).sort()) {
+    const planet = world.entities.planets[pid];
+    if (!planet.ind || !planet.ind.v) continue;
+    const colony = Object.values(world.entities.colonies).find((cc) => cc.planetId === pid);
+    const fid = colony ? colony.factionId : world.playerFactionId;
+    const defs = BUILDINGS_ALL;
+    stepPlanetIndustry(world, planet, planet.ind, defs, 1);
+    const grid0 = (planet.ind.grids || [])[0] || null;
+    const cat0 = planet.ind.catapult;
+    if (cat0 && grid0) {
+      // 弹射井由其所属子电网供能（取 catapult 节点的 gridId）
+      const catNode = (planet.ind.nodes || []).find((n) => n[NODE_IDX.DEF] >= 0
+        && BUILDINGS_ALL[n[NODE_IDX.DEF]] && BUILDINGS_ALL[n[NODE_IDX.DEF]].catapult);
+      const grid = catNode
+        ? (planet.ind.grids || []).find((g) => g.id === catNode[NODE_IDX.GRID]) || grid0
+        : grid0;
+      stepCatapult(world, planet, planet.ind, grid, 1);
+      settleOrbitalBuffer(world, planet, planet.ind);
+    }
+    void fid;
+  }
 });
 
 registerHourly('research', (world) => {
