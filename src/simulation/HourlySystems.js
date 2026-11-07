@@ -80,6 +80,29 @@ registerHourly('production', (world) => {
     tickColonyConstruction(world, colony);
   }
   tickShipyards(world);
+  // —— doc19 v0.4 WP-4：行星局部工业 + 货运弹射井 + 近地中转站三级分发 ——
+  //   仅遍历已激活工业星（planet.ind），零 planet.ind 星球为 0 开销（金快照零漂移）
+  for (const pid of Object.keys(world.entities.planets).sort()) {
+    const planet = world.entities.planets[pid];
+    if (!planet.ind || !planet.ind.v) continue;
+    const colony = Object.values(world.entities.colonies).find((cc) => cc.planetId === pid);
+    const fid = colony ? colony.factionId : world.playerFactionId;
+    const defs = BUILDINGS_ALL;
+    stepPlanetIndustry(world, planet, planet.ind, defs, 1);
+    const grid0 = (planet.ind.grids || [])[0] || null;
+    const cat0 = planet.ind.catapult;
+    if (cat0 && grid0) {
+      // 弹射井由其所属子电网供能（取 catapult 节点的 gridId）
+      const catNode = (planet.ind.nodes || []).find((n) => n[NODE_IDX.DEF] >= 0
+        && BUILDINGS_ALL[n[NODE_IDX.DEF]] && BUILDINGS_ALL[n[NODE_IDX.DEF]].catapult);
+      const grid = catNode
+        ? (planet.ind.grids || []).find((g) => g.id === catNode[NODE_IDX.GRID]) || grid0
+        : grid0;
+      stepCatapult(world, planet, planet.ind, grid, 1);
+      settleOrbitalBuffer(world, planet, planet.ind);
+    }
+    void fid;
+  }
 });
 
 registerHourly('research', (world) => {

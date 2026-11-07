@@ -212,4 +212,21 @@ export const HULLS = [
     },
     slots: { high: 1, mid: 2, low: 2 },
   },
+  {
+    id: 'hull_titan',
+    nameZh: '泰坦级无畏巨舰',
+    nameEn: 'Titan Dreadnought',
+    descZh: '终局旗舰：仅能由行星货运弹射供应链（20 装甲模块舱 + 5 量子核心舱）合拢龙骨的超旗舰体，集舰队火力与指挥中枢于一身。',
+    descEn: 'Endgame flagship: keel laid only by the planetary freight-catapult supply chain (20 armor module pods + 5 quantum core pods).',
+    category: 'capital',
+    techReq: 'tech_precursor_mass_catapult',
+    cost: { credits: 20000, alloy: 1200 },
+    buildHours: 480,
+    baseStats: {
+      structure: 2600, armor: 160, shield: 120, power: 420, cpu: 160,
+      strategicSpeed: 2.0, fuelCap: 800, cargo: 600, crew: 90,
+      sensor: 90, signature: 120, lockons: 6, hangar: 2,
+    },
+    slots: { high: 6, mid: 5, low: 6 },
+  },
 ];

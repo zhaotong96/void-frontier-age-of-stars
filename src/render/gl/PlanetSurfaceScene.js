@@ -45,6 +45,7 @@ import {
 import { PlanetTerrainMesh } from './PlanetTerrainMesh.js';
 import { PlanetAtmosphere } from './PlanetAtmosphere.js';
 import { PlanetWater, tideWaterLevel, WATERLEVEL_NONE } from './PlanetWater.js';
+import { BioFloraPass } from './BioFloraPass.js';
 import { buildTerrainField } from '../../domain/ground/terrainField.js';
 
 function clamp(v, lo, hi) {
@@ -78,11 +79,16 @@ export class PlanetSurfaceScene {
     this._terrain = null;
     this._atmosphere = null;
     this._water = null;
+    // —— doc18 WP-4：异星生态双通道实例化渲染器（植被风摆 1 DC + 动物群 1 DC） ——
+    this._bio = null;
+    this._bioColA = null;      // 主题植被基色（setTheme 时从 matColors 提取）
+    this._bioColB = null;      // 主题植被强调色
     if (canGL) {
       this._terrain = new PlanetTerrainMesh(glc, this.tier);
       this._atmosphere = new PlanetAtmosphere(glc, this.tier);
       // —— doc9 P0-3：五层水下光学海面层挂载（地形之后、天气之前绘制） ——
       this._water = new PlanetWater(glc, this.tier);
+      this._bio = new BioFloraPass(glc, this.tier);
       if (opts.planetRadiusMeters) this._terrain.setPlanetRadius(opts.planetRadiusMeters);
     }
 
@@ -143,6 +149,11 @@ export class PlanetSurfaceScene {
         sun: t.sun || tt.sun,
         fog: t.fog || tt.fog,
       });
+      // —— doc18 WP-4：BioFloraPass 主题植被色提取（matColors[2] 生态高光 / [0] 地表基色） ——
+      if (Array.isArray(tt.matColors) && tt.matColors.length >= 3) {
+        this._bioColA = tt.matColors[2];
+        this._bioColB = tt.matColors[0];
+      }
     }
     if (this._atmosphere) {
       this._atmosphere.setTheme({
@@ -309,11 +320,31 @@ export class PlanetSurfaceScene {
       }).drawCalls;
     }
 
-    // —— 3. 对象占位 pass（Phase 1 切片：空数组/未提供时安全跳过，0 dc；
+    // —— 3. 异星生态双通道（doc18 WP-4：BioFloraPass 植被风摆 + 动物群落，≤2 DC） ——
+    if (this._bio && rd.bioInstances) {
+      this._bio.sync(rd.bioInstances);
+      const bioCol = this._bioColA || [0.24, 0.42, 0.22];
+      const bioColB = this._bioColB || [0.45, 0.60, 0.30];
+      dc += this._bio.draw(gl, {
+        vp: cam.vp,
+        eye: cam.eye,
+        time,
+        hdr,
+        worldOffset: this._worldOffset || [0, 0, 0],
+        colA: bioCol,
+        colB: bioColB,
+        biolumePulse: (this._terrain._themeFx && this._terrain._themeFx[1] != null)
+          ? Math.max(0.2, this._terrain._themeFx[1]) : 1.0,
+        windAngle: 0.8,
+        windStrength: 0.4,
+      }).drawCalls;
+    }
+
+    // —— 4. 对象占位 pass（Phase 1 切片：空数组/未提供时安全跳过，0 dc；
     //      实例化绘制由后续对象 pass 波次在此接入） ——
     dc += this._drawActorPlaceholders(gl, rd.actors);
 
-    // —— 4. 天气粒子（地形之后、深度测试遮挡、加性；密度 0 时不产生 dc） ——
+    // —— 5. 天气粒子（地形之后、深度测试遮挡、加性；密度 0 时不产生 dc） ——
     dc += this._atmosphere.drawWeather(gl, {
       vp: cam.vp, view: cam.view, eye: cam.eye, time, hdr,
     });
@@ -433,9 +464,11 @@ export class PlanetSurfaceScene {
     if (this._terrain) { try { this._terrain.destroy(); } catch (_) { /* 失效句柄安全 */ } }
     if (this._atmosphere) { try { this._atmosphere.destroy(); } catch (_) { /* 同上 */ } }
     if (this._water) { try { this._water.destroy(); } catch (_) { /* 同上 */ } }
+    if (this._bio) { try { this._bio.destroy(); } catch (_) { /* 同上 */ } this._bio = null; }
     this._terrain = new PlanetTerrainMesh(glc, this.tier);
     this._atmosphere = new PlanetAtmosphere(glc, this.tier);
     this._water = new PlanetWater(glc, this.tier);
+    this._bio = new BioFloraPass(glc, this.tier);
     if (this._worldOffset) this._water.setWorldOffset(this._worldOffset);
     if (this._planetInfo && this._planetInfo.visualRadiusMeters) {
       this._terrain.setPlanetRadius(this._planetInfo.visualRadiusMeters);
@@ -468,9 +501,11 @@ export class PlanetSurfaceScene {
     if (this._terrain) { try { this._terrain.destroy(); } catch (_) { /* 失效句柄安全 */ } }
     if (this._atmosphere) { try { this._atmosphere.destroy(); } catch (_) { /* 同上 */ } }
     if (this._water) { try { this._water.destroy(); } catch (_) { /* 同上 */ } }
+    if (this._bio) { try { this._bio.destroy(); } catch (_) { /* 同上 */ } }
     this._terrain = null;
     this._atmosphere = null;
     this._water = null;
+    this._bio = null;
     this._field = null;
     this._inited = false;
   }

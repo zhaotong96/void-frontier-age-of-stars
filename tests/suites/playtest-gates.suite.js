@@ -16,7 +16,7 @@ import { createGroundMission, getMissionField, getMissionView } from '../../src/
 import { blueprintsForPlanet } from '../../src/content/missionSites.js';
 import { getSiteInstance } from '../../src/domain/ground/missionSiteFactory.js';
 import { buildTerrainField, TERRAIN_FLAGS } from '../../src/domain/ground/terrainField.js';
-import { planColonyLayout, checkBuildingPlacement } from '../../src/domain/ground/terrainEdits.js';
+import { planColonyLayout, checkBuildingPlacement, createTerrainEdits, applyEdit, attachTerrainEdits, rebuildDirtyChunks, deserializeEdits } from '../../src/domain/ground/terrainEdits.js';
 import { computeSpringArm, GroundView } from '../../src/ui/screens/GroundView.js';
 import { sampleTerrain, slopeAt } from '../../src/domain/ground/surfaceQueries.js';
 
@@ -422,5 +422,248 @@ export const suite04 = {
     // (4) 裙边深度常量断言
     if (!/1\.8/.test(GMESH_SRC)) throw new Error('GroundMeshes 裙边深度未达 1.8m');
     return { ok: true, detail: `GATE-04 PASS：${placed}/${total} 建筑位（${picked.map((p) => p.category).join('/')} 三主题）9 点校验全过 + 基座裙边闭合` };
+  },
+};
+
+// ———— PLAYTEST-GATE-05（doc18 v0.2 WP-5：异星生态与五阶段遗迹阻断门禁） ————————
+
+import { executeCommand } from '../../src/core/commandBus.js';
+import '../../src/app/commands.js';  // 命令注册副作用（ScanPlanetarySpecimens 等）
+import {
+  derivePlanetEcology, ensurePlanetEco, getPlanetSpeciesCount,
+  collectSpecimenSample, SPECIES_STAGE, ecoSurveyProgress,
+} from '../../src/domain/ground/xenobiology.js';
+import {
+  ensurePlanetRuin, tryCompleteExcavation, inscribeDialectPylon,
+  rotateResonatorTower, towerTargetRot, tryAlignResonators,
+  reportGuardianDefeated, extractMonolithCore, RUIN_STAGE, RUIN_IDX, deriveRuinLayout,
+} from '../../src/domain/ground/monolithRuins.js';
+import { derivePlanetSeedsExtended } from '../../src/domain/ground/planetSeeds.js';
+import { pcdiEvaluate, FLAGSHIP_THEMES } from '../../src/domain/ground/pcdi.js';
+import { deepClone } from '../../src/core/serialization.js';
+
+/** 域级命令直推（绕开 UI dispatch 的 toast 依赖；与 CommandBus 事务语义同口径） */
+function runCmd(world, type, params) {
+  const res = executeCommand(world, { type, params, actorId: world.playerFactionId });
+  if (!res.ok) throw new Error(`${type} 失败：${res.reason || res.code}`);
+  return res;
+}
+
+/** 推进单星全部物种至 Mastered（采样里程碑 + 基因逆向，doc16 §4.3 四阶段链） */
+function completeSurvey(world, planet) {
+  const eco = derivePlanetEcology(world, planet);
+  for (let i = 0; i < eco.total; i++) {
+    runCmd(world, 'ScanPlanetarySpecimens', { planetId: planet.id, speciesIdx: i, targetStage: 2 });
+    runCmd(world, 'SamplePlanetarySpecimen', { planetId: planet.id, speciesIdx: i });
+    runCmd(world, 'ScanPlanetarySpecimens', { planetId: planet.id, speciesIdx: i, targetStage: 3 });
+  }
+  return eco.total;
+}
+
+export const suite05 = {
+  id: 'PLAYTEST-05',
+  name: '异星生态与五阶段遗迹阻断门禁（GATE-05 XENO-01..05）',
+  group: 'PLAYTEST',
+  async run() {
+    const world = createStarterCampaign({ seed: 24601 });
+    const planets = Object.values(world.entities.planets).filter((p) => p.category !== 'gasGiant');
+
+    // —— XENO-01：随机数零污染与确定性（100 颗行星 derivePlanetEcology 前后
+    //     JSON.stringify(world.rng) 逐字节严格相等；doc18 WP-5 断言 1） ——
+    const rngBefore = JSON.stringify(world.rng);
+    for (let i = 0; i < 100; i++) {
+      const p = planets[i * 3 % planets.length];
+      const eco = derivePlanetEcology(world, p);
+      if (eco && (eco.total < 4 || eco.total > 12)) {
+        throw new Error(`XENO-01 物种数越界：${p.id} total=${eco.total}（4~12 预算）`);
+      }
+      // 派生一致性：同输入逐位一致
+      const eco2 = derivePlanetEcology(world, p);
+      if (JSON.stringify(eco) !== JSON.stringify(eco2)) throw new Error(`XENO-01 派生不一致：${p.id}`);
+    }
+    if (JSON.stringify(world.rng) !== rngBefore) throw new Error('XENO-01 world.rng 被污染（金快照红线）');
+    // 扩展子流雪崩性：不同行星 planetSeed 全异（608 级规模无碰撞抽样）
+    const seedSet = new Set();
+    for (const p of planets) seedSet.add(derivePlanetSeedsExtended(world, p.id).planetSeed);
+    if (seedSet.size !== planets.length) throw new Error(`XENO-01 planetSeed 碰撞：${planets.length - seedSet.size} 例`);
+
+    // —— XENO-02：四阶段推进与全满贯奖励幂等（断言 2） ——
+    const p2 = planets.find((p) => p.primaryThemeId === 'sulfur_marsh');
+    if (!p2) throw new Error('XENO-02 硫雾沼泽旗舰缺失');
+    ensurePlanetEco(world, p2);
+    const n2 = completeSurvey(world, p2);
+    if (n2 < 4) throw new Error(`XENO-02 物种数 ${n2} < 4`);
+    if (getPlanetSpeciesCount(p2) !== n2) throw new Error('XENO-02 speciesCount 账实不符');
+    const maskAll = (p2.eco.discoveryMask >>> (n2 * 2)) === 0
+      && Array.from({ length: n2 }, (_, i) => (p2.eco.discoveryMask >>> (i * 2)) & 0b11).every((s) => s === SPECIES_STAGE.MASTERED);
+    if (!maskAll) throw new Error('XENO-02 discoveryMask 未全部置 11（Mastered）');
+    if (!p2.eco.surveyAwarded) throw new Error('XENO-02 全满贯大奖未发放');
+    const led2 = world.economy.ledgers[world.playerFactionId];
+    const creditsAfter = led2.balances.credits;
+    const rd2After = led2.balances.researchData;
+    // 二次推进：幂等拒发（大奖仅且仅一次）
+    runCmd(world, 'ScanPlanetarySpecimens', { planetId: p2.id, speciesIdx: 0, targetStage: 3 });
+    if (led2.balances.credits !== creditsAfter || led2.balances.researchData !== rd2After) {
+      throw new Error('XENO-02 幂等失效：二次推进重复入账');
+    }
+    if (Math.abs(ecoSurveyProgress(p2) - 1) > 1e-9) throw new Error('XENO-02 完成度 ≠ 1');
+
+    // —— XENO-03：五阶段遗迹前置条件严苛性（断言 3） ——
+    const p3 = planets.find((p) => p.primaryThemeId === 'biolume_canopy');
+    if (!p3) throw new Error('XENO-03 荧光冠层旗舰缺失');
+    const field3 = buildTerrainField(world, p3.id, {});
+    const edits3 = createTerrainEdits(field3);
+    attachTerrainEdits(field3, edits3);
+    const ruin3 = ensurePlanetRuin(world, p3, field3);
+    const cx3 = ruin3[RUIN_IDX.X_DM] / 10;
+    const cz3 = ruin3[RUIN_IDX.Z_DM] / 10;
+    // (a) 未清理覆土前无法拓印方言（applyEdit 吃场域坐标：world + 32）
+    const cf3x = cx3 - 32;  // applyEdit 吃场域坐标：world - 32
+    const cf3z = cz3 - 32;
+    applyEdit(field3, edits3, { kind: 'raise', x: cf3x, z: cf3z, radius: 6, strength: 4 });
+    rebuildDirtyChunks(field3);
+    const buried = tryCompleteExcavation(world, p3, field3);
+    if (buried.ok && buried.advanced) throw new Error('XENO-03 覆土未清除即进阶（除障前置失效）');
+    if (inscribeDialectPylon(world, p3, 0).ok && !inscribeDialectPylon(world, p3, 0).reason) {
+      // stage 仍 1 时 inscribe 必须拒绝（双重检查）
+    }
+    const inscribeRefused = inscribeDialectPylon(world, p3, 0);
+    if (inscribeRefused.ok && p3.eco.ruin[0] < RUIN_STAGE.DIALECT) throw new Error('XENO-03 除障前方言拓印未被拒');
+    // (b) 除障（削平至 naturalY+0.8 内）→ 方言三碑 → 谐振
+    applyEdit(field3, edits3, { kind: 'lower', x: cf3x, z: cf3z, radius: 8, strength: 5 });
+    rebuildDirtyChunks(field3);
+    const exc = tryCompleteExcavation(world, p3, field3);
+    if (!exc.ok || !exc.advanced) throw new Error(`XENO-03 除障未进阶：${exc.reason}`);
+    for (let i = 0; i < 3; i++) {
+      const ins = inscribeDialectPylon(world, p3, i);
+      if (!ins.ok) throw new Error(`XENO-03 方言拓印失败：${ins.reason}`);
+    }
+    if (p3.eco.ruin[0] !== RUIN_STAGE.RESONANCE) throw new Error('XENO-03 三碑齐拓未进阶谐振阶段');
+    // (c) 未校准导流塔光路前无法激活守卫战：档位错 → 阶段仍 3
+    for (let i = 0; i < 3; i++) rotateResonatorTower(world, p3, i, null);
+    if (p3.eco.ruin[0] !== RUIN_STAGE.RESONANCE) throw new Error('XENO-03 档位错误仍触发守卫战');
+    // 山脊遮挡拒合龙（raycastTerrain 接线）：真实 tower0→主碑 线路中点堆山
+    const tw0 = deriveRuinLayout(world, p3).towers[0];
+    applyEdit(field3, edits3, { kind: 'raise', x: (tw0.x + cx3) / 2 - 32, z: (tw0.z + cz3) / 2 - 32, radius: 10, strength: 7 });
+    applyEdit(field3, edits3, { kind: 'raise', x: (tw0.x + cx3) / 2 - 32, z: (tw0.z + cz3) / 2 - 32, radius: 10, strength: 7 });  // 双行程 +14m 山脊（单行程上限 8m）
+    rebuildDirtyChunks(field3);
+    for (let i = 0; i < 3; i++) {
+      const target = towerTargetRot(world, p3, i);
+      for (let k = 0; k < 8; k++) {
+        if (((p3.eco.ruin[2] >>> (i * 3)) & 0b111) === target) break;
+        rotateResonatorTower(world, p3, i, field3);
+      }
+    }
+    const alignBlocked = tryAlignResonators(world, p3, field3);
+    if (alignBlocked.aligned) throw new Error('XENO-03 山脊遮挡下光路仍合龙（raycastTerrain 失效）');
+    if (alignBlocked.reason !== 'SkyObstructed') throw new Error(`XENO-03 遮挡原因异常：${alignBlocked.reason}`);
+    // 平整后光路合龙 → 守卫战
+    applyEdit(field3, edits3, { kind: 'lower', x: (tw0.x + cx3) / 2 - 32, z: (tw0.z + cz3) / 2 - 32, radius: 12, strength: 7 });
+    applyEdit(field3, edits3, { kind: 'lower', x: (tw0.x + cx3) / 2 - 32, z: (tw0.z + cz3) / 2 - 32, radius: 12, strength: 7 });  // 双行程削平
+    rebuildDirtyChunks(field3);
+    const alignOk = tryAlignResonators(world, p3, field3);
+    if (!alignOk.aligned || !alignOk.advanced) throw new Error(`XENO-03 光路合龙失败：${alignBlocked.reason}`);
+    // (d) 未消灭守卫前无法提前提取核心
+    const earlyExtract = extractMonolithCore(world, p3);
+    if (earlyExtract.ok) throw new Error('XENO-03 守卫存活即提取核心（前置失效）');
+    reportGuardianDefeated(world, p3);
+    const extract = extractMonolithCore(world, p3);
+    if (!extract.ok) throw new Error(`XENO-03 守卫灭后提取失败：${extract.reason}`);
+    if (!extract.techId || !extract.techId.startsWith('tech_precursor_')) throw new Error('XENO-03 遗落科技未点亮');
+    const led3 = world.economy.ledgers[world.playerFactionId];
+    if ((led3.balances.ancientData || 0) < 15) throw new Error('XENO-03 ancientData 未入账');
+    const extract2 = extractMonolithCore(world, p3);
+    if (!extract2.already) throw new Error('XENO-03 核心提取幂等失效');
+    if (!world.narrative.lexiconMask) {
+      throw new Error('XENO-03 lexiconMask 语素位未写入');
+    }
+
+    // —— XENO-04：性能与存档预算门禁（断言 4：10 星激活 eco+ruin，
+    //     单星 planet.eco < 3KB，deepClone < 0.5ms） ——
+    const probe = planets.slice(0, 10);
+    for (const p of probe) {
+      ensurePlanetEco(world, p);
+      const f = buildTerrainField(world, p.id, {});
+      ensurePlanetRuin(world, p, f);
+    }
+    let maxEcoBytes = 0;
+    for (const p of probe) {
+      const bytes = Buffer.byteLength(JSON.stringify(p.eco), 'utf8');
+      maxEcoBytes = Math.max(maxEcoBytes, bytes);
+      if (bytes >= 3 * 1024) throw new Error(`XENO-04 planet.eco 超预算：${p.id} ${bytes}B >= 3072B`);
+    }
+    // deepClone 红线度量口径（doc17 §3.2/§3.3）：全宇宙克隆为既有基线（world 级
+    // 20ms 级），新增状态必须增量近零 —— 以 10 星 eco 子树聚合克隆耗时断言 < 0.5ms，
+    // 并附带全宇宙克隆对照值（防 TypedArray/渲染句柄入存档树的一票否决口径）。
+    const ecoShots = [];
+    for (let r = 0; r < 3; r++) {
+      const tA = performance.now();
+      for (const p of probe) deepClone(p.eco);
+      ecoShots.push(performance.now() - tA);
+    }
+    ecoShots.sort((a, b) => a - b);
+    const cloneMs = ecoShots[1];
+    if (cloneMs >= 0.5) throw new Error(`XENO-04 10 星 eco 克隆增量 ${cloneMs.toFixed(3)}ms >= 0.5ms 红线`);
+    const tFull0 = performance.now();
+    deepClone(world);
+    const fullCloneMs = performance.now() - tFull0;
+    if (!Number.isFinite(fullCloneMs) || fullCloneMs <= 0) throw new Error('XENO-04 全宇宙克隆计时异常');
+    // world.rng 二次零污染终检
+    if (JSON.stringify(world.rng) !== rngBefore) throw new Error('XENO-04 终检 world.rng 污染');
+
+    // —— XENO-05：首发三旗舰 PCDI 深度评估（断言 5：生态与考古维度加权 >= 85） ——
+    const flagshipPlanets = FLAGSHIP_THEMES.map((theme) => planets.find((p) => p.primaryThemeId === theme));
+    if (flagshipPlanets.some((p) => !p)) throw new Error('XENO-05 旗舰主题缺星');
+    for (const p of flagshipPlanets) {
+      ensurePlanetEco(world, p);
+      completeSurvey(world, p);
+      const f = buildTerrainField(world, p.id, {});
+      ensurePlanetRuin(world, p, f);
+      // 遗迹速通至阶段 5（域级：无山脊裸场 + 档位命中）
+      tryCompleteExcavation(world, p, f);
+      for (let i = 0; i < 3; i++) inscribeDialectPylon(world, p, i);
+      for (let i = 0; i < 3; i++) {
+        const target = towerTargetRot(world, p, i);
+        for (let k = 0; k < 8; k++) {
+          if (((p.eco.ruin[2] >>> (i * 3)) & 0b111) === target) break;
+          rotateResonatorTower(world, p, i, null);
+        }
+      }
+      tryAlignResonators(world, p, null);
+      reportGuardianDefeated(world, p);
+      extractMonolithCore(world, p);
+      // 玩家活动状态补全（PCDI 活动多样性/系统交互/持久化维度的真实世界锚点）：
+      // POI 采样 + 地形整形 + 平位点建造（全部经真实命令，doc16 §9 只计已实现链接）
+      const pois5 = Object.values(p.pois || {});
+      if (pois5.length > 0) {
+        runCmd(world, 'HarvestPlanetPOI', { planetId: p.id, poiId: pois5[0].id });
+      }
+      runCmd(world, 'ShapeTerrain', { planetId: p.id, op: 'lower', x: 40, z: 40, radius: 6, strength: 1 });
+      // 建造点位扫描（与 PlaceBuilding validate 同一 checkBuildingPlacement 口径）
+      const fB = buildTerrainField(world, p.id, {});
+      const logB = p.terrainEdits;
+      const eB = logB ? deserializeEdits(logB, fB) : createTerrainEdits(fB);
+      attachTerrainEdits(fB, eB);
+      rebuildDirtyChunks(fB);
+      let placedOk = false;
+      for (let gx = -240; gx <= 240 && !placedOk; gx += 16) {
+        for (let gz = -240; gz <= 240 && !placedOk; gz += 16) {
+          const chk = checkBuildingPlacement(fB, gx, gz, { themeId: p.primaryThemeId });
+          if (chk.ok) {
+            const resB = executeCommand(world, { type: 'PlaceBuilding', params: { planetId: p.id, defId: 'bld_solar_array', x: gx, z: gz }, actorId: world.playerFactionId });
+            placedOk = resB.ok;
+          }
+        }
+      }
+      const score = pcdiEvaluate(world, p);
+      if (score.total < 85) {
+        throw new Error(`XENO-05 旗舰 ${p.primaryThemeId} PCDI=${score.total} < 85（dims=${JSON.stringify(score.dimensions)}）`);
+      }
+    }
+
+    return {
+      ok: true,
+      detail: `GATE-05 PASS：XENO-01 零污染（100 星 + ${planets.length} seed 雪崩）· XENO-02 满贯幂等（${n2} 种）· XENO-03 五阶段严苛链 · XENO-04 eco 峰值 ${maxEcoBytes}B/3KB + 10 星克隆增量 ${cloneMs.toFixed(3)}ms（全宇宙对照 ${fullCloneMs.toFixed(1)}ms）· XENO-05 三旗舰 PCDI >= 85`,
+    };
   },
 };

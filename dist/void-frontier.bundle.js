@@ -1223,6 +1223,8 @@ const { applyEdit: applyEdit, attachTerrainEdits: attachTerrainEdits, serializeE
 const { sampleTerrain: sampleTerrain } = __require("src/domain/ground/surfaceQueries.js");
 const { RNG: RNG } = __require("src/core/rng.js");
 const { emit: emit } = __require("src/core/eventBus.js");
+const { advanceSpeciesDiscovery: advanceSpeciesDiscovery, collectSpecimenSample: collectSpecimenSample, ensurePlanetEco: ensurePlanetEco } = __require("src/domain/ground/xenobiology.js");
+const { ensurePlanetRuin: ensurePlanetRuin, tryCompleteExcavation: tryCompleteExcavation, inscribeDialectPylon: inscribeDialectPylon, rotateResonatorTower: rotateResonatorTower, reportGuardianDefeated: reportGuardianDefeated, extractMonolithCore: extractMonolithCore } = __require("src/domain/ground/monolithRuins.js");
 
 function ownFleet(world, cmd) {
   const fleet = getEntity(world, 'fleets', cmd.params.fleetId || cmd.targetId);
@@ -1978,6 +1980,76 @@ registerCommand('HarvestTerrainOre', {
     emit(ctx.world, 'TerrainOreHarvested', {
       planetId: planet.id, x: cmd.params.x, z: cmd.params.z, resId, credited: !!colony,
     }, 'ground');
+  },
+});
+
+// —— 外交战争终局（doc5 TD2 / DIP-02：和谈与占领吞并） ——————————————————
+
+// —— WP-2/WP-3（doc18 v0.2）：异星生态科考与五阶段遗迹命令 ————————————————
+
+registerCommand('ScanPlanetarySpecimens', {
+  desc: '科考分析面罩：推进物种图鉴档位（1 Observed / 2 Identified；doc18 WP-2）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    const stage = cmd.params.targetStage || 1;
+    if (!(stage >= 1 && stage <= 3)) return { ok: false, code: 'BAD_STAGE', reason: '档位非法' };
+    if (!Number.isInteger(cmd.params.speciesIdx) || cmd.params.speciesIdx < 0) {
+      return { ok: false, code: 'BAD_SPECIES', reason: '物种序号非法' };
+    }
+    return { ok: true, planet, stage };
+  },
+  execute(ctx, cmd) {
+    const res = advanceSpeciesDiscovery(ctx.world, cmd.params.planetId || cmd.targetId, cmd.params.speciesIdx, cmd.params.targetStage || 1);
+    if (!res.ok) throw new Error(res.reason || 'ScanPlanetarySpecimens 失败');
+    return res;
+  },
+});
+
+registerCommand('SamplePlanetarySpecimen', {
+  desc: '活体采样（Analyzed 里程碑）：入账科研点/生物质并标记 sampleMask（doc16 §4.3）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    if (!Number.isInteger(cmd.params.speciesIdx) || cmd.params.speciesIdx < 0) {
+      return { ok: false, code: 'BAD_SPECIES', reason: '物种序号非法' };
+    }
+    return { ok: true, planet };
+  },
+  execute(ctx, cmd) {
+    const res = collectSpecimenSample(ctx.world, cmd.params.planetId || cmd.targetId, cmd.params.speciesIdx);
+    if (!res.ok) throw new Error(res.reason || 'SamplePlanetarySpecimen 失败');
+    return res;
+  },
+});
+
+registerCommand('AdvanceMonolithStage', {
+  desc: '五阶段巨石遗迹推进：excavate 除障 / inscribe 拓印 / rotate 对光 / guardian 守卫战果 / extract 核心破译（doc18 WP-3）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    const actions = ['excavate', 'inscribe', 'rotate', 'guardianDefeated', 'extract'];
+    if (!actions.includes(cmd.params.action)) {
+      return { ok: false, code: 'BAD_ACTION', reason: '未知遗迹动作' };
+    }
+    return { ok: true, planet };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet.eco) ensurePlanetEco(ctx.world, planet);
+    const { field } = loadLiveEdits(ctx.world, planet.id);
+    ensurePlanetRuin(ctx.world, planet, field);
+    let res;
+    switch (cmd.params.action) {
+      case 'excavate': res = tryCompleteExcavation(ctx.world, planet, field); break;
+      case 'inscribe': res = inscribeDialectPylon(ctx.world, planet, cmd.params.pylonIdx | 0); break;
+      case 'rotate': res = rotateResonatorTower(ctx.world, planet, cmd.params.towerIdx | 0, field); break;
+      case 'guardianDefeated': res = reportGuardianDefeated(ctx.world, planet); break;
+      case 'extract': res = extractMonolithCore(ctx.world, planet); break;
+      default: res = { ok: false, reason: 'BadAction' };
+    }
+    if (!res.ok) throw new Error(res.reason || 'AdvanceMonolithStage 失败');
+    return res;
   },
 });
 
@@ -7570,6 +7642,41 @@ const { hash32: hash32 } = __require("src/domain/ground/SurfaceSandbox.js");
 
 /** 子流 salt 的混淆常数（splitmix32 黄金比例常数，防止直接异或撞流） */
 const SALT_SITE = 0x85ebca6b;
+// —— WP-1（doc18 v0.2）：五大支柱扩展子流盐值（doc17 §3.1 契约，互不碰撞） ——
+const SALT_FLORA = 0x9e3779b9;
+const SALT_FAUNA = 0x7f4a7c15;
+const SALT_RUIN = 0x6c8e9cf5;
+const SALT_WEATHER = 0xb5297a4d;
+const SALT_DILEMMA = 0x1b56c4e9;
+
+/**
+ * splitmix32 终态雪崩混淆器（WP-1：消除线性异或相关性，扩展子流专用）。
+ * 既有 derivePlanetSeeds 的 base 不经 mix32（保持金快照 68462446 逐位不变）；
+ * 扩展子流一律经本函数混淆，新旧两树互不影响。
+ * @param {number} h 32 位无符号整数
+ * @returns {number} 混淆后的 32 位无符号整数
+ */
+function mix32(h) {
+  let z = (h >>> 0);
+  z = Math.imul(z ^ (z >>> 16), 0x85ebca6b) >>> 0;
+  z = Math.imul(z ^ (z >>> 13), 0xc2b2ae35) >>> 0;
+  return (z ^ (z >>> 16)) >>> 0;
+}
+
+/**
+ * 轻量级可复现 mulberry32 流发生器（WP-1：供生态/天气/困境纯函数局部消费）。
+ * @param {number} seed32 混淆后的 32 位种子
+ * @returns {()=>number} [0,1) 均匀浮点（确定性：同种子同序列）
+ */
+function createSubRng(seed32) {
+  let a = seed32 >>> 0;
+  return function nextFloat() {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
 /**
  * 派生一颗行星的确定性随机子流树。
@@ -7609,7 +7716,56 @@ function derivePlanetSeeds(world, planetId) {
   };
 }
 
-Object.assign(__exports, { derivePlanetSeeds });
+/**
+ * WP-1（doc18 v0.2）：五大支柱扩展确定性子流树（doc17 §5.1 原型 1A 契约）。
+ * 纯函数 of (world.seed, planetId)：零 world.rng 消费、零 Math.random()；
+ * base 经 mix32 雪崩混淆，与既有 derivePlanetSeeds（未混淆）互不影响，
+ * 供生态（flora/fauna）、遗迹（ruin）、气象（weatherCycle）、治理困境（dilemma）消费。
+ * @param {{seed:number}} world 世界实体（只读取 world.seed）
+ * @param {string|number} planetId 行星实体 id
+ * @returns {object} 扩展子流集合（planetSeed/themeSeed/…/dilemmaSeed(tick)）
+ */
+function derivePlanetSeedsExtended(world, planetId) {
+  const worldSeed = world && Number.isFinite(world.seed) ? world.seed >>> 0 : 0;
+  const base = mix32(worldSeed ^ hash32(String(planetId)));
+  return {
+    planetSeed: base,
+    themeSeed: mix32(base ^ hash32('theme')),
+    macroTerrainSeed: mix32(base ^ hash32('macro')),
+    biomeSeed: mix32(base ^ hash32('biome')),
+    decorationSeed: mix32(base ^ hash32('deco')),
+    cosmeticSeed: mix32(base ^ hash32('cosmetic')),
+    missionSiteSeed(siteId, blueprintVersion = 1) {
+      const v = Number.isFinite(blueprintVersion) ? blueprintVersion >>> 0 : 1;
+      return mix32(base ^ hash32(`site:${siteId}`) ^ Math.imul(v || 1, SALT_SITE));
+    },
+    poiSeed(poiId) {
+      return mix32(base ^ hash32(`poi:${poiId}`));
+    },
+    /** 支柱一：第 speciesIdx 种原生植物形态基因码子流 */
+    floraSeed(speciesIdx) {
+      return mix32(base ^ Math.imul((speciesIdx >>> 0) + 1, SALT_FLORA));
+    },
+    /** 支柱一：第 speciesIdx 种原生动物骨骼比例/营养级/相位子流 */
+    faunaSeed(speciesIdx) {
+      return mix32(base ^ Math.imul((speciesIdx >>> 0) + 1, SALT_FAUNA));
+    },
+    /** 支柱一：五阶段先驱者巨石遗址子流 */
+    ruinSeed(siteId) {
+      return mix32(base ^ hash32(`ruin:${siteId}`) ^ SALT_RUIN);
+    },
+    /** 支柱三：按游戏日（Math.floor(world.tick / 24)）派生的气象锋面子流 */
+    weatherCycleSeed(dayIndex) {
+      return mix32(base ^ Math.imul((dayIndex >>> 0) + 1, SALT_WEATHER));
+    },
+    /** 支柱四：聚落总督抉择事件子流（按战略 tick） */
+    dilemmaSeed(tick) {
+      return mix32(base ^ Math.imul((tick >>> 0) + 1, SALT_DILEMMA));
+    },
+  };
+}
+
+Object.assign(__exports, { mix32, createSubRng, derivePlanetSeeds, derivePlanetSeedsExtended });
 
 });
 __register("src/domain/ground/SurfaceSandbox.js", function (__exports, __require) {
@@ -15891,783 +16047,292 @@ function cancelByKind(world, kind, filterFn = null) {
 Object.assign(__exports, { registerScheduled, schedule, popDue, runDue, cancelByKind });
 
 });
-__register("src/domain/ground/terrainEdits.js", function (__exports, __require) {
+__register("src/domain/ground/monolithRuins.js", function (__exports, __require) {
 /**
- * domain/ground/terrainEdits.js — 地形整形编辑层（doc7 TASK-5.1 / §6.5 地形整形器）
+ * domain/ground/monolithRuins.js — 五阶段先驱者巨石遗迹（doc18 v0.2 WP-3 / doc16 §4.5）
  *
- * 职责：
- *  - 编辑日志（ops）：raise / lower / smooth / flatten / restore 五类刷子 + plant / removePlant 植被移植；
- *  - 刷子生效不直接改 terrainField 数据，而是挂进 field.evalPoint 的 siteModifier 合成链
- *    （attachTerrainEdits：既有 siteModifier（GroundView._fieldSiteModifier 采掘凹陷等）先评估，
- *     编辑层后评估 —— flatten / restore 因此可以覆写采掘凹陷，回任自然地貌）；
- *  - 每次编辑仅把受影响 Chunk 标脏（TERRAIN-06：刷子半径 ≤ chunkMeters/2 → 至多 2×2 = 4 个区块），
- *    邻接区块由下一帧增量重建；高度预算 [-40,+80] 仍由 evalPoint 统一钳制；
- *  - 紧凑 JSON 编辑命令序列（serializeEdits / deserializeEdits）供存档确定性重放（SITE-07）；
- *  - 建筑落位 9 点三角网格投影校验（doc7 TASK-5.2 / §6.8 坡度阈值）与主题专属桩基类型。
+ * 状态机（持久化于 planet.eco.ruin，固定紧凑 8 元组——doc18 五元组语义 + 布局三点）：
+ *   [stage, dialectMask, pylonRotMask, guardianDefeated, coreHarvested, coreX_dm, coreZ_dm, naturalY_dm]
+ *   stage: 1 除障(Excavation) → 2 方言拓印(Dialect) → 3 谐振对光(Resonance)
+ *          → 4 机偶守卫战(Guardian) → 5 核心破译(Precursor Feedback)
+ *   pylonRotMask: 3 座导流塔 × 3-bit 当前档位（0..7 = 45° 步进 × 8）
  *
- * 确定性（doc7 红线 4）：零 Math.random、零 world.rng；smooth 的局部均值与 flatten 的
- * 目标高度均在 applyEdit 时用 _macro 纯宏观场按固定采样点预计算（缓存可由
- * deserializeEdits 重建，逐位一致）；植被 seed 由 hash32(内容串) 派生。
- * 本文件为纯领域层：无 DOM / 无 WebGL。
+ * 确定性红线：布局/方言词根/对光目标档位全部由 derivePlanetSeedsExtended().ruinSeed
+ * 派生；零 Math.random()、零 world.rng 消费。XENO-03 门禁断言前置条件严苛性。
  */
 
-const { MIN_HEIGHT: MIN_HEIGHT, MAX_HEIGHT: MAX_HEIGHT, buildTriangulatedChunkMesh: buildTriangulatedChunkMesh } = __require("src/domain/ground/terrainField.js");
-const { hash32: hash32 } = __require("src/domain/ground/SurfaceSandbox.js");
-const { sampleTerrain: sampleTerrain, slopeAt: slopeAt } = __require("src/domain/ground/surfaceQueries.js");
+const { derivePlanetSeedsExtended: derivePlanetSeedsExtended } = __require("src/domain/ground/planetSeeds.js");
+const { ensurePlanetEco: ensurePlanetEco } = __require("src/domain/ground/xenobiology.js");
+const { sampleTerrain: sampleTerrain, raycastTerrain: raycastTerrain } = __require("src/domain/ground/surfaceQueries.js");
+const { emit: emit, chronicle: chronicle } = __require("src/core/eventBus.js");
+const { credit: credit } = __require("src/domain/economy/ledger.js");
+const { completeTech: completeTech } = __require("src/domain/research/research.js");
 
-// ———— 常量 ————
+/** 紧凑元组下标（doc18 WP-3 契约 + 布局追加段） */
+const RUIN_IDX = Object.freeze({
+  STAGE: 0, DIALECT: 1, PYLON: 2, GUARDIAN: 3, CORE: 4,
+  X_DM: 5, Z_DM: 6, Y_DM: 7,
+});
 
-/** 编辑日志 schema 版本（存档兼容性标记） */
-const TERRAIN_EDITS_VERSION = 1;
+const RUIN_STAGE = Object.freeze({
+  EXCAVATION: 1,
+  DIALECT: 2,
+  RESONANCE: 3,
+  GUARDIAN: 4,
+  CORE: 5,
+});
 
-/**
- * 刷子参数上限（TERRAIN-06 增量重建约束）：
- * 半径 ≤ chunkMeters/2 → 圆盘至多跨 2×2 区块（4 个）；强度上限防止一次刷穿高度预算。
- */
-const BRUSH_LIMITS = {
-  maxRadiusM: 32,        // 米；512m 场默认 64m 区块 → 至多 4 区块受影响
-  maxStrokeM: 8,         // raise/lower 单次行程上限（米）
-  minStrength: 0.001,
-};
+/** 方言碑半径（doc18：120m 副碑环）与除障判定参数 */
+const PYLON_RING_M = 120;
+const EXCAV_PROBE_M = 2.5;
+const EXCAV_TOLERANCE_M = 0.8;
 
-/**
- * 建筑落位阈值（doc7:273 image17/18 阈值公式图不可读，按 GAME-05..08 门禁语义自定
- * 并在此文档化 —— 后续读回原文图片时仅需改这里）：
- *  - 建筑底面 9 点（中心 + 4 角 + 4 边中点）投影到三角网格；
- *  - 任一点坡度 > maxSlopeDeg(16°，与 surfaceQueries.isBuildableSlope 默认一致) → 拒绝 SLOPE_TOO_STEEP；
- *  - 9 点最大高差 > maxHeightDeltaM(2.2m) → 拒绝 HEIGHT_DELTA（要求先整地/桩基）；
- *  - 高差 ≤ foundationGradeDeltaM(0.4m) 直接平铺；否则自动地基承台（graded）并按主题选桩基。
- */
-const BUILDING_PLACEMENT = {
-  maxSlopeDeg: 16,
-  maxHeightDeltaM: 2.2,
-  foundationGradeDeltaM: 0.4,
-  footprintHalfM: 3, // 6m × 6m 占地
-};
+/** 前驱者遗落科技（二选一由 ruinSeed 奇偶决定） */
+const PRECURSOR_TECHS = Object.freeze(['tech_precursor_shield_harmonics', 'tech_precursor_mass_catapult']);
 
-/** 主题专属桩基（doc7 TASK-5.2：浮台 / 隔热基座 / 耐酸桩；未列主题 → 标准承台） */
-const THEME_PILING = {
-  obsidian_lava: 'thermal_base',      // 隔热基座（熔岩地表）
-  sulfur_marsh: 'acid_pile',          // 耐酸桩（毒雾沼泽）
-  abyssal_ocean: 'pontoon',           // 浮台（海洋/潮汐带）
-  cryomethane_sea: 'pontoon',
-  prism_crystal: 'standard',
-  permafrost_furnace: 'insulated_base', // 隔热基座（冻土热区）
-  dry_night_polar: 'insulated_base',
-};
-
-/** 编辑算子集合 */
-const SHAPE_KINDS = new Set(['raise', 'lower', 'smooth', 'flatten', 'restore']);
-
-// ———— 小工具 ————
-
-function clamp(v, lo, hi) {
-  return v < lo ? lo : v > hi ? hi : v;
+/** (world, planet) → ruin 种子整数（布局与目标的唯一确定性来源） */
+function ruinSeedOf(world, planet) {
+  return derivePlanetSeedsExtended(world, planet.id).ruinSeed('main');
 }
 
-function num(v, dflt) {
-  return Number.isFinite(v) ? v : dflt;
-}
-
-/** 纯宏观场原始高度（不含 siteModifier 与编辑层）——smooth/flatten 的确定性基准 */
-function pristineHeight(field, wx, wz) {
-  const macro = field._macro;
-  if (!macro || typeof macro.heightAt !== 'function') {
-    throw new Error('terrainEdits: field 缺少 _macro 宏观场（须由 createTerrainField 构建）');
+/**
+ * 纯函数：主碑/副碑/导流塔布局（世界坐标，场域 [-240,+240] 内）。
+ * 主碑锚定 ruinSeed 角度 × 140~210m 半径；副碑环 120m；导流塔 60m 内环。
+ */
+function deriveRuinLayout(world, planet) {
+  const seed = ruinSeedOf(world, planet);
+  const ang = ((seed >>> 8) % 3600) / 3600 * Math.PI * 2;
+  const rad = 140 + ((seed >>> 20) % 70);
+  const coreX = Math.round(Math.cos(ang) * rad);
+  const coreZ = Math.round(Math.sin(ang) * rad);
+  const pylons = [];
+  const towers = [];
+  for (let i = 0; i < 3; i++) {
+    const pa = ang + ((i + 1) * (Math.PI * 2 / 3)) + ((seed >>> (i * 3)) % 15) / 100;
+    pylons.push({
+      x: Math.round(coreX + Math.cos(pa) * PYLON_RING_M),
+      z: Math.round(coreZ + Math.sin(pa) * PYLON_RING_M),
+      lexemeIdx: (seed >>> (5 + i * 4)) % 32, // 32 基础语素位（doc17 §2.1）
+    });
+    const ta = ang + ((i + 1) * (Math.PI * 2 / 3)) + 0.5;
+    towers.push({
+      x: Math.round(coreX + Math.cos(ta) * 60),
+      z: Math.round(coreZ + Math.sin(ta) * 60),
+      targetRot: (seed >>> (17 + i * 5)) % 8, // 对光目标档位（0..7 × 45°）
+    });
   }
-  return clamp(macro.heightAt(wx, wz).y, MIN_HEIGHT, MAX_HEIGHT);
-}
-
-/** 平滑核：(1 - (d/r)^2)^2，d=r 处为 0（C1 连续，避免刷痕硬边） */
-function brushFalloff(d, r) {
-  if (d >= r) return 0;
-  const t = 1 - (d * d) / (r * r);
-  return t * t;
+  return { coreX, coreZ, pylons, towers };
 }
 
 /**
- * 压平核：半径内圈（r/2）为全强度平台（建筑 9 点落位足印 ±3m 必须落在平芯内），
- * 外圈 (1-t²)² 平滑过渡到 0 —— 平芯 + 裙边，符合「压平建筑地基」的工具语义。
+ * 惰性创建遗迹元组（幂等；GroundView 场域就绪后首登陆调用）。
+ * naturalY 以创建时地表高程捕获（玩家此后堆高需自行刻槽削平——doc18 阶段 1）。
  */
-function flattenFalloff(d, r) {
-  const coreR = r * 0.5;
-  if (d <= coreR) return 1;
-  if (d >= r) return 0;
-  const t = (d - coreR) / (r - coreR);
-  const u = 1 - t * t;
-  return u * u;
+function ensurePlanetRuin(world, planet, field) {
+  ensurePlanetEco(world, planet);
+  if (planet.eco.ruin) return planet.eco.ruin;
+  const layout = deriveRuinLayout(world, planet);
+  // 布局持世界坐标；场域 = 世界 − 32（field ∈ [-256,+256]，doc11 坐标系铁律）
+  const s = field ? sampleTerrain(field, layout.coreX - 32, layout.coreZ - 32) : null;
+  const naturalY = s && Number.isFinite(s.y) ? s.y : 0;
+  const ruin = [
+    RUIN_STAGE.EXCAVATION, 0, 0, 0, 0,
+    layout.coreX * 10, layout.coreZ * 10, Math.round(naturalY * 10),
+  ];
+  planet.eco.ruin = ruin;
+  return ruin;
 }
 
-function chunkKeyOf(field, x, z) {
-  const cx = clamp(Math.floor((x - field.originX) / field.chunkMeters), 0, field.chunksX - 1);
-  const cz = clamp(Math.floor((z - field.originZ) / field.chunkMeters), 0, field.chunksZ - 1);
-  return `${cx},${cz}`;
-}
-
-// ———— 编辑仓库 ————
-
-/**
- * 创建编辑仓库（挂在一个地形场上，但只通过 siteModifier 合成链接入，
- * 不直接改写 terrainField 的任何缓冲）。
- */
-function createTerrainEdits(field) {
-  if (!field || !Array.isArray(field.chunks)) {
-    throw new Error('createTerrainEdits: 需要 createTerrainField 产出的地形场');
-  }
+/** 布局反解（渲染/交互层消费；纯函数） */
+function ruinLayoutOf(ruin) {
+  const seedBase = null; // 布局以坐标持久化，导流塔目标档位仍需 seed —— 由 consume 方传 world
   return {
-    planetId: field.planetId,
-    revision: 0,   // 每次成功 applyEdit +1（与存档快照 revision 对齐）
-    seq: 0,        // 植被 id 序列（确定性 id 派生）
-    ops: [],       // 时序编辑日志（内部规范形）
-    byChunk: new Map(), // 'cx,cz' → [opIdx...]（按全局顺序追加；渲染增量重建索引）
-    flora: [],     // 在场植被 [{ id, x, z, prefabId, seed }]
+    coreX: ruin[RUIN_IDX.X_DM] / 10,
+    coreZ: ruin[RUIN_IDX.Z_DM] / 10,
+    naturalY: ruin[RUIN_IDX.Y_DM] / 10,
+    dialectMask: ruin[RUIN_IDX.DIALECT],
+    pylonRotMask: ruin[RUIN_IDX.PYLON],
+    stage: ruin[RUIN_IDX.STAGE],
+    seedBase,
   };
 }
 
-/**
- * 预计算算子缓存（smooth 局部均值 / flatten 目标高度）。
- * 固定采样图案：中心 + 内环 8 点(0.55r) + 外环 8 点(0.92r)，全部取纯宏观场高度。
- * 缓存丢失（反序列化后）时惰性重建 —— 同输入逐位一致。
- */
-function ensureOpCache(field, op) {
-  if (op.kind === 'flatten') {
-    if (op._targetY === undefined) op._targetY = pristineHeight(field, op.x, op.z);
-    return;
-  }
-  if (op.kind === 'smooth') {
-    if (op._avgY === undefined) {
-      let sum = 0;
-      let n = 0;
-      sum += pristineHeight(field, op.x, op.z); n += 1;
-      for (let ring = 0; ring < 2; ring++) {
-        const rr = op.r * (ring === 0 ? 0.55 : 0.92);
-        for (let a = 0; a < 8; a++) {
-          const ang = (a * Math.PI) / 4;
-          sum += pristineHeight(field, op.x + Math.cos(ang) * rr, op.z + Math.sin(ang) * rr);
-          n += 1;
-        }
-      }
-      op._avgY = sum / n;
-    }
-  }
+/** 读导流塔当前档位（pylonRotMask 3-bit × 3） */
+function towerRotOf(ruin, towerIdx) {
+  return (ruin[RUIN_IDX.PYLON] >>> (towerIdx * 3)) & 0b111;
+}
+
+/** 对光目标档位（ruinSeed 派生，纯确定性） */
+function towerTargetRot(world, planet, towerIdx) {
+  const seed = ruinSeedOf(world, planet);
+  return (seed >>> (17 + towerIdx * 5)) % 8;
+}
+
+/** 副碑语素位（ruinSeed 派生） */
+function pylonLexemeIdx(world, planet, pylonIdx) {
+  const seed = ruinSeedOf(world, planet);
+  return (seed >>> (5 + pylonIdx * 4)) % 32;
 }
 
 /**
- * 应用一次编辑：校验 → 追加日志 → 标脏受影响区块（≤4）。
- * shape 算子 { kind, x, z, radius, strength }；plant { kind:'plant', x, z, prefabId, seed? }；
- * removePlant { kind:'removePlant', plantId }。
- * @returns {{ok:true, op:object, index:number, dirtyChunks:string[], floraId?:string}}
- * @throws {Error} 参数非法（命令层先行校验并映射错误码）
+ * 阶段 1 → 2：除障检测（doc18：调用 getElevation 检测周围 4 点平均覆土高度，
+ * 需将高度降至阈值下方——naturalY + 0.8m 以内视为覆土清除）。
+ * @returns {{ok:boolean, reason?:string, meanY?:number, advanced?:boolean}}
  */
-function applyEdit(field, edits, op) {
-  if (!field || !edits || !op || typeof op !== 'object') {
-    throw new Error('applyEdit: 缺少 field/edits/op');
-  }
-  const x = num(op.x, NaN);
-  const z = num(op.z, NaN);
-  if (!Number.isFinite(x) || !Number.isFinite(z)) {
-    throw new Error('applyEdit: 坐标非法');
-  }
-
-  const dirtyChunks = [];
-  let entry;
-
-  if (op.kind === 'plant' || op.kind === 'removePlant') {
-    if (op.kind === 'plant') {
-      if (typeof op.prefabId !== 'string' || op.prefabId.length === 0) {
-        throw new Error('applyEdit: plant 需要 prefabId');
-      }
-      edits.seq += 1;
-      const id = op.id || `flora_${edits.seq}`;
-      const seed = Number.isFinite(op.seed) ? (op.seed >>> 0)
-        : (hash32(`${field.planetId}|${id}|${x.toFixed(3)}|${z.toFixed(3)}|${op.prefabId}`) >>> 0);
-      entry = { kind: 'plant', x, z, id, prefabId: op.prefabId, seed };
-      edits.flora.push({ id, x, z, prefabId: op.prefabId, seed });
-    } else {
-      if (typeof op.plantId !== 'string') throw new Error('applyEdit: removePlant 需要 plantId');
-      entry = { kind: 'removePlant', x, z, plantId: op.plantId };
-      const before = edits.flora.length;
-      edits.flora = edits.flora.filter((f) => f.id !== op.plantId);
-      if (edits.flora.length === before) {
-        throw new Error(`applyEdit: 植被不存在 ${op.plantId}`);
-      }
-    }
-  } else {
-    if (!SHAPE_KINDS.has(op.kind)) throw new Error(`applyEdit: 未知算子 ${op.kind}`);
-    const radius = num(op.radius, 8);
-    if (!(radius > 0) || radius > Math.max(BRUSH_LIMITS.maxRadiusM, field.chunkMeters / 2)) {
-      throw new Error(`applyEdit: 半径越界（0,${Math.min(BRUSH_LIMITS.maxRadiusM, field.chunkMeters / 2)}]）`);
-    }
-    const strength = num(op.strength, op.kind === 'smooth' || op.kind === 'flatten' ? 1 : 2);
-    if (!(strength >= BRUSH_LIMITS.minStrength)) throw new Error('applyEdit: 强度过小');
-    if ((op.kind === 'raise' || op.kind === 'lower') && strength > BRUSH_LIMITS.maxStrokeM) {
-      throw new Error(`applyEdit: 行程强度上限 ${BRUSH_LIMITS.maxStrokeM}m`);
-    }
-    if ((op.kind === 'smooth' || op.kind === 'flatten') && strength > 1) {
-      throw new Error('applyEdit: smooth/flatten 强度为混合系数 (0,1]');
-    }
-    entry = { kind: op.kind, x, z, r: radius, s: strength };
-    ensureOpCache(field, entry);
-  }
-
-  edits.ops.push(entry);
-  const index = edits.ops.length - 1;
-
-  // 标脏：圆盘 AABB 覆盖的区块（半径 ≤ chunkMeters/2 → 至多 2×2 = 4 个，TERRAIN-06）
-  const reach = entry.kind === 'plant' || entry.kind === 'removePlant' ? 0.5 : entry.r;
-  const cxMin = clamp(Math.floor((x - reach - field.originX) / field.chunkMeters), 0, field.chunksX - 1);
-  const cxMax = clamp(Math.floor((x + reach - field.originX) / field.chunkMeters), 0, field.chunksX - 1);
-  const czMin = clamp(Math.floor((z - reach - field.originZ) / field.chunkMeters), 0, field.chunksZ - 1);
-  const czMax = clamp(Math.floor((z + reach - field.originZ) / field.chunkMeters), 0, field.chunksZ - 1);
-  for (let cz = czMin; cz <= czMax; cz++) {
-    for (let cx = cxMin; cx <= cxMax; cx++) {
-      const key = `${cx},${cz}`;
-      let list = edits.byChunk.get(key);
-      if (!list) {
-        list = [];
-        edits.byChunk.set(key, list);
-      }
-      list.push(index);
-      const chunk = field.chunks[cz * field.chunksX + cx];
-      if (chunk) chunk.dirty = true;
-      dirtyChunks.push(key);
-    }
-  }
-
-  edits.revision += 1;
-  return { ok: true, op: entry, index, dirtyChunks, floraId: entry.kind === 'plant' ? entry.id : undefined };
-}
-
-// ———— evalPoint 合成链挂点 ————
-
-/**
- * 编辑层逐点求值。restore 覆盖点重置此前全部编辑影响与 siteModifier 影响
- * （DSP 式「一键恢复自然地貌」）。
- * @param {number} siteDyIn 既有 siteModifier 已算得的 dy（先于编辑层评估）
- * @returns {number} 合成总 dy（0 = 无影响；无相关列表时原样透传 siteDyIn）
- */
-function evalEditsDy(field, edits, wx, wz, baseY, siteDyIn) {
-  const key = chunkKeyOf(field, wx, wz);
-  const list = edits.byChunk.get(key);
-  if (!list || list.length === 0) return siteDyIn;
-
-  let siteApplied = siteDyIn; // 既有 siteModifier 影响（restore 可清零）
-  let extra = 0;              // 编辑层累计
-
-  for (let i = 0; i < list.length; i++) {
-    const op = edits.ops[list[i]];
-    const dx = wx - op.x;
-    const dz = wz - op.z;
-    const d = Math.sqrt(dx * dx + dz * dz);
-
-    if (op.kind === 'restore') {
-      if (d <= op.r) {
-        // 一键恢复：清空此前编辑叠加 + siteModifier 叠加，回到纯宏观地貌
-        extra = 0;
-        siteApplied = 0;
-      }
-      continue;
-    }
-
-    const fall = op.kind === 'flatten' ? flattenFalloff(d, op.r) : brushFalloff(d, op.r);
-    if (fall <= 0) continue;
-    ensureOpCache(field, op);
-
-    if (op.kind === 'raise') extra += op.s * fall;
-    else if (op.kind === 'lower') extra -= op.s * fall;
-    else if (op.kind === 'smooth') {
-      // 盒式模糊语义：向预计算的局部均值收敛（applyEdit 时对纯宏观场采样）
-      extra += (op._avgY - (baseY + siteApplied + extra)) * op.s * fall;
-    } else if (op.kind === 'flatten') {
-      // 压平：向算子中心纯宏观高度收敛 → 覆写采掘凹陷（凹陷先于编辑层计入运行高度）
-      extra += (op._targetY - (baseY + siteApplied + extra)) * op.s * fall;
-    }
-  }
-  return siteApplied + extra;
-}
-
-/**
- * 把编辑仓库接入 field.evalPoint 的 siteModifier 合成链：
- *   最终 dy = 既有 siteModifier dy（先评估；可被 restore 清零） + 编辑层 dy（后评估）。
- * 可重复调用（幂等）；再次 attach 会保留最初的地基 siteModifier（GroundView 凹陷等）。
- * @returns {Function} 合成后的 siteModifier（field.siteModifier）
- */
-function attachTerrainEdits(field, edits) {
-  if (!field || !edits) throw new Error('attachTerrainEdits: 缺少 field/edits');
-  if (field.__terrainEdits === edits && typeof field.siteModifier === 'function' && field.siteModifier.__terrainEdits) {
-    return field.siteModifier; // 已挂接同一仓库
-  }
-  const underlying = field.__baseSiteModifier !== undefined ? field.__baseSiteModifier : field.siteModifier;
-  field.__baseSiteModifier = underlying; // 保留地基（首次 attach 时为 GroundView/_digDents 链）
-
-  const composed = (fx, fz, base) => {
-    const baseY = num(base && base.y, 0);
-    // 1) 既有 siteModifier（任务核心 SDF / 采掘凹陷）
-    let siteDy = 0;
-    if (typeof underlying === 'function') {
-      const mod = underlying(fx, fz, base);
-      if (mod && Number.isFinite(mod.dy)) siteDy = mod.dy;
-    }
-    // 2) 编辑层（后评估：flatten/restore 可覆写凹陷；restore 清零 siteDy）
-    if (edits.ops.length === 0) {
-      return siteDy !== 0 ? { dy: siteDy } : null;
-    }
-    const total = evalEditsDy(field, edits, fx, fz, baseY, siteDy);
-    return Number.isFinite(baseY + total) && total !== 0 ? { dy: total } : null;
-  };
-  composed.__terrainEdits = true;
-
-  field.siteModifier = composed;
-  field.__terrainEdits = edits;
-  return composed;
-}
-
-// ———— 增量重建 ————
-
-/**
- * 重建全部脏区块（meshRevision 对齐、dirty 清零）；返回重建数量。
- * GroundView 的帧同步也可只消费 chunk.dirty 自行重建 —— 本函数供域侧/测试复用。
- */
-function rebuildDirtyChunks(field) {
-  if (!field || !Array.isArray(field.chunks)) return 0;
-  let n = 0;
-  for (let i = 0; i < field.chunks.length; i++) {
-    const ch = field.chunks[i];
-    if (ch && ch.dirty) {
-      buildTriangulatedChunkMesh(ch, field.evalPoint);
-      n += 1;
-    }
-  }
-  return n;
-}
-
-// ———— 存档序列化（SITE-07：紧凑命令序列，确定性重放） ————
-
-/**
- * 序列化为紧凑 JSON 字符串（键序固定 → 逐字节可复现；不含运行期缓存 _avgY/_targetY）。
- */
-function serializeEdits(edits) {
-  if (!edits || !Array.isArray(edits.ops)) throw new Error('serializeEdits: 非法编辑仓库');
-  const ops = [];
-  for (const op of edits.ops) {
-    if (op.kind === 'plant') {
-      ops.push({ kind: 'plant', x: op.x, z: op.z, id: op.id, prefabId: op.prefabId, seed: op.seed });
-    } else if (op.kind === 'removePlant') {
-      ops.push({ kind: 'removePlant', x: op.x, z: op.z, plantId: op.plantId });
-    } else {
-      ops.push({ kind: op.kind, x: op.x, z: op.z, r: op.r, s: op.s });
-    }
-  }
-  return JSON.stringify({ v: TERRAIN_EDITS_VERSION, rev: edits.revision, seq: edits.seq, ops });
-}
-
-/**
- * 反序列化（接受 JSON 字符串或已解析的 plain 对象）→ 活体编辑仓库。
- * 空串/缺字段 → 新仓库；shape 算子缓存由 ensureOpCache 在求值时确定性重建。
- */
-function deserializeEdits(json, field) {
-  let plain = json;
-  if (typeof json === 'string') {
-    plain = json.trim().length === 0 ? null : JSON.parse(json);
-  }
-  const edits = field ? createTerrainEdits(field) : {
-    planetId: null,
-    revision: 0,
-    seq: 0,
-    ops: [],
-    byChunk: new Map(),
-    flora: [],
-  };
-  if (!plain || typeof plain !== 'object') return edits;
-  edits.revision = Number.isFinite(plain.rev) ? plain.rev : 0;
-  edits.seq = Number.isFinite(plain.seq) ? plain.seq : 0;
-  const ops = Array.isArray(plain.ops) ? plain.ops : [];
-  if (!field) {
-    // 轻载模式：仅回放日志与植被（无场可标脏）
-    for (const raw of ops) {
-      const op = { ...raw };
-      edits.ops.push(op);
-      if (op.kind === 'plant') edits.flora.push({ id: op.id, x: op.x, z: op.z, prefabId: op.prefabId, seed: op.seed });
-    }
-    return edits;
-  }
-  // 带场重放：逐条 applyEdit 重建 byChunk 索引与脏标记（确定性；revision/seq 以日志为准）
-  for (const raw of ops) {
-    if (raw && (SHAPE_KINDS.has(raw.kind) || raw.kind === 'plant' || raw.kind === 'removePlant')) {
-      edits.revision = Math.max(0, edits.revision - 1); // applyEdit 会 +1，维持存档 revision
-      if (raw.kind === 'plant') edits.seq = Math.max(0, edits.seq - 1); // applyEdit 会 +1
-      // 紧凑键 (r/s) → applyEdit 规范键 (radius/strength)
-      applyEdit(field, edits, {
-        kind: raw.kind,
-        x: raw.x,
-        z: raw.z,
-        radius: raw.r,
-        strength: raw.s,
-        id: raw.id,
-        prefabId: raw.prefabId,
-        seed: raw.seed,
-        plantId: raw.plantId,
-      });
-    }
-  }
-  if (Number.isFinite(plain.rev)) edits.revision = plain.rev;
-  if (Number.isFinite(plain.seq)) edits.seq = plain.seq;
-  return edits;
-}
-
-// ———— 建筑落位校验（doc7 TASK-5.2 / §6.8；doc7:188） ————
-
-/** 主题 → 桩基类型（未列主题回退标准承台） */
-function foundationTypeForTheme(themeId) {
-  return THEME_PILING[themeId] || 'standard';
-}
-
-/**
- * 建筑底面 9 点三角网格投影校验：
- * 采样点 = 中心 + 4 角 + 4 边中点（footprintHalfM 正方形），逐点 sampleTerrain。
- * @returns {{ ok:boolean, code?:'SLOPE_TOO_STEEP'|'HEIGHT_DELTA'|'OUT_OF_FIELD',
- *             maxSlopeDeg:number, maxHeightDeltaM:number,
- *             foundation?:{ kind:'flat'|'graded', piling:string, etaHeightM:number } }}
- * 通过时 foundation.etaHeightM = 9 点均高（承台基准高），piling 按主题解析。
- */
-function checkBuildingPlacement(field, x, z, opts = {}) {
-  const half = num(opts.footprintHalfM, BUILDING_PLACEMENT.footprintHalfM);
-  const maxSlope = num(opts.maxSlopeDeg, BUILDING_PLACEMENT.maxSlopeDeg);
-  const maxDelta = num(opts.maxHeightDeltaM, BUILDING_PLACEMENT.maxHeightDeltaM);
-
-  const offs = [[0, 0], [half, half], [-half, half], [half, -half], [-half, -half],
-    [half, 0], [-half, 0], [0, half], [0, -half]];
-  let maxY = -Infinity;
-  let minY = Infinity;
+function tryCompleteExcavation(world, planet, field) {
+  const ruin = planet.eco && planet.eco.ruin;
+  if (!ruin) return { ok: false, reason: 'RuinNotInitialized' };
+  if (ruin[RUIN_IDX.STAGE] >= RUIN_STAGE.DIALECT) return { ok: true, advanced: false };
+  const cx = ruin[RUIN_IDX.X_DM] / 10;
+  const cz = ruin[RUIN_IDX.Z_DM] / 10;
+  const naturalY = ruin[RUIN_IDX.Y_DM] / 10;
+  const probes = [
+    [cx + EXCAV_PROBE_M, cz], [cx - EXCAV_PROBE_M, cz],
+    [cx, cz + EXCAV_PROBE_M], [cx, cz - EXCAV_PROBE_M],
+  ];
   let sum = 0;
-  let n = 0;
-  let maxSlopeSeen = 0;
-
-  for (const [ox, oz] of offs) {
-    const px = x + ox;
-    const pz = z + oz;
-    const s = sampleTerrain(field, px, pz);
-    if (!s) {
-      return { ok: false, code: 'OUT_OF_FIELD', maxSlopeDeg: NaN, maxHeightDeltaM: NaN };
-    }
-    const sl = slopeAt(field, px, pz);
-    if (Number.isFinite(sl) && sl > maxSlopeSeen) maxSlopeSeen = sl;
-    maxY = Math.max(maxY, s.y);
-    minY = Math.min(minY, s.y);
-    sum += s.y;
-    n += 1;
+  let valid = 0;
+  for (const [px, pz] of probes) {
+    const s = field ? sampleTerrain(field, px - 32, pz - 32) : null;
+    if (s && Number.isFinite(s.y)) { sum += s.y; valid++; }
   }
-
-  const delta = maxY - minY;
-  if (maxSlopeSeen > maxSlope) {
-    return { ok: false, code: 'SLOPE_TOO_STEEP', maxSlopeDeg: maxSlopeSeen, maxHeightDeltaM: delta };
+  if (valid < 4) return { ok: false, reason: 'FieldNotReady' };
+  const meanY = sum / 4;
+  if (meanY > naturalY + EXCAV_TOLERANCE_M) {
+    return { ok: false, reason: 'StillBuried', meanY, threshold: naturalY + EXCAV_TOLERANCE_M };
   }
-  if (delta > maxDelta) {
-    return { ok: false, code: 'HEIGHT_DELTA', maxSlopeDeg: maxSlopeSeen, maxHeightDeltaM: delta };
-  }
-  return {
-    ok: true,
-    maxSlopeDeg: maxSlopeSeen,
-    maxHeightDeltaM: delta,
-    foundation: {
-      kind: delta > BUILDING_PLACEMENT.foundationGradeDeltaM ? 'graded' : 'flat',
-      piling: foundationTypeForTheme(opts.themeId),
-      etaHeightM: sum / n,
-    },
-  };
+  ruin[RUIN_IDX.STAGE] = RUIN_STAGE.DIALECT;
+  emit(world, 'MonolithStageAdvanced', { planetId: planet.id, stage: RUIN_STAGE.DIALECT }, 'ground');
+  return { ok: true, advanced: true, meanY };
 }
 
-// ———— P1-2 殖民地等高线感知布局规划器（doc8 §3.2 议题 B2 仲裁落地） ————
-
-/** 黄金角（与 doc8 B2 一致）与过渡环带半径（22m–75m） */
-const COLONY_LAYOUT = { goldenAngle: 2.399963229728653, ringMinM: 22, ringMaxM: 75, footprintHalfM: 2.2, maxSlopeDeg: 16, maxHeightDeltaM: 2.2, minSpacingM: 6, skirtDepthM: 1.8 };
+/**
+ * 阶段 2：方言拓印（靠近副碑按 E；需 stage ≥ 2——XENO-03 未除障前拒发）。
+ * 每次拓印向 world.narrative.lexiconMask 写入 1 个先驱者语素位（32 基础语素）。
+ * 三碑齐拓 → 自动进阶阶段 3。
+ */
+function inscribeDialectPylon(world, planet, pylonIdx) {
+  const ruin = planet.eco && planet.eco.ruin;
+  if (!ruin) return { ok: false, reason: 'RuinNotInitialized' };
+  if (ruin[RUIN_IDX.STAGE] < RUIN_STAGE.DIALECT) return { ok: false, reason: 'StillBuried' };
+  if (ruin[RUIN_IDX.STAGE] > RUIN_STAGE.DIALECT) return { ok: true, advanced: false };
+  if (!(pylonIdx >= 0 && pylonIdx < 3)) return { ok: false, reason: 'BadPylonIdx' };
+  const bit = 1 << pylonIdx;
+  const already = (ruin[RUIN_IDX.DIALECT] & bit) !== 0;
+  if (!already) {
+    ruin[RUIN_IDX.DIALECT] |= bit;
+    const lexIdx = pylonLexemeIdx(world, planet, pylonIdx);
+    world.narrative ||= {};
+    world.narrative.lexiconMask = (world.narrative.lexiconMask || 0) | (1 << lexIdx);
+    emit(world, 'MonolithDialectInscribed', { planetId: planet.id, pylonIdx, lexIdx }, 'ground');
+  }
+  const all = (ruin[RUIN_IDX.DIALECT] & 0b111) === 0b111;
+  if (all && ruin[RUIN_IDX.STAGE] === RUIN_STAGE.DIALECT) {
+    ruin[RUIN_IDX.STAGE] = RUIN_STAGE.RESONANCE;
+    emit(world, 'MonolithStageAdvanced', { planetId: planet.id, stage: RUIN_STAGE.RESONANCE }, 'ground');
+    return { ok: true, advanced: true };
+  }
+  return { ok: true, advanced: false, already };
+}
 
 /**
- * 等高线感知的殖民地布局规划（纯函数、确定性、无 DOM）：
- *  - groundBuildings（PlaceBuilding 已定三维坐标）原样保留；
- *  - 未定坐标建筑在过渡环带（22–75m）内按黄金角候选序列搜索
- *    checkBuildingPlacement（9 点坡度 ≤16°、高差 ≤2.2m）的平坦台地；
- *  - mining 类优先吸附 TERRAIN_FLAGS.ORE 标记点；
- *  - 基准高程 = 9 点最高点 × 0.35 + 均高 × 0.65（防止任何一角插入山体）；
- *  - 朝向对齐等高线切线（梯度垂线）。
- * @param {object} field terrainField 场域
- * @param {{entries:Array<{defId:string,state?:string}>, groundBuildings?:Array, center:[number,number], categoryOf:(defId:string)=>string, themeId?:string}} opts
- * @returns {Array<{defId:string,state:string,fx:number,fz:number,y:number,rotY:number,category:string,placement:Object|null}>}
+ * 阶段 3：导流塔旋转（按 E 每次 +45°）+ 光路合龙检验。
+ * 需 stage ≥ 3；三塔档位全部命中目标 且 raycastTerrain 视线直达主碑无山脊遮挡
+ * → 进阶阶段 4（机偶守卫苏醒事件）。
  */
-function planColonyLayout(field, opts = {}) {
-  const L = COLONY_LAYOUT;
-  const entries = opts.entries || [];
-  const ground = opts.groundBuildings || [];
-  const center = opts.center || [0, 0];
-  const categoryOf = opts.categoryOf || (() => 'default');
-  const out = [];
-  const placed = [];
-  for (const gb of ground) {
-    if (!gb || !Number.isFinite(gb.x) || !Number.isFinite(gb.z)) continue;
-    placed.push({ x: gb.x, z: gb.z });
-    const chk = checkBuildingPlacement(field, gb.x, gb.z, { footprintHalfM: L.footprintHalfM, maxSlopeDeg: L.maxSlopeDeg, maxHeightDeltaM: L.maxHeightDeltaM });
-    out.push({ defId: gb.defId || 'default', state: gb.state || 'built', fx: gb.x, fz: gb.z, y: gb.y != null ? gb.y : (Number.isFinite(chk.baseY) ? chk.baseY : 0), rotY: gb.rotY || 0, category: categoryOf(gb.defId || 'default'), placement: chk });
+function rotateResonatorTower(world, planet, towerIdx, field) {
+  const ruin = planet.eco && planet.eco.ruin;
+  if (!ruin) return { ok: false, reason: 'RuinNotInitialized' };
+  if (ruin[RUIN_IDX.STAGE] < RUIN_STAGE.RESONANCE) return { ok: false, reason: 'DialectIncomplete' };
+  if (ruin[RUIN_IDX.STAGE] > RUIN_STAGE.RESONANCE) return { ok: true, advanced: false };
+  if (!(towerIdx >= 0 && towerIdx < 3)) return { ok: false, reason: 'BadTowerIdx' };
+  const rot = towerRotOf(ruin, towerIdx);
+  ruin[RUIN_IDX.PYLON] = (ruin[RUIN_IDX.PYLON] & ~(0b111 << (towerIdx * 3)))
+    | (((rot + 1) % 8) << (towerIdx * 3));
+  emit(world, 'MonolithTowerRotated', { planetId: planet.id, towerIdx, rot: (rot + 1) % 8 }, 'ground');
+  return tryAlignResonators(world, planet, field);
+}
+
+/**
+ * 光路合龙检验：三塔档位命中 + 三塔→主碑 raycast 无遮挡。
+ * @returns {{ok:boolean, aligned?:boolean, reason?:string}}
+ */
+function tryAlignResonators(world, planet, field) {
+  const ruin = planet.eco && planet.eco.ruin;
+  if (!ruin) return { ok: false, reason: 'RuinNotInitialized' };
+  if (ruin[RUIN_IDX.STAGE] < RUIN_STAGE.RESONANCE) return { ok: false, reason: 'DialectIncomplete' };
+  if (ruin[RUIN_IDX.STAGE] > RUIN_STAGE.RESONANCE) return { ok: true, aligned: true };
+  for (let i = 0; i < 3; i++) {
+    if (towerRotOf(ruin, i) !== towerTargetRot(world, planet, i)) {
+      return { ok: true, aligned: false, reason: 'RotationMismatch' };
+    }
   }
-  for (let i = 0; i < entries.length && out.length < 24; i++) {
-    const e = entries[i];
-    const cat = categoryOf(e.defId);
-    let chosen = null;
-    let lastChk = null;
-    let chosenMaxY = 0;
-    let chosenAvgY = 0;
-    // 黄金角候选序列：过渡环带内的确定性平地寻址（最多 1200 候选；崎岖主题如熔岩/黑曜平坦台地稀疏，需大搜索量）
-    for (let k = 0; k < 1200 && !chosen; k++) {
-      const a = k * L.goldenAngle;
-      const r = L.ringMinM + (L.ringMaxM - L.ringMinM) * ((k * 0.6180339887) % 1);
-      const fx = center[0] + Math.cos(a) * r;
-      const fz = center[1] + Math.sin(a) * r;
-      const chk = checkBuildingPlacement(field, fx, fz, { footprintHalfM: L.footprintHalfM, maxSlopeDeg: L.maxSlopeDeg, maxHeightDeltaM: L.maxHeightDeltaM });
-      lastChk = chk;
-      if (!chk.ok) continue;
-      // 自采样 9 点：chk 不外露 maxY/avgY/flags，布局器自行求基准高程与 ORE 判定
-      const offs = [[0, 0], [2.2, 2.2], [-2.2, 2.2], [2.2, -2.2], [-2.2, -2.2], [2.2, 0], [-2.2, 0], [0, 2.2], [0, -2.2]];
-      let maxY = -Infinity; let sum = 0; let flagsAny = 0; let n = 0;
-      for (const [ox, oz] of offs) {
-        const sp = sampleTerrain(field, fx + ox, fz + oz);
-        if (!sp) continue;
-        maxY = Math.max(maxY, sp.y); sum += sp.y; flagsAny |= sp.flags; n++;
+  if (field) {
+    const layout = deriveRuinLayout(world, planet);
+    const cx = ruin[RUIN_IDX.X_DM] / 10;
+    const cz = ruin[RUIN_IDX.Z_DM] / 10;
+    for (let i = 0; i < 3; i++) {
+      const t = layout.towers[i];
+      // 端点各取「本地地面 + 10m」导流塔光学轴高（塔身有效高度）；山脊遮挡由
+      // 玩家削平——doc17 §2.1：地形改造服务于考古解谜的玩法互锁
+      const tS = sampleTerrain(field, t.x - 32, t.z - 32);
+      const cS = sampleTerrain(field, cx - 32, cz - 32);
+      const towerTopY = (tS && Number.isFinite(tS.y) ? tS.y : 0) + 10;
+      const coreTopY = (cS && Number.isFinite(cS.y) ? cS.y : 0) + 10;
+      const dir = [cx - t.x, coreTopY - towerTopY, cz - t.z];
+      const len = Math.hypot(dir[0], dir[2]);
+      if (len > 0.5) {
+        const dl = Math.hypot(dir[0], dir[1], dir[2]);
+        dir[0] /= dl; dir[1] /= dl; dir[2] /= dl;
+        const hit = raycastTerrain(field, [t.x - 32, towerTopY, t.z - 32], dir, len + 4);
+        if (hit && hit.hit) return { ok: true, aligned: false, reason: 'SkyObstructed', towerIdx: i };
       }
-      if (!n) continue;
-      const avgY = sum / n;
-      chosenMaxY = maxY;
-      chosenAvgY = avgY;
-      // 间距：距已落位建筑 ≥ minSpacingM
-      let spaced = true;
-      for (const q of placed) {
-        if (Math.hypot(q.x - fx, q.z - fz) < L.minSpacingM) { spaced = false; break; }
-      }
-      if (!spaced) continue;
-      // mining 优先 ORE 标记点（前 60 个候选内未命中 ORE 则放宽，保证必然落位）
-      if (cat === 'mining' && k < 200 && !(flagsAny & 16)) continue;
-      chosen = { fx, fz, chk };
-    }
-    if (!chosen && lastChk && lastChk.ok) chosen = { fx: center[0], fz: center[1], chk: lastChk };
-    if (!chosen) continue; // 生成质量门禁未过 → 该建筑本轮不落位（绝不盲盒撒点）
-    placed.push({ x: chosen.fx, z: chosen.fz });
-    const chk = chosen.chk;
-    // 基准高程：最高点 0.35 + 均高 0.65 加权（doc8 B2 公式）
-    const y = chosenMaxY * 0.35 + chosenAvgY * 0.65;
-    // 朝向：等高线切线 = 梯度垂线
-    const gx = (sampleTerrain(field, chosen.fx + 2, chosen.fz).y - sampleTerrain(field, chosen.fx - 2, chosen.fz).y) || 0;
-    const gz = (sampleTerrain(field, chosen.fx, chosen.fz + 2).y - sampleTerrain(field, chosen.fx, chosen.fz - 2).y) || 0;
-    const rotY = Math.abs(gx) + Math.abs(gz) > 1e-6 ? Math.atan2(gz, gx) + Math.PI / 2 : (i * 0.618) % 1 * Math.PI * 2;
-    out.push({ defId: e.defId, state: e.state || 'built', fx: chosen.fx, fz: chosen.fz, y, rotY, category: cat, placement: chk });
-  }
-  return out;
-}
-
-Object.assign(__exports, { TERRAIN_EDITS_VERSION, BRUSH_LIMITS, BUILDING_PLACEMENT, createTerrainEdits, applyEdit, attachTerrainEdits, rebuildDirtyChunks, serializeEdits, deserializeEdits, foundationTypeForTheme, checkBuildingPlacement, COLONY_LAYOUT, planColonyLayout });
-
-});
-__register("src/domain/economy/market.js", function (__exports, __require) {
-/**
- * domain/economy/market.js — 区域市场与供需价格（任务书 4.5 / ECON-04）
- *
- * P = base × clamp(1 + α(D−S)/max(S,ε), minFactor, maxFactor)，每日平滑。
- * 市场挂在星系上；库存/需求由殖民地、船坞、贸易路线与事件驱动。
- */
-
-const { BAL: BAL } = __require("src/content/constants.js");
-const { tradeableResourceIds: tradeableResourceIds, resourceDef: resourceDef } = __require("src/content/resources.js");
-const { clamp: clamp, lerp: lerp } = __require("src/core/math.js");
-const { emit: emit } = __require("src/core/eventBus.js");
-
-/** 确保星系市场存在 */
-function ensureMarket(world, systemId) {
-  let m = world.economy.markets[systemId];
-  if (!m) {
-    const stock = {};
-    const demand = {};
-    const price = {};
-    for (const rid of tradeableResourceIds()) {
-      stock[rid] = Math.max(40, Math.round(resourceDef(rid).basePrice * BAL.economy.marketBaseStockDays / 4));
-      demand[rid] = 0;
-      price[rid] = resourceDef(rid).basePrice;
-    }
-    m = { systemId, stock, demand, price, embargo: {}, riskFactor: 0 };
-    world.economy.markets[systemId] = m;
-  }
-  return m;
-}
-
-/** 当前价格 */
-function price(world, systemId, resId) {
-  const m = world.economy.markets[systemId];
-  if (!m) return resourceDef(resId).basePrice;
-  return m.price[resId] ?? resourceDef(resId).basePrice;
-}
-
-/** 每日价格更新（DailySystems 调用） */
-function updateMarketPrices(world) {
-  for (const systemId of Object.keys(world.economy.markets).sort()) {
-    const m = world.economy.markets[systemId];
-    for (const rid of tradeableResourceIds()) {
-      const def = resourceDef(rid);
-      const s = Math.max(0, m.stock[rid]);
-      const d = Math.max(0, m.demand[rid]);
-      const ratio = (d - s) / Math.max(s, 25);
-      const raw = 1 + BAL.economy.priceAlpha * ratio;
-      const target = def.basePrice * clamp(raw, BAL.economy.priceMinFactor, BAL.economy.priceMaxFactor);
-      m.price[rid] = Math.round(lerp(m.price[rid], target, BAL.economy.priceSmooth) * 100) / 100;
-    }
-    // 需求每日衰减（需求由当日活动重新注入）
-    for (const rid of tradeableResourceIds()) {
-      m.demand[rid] = Math.round(m.demand[rid] * 0.6);
     }
   }
+  ruin[RUIN_IDX.STAGE] = RUIN_STAGE.GUARDIAN;
+  chronicle(world, 'discovery', `行星 ${planet.name} 的先驱者导流塔光路合龙，遗迹守卫苏醒！`, { planetId: planet.id });
+  emit(world, 'MonolithStageAdvanced', { planetId: planet.id, stage: RUIN_STAGE.GUARDIAN }, 'ground');
+  return { ok: true, aligned: true, advanced: true };
 }
 
-/** 市场挂单需求注入（殖民地/船坞缺料时由其逻辑调用） */
-function addDemand(world, systemId, resId, amount) {
-  const m = ensureMarket(world, systemId);
-  m.demand[resId] = (m.demand[resId] || 0) + Math.max(0, Math.round(amount));
+/** 阶段 4 → 5：机偶守卫击杀回执（GroundMission/GroundView 战斗层上报） */
+function reportGuardianDefeated(world, planet) {
+  const ruin = planet.eco && planet.eco.ruin;
+  if (!ruin) return { ok: false, reason: 'RuinNotInitialized' };
+  if (ruin[RUIN_IDX.STAGE] < RUIN_STAGE.GUARDIAN) return { ok: false, reason: 'GuardianNotAwakened' };
+  if (ruin[RUIN_IDX.GUARDIAN]) return { ok: true, advanced: false };
+  ruin[RUIN_IDX.GUARDIAN] = 1;
+  ruin[RUIN_IDX.STAGE] = RUIN_STAGE.CORE;
+  emit(world, 'MonolithStageAdvanced', { planetId: planet.id, stage: RUIN_STAGE.CORE }, 'ground');
+  return { ok: true, advanced: true };
 }
 
 /**
- * 玩家/AI 市场买入：花 credits，取库存。
- * 返回 { ok, reason, spent, got }
+ * 阶段 5：先驱者核心提取（需守卫已灭——XENO-03 提前提取拒发）。
+ * ancientData × 15 入玩家账本 + 解锁先驱者遗落科技（二选一，ruinSeed 奇偶）；
+ * 幂等：coreHarvested 位防二次发放。
  */
-function marketBuy(world, factionId, systemId, resId, amount, ledgerApi) {
-  const m = ensureMarket(world, systemId);
-  const qty = Math.min(amount, Math.floor(m.stock[resId] || 0));
-  if (qty <= 0) return { ok: false, reason: '市场无货' };
-  const embargo = m.embargo[factionId];
-  if (embargo) return { ok: false, reason: '禁运中' };
-  const unit = marketUnitPrice(m, resId, qty, 'buy');
-  const cost = Math.ceil(unit * qty);
-  if (!ledgerApi.debit(world, factionId, 'credits', cost, `marketBuy:${resId}`, systemId)) {
-    return { ok: false, reason: '信用点不足' };
+function extractMonolithCore(world, planet) {
+  const ruin = planet.eco && planet.eco.ruin;
+  if (!ruin) return { ok: false, reason: 'RuinNotInitialized' };
+  if (ruin[RUIN_IDX.STAGE] < RUIN_STAGE.CORE || !ruin[RUIN_IDX.GUARDIAN]) {
+    return { ok: false, reason: 'GuardianAlive' };
   }
-  m.stock[resId] -= qty;
-  return { ok: true, spent: cost, got: qty, unitPrice: unit };
+  if (ruin[RUIN_IDX.CORE]) return { ok: true, already: true };
+  ruin[RUIN_IDX.CORE] = 1;
+  const fid = world.playerFactionId;
+  if (fid) credit(world, fid, 'ancientData', 15, 'monolithCore', planet.id);
+  const seed = ruinSeedOf(world, planet);
+  const techId = PRECURSOR_TECHS[seed & 1];
+  if (fid && world.research && world.research[fid]) {
+    completeTech(world, fid, techId);
+  }
+  chronicle(world, 'discovery', `先驱者核心破译完成：遗落科技 ${techId} 已点亮`, { planetId: planet.id, techId });
+  emit(world, 'MonolithCoreHarvested', { planetId: planet.id, techId, ancientData: 15 }, 'ground');
+  return { ok: true, techId };
 }
 
-/** 市场卖出 */
-function marketSell(world, factionId, systemId, resId, amount, ledgerApi) {
-  const m = ensureMarket(world, systemId);
-  if (m.embargo[factionId]) return { ok: false, reason: '禁运中' };
-  const qty = Math.max(0, Math.round(amount));
-  if (qty <= 0) return { ok: false, reason: '数量无效' };
-  const unit = marketUnitPrice(m, resId, qty, 'sell');
-  const gain = Math.floor(unit * qty);
-  m.stock[resId] += qty;
-  ledgerApi.credit(world, factionId, 'credits', gain, `marketSell:${resId}`, systemId);
-  return { ok: true, gained: gain, unitPrice: unit };
-}
-
-/** 单价（买入贵 / 卖出贱 的价差模型） */
-function marketUnitPrice(m, resId, qty, side) {
-  const p = m.price[resId] ?? resourceDef(resId).basePrice;
-  const impact = 1 + clamp(qty / Math.max(200, (m.stock[resId] || 0) + qty), 0, 0.25) * (side === 'buy' ? 0.2 : -0.15);
-  return Math.max(0.1, Math.round(p * impact * 100) / 100);
-}
-
-/** 禁运（外交命令调用） */
-function setEmbargo(world, systemId, factionId, on) {
-  const m = ensureMarket(world, systemId);
-  if (on) m.embargo[factionId] = true;
-  else delete m.embargo[factionId];
-  emit(world, 'EmbargoChanged', { systemId, factionId, on }, 'economy');
-}
-
-/** 贸易路线执行：把货物从殖民地搬到目标市场（由 convoy 逻辑每小时调用） */
-function deliverToMarket(world, systemId, resId, qty) {
-  const m = ensureMarket(world, systemId);
-  m.stock[resId] = (m.stock[resId] || 0) + qty;
-}
-
-function takeFromMarket(world, systemId, resId, qty) {
-  const m = ensureMarket(world, systemId);
-  const take = Math.min(qty, Math.floor(m.stock[resId] || 0));
-  m.stock[resId] -= take;
-  return take;
-}
-
-Object.assign(__exports, { ensureMarket, price, updateMarketPrices, addDemand, marketBuy, marketSell, marketUnitPrice, setEmbargo, deliverToMarket, takeFromMarket });
-
-});
-__register("src/content/resources.js", function (__exports, __require) {
-/**
- * content/resources.js — 资源定义（任务书 4.4 / 13.3：不少于 18 种）
- *
- * 每种资源：id、nameKey、category、unit、basePrice、mass、volume、
- * storageClass、rarity、isTradeable、isStrategic、decayRule、sourceTypes、sinkTypes。
- * 所有计量为整数单位（显示层格式化 K/M/B —— 任务书 2.5）。
- */
-
-const RESOURCES = [
-  // —— 基础矿物 ——
-  { id: 'ferro', nameKey: 'res.ferro', category: 'baseMineral', unit: 't', basePrice: 4, mass: 1.0, volume: 0.35, storageClass: 'bulk', rarity: 1, isTradeable: true, isStrategic: false, decayRule: null, sourceTypes: ['mine'], sinkTypes: ['refine', 'build'] },
-  { id: 'silicate', nameKey: 'res.silicate', category: 'baseMineral', unit: 't', basePrice: 3, mass: 1.0, volume: 0.4, storageClass: 'bulk', rarity: 1, isTradeable: true, isStrategic: false, decayRule: null, sourceTypes: ['mine'], sinkTypes: ['refine', 'build'] },
-  { id: 'rareEarth', nameKey: 'res.rareEarth', category: 'baseMineral', unit: 't', basePrice: 18, mass: 1.0, volume: 0.25, storageClass: 'crate', rarity: 3, isTradeable: true, isStrategic: true, decayRule: null, sourceTypes: ['mine'], sinkTypes: ['refine', 'build'] },
-  { id: 'heavyMetal', nameKey: 'res.heavyMetal', category: 'baseMineral', unit: 't', basePrice: 10, mass: 1.3, volume: 0.2, storageClass: 'crate', rarity: 2, isTradeable: true, isStrategic: false, decayRule: null, sourceTypes: ['mine'], sinkTypes: ['refine'] },
-
-  // —— 工业材料 ——
-  { id: 'alloy', nameKey: 'res.alloy', category: 'industrial', unit: 't', basePrice: 22, mass: 1.0, volume: 0.3, storageClass: 'crate', rarity: 2, isTradeable: true, isStrategic: true, decayRule: null, sourceTypes: ['refine'], sinkTypes: ['build', 'ship', 'repair'] },
-  { id: 'polymer', nameKey: 'res.polymer', category: 'industrial', unit: 't', basePrice: 14, mass: 0.8, volume: 0.5, storageClass: 'crate', rarity: 2, isTradeable: true, isStrategic: false, decayRule: null, sourceTypes: ['refine'], sinkTypes: ['build', 'ship'] },
-  { id: 'composite', nameKey: 'res.composite', category: 'industrial', unit: 't', basePrice: 34, mass: 0.7, volume: 0.4, storageClass: 'crate', rarity: 3, isTradeable: true, isStrategic: true, decayRule: null, sourceTypes: ['factory'], sinkTypes: ['ship', 'module'] },
-  { id: 'ceramic', nameKey: 'res.ceramic', category: 'industrial', unit: 't', basePrice: 20, mass: 0.9, volume: 0.35, storageClass: 'crate', rarity: 2, isTradeable: true, isStrategic: false, decayRule: null, sourceTypes: ['factory'], sinkTypes: ['module'] },
-  { id: 'conductor', nameKey: 'res.conductor', category: 'industrial', unit: 't', basePrice: 30, mass: 0.6, volume: 0.2, storageClass: 'crate', rarity: 3, isTradeable: true, isStrategic: true, decayRule: null, sourceTypes: ['factory'], sinkTypes: ['module', 'building'] },
-
-  // —— 挥发物 ——
-  { id: 'hydrogen', nameKey: 'res.hydrogen', category: 'volatile', unit: 't', basePrice: 2, mass: 0.1, volume: 1.2, storageClass: 'tank', rarity: 1, isTradeable: true, isStrategic: false, decayRule: { perDayPct: 0.1 }, sourceTypes: ['mine', 'gasGiant'], sinkTypes: ['fuel', 'refine'] },
-  { id: 'helium3', nameKey: 'res.helium3', category: 'volatile', unit: 't', basePrice: 16, mass: 0.1, volume: 1.0, storageClass: 'tank', rarity: 2, isTradeable: true, isStrategic: true, decayRule: null, sourceTypes: ['gasGiant', 'mine'], sinkTypes: ['reactor'] },
-  { id: 'deuterium', nameKey: 'res.deuterium', category: 'volatile', unit: 't', basePrice: 26, mass: 0.1, volume: 0.8, storageClass: 'tank', rarity: 3, isTradeable: true, isStrategic: true, decayRule: null, sourceTypes: ['refine'], sinkTypes: ['reactor', 'weapon'] },
-  { id: 'inertGas', nameKey: 'res.inertGas', category: 'volatile', unit: 't', basePrice: 8, mass: 0.1, volume: 1.1, storageClass: 'tank', rarity: 1, isTradeable: true, isStrategic: false, decayRule: null, sourceTypes: ['gasGiant'], sinkTypes: ['refine', 'terraform'] },
-  { id: 'reagents', nameKey: 'res.reagents', category: 'volatile', unit: 't', basePrice: 12, mass: 0.5, volume: 0.6, storageClass: 'crate', rarity: 2, isTradeable: true, isStrategic: false, decayRule: { perDayPct: 0.2 }, sourceTypes: ['factory'], sinkTypes: ['refine', 'medicine'] },
-
-  // —— 生态资源 ——
-  { id: 'food', nameKey: 'res.food', category: 'bio', unit: 't', basePrice: 3, mass: 1.0, volume: 0.9, storageClass: 'bulk', rarity: 1, isTradeable: true, isStrategic: false, decayRule: { perDayPct: 0.3 }, sourceTypes: ['farm'], sinkTypes: ['population'] },
-  { id: 'water', nameKey: 'res.water', category: 'bio', unit: 't', basePrice: 1, mass: 1.0, volume: 0.9, storageClass: 'tank', rarity: 1, isTradeable: true, isStrategic: false, decayRule: null, sourceTypes: ['mine', 'recycler'], sinkTypes: ['population', 'farm', 'terraform'] },
-  { id: 'oxygen', nameKey: 'res.oxygen', category: 'bio', unit: 't', basePrice: 2, mass: 0.1, volume: 1.3, storageClass: 'tank', rarity: 1, isTradeable: true, isStrategic: false, decayRule: null, sourceTypes: ['farm'], sinkTypes: ['population'] },
-  { id: 'biomass', nameKey: 'res.biomass', category: 'bio', unit: 't', basePrice: 6, mass: 0.9, volume: 0.8, storageClass: 'bulk', rarity: 2, isTradeable: true, isStrategic: false, decayRule: { perDayPct: 0.3 }, sourceTypes: ['farm'], sinkTypes: ['medicine', 'terraform'] },
-  { id: 'medicine', nameKey: 'res.medicine', category: 'bio', unit: '箱', basePrice: 24, mass: 0.3, volume: 0.3, storageClass: 'crate', rarity: 2, isTradeable: true, isStrategic: false, decayRule: { perDayPct: 0.2 }, sourceTypes: ['factory'], sinkTypes: ['population', 'groundMission'] },
-
-  // —— 能源 ——
-  { id: 'powerCell', nameKey: 'res.powerCell', category: 'energy', unit: '组', basePrice: 28, mass: 0.5, volume: 0.25, storageClass: 'crate', rarity: 2, isTradeable: true, isStrategic: false, decayRule: null, sourceTypes: ['factory'], sinkTypes: ['building', 'ship', 'groundMission'] },
-  { id: 'reactorFuel', nameKey: 'res.reactorFuel', category: 'energy', unit: '组', basePrice: 40, mass: 0.4, volume: 0.3, storageClass: 'crate', rarity: 3, isTradeable: true, isStrategic: true, decayRule: null, sourceTypes: ['refine'], sinkTypes: ['ship', 'station'] },
-
-  // —— 高级资源 ——
-  { id: 'quantumCrystal', nameKey: 'res.quantumCrystal', category: 'advanced', unit: '克拉', basePrice: 120, mass: 0.1, volume: 0.05, storageClass: 'vault', rarity: 5, isTradeable: true, isStrategic: true, decayRule: null, sourceTypes: ['refine', 'anomaly'], sinkTypes: ['module', 'research'] },
-  { id: 'darkMatter', nameKey: 'res.darkMatter', category: 'advanced', unit: '样本', basePrice: 400, mass: 0.0, volume: 0.02, storageClass: 'vault', rarity: 5, isTradeable: false, isStrategic: true, decayRule: null, sourceTypes: ['anomaly'], sinkTypes: ['research', 'crisis'] },
-  { id: 'exoticMatter', nameKey: 'res.exoticMatter', category: 'advanced', unit: '样本', basePrice: 320, mass: 0.0, volume: 0.02, storageClass: 'vault', rarity: 5, isTradeable: false, isStrategic: true, decayRule: null, sourceTypes: ['anomaly', 'crisis'], sinkTypes: ['research', 'module'] },
-  { id: 'ancientData', nameKey: 'res.ancientData', category: 'advanced', unit: '份', basePrice: 150, mass: 0.0, volume: 0.0, storageClass: 'vault', rarity: 4, isTradeable: false, isStrategic: false, decayRule: null, sourceTypes: ['anomaly', 'survey'], sinkTypes: ['research', 'story'] },
-
-  // —— 经济资源 ——
-  { id: 'credits', nameKey: 'res.credits', category: 'economic', unit: 'Cr', basePrice: 1, mass: 0, volume: 0, storageClass: 'abstract', rarity: 1, isTradeable: false, isStrategic: false, decayRule: null, sourceTypes: ['tax', 'trade', 'mission'], sinkTypes: ['build', 'ship', 'policy', 'diplomacy'] },
-  { id: 'influence', nameKey: 'res.influence', category: 'economic', unit: '点', basePrice: 0, mass: 0, volume: 0, storageClass: 'abstract', rarity: 1, isTradeable: false, isStrategic: false, decayRule: null, sourceTypes: ['politics', 'events'], sinkTypes: ['policy', 'diplomacy', 'claims'] },
-  { id: 'researchData', nameKey: 'res.researchData', category: 'economic', unit: '份', basePrice: 10, mass: 0, volume: 0, storageClass: 'abstract', rarity: 2, isTradeable: true, isStrategic: false, decayRule: null, sourceTypes: ['survey', 'anomaly', 'lab'], sinkTypes: ['research'] },
-  { id: 'intelPoints', nameKey: 'res.intelPoints', category: 'economic', unit: '点', basePrice: 0, mass: 0, volume: 0, storageClass: 'abstract', rarity: 2, isTradeable: false, isStrategic: false, decayRule: null, sourceTypes: ['intel'], sinkTypes: ['intel', 'diplomacy'] },
-];
-
-const byId = new Map(RESOURCES.map((r) => [r.id, r]));
-
-/** 读取资源定义（未知 id 抛错 —— 防止静默伪造资源） */
-function resourceDef(id) {
-  const r = byId.get(id);
-  if (!r) throw new Error(`未知资源: ${id}`);
-  return r;
-}
-
-function isResource(id) {
-  return byId.has(id);
-}
-
-function allResourceIds() {
-  return RESOURCES.map((r) => r.id);
-}
-
-/** 可市场交易资源 */
-function tradeableResourceIds() {
-  return RESOURCES.filter((r) => r.isTradeable).map((r) => r.id);
-}
-
-Object.assign(__exports, { RESOURCES, resourceDef, isResource, allResourceIds, tradeableResourceIds });
+Object.assign(__exports, { RUIN_IDX, RUIN_STAGE, PRECURSOR_TECHS, deriveRuinLayout, ensurePlanetRuin, ruinLayoutOf, towerRotOf, towerTargetRot, pylonLexemeIdx, tryCompleteExcavation, inscribeDialectPylon, rotateResonatorTower, tryAlignResonators, reportGuardianDefeated, extractMonolithCore });
 
 });
 __register("src/domain/research/research.js", function (__exports, __require) {
@@ -16730,6 +16395,8 @@ function canStart(world, factionId, techId) {
   const rs = world.research[factionId];
   const tech = techIndex.get(techId);
   if (!tech) return { ok: false, reason: '未知科技' };
+  // doc18 WP-3：先驱者遗落科技仅能由五阶段巨石遗迹核心破译解锁，常规科研拒启动
+  if (tech.special === 'precursor') return { ok: false, reason: '先驱者遗落科技：需在地表破译先驱者巨石核心' };
   if (!rs) return { ok: false, reason: '科研状态未初始化' };
   if (rs.completed.includes(techId)) return { ok: false, reason: '已研究完成' };
   if (rs.active.some((a) => a.techId === techId)) return { ok: false, reason: '已在研究中' };
@@ -17723,9 +17390,1118 @@ const TECHNOLOGIES = [
     ],
     unlocks: [], special: 'crisis',
   },
+  // ── 先驱者遗落科技（doc18 WP-3：仅能由五阶段巨石遗迹核心破译解锁，常规科研不可研发） ──
+  {
+    id: 'tech_precursor_shield_harmonics',
+    nameZh: '先驱者谐振护盾',
+    nameEn: 'Precursor Shield Harmonics',
+    descZh: '先驱者遗落科技：逆向先驱者核心的谐振波形，为全体舰船叠加一层相位护盾谐振。',
+    descEn: 'Precursor tech: reverse-engineering resonant waveforms from a Precursor core to phase-harmonize all ship shields.',
+    category: 'society', tier: 4, cost: 0, prereqs: [],
+    effects: [{ stat: 'damageReduction', mode: 'add', value: 0.05 }],
+    unlocks: [], special: 'precursor',
+  },
+  {
+    id: 'tech_precursor_mass_catapult',
+    nameZh: '先驱者零点能质量弹射器',
+    nameEn: 'Precursor Mass Catapult',
+    descZh: '先驱者遗落科技：零点能场驱动的质量弹射结构，大幅降低舰队推进燃料损耗。',
+    descEn: 'Precursor tech: zero-point mass catapult structures slashing fleet propulsion fuel losses.',
+    category: 'propulsion', tier: 4, cost: 0, prereqs: [],
+    effects: [{ stat: 'fuelEfficiency', mode: 'mult', value: 1.15 }],
+    unlocks: [], special: 'precursor',
+  },
 ];
 
 Object.assign(__exports, { TECHNOLOGIES });
+
+});
+__register("src/domain/ground/xenobiology.js", function (__exports, __require) {
+/**
+ * domain/ground/xenobiology.js — 异星生态科学（doc18 v0.2 WP-2 / doc16 §4.1~4.4）
+ *
+ * 设计红线（doc16 §4.2）：严禁逐草逐兽建对象——采用「区域生态斑块统计
+ * （Ecological Patch）+ 物种种群统计 + 局部表现代理」三级轻量模型；
+ * 单星持久化 planet.eco 严格 ≤ 3 KB（XENO-04 门禁）。
+ *
+ * 确定性红线（doc17 §3.1）：物种形态基因 100% 由 derivePlanetSeedsExtended
+ * 的 floraSeed/faunaSeed 子流实时派生，未扫描物种在存档中占 0 字节；
+ * 零 Math.random()、零 world.rng 消费（XENO-01 门禁断言逐字节零污染）。
+ *
+ * 四阶段图鉴状态机（doc16 §4.3）：Observed（远距目击 1.0s）→ Identified
+ * （25m 光谱识别 2.0s）→ Analyzed（E 采样，入账科研/生物质）→ Mastered
+ * （基因逆向，解锁特种科技）。持久化 2-bit 档位（doc18 契约）：
+ *   00 未发现 / 01 Observed / 10 Identified / 11 Mastered；
+ * Analyzed 里程碑以 sampleMask 位记录（采样动作先于基因逆向）。
+ */
+
+const { derivePlanetSeedsExtended: derivePlanetSeedsExtended, createSubRng: createSubRng } = __require("src/domain/ground/planetSeeds.js");
+const { emit: emit } = __require("src/core/eventBus.js");
+const { clamp: clamp } = __require("src/core/math.js");
+const { credit: credit } = __require("src/domain/economy/ledger.js");
+
+/** 四阶段图鉴档位（discoveryMask 每物种 2-bit，doc18 WP-2 数据契约） */
+const SPECIES_STAGE = Object.freeze({
+  NONE: 0,
+  OBSERVED: 1,
+  IDENTIFIED: 2,
+  MASTERED: 3,
+});
+
+/** 生态斑块数（每行星固定 5 斑块；[biomass, nutrients, water, contamination, speciesDensityMask]） */
+const ECO_PATCH_COUNT = 5;
+
+/** 主题生态风味（doc18 WP-2 目标文件 planetThemes.js 的配套语义表：命名/习性派生素材） */
+const PLANET_ECO_FLAVOR = Object.freeze({
+  abyssal_ocean: { floraStyle: '发光海带', faunaStyle: '滤食水母', hazard: 'depth' },
+  permafrost_furnace: { floraStyle: '热泉苔毯', faunaStyle: '潜冰猎手', hazard: 'cold' },
+  red_regolith_frontier: { floraStyle: '铁锈地衣', faunaStyle: '砂原掘食兽', hazard: 'dust' },
+  dry_night_polar: { floraStyle: '极夜晶蕨', faunaStyle: '夜巡绒兽', hazard: 'cold' },
+  sulfur_marsh: { floraStyle: '硫华菌簇', faunaStyle: '酸液喷吐兽', hazard: 'acid' },
+  biolume_canopy: { floraStyle: '荧光树蕨', faunaStyle: '夜行翼蜥', hazard: 'none' },
+  obsidian_lava: { floraStyle: '硅基晶簇', faunaStyle: '熔壳爬行者', hazard: 'heat' },
+  prism_crystal: { floraStyle: '棱镜晶兰', faunaStyle: '折光浮游体', hazard: 'none' },
+  salt_mirror_desert: { floraStyle: '盐壳地衣', faunaStyle: '盐甲虫群', hazard: 'dust' },
+  cryomethane_sea: { floraStyle: '甲烷藻毯', faunaStyle: '低温滤食者', hazard: 'cold' },
+  tidal_lock_dusk: { floraStyle: '晨昏藤蔓', faunaStyle: '昏线游荡兽', hazard: 'none' },
+  cloud_giant_atolls: { floraStyle: '浮台垂兰', faunaStyle: '浮空气囊兽', hazard: 'fall' },
+  fungal_catacombs: { floraStyle: '孢林菌柱', faunaStyle: '孢子漫步者', hazard: 'spore' },
+  ancient_megastructure: { floraStyle: '巨构附生蕨', faunaStyle: '巡构机偶兽', hazard: 'none' },
+  glassstorm_barrens: { floraStyle: '玻晶棘丛', faunaStyle: '风暴蚀壳兽', hazard: 'glassstorm' },
+  magnetar_aurora: { floraStyle: '磁极光苔', faunaStyle: '电磁水母群', hazard: 'emp' },
+  canopy_colossus: { floraStyle: '冠层垂蕨', faunaStyle: '冠层荡臂兽', hazard: 'fall' },
+  fractured_moon: { floraStyle: null, faunaStyle: null, hazard: 'vacuum' },
+});
+
+/** 真空/气态天体不生成地表生物（doc18 WP-2 §3.1；fractured_moon = 真空碎环月主题） */
+function isSterilePlanet(planet) {
+  return planet.category === 'gasGiant' || planet.primaryThemeId === 'fractured_moon';
+}
+
+/** 形态基因码（纯种子派生，0 存档字节）：i = 物种序号 */
+function deriveGenome(seeds, kind, i) {
+  const r = createSubRng(kind === 'flora' ? seeds.floraSeed(i) : seeds.faunaSeed(i));
+  return {
+    hueIdx: (r() * 6) | 0,              // 色相偏移桶（渲染层取主题色板）
+    sizeClass: 1 + ((r() * 4) | 0),     // 1..4 体型档（0.4m ~ 6m 视觉映射）
+    toxicity: kind === 'flora' ? (r() * 100) | 0 : (r() * 60) | 0,
+    waterNeed: Math.round(r() * 100) / 100,   // 0.0~1.0 水分依赖
+    biolume: r() < 0.35 ? 1 : 0,        // 荧光/发光体征
+    mobility: kind === 'flora' ? 0 : 1 + ((r() * 3) | 0), // 1 步行 / 2 奔跑 / 3 飞行
+    aggroR: kind === 'predator' ? 10 + Math.round(r() * 14) : 0, // 掠食者感知半径 m
+  };
+}
+
+/** 程序化物种名（风味前缀 + 基因特征词根，纯确定性） */
+const HUE_ZH = ['赤', '橙', '黄', '青', '蓝', '紫'];
+function speciesName(flavor, kind, genome, i) {
+  const hue = HUE_ZH[genome.hueIdx] || '';
+  const trait = genome.biolume ? '荧光' : genome.toxicity > 55 ? '毒腺' : genome.sizeClass >= 3 ? '巨躯' : '矮簇';
+  const style = kind === 'flora' ? (flavor.floraStyle || '原生植物') : (flavor.faunaStyle || '原生生物');
+  return `${hue}${trait}${style}`;
+}
+
+/**
+ * 纯函数：派生一颗行星的原生物种名录（含形态基因码）。
+ * 不写任何状态——GroundView/BioFloraPass 每次进场景实时重建。
+ * 营养级（doc16 §4.1）：第一 4~8 种植物/菌落、第二 1~2 种草食、第三 1~2 种掠食者。
+ * @returns {{species:Array, total:number}|null} null = 不育天体（气态巨行星/真空碎环月）
+ */
+function derivePlanetEcology(world, planet) {
+  if (!planet || isSterilePlanet(planet)) return null;
+  const seeds = derivePlanetSeedsExtended(world, planet.id);
+  const flavor = PLANET_ECO_FLAVOR[planet.primaryThemeId] || PLANET_ECO_FLAVOR.red_regolith_frontier;
+  const countRng = createSubRng(seeds.biomeSeed ^ seeds.planetSeed);
+  const nFlora = 4 + ((countRng() * 5) | 0);          // 4..8
+  const nHerbivore = 1 + ((countRng() * 2) | 0);      // 1..2
+  const nPredator = 1 + ((countRng() * 2) | 0);       // 1..2
+  const species = [];
+  for (let i = 0; i < nFlora; i++) {
+    const g = deriveGenome(seeds, 'flora', i);
+    species.push({ idx: species.length, kind: 'flora', trophic: 1, name: speciesName(flavor, 'flora', g, i), genome: g });
+  }
+  for (let i = 0; i < nHerbivore; i++) {
+    const g = deriveGenome(seeds, 'herbivore', i);
+    species.push({ idx: species.length, kind: 'herbivore', trophic: 2, name: speciesName(flavor, 'herbivore', g, i), genome: g });
+  }
+  for (let i = 0; i < nPredator; i++) {
+    const g = deriveGenome(seeds, 'predator', i);
+    species.push({ idx: species.length, kind: 'predator', trophic: 3, name: speciesName(flavor, 'predator', g, i), genome: g });
+  }
+  return { species, total: species.length };
+}
+
+/**
+ * 惰性初始化 planet.eco（doc18 WP-2 数据契约；幂等）。
+ * 斑块初值由 biomeSeed 子流确定性派生（同种子逐位一致），非文档示例字面量。
+ */
+function ensurePlanetEco(world, planet) {
+  if (planet.eco && planet.eco.v === 1) return planet.eco;
+  const seeds = derivePlanetSeedsExtended(world, planet.id);
+  const eco = derivePlanetEcology(world, planet);
+  const rng = createSubRng(seeds.biomeSeed);
+  const patches = [];
+  for (let p = 0; p < ECO_PATCH_COUNT; p++) {
+    const biomass = 30 + ((rng() * 55) | 0);     // 30..85
+    const nutrients = 20 + ((rng() * 50) | 0);   // 20..70
+    const water = 25 + ((rng() * 55) | 0);       // 25..80
+    const contamination = eco ? (rng() * 6) | 0 : 0; // 原生污染基线 0..5
+    // 物种密度位掩码：第 p 斑块按哈希散布物种（bit i = 物种 i 在本斑块有栖息密度）
+    let densityMask = 0;
+    if (eco) {
+      const prng = createSubRng(seeds.biomeSeed ^ (p + 1) * 0x9e3779b9);
+      for (let s = 0; s < eco.total; s++) {
+        if (prng() < 0.45) densityMask |= (1 << s);
+      }
+      if (densityMask === 0) densityMask = 1 << (p % eco.total); // 每斑块至少 1 种
+    }
+    patches.push([biomass, nutrients, water, contamination, densityMask]);
+  }
+  planet.eco = {
+    v: 1,
+    speciesCount: eco ? eco.total : 0,
+    discoveryMask: 0,
+    sampleMask: 0,          // Analyzed 里程碑（bit i = 物种 i 已采样）
+    patches,
+    surveyAwarded: false,
+    ruin: null,             // WP-3 monolithRuins 紧凑元组
+  };
+  return planet.eco;
+}
+
+/** 物种总数（doc18 契约签名 getPlanetSpeciesCount(planet)；未激活生态返回 0） */
+function getPlanetSpeciesCount(planet) {
+  return (planet && planet.eco && planet.eco.speciesCount) || 0;
+}
+
+/** 读某物种当前档位 */
+function getSpeciesStage(planet, speciesIdx) {
+  if (!planet.eco) return SPECIES_STAGE.NONE;
+  return (planet.eco.discoveryMask >>> (speciesIdx * 2)) & 0b11;
+}
+
+/** 全物种 Mastered 且未发奖 → 一次性「行星生态完全测绘大奖」（幂等，doc18 XENO-02） */
+function grantSurveyAwardIfComplete(world, planet) {
+  const eco = planet.eco;
+  if (eco.surveyAwarded) return false;
+  const total = getPlanetSpeciesCount(planet);
+  for (let i = 0; i < total; i++) {
+    if (((eco.discoveryMask >>> (i * 2)) & 0b11) < SPECIES_STAGE.MASTERED) return false;
+  }
+  eco.surveyAwarded = true;
+  const fid = world.playerFactionId;
+  if (fid) {
+    credit(world, fid, 'credits', 500, 'planetEcoSurvey', planet.id);
+    credit(world, fid, 'researchData', 60, 'planetEcoSurvey', planet.id);
+  }
+  emit(world, 'PlanetEcoSurveyCompleted', { planetId: planet.id, speciesCount: total }, 'ground');
+  return true;
+}
+
+/**
+ * 四阶段图鉴推进（doc18 WP-2 §3 契约实现；GroundView 分析面罩/采样/实验室调用）。
+ * Analyzed 里程碑：targetStage ≥ 2（Identified）且首次采样时置 sampleMask 位并入账
+ * 科研点与生物质（doc16 §4.3 阶段 3）。Mastered（档位 3）要求该物种已采样（阶段 4
+ * 基因逆向的前置），无殖民星球亦可完成（doc16 §8.1 验收红线）。
+ * @param {number} targetStage 1..3（SPECIES_STAGE）
+ * @returns {{ok:boolean, reason?:string, currentStage?:number, newlyAwarded?:boolean, sampleAward?:object}}
+ */
+function advanceSpeciesDiscovery(world, planetId, speciesIdx, targetStage) {
+  const planet = world.entities.planets[planetId];
+  if (!planet) return { ok: false, reason: 'PlanetNotFound' };
+  if (!planet.eco) ensurePlanetEco(world, planet);
+  const eco = planet.eco;
+  const total = getPlanetSpeciesCount(planet);
+  if (!(speciesIdx >= 0 && speciesIdx < total)) return { ok: false, reason: 'SpeciesIdxOutOfRange' };
+  if (!(targetStage >= SPECIES_STAGE.NONE && targetStage <= SPECIES_STAGE.MASTERED)) {
+    return { ok: false, reason: 'BadTargetStage' };
+  }
+
+  const shift = speciesIdx * 2;
+  const currentStage = (eco.discoveryMask >>> shift) & 0b11;
+  // Mastered 前置：必须先完成 Analyzed 采样里程碑（doc16 §4.3 阶段链）
+  let sampleAward = null;
+  if (targetStage >= SPECIES_STAGE.MASTERED && !(eco.sampleMask & (1 << speciesIdx))) {
+    return { ok: false, reason: 'SampleRequired', currentStage };
+  }
+  if (targetStage > currentStage) {
+    eco.discoveryMask = (eco.discoveryMask & ~(0b11 << shift)) | (targetStage << shift);
+  }
+
+  const newlyAwarded = grantSurveyAwardIfComplete(world, planet);
+  return { ok: true, currentStage: Math.max(currentStage, targetStage), newlyAwarded, sampleAward };
+}
+
+/**
+ * Analyzed 采样里程碑（doc16 §4.3 阶段 3）：E 键采集活体组织/排泄物。
+ * 入账科研点 +10 与生物质 +5（有殖民地入殖民地仓储，否则入玩家账本）；
+ * 幂等性：每物种档位只发一次（重复采样只产物料不改档位——由调用方节流）。
+ */
+function collectSpecimenSample(world, planetId, speciesIdx) {
+  const planet = world.entities.planets[planetId];
+  if (!planet) return { ok: false, reason: 'PlanetNotFound' };
+  if (!planet.eco) ensurePlanetEco(world, planet);
+  const eco = planet.eco;
+  const total = getPlanetSpeciesCount(planet);
+  if (!(speciesIdx >= 0 && speciesIdx < total)) return { ok: false, reason: 'SpeciesIdxOutOfRange' };
+  const stage = getSpeciesStage(planet, speciesIdx);
+  if (stage < SPECIES_STAGE.IDENTIFIED) return { ok: false, reason: 'NotIdentified' };
+  const first = (eco.sampleMask & (1 << speciesIdx)) === 0;
+  if (first) {
+    eco.sampleMask |= (1 << speciesIdx);
+    const fid = world.playerFactionId;
+    if (fid) credit(world, fid, 'researchData', 10, 'specimenSample', planet.id);
+    const colony = Object.values(world.entities.colonies || {}).find((c) => c.planetId === planet.id);
+    if (colony) {
+      colony.stockpile ||= {};
+      colony.stockpile.biomass = (colony.stockpile.biomass || 0) + 5;
+    }
+    emit(world, 'SpecimenSampled', { planetId: planet.id, speciesIdx, resCredits: 0 }, 'ground');
+  }
+  return { ok: true, first, stage };
+}
+
+/**
+ * 生态斑块日结算（doc16 §4.2 ΔN_i = B_i − D_i + M_i + Σ I_ij 轻量统计模型；
+ * DailySystems population 阶段调用；确定性、O(5) 常数、零对象分配）。
+ * B 繁殖：水分充足 + 营养有余；D 死亡：污染超阈值/超承载；M 迁徙：邻斑 Biomass 梯度；
+ * I 交互：污染侵蚀物种密度位（灭绝-重殖皆确定性）。
+ */
+function tickPlanetEcology(world, planet) {
+  if (!planet || !planet.eco || !planet.eco.patches) return false;
+  const patches = planet.eco.patches;
+  let changed = false;
+  const next = [];
+  for (let i = 0; i < patches.length; i++) {
+    const cur = patches[i];
+    const [biomass, nutrients, water, contamination, densityMask] = cur;
+    // B：繁殖增长（水分/营养双门槛）
+    const grow = (water >= 25 && nutrients >= 20 && biomass < 95) ? 2 : 0;
+    // D：死亡损失（污染毒害 + 超承载密度制约）
+    const die = (contamination > 40 ? 3 : 0) + (biomass > 85 ? 1 : 0);
+    // M：迁徙净变化（环形邻域梯度，同种子确定性）
+    const nb = patches[(i + 1) % patches.length][0];
+    const migrate = Math.sign(nb - biomass) * (Math.abs(nb - biomass) > 20 ? 1 : 0);
+    // I：交互（污染每 25 点侵蚀 1 点营养循环效率 → 营养流失）
+    const pollutionDrain = contamination >= 25 ? 1 : 0;
+    let nb2 = clamp(biomass + grow - die + migrate, 0, 100);
+    let nn = clamp(nutrients - (grow > 0 ? 1 : 0) - pollutionDrain + (contamination > 60 ? 0 : 1), 0, 100);
+    let nw = clamp(water - (grow > 0 ? 1 : 0) + (contamination > 50 ? 0 : 1), 0, 100);
+    let nc = clamp(contamination - 1, 0, 100); // 自然消散（世界不会永远惩罚，doc16 §11）
+    let nm = densityMask;
+    // 物种密度位：斑块荒漠化（<10）→ 密度位清零（局部迁离）；恢复（>40）→ 重殖回填
+    if (nb2 < 10 && nm !== 0) nm = 0;
+    else if (nb2 > 40 && nm === 0) {
+      const prng = createSubRng((planet.eco.discoveryMask ^ (i + 1) * 0x85ebca6b ^ world.tick) >>> 0);
+      nm = (1 << (prng() * Math.max(1, getPlanetSpeciesCount(planet)) | 0)) >>> 0;
+    }
+    if (nb2 !== biomass || nn !== nutrients || nw !== water || nc !== contamination || nm !== densityMask) changed = true;
+    next.push([nb2, nn, nw, nc, nm]);
+  }
+  if (changed) planet.eco.patches = next;
+  return changed;
+}
+
+/** 生态图鉴完成度（0..1）：已 Mastered 物种 / 总物种；不育天体 = 1 */
+function ecoSurveyProgress(planet) {
+  const total = getPlanetSpeciesCount(planet);
+  if (!total) return 1;
+  let mastered = 0;
+  for (let i = 0; i < total; i++) {
+    if (((planet.eco.discoveryMask >>> (i * 2)) & 0b11) >= SPECIES_STAGE.MASTERED) mastered++;
+  }
+  return mastered / total;
+}
+
+Object.assign(__exports, { SPECIES_STAGE, ECO_PATCH_COUNT, PLANET_ECO_FLAVOR, derivePlanetEcology, ensurePlanetEco, getPlanetSpeciesCount, getSpeciesStage, advanceSpeciesDiscovery, collectSpecimenSample, tickPlanetEcology, ecoSurveyProgress });
+
+});
+__register("src/domain/ground/terrainEdits.js", function (__exports, __require) {
+/**
+ * domain/ground/terrainEdits.js — 地形整形编辑层（doc7 TASK-5.1 / §6.5 地形整形器）
+ *
+ * 职责：
+ *  - 编辑日志（ops）：raise / lower / smooth / flatten / restore 五类刷子 + plant / removePlant 植被移植；
+ *  - 刷子生效不直接改 terrainField 数据，而是挂进 field.evalPoint 的 siteModifier 合成链
+ *    （attachTerrainEdits：既有 siteModifier（GroundView._fieldSiteModifier 采掘凹陷等）先评估，
+ *     编辑层后评估 —— flatten / restore 因此可以覆写采掘凹陷，回任自然地貌）；
+ *  - 每次编辑仅把受影响 Chunk 标脏（TERRAIN-06：刷子半径 ≤ chunkMeters/2 → 至多 2×2 = 4 个区块），
+ *    邻接区块由下一帧增量重建；高度预算 [-40,+80] 仍由 evalPoint 统一钳制；
+ *  - 紧凑 JSON 编辑命令序列（serializeEdits / deserializeEdits）供存档确定性重放（SITE-07）；
+ *  - 建筑落位 9 点三角网格投影校验（doc7 TASK-5.2 / §6.8 坡度阈值）与主题专属桩基类型。
+ *
+ * 确定性（doc7 红线 4）：零 Math.random、零 world.rng；smooth 的局部均值与 flatten 的
+ * 目标高度均在 applyEdit 时用 _macro 纯宏观场按固定采样点预计算（缓存可由
+ * deserializeEdits 重建，逐位一致）；植被 seed 由 hash32(内容串) 派生。
+ * 本文件为纯领域层：无 DOM / 无 WebGL。
+ */
+
+const { MIN_HEIGHT: MIN_HEIGHT, MAX_HEIGHT: MAX_HEIGHT, buildTriangulatedChunkMesh: buildTriangulatedChunkMesh } = __require("src/domain/ground/terrainField.js");
+const { hash32: hash32 } = __require("src/domain/ground/SurfaceSandbox.js");
+const { sampleTerrain: sampleTerrain, slopeAt: slopeAt } = __require("src/domain/ground/surfaceQueries.js");
+
+// ———— 常量 ————
+
+/** 编辑日志 schema 版本（存档兼容性标记） */
+const TERRAIN_EDITS_VERSION = 1;
+
+/**
+ * 刷子参数上限（TERRAIN-06 增量重建约束）：
+ * 半径 ≤ chunkMeters/2 → 圆盘至多跨 2×2 区块（4 个）；强度上限防止一次刷穿高度预算。
+ */
+const BRUSH_LIMITS = {
+  maxRadiusM: 32,        // 米；512m 场默认 64m 区块 → 至多 4 区块受影响
+  maxStrokeM: 8,         // raise/lower 单次行程上限（米）
+  minStrength: 0.001,
+};
+
+/**
+ * 建筑落位阈值（doc7:273 image17/18 阈值公式图不可读，按 GAME-05..08 门禁语义自定
+ * 并在此文档化 —— 后续读回原文图片时仅需改这里）：
+ *  - 建筑底面 9 点（中心 + 4 角 + 4 边中点）投影到三角网格；
+ *  - 任一点坡度 > maxSlopeDeg(16°，与 surfaceQueries.isBuildableSlope 默认一致) → 拒绝 SLOPE_TOO_STEEP；
+ *  - 9 点最大高差 > maxHeightDeltaM(2.2m) → 拒绝 HEIGHT_DELTA（要求先整地/桩基）；
+ *  - 高差 ≤ foundationGradeDeltaM(0.4m) 直接平铺；否则自动地基承台（graded）并按主题选桩基。
+ */
+const BUILDING_PLACEMENT = {
+  maxSlopeDeg: 16,
+  maxHeightDeltaM: 2.2,
+  foundationGradeDeltaM: 0.4,
+  footprintHalfM: 3, // 6m × 6m 占地
+};
+
+/** 主题专属桩基（doc7 TASK-5.2：浮台 / 隔热基座 / 耐酸桩；未列主题 → 标准承台） */
+const THEME_PILING = {
+  obsidian_lava: 'thermal_base',      // 隔热基座（熔岩地表）
+  sulfur_marsh: 'acid_pile',          // 耐酸桩（毒雾沼泽）
+  abyssal_ocean: 'pontoon',           // 浮台（海洋/潮汐带）
+  cryomethane_sea: 'pontoon',
+  prism_crystal: 'standard',
+  permafrost_furnace: 'insulated_base', // 隔热基座（冻土热区）
+  dry_night_polar: 'insulated_base',
+};
+
+/** 编辑算子集合 */
+const SHAPE_KINDS = new Set(['raise', 'lower', 'smooth', 'flatten', 'restore']);
+
+// ———— 小工具 ————
+
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
+function num(v, dflt) {
+  return Number.isFinite(v) ? v : dflt;
+}
+
+/** 纯宏观场原始高度（不含 siteModifier 与编辑层）——smooth/flatten 的确定性基准 */
+function pristineHeight(field, wx, wz) {
+  const macro = field._macro;
+  if (!macro || typeof macro.heightAt !== 'function') {
+    throw new Error('terrainEdits: field 缺少 _macro 宏观场（须由 createTerrainField 构建）');
+  }
+  return clamp(macro.heightAt(wx, wz).y, MIN_HEIGHT, MAX_HEIGHT);
+}
+
+/** 平滑核：(1 - (d/r)^2)^2，d=r 处为 0（C1 连续，避免刷痕硬边） */
+function brushFalloff(d, r) {
+  if (d >= r) return 0;
+  const t = 1 - (d * d) / (r * r);
+  return t * t;
+}
+
+/**
+ * 压平核：半径内圈（r/2）为全强度平台（建筑 9 点落位足印 ±3m 必须落在平芯内），
+ * 外圈 (1-t²)² 平滑过渡到 0 —— 平芯 + 裙边，符合「压平建筑地基」的工具语义。
+ */
+function flattenFalloff(d, r) {
+  const coreR = r * 0.5;
+  if (d <= coreR) return 1;
+  if (d >= r) return 0;
+  const t = (d - coreR) / (r - coreR);
+  const u = 1 - t * t;
+  return u * u;
+}
+
+function chunkKeyOf(field, x, z) {
+  const cx = clamp(Math.floor((x - field.originX) / field.chunkMeters), 0, field.chunksX - 1);
+  const cz = clamp(Math.floor((z - field.originZ) / field.chunkMeters), 0, field.chunksZ - 1);
+  return `${cx},${cz}`;
+}
+
+// ———— 编辑仓库 ————
+
+/**
+ * 创建编辑仓库（挂在一个地形场上，但只通过 siteModifier 合成链接入，
+ * 不直接改写 terrainField 的任何缓冲）。
+ */
+function createTerrainEdits(field) {
+  if (!field || !Array.isArray(field.chunks)) {
+    throw new Error('createTerrainEdits: 需要 createTerrainField 产出的地形场');
+  }
+  return {
+    planetId: field.planetId,
+    revision: 0,   // 每次成功 applyEdit +1（与存档快照 revision 对齐）
+    seq: 0,        // 植被 id 序列（确定性 id 派生）
+    ops: [],       // 时序编辑日志（内部规范形）
+    byChunk: new Map(), // 'cx,cz' → [opIdx...]（按全局顺序追加；渲染增量重建索引）
+    flora: [],     // 在场植被 [{ id, x, z, prefabId, seed }]
+  };
+}
+
+/**
+ * 预计算算子缓存（smooth 局部均值 / flatten 目标高度）。
+ * 固定采样图案：中心 + 内环 8 点(0.55r) + 外环 8 点(0.92r)，全部取纯宏观场高度。
+ * 缓存丢失（反序列化后）时惰性重建 —— 同输入逐位一致。
+ */
+function ensureOpCache(field, op) {
+  if (op.kind === 'flatten') {
+    if (op._targetY === undefined) op._targetY = pristineHeight(field, op.x, op.z);
+    return;
+  }
+  if (op.kind === 'smooth') {
+    if (op._avgY === undefined) {
+      let sum = 0;
+      let n = 0;
+      sum += pristineHeight(field, op.x, op.z); n += 1;
+      for (let ring = 0; ring < 2; ring++) {
+        const rr = op.r * (ring === 0 ? 0.55 : 0.92);
+        for (let a = 0; a < 8; a++) {
+          const ang = (a * Math.PI) / 4;
+          sum += pristineHeight(field, op.x + Math.cos(ang) * rr, op.z + Math.sin(ang) * rr);
+          n += 1;
+        }
+      }
+      op._avgY = sum / n;
+    }
+  }
+}
+
+/**
+ * 应用一次编辑：校验 → 追加日志 → 标脏受影响区块（≤4）。
+ * shape 算子 { kind, x, z, radius, strength }；plant { kind:'plant', x, z, prefabId, seed? }；
+ * removePlant { kind:'removePlant', plantId }。
+ * @returns {{ok:true, op:object, index:number, dirtyChunks:string[], floraId?:string}}
+ * @throws {Error} 参数非法（命令层先行校验并映射错误码）
+ */
+function applyEdit(field, edits, op) {
+  if (!field || !edits || !op || typeof op !== 'object') {
+    throw new Error('applyEdit: 缺少 field/edits/op');
+  }
+  const x = num(op.x, NaN);
+  const z = num(op.z, NaN);
+  if (!Number.isFinite(x) || !Number.isFinite(z)) {
+    throw new Error('applyEdit: 坐标非法');
+  }
+
+  const dirtyChunks = [];
+  let entry;
+
+  if (op.kind === 'plant' || op.kind === 'removePlant') {
+    if (op.kind === 'plant') {
+      if (typeof op.prefabId !== 'string' || op.prefabId.length === 0) {
+        throw new Error('applyEdit: plant 需要 prefabId');
+      }
+      edits.seq += 1;
+      const id = op.id || `flora_${edits.seq}`;
+      const seed = Number.isFinite(op.seed) ? (op.seed >>> 0)
+        : (hash32(`${field.planetId}|${id}|${x.toFixed(3)}|${z.toFixed(3)}|${op.prefabId}`) >>> 0);
+      entry = { kind: 'plant', x, z, id, prefabId: op.prefabId, seed };
+      edits.flora.push({ id, x, z, prefabId: op.prefabId, seed });
+    } else {
+      if (typeof op.plantId !== 'string') throw new Error('applyEdit: removePlant 需要 plantId');
+      entry = { kind: 'removePlant', x, z, plantId: op.plantId };
+      const before = edits.flora.length;
+      edits.flora = edits.flora.filter((f) => f.id !== op.plantId);
+      if (edits.flora.length === before) {
+        throw new Error(`applyEdit: 植被不存在 ${op.plantId}`);
+      }
+    }
+  } else {
+    if (!SHAPE_KINDS.has(op.kind)) throw new Error(`applyEdit: 未知算子 ${op.kind}`);
+    const radius = num(op.radius, 8);
+    if (!(radius > 0) || radius > Math.max(BRUSH_LIMITS.maxRadiusM, field.chunkMeters / 2)) {
+      throw new Error(`applyEdit: 半径越界（0,${Math.min(BRUSH_LIMITS.maxRadiusM, field.chunkMeters / 2)}]）`);
+    }
+    const strength = num(op.strength, op.kind === 'smooth' || op.kind === 'flatten' ? 1 : 2);
+    if (!(strength >= BRUSH_LIMITS.minStrength)) throw new Error('applyEdit: 强度过小');
+    if ((op.kind === 'raise' || op.kind === 'lower') && strength > BRUSH_LIMITS.maxStrokeM) {
+      throw new Error(`applyEdit: 行程强度上限 ${BRUSH_LIMITS.maxStrokeM}m`);
+    }
+    if ((op.kind === 'smooth' || op.kind === 'flatten') && strength > 1) {
+      throw new Error('applyEdit: smooth/flatten 强度为混合系数 (0,1]');
+    }
+    entry = { kind: op.kind, x, z, r: radius, s: strength };
+    ensureOpCache(field, entry);
+  }
+
+  edits.ops.push(entry);
+  const index = edits.ops.length - 1;
+
+  // 标脏：圆盘 AABB 覆盖的区块（半径 ≤ chunkMeters/2 → 至多 2×2 = 4 个，TERRAIN-06）
+  const reach = entry.kind === 'plant' || entry.kind === 'removePlant' ? 0.5 : entry.r;
+  const cxMin = clamp(Math.floor((x - reach - field.originX) / field.chunkMeters), 0, field.chunksX - 1);
+  const cxMax = clamp(Math.floor((x + reach - field.originX) / field.chunkMeters), 0, field.chunksX - 1);
+  const czMin = clamp(Math.floor((z - reach - field.originZ) / field.chunkMeters), 0, field.chunksZ - 1);
+  const czMax = clamp(Math.floor((z + reach - field.originZ) / field.chunkMeters), 0, field.chunksZ - 1);
+  for (let cz = czMin; cz <= czMax; cz++) {
+    for (let cx = cxMin; cx <= cxMax; cx++) {
+      const key = `${cx},${cz}`;
+      let list = edits.byChunk.get(key);
+      if (!list) {
+        list = [];
+        edits.byChunk.set(key, list);
+      }
+      list.push(index);
+      const chunk = field.chunks[cz * field.chunksX + cx];
+      if (chunk) chunk.dirty = true;
+      dirtyChunks.push(key);
+    }
+  }
+
+  edits.revision += 1;
+  return { ok: true, op: entry, index, dirtyChunks, floraId: entry.kind === 'plant' ? entry.id : undefined };
+}
+
+// ———— evalPoint 合成链挂点 ————
+
+/**
+ * 编辑层逐点求值。restore 覆盖点重置此前全部编辑影响与 siteModifier 影响
+ * （DSP 式「一键恢复自然地貌」）。
+ * @param {number} siteDyIn 既有 siteModifier 已算得的 dy（先于编辑层评估）
+ * @returns {number} 合成总 dy（0 = 无影响；无相关列表时原样透传 siteDyIn）
+ */
+function evalEditsDy(field, edits, wx, wz, baseY, siteDyIn) {
+  const key = chunkKeyOf(field, wx, wz);
+  const list = edits.byChunk.get(key);
+  if (!list || list.length === 0) return siteDyIn;
+
+  let siteApplied = siteDyIn; // 既有 siteModifier 影响（restore 可清零）
+  let extra = 0;              // 编辑层累计
+
+  for (let i = 0; i < list.length; i++) {
+    const op = edits.ops[list[i]];
+    const dx = wx - op.x;
+    const dz = wz - op.z;
+    const d = Math.sqrt(dx * dx + dz * dz);
+
+    if (op.kind === 'restore') {
+      if (d <= op.r) {
+        // 一键恢复：清空此前编辑叠加 + siteModifier 叠加，回到纯宏观地貌
+        extra = 0;
+        siteApplied = 0;
+      }
+      continue;
+    }
+
+    const fall = op.kind === 'flatten' ? flattenFalloff(d, op.r) : brushFalloff(d, op.r);
+    if (fall <= 0) continue;
+    ensureOpCache(field, op);
+
+    if (op.kind === 'raise') extra += op.s * fall;
+    else if (op.kind === 'lower') extra -= op.s * fall;
+    else if (op.kind === 'smooth') {
+      // 盒式模糊语义：向预计算的局部均值收敛（applyEdit 时对纯宏观场采样）
+      extra += (op._avgY - (baseY + siteApplied + extra)) * op.s * fall;
+    } else if (op.kind === 'flatten') {
+      // 压平：向算子中心纯宏观高度收敛 → 覆写采掘凹陷（凹陷先于编辑层计入运行高度）
+      extra += (op._targetY - (baseY + siteApplied + extra)) * op.s * fall;
+    }
+  }
+  return siteApplied + extra;
+}
+
+/**
+ * 把编辑仓库接入 field.evalPoint 的 siteModifier 合成链：
+ *   最终 dy = 既有 siteModifier dy（先评估；可被 restore 清零） + 编辑层 dy（后评估）。
+ * 可重复调用（幂等）；再次 attach 会保留最初的地基 siteModifier（GroundView 凹陷等）。
+ * @returns {Function} 合成后的 siteModifier（field.siteModifier）
+ */
+function attachTerrainEdits(field, edits) {
+  if (!field || !edits) throw new Error('attachTerrainEdits: 缺少 field/edits');
+  if (field.__terrainEdits === edits && typeof field.siteModifier === 'function' && field.siteModifier.__terrainEdits) {
+    return field.siteModifier; // 已挂接同一仓库
+  }
+  const underlying = field.__baseSiteModifier !== undefined ? field.__baseSiteModifier : field.siteModifier;
+  field.__baseSiteModifier = underlying; // 保留地基（首次 attach 时为 GroundView/_digDents 链）
+
+  const composed = (fx, fz, base) => {
+    const baseY = num(base && base.y, 0);
+    // 1) 既有 siteModifier（任务核心 SDF / 采掘凹陷）
+    let siteDy = 0;
+    let baseRes = null;
+    if (typeof underlying === 'function') {
+      baseRes = underlying(fx, fz, base);
+      if (baseRes && Number.isFinite(baseRes.dy)) siteDy = baseRes.dy;
+    }
+    // 2) 编辑层（后评估：flatten/restore 可覆写凹陷；restore 清零 siteDy）
+    const total = edits.ops.length === 0
+      ? siteDy
+      : evalEditsDy(field, edits, fx, fz, baseY, siteDy);
+    if (!baseRes && total === 0) return null;
+    // WP-0（doc18 v0.1.1）：语义旗透传——增量重建区块时保留路面材质与 clearFlags 安全豁免位
+    return {
+      ...(baseRes || null),
+      dy: total,
+      flags: (baseRes && baseRes.flags) || 0,
+      clearFlags: (baseRes && baseRes.clearFlags) || 0,
+      weights: (baseRes && baseRes.weights) || null,
+      biomeId: (baseRes && baseRes.biomeId) != null ? baseRes.biomeId : null,
+    };
+  };
+  composed.__terrainEdits = true;
+
+  field.siteModifier = composed;
+  field.__terrainEdits = edits;
+  return composed;
+}
+
+// ———— 增量重建 ————
+
+/**
+ * 重建全部脏区块（meshRevision 对齐、dirty 清零）；返回重建数量。
+ * GroundView 的帧同步也可只消费 chunk.dirty 自行重建 —— 本函数供域侧/测试复用。
+ */
+function rebuildDirtyChunks(field) {
+  if (!field || !Array.isArray(field.chunks)) return 0;
+  let n = 0;
+  for (let i = 0; i < field.chunks.length; i++) {
+    const ch = field.chunks[i];
+    if (ch && ch.dirty) {
+      buildTriangulatedChunkMesh(ch, field.evalPoint);
+      n += 1;
+    }
+  }
+  return n;
+}
+
+// ———— 存档序列化（SITE-07：紧凑命令序列，确定性重放） ————
+
+/**
+ * 序列化为紧凑 JSON 字符串（键序固定 → 逐字节可复现；不含运行期缓存 _avgY/_targetY）。
+ */
+function serializeEdits(edits) {
+  if (!edits || !Array.isArray(edits.ops)) throw new Error('serializeEdits: 非法编辑仓库');
+  const ops = [];
+  for (const op of edits.ops) {
+    if (op.kind === 'plant') {
+      ops.push({ kind: 'plant', x: op.x, z: op.z, id: op.id, prefabId: op.prefabId, seed: op.seed });
+    } else if (op.kind === 'removePlant') {
+      ops.push({ kind: 'removePlant', x: op.x, z: op.z, plantId: op.plantId });
+    } else {
+      ops.push({ kind: op.kind, x: op.x, z: op.z, r: op.r, s: op.s });
+    }
+  }
+  return JSON.stringify({ v: TERRAIN_EDITS_VERSION, rev: edits.revision, seq: edits.seq, ops });
+}
+
+/**
+ * 反序列化（接受 JSON 字符串或已解析的 plain 对象）→ 活体编辑仓库。
+ * 空串/缺字段 → 新仓库；shape 算子缓存由 ensureOpCache 在求值时确定性重建。
+ */
+function deserializeEdits(json, field) {
+  let plain = json;
+  if (typeof json === 'string') {
+    plain = json.trim().length === 0 ? null : JSON.parse(json);
+  }
+  const edits = field ? createTerrainEdits(field) : {
+    planetId: null,
+    revision: 0,
+    seq: 0,
+    ops: [],
+    byChunk: new Map(),
+    flora: [],
+  };
+  if (!plain || typeof plain !== 'object') return edits;
+  edits.revision = Number.isFinite(plain.rev) ? plain.rev : 0;
+  edits.seq = Number.isFinite(plain.seq) ? plain.seq : 0;
+  const ops = Array.isArray(plain.ops) ? plain.ops : [];
+  if (!field) {
+    // 轻载模式：仅回放日志与植被（无场可标脏）
+    for (const raw of ops) {
+      const op = { ...raw };
+      edits.ops.push(op);
+      if (op.kind === 'plant') edits.flora.push({ id: op.id, x: op.x, z: op.z, prefabId: op.prefabId, seed: op.seed });
+    }
+    return edits;
+  }
+  // 带场重放：逐条 applyEdit 重建 byChunk 索引与脏标记（确定性；revision/seq 以日志为准）
+  for (const raw of ops) {
+    if (raw && (SHAPE_KINDS.has(raw.kind) || raw.kind === 'plant' || raw.kind === 'removePlant')) {
+      edits.revision = Math.max(0, edits.revision - 1); // applyEdit 会 +1，维持存档 revision
+      if (raw.kind === 'plant') edits.seq = Math.max(0, edits.seq - 1); // applyEdit 会 +1
+      // 紧凑键 (r/s) → applyEdit 规范键 (radius/strength)
+      applyEdit(field, edits, {
+        kind: raw.kind,
+        x: raw.x,
+        z: raw.z,
+        radius: raw.r,
+        strength: raw.s,
+        id: raw.id,
+        prefabId: raw.prefabId,
+        seed: raw.seed,
+        plantId: raw.plantId,
+      });
+    }
+  }
+  if (Number.isFinite(plain.rev)) edits.revision = plain.rev;
+  if (Number.isFinite(plain.seq)) edits.seq = plain.seq;
+  return edits;
+}
+
+// ———— 建筑落位校验（doc7 TASK-5.2 / §6.8；doc7:188） ————
+
+/** 主题 → 桩基类型（未列主题回退标准承台） */
+function foundationTypeForTheme(themeId) {
+  return THEME_PILING[themeId] || 'standard';
+}
+
+/**
+ * 建筑底面 9 点三角网格投影校验：
+ * 采样点 = 中心 + 4 角 + 4 边中点（footprintHalfM 正方形），逐点 sampleTerrain。
+ * @returns {{ ok:boolean, code?:'SLOPE_TOO_STEEP'|'HEIGHT_DELTA'|'OUT_OF_FIELD',
+ *             maxSlopeDeg:number, maxHeightDeltaM:number,
+ *             foundation?:{ kind:'flat'|'graded', piling:string, etaHeightM:number } }}
+ * 通过时 foundation.etaHeightM = 9 点均高（承台基准高），piling 按主题解析。
+ */
+function checkBuildingPlacement(field, x, z, opts = {}) {
+  const half = num(opts.footprintHalfM, BUILDING_PLACEMENT.footprintHalfM);
+  const maxSlope = num(opts.maxSlopeDeg, BUILDING_PLACEMENT.maxSlopeDeg);
+  const maxDelta = num(opts.maxHeightDeltaM, BUILDING_PLACEMENT.maxHeightDeltaM);
+
+  const offs = [[0, 0], [half, half], [-half, half], [half, -half], [-half, -half],
+    [half, 0], [-half, 0], [0, half], [0, -half]];
+  let maxY = -Infinity;
+  let minY = Infinity;
+  let sum = 0;
+  let n = 0;
+  let maxSlopeSeen = 0;
+
+  for (const [ox, oz] of offs) {
+    const px = x + ox;
+    const pz = z + oz;
+    const s = sampleTerrain(field, px, pz);
+    if (!s) {
+      return { ok: false, code: 'OUT_OF_FIELD', maxSlopeDeg: NaN, maxHeightDeltaM: NaN };
+    }
+    const sl = slopeAt(field, px, pz);
+    if (Number.isFinite(sl) && sl > maxSlopeSeen) maxSlopeSeen = sl;
+    maxY = Math.max(maxY, s.y);
+    minY = Math.min(minY, s.y);
+    sum += s.y;
+    n += 1;
+  }
+
+  const delta = maxY - minY;
+  if (maxSlopeSeen > maxSlope) {
+    return { ok: false, code: 'SLOPE_TOO_STEEP', maxSlopeDeg: maxSlopeSeen, maxHeightDeltaM: delta };
+  }
+  if (delta > maxDelta) {
+    return { ok: false, code: 'HEIGHT_DELTA', maxSlopeDeg: maxSlopeSeen, maxHeightDeltaM: delta };
+  }
+  return {
+    ok: true,
+    maxSlopeDeg: maxSlopeSeen,
+    maxHeightDeltaM: delta,
+    foundation: {
+      kind: delta > BUILDING_PLACEMENT.foundationGradeDeltaM ? 'graded' : 'flat',
+      piling: foundationTypeForTheme(opts.themeId),
+      etaHeightM: sum / n,
+    },
+  };
+}
+
+// ———— P1-2 殖民地等高线感知布局规划器（doc8 §3.2 议题 B2 仲裁落地） ————
+
+/** 黄金角（与 doc8 B2 一致）与过渡环带半径（22m–75m） */
+const COLONY_LAYOUT = { goldenAngle: 2.399963229728653, ringMinM: 22, ringMaxM: 75, footprintHalfM: 2.2, maxSlopeDeg: 16, maxHeightDeltaM: 2.2, minSpacingM: 6, skirtDepthM: 1.8 };
+
+/**
+ * 等高线感知的殖民地布局规划（纯函数、确定性、无 DOM）：
+ *  - groundBuildings（PlaceBuilding 已定三维坐标）原样保留；
+ *  - 未定坐标建筑在过渡环带（22–75m）内按黄金角候选序列搜索
+ *    checkBuildingPlacement（9 点坡度 ≤16°、高差 ≤2.2m）的平坦台地；
+ *  - mining 类优先吸附 TERRAIN_FLAGS.ORE 标记点；
+ *  - 基准高程 = 9 点最高点 × 0.35 + 均高 × 0.65（防止任何一角插入山体）；
+ *  - 朝向对齐等高线切线（梯度垂线）。
+ * @param {object} field terrainField 场域
+ * @param {{entries:Array<{defId:string,state?:string}>, groundBuildings?:Array, center:[number,number], categoryOf:(defId:string)=>string, themeId?:string}} opts
+ * @returns {Array<{defId:string,state:string,fx:number,fz:number,y:number,rotY:number,category:string,placement:Object|null}>}
+ */
+function planColonyLayout(field, opts = {}) {
+  const L = COLONY_LAYOUT;
+  const entries = opts.entries || [];
+  const ground = opts.groundBuildings || [];
+  const center = opts.center || [0, 0];
+  const categoryOf = opts.categoryOf || (() => 'default');
+  const out = [];
+  const placed = [];
+  for (const gb of ground) {
+    if (!gb || !Number.isFinite(gb.x) || !Number.isFinite(gb.z)) continue;
+    placed.push({ x: gb.x, z: gb.z });
+    const chk = checkBuildingPlacement(field, gb.x, gb.z, { footprintHalfM: L.footprintHalfM, maxSlopeDeg: L.maxSlopeDeg, maxHeightDeltaM: L.maxHeightDeltaM });
+    out.push({ defId: gb.defId || 'default', state: gb.state || 'built', fx: gb.x, fz: gb.z, y: gb.y != null ? gb.y : (Number.isFinite(chk.baseY) ? chk.baseY : 0), rotY: gb.rotY || 0, category: categoryOf(gb.defId || 'default'), placement: chk });
+  }
+  for (let i = 0; i < entries.length && out.length < 24; i++) {
+    const e = entries[i];
+    const cat = categoryOf(e.defId);
+    let chosen = null;
+    let lastChk = null;
+    let chosenMaxY = 0;
+    let chosenAvgY = 0;
+    // 黄金角候选序列：过渡环带内的确定性平地寻址（最多 1200 候选；崎岖主题如熔岩/黑曜平坦台地稀疏，需大搜索量）
+    for (let k = 0; k < 1200 && !chosen; k++) {
+      const a = k * L.goldenAngle;
+      const r = L.ringMinM + (L.ringMaxM - L.ringMinM) * ((k * 0.6180339887) % 1);
+      const fx = center[0] + Math.cos(a) * r;
+      const fz = center[1] + Math.sin(a) * r;
+      const chk = checkBuildingPlacement(field, fx, fz, { footprintHalfM: L.footprintHalfM, maxSlopeDeg: L.maxSlopeDeg, maxHeightDeltaM: L.maxHeightDeltaM });
+      lastChk = chk;
+      if (!chk.ok) continue;
+      // 自采样 9 点：chk 不外露 maxY/avgY/flags，布局器自行求基准高程与 ORE 判定
+      const offs = [[0, 0], [2.2, 2.2], [-2.2, 2.2], [2.2, -2.2], [-2.2, -2.2], [2.2, 0], [-2.2, 0], [0, 2.2], [0, -2.2]];
+      let maxY = -Infinity; let sum = 0; let flagsAny = 0; let n = 0;
+      for (const [ox, oz] of offs) {
+        const sp = sampleTerrain(field, fx + ox, fz + oz);
+        if (!sp) continue;
+        maxY = Math.max(maxY, sp.y); sum += sp.y; flagsAny |= sp.flags; n++;
+      }
+      if (!n) continue;
+      const avgY = sum / n;
+      chosenMaxY = maxY;
+      chosenAvgY = avgY;
+      // 间距：距已落位建筑 ≥ minSpacingM
+      let spaced = true;
+      for (const q of placed) {
+        if (Math.hypot(q.x - fx, q.z - fz) < L.minSpacingM) { spaced = false; break; }
+      }
+      if (!spaced) continue;
+      // mining 优先 ORE 标记点（前 60 个候选内未命中 ORE 则放宽，保证必然落位）
+      if (cat === 'mining' && k < 200 && !(flagsAny & 16)) continue;
+      chosen = { fx, fz, chk };
+    }
+    if (!chosen && lastChk && lastChk.ok) chosen = { fx: center[0], fz: center[1], chk: lastChk };
+    if (!chosen) continue; // 生成质量门禁未过 → 该建筑本轮不落位（绝不盲盒撒点）
+    placed.push({ x: chosen.fx, z: chosen.fz });
+    const chk = chosen.chk;
+    // 基准高程：最高点 0.35 + 均高 0.65 加权（doc8 B2 公式）
+    const y = chosenMaxY * 0.35 + chosenAvgY * 0.65;
+    // 朝向：等高线切线 = 梯度垂线
+    const gx = (sampleTerrain(field, chosen.fx + 2, chosen.fz).y - sampleTerrain(field, chosen.fx - 2, chosen.fz).y) || 0;
+    const gz = (sampleTerrain(field, chosen.fx, chosen.fz + 2).y - sampleTerrain(field, chosen.fx, chosen.fz - 2).y) || 0;
+    const rotY = Math.abs(gx) + Math.abs(gz) > 1e-6 ? Math.atan2(gz, gx) + Math.PI / 2 : (i * 0.618) % 1 * Math.PI * 2;
+    out.push({ defId: e.defId, state: e.state || 'built', fx: chosen.fx, fz: chosen.fz, y, rotY, category: cat, placement: chk });
+  }
+  return out;
+}
+
+Object.assign(__exports, { TERRAIN_EDITS_VERSION, BRUSH_LIMITS, BUILDING_PLACEMENT, createTerrainEdits, applyEdit, attachTerrainEdits, rebuildDirtyChunks, serializeEdits, deserializeEdits, foundationTypeForTheme, checkBuildingPlacement, COLONY_LAYOUT, planColonyLayout });
+
+});
+__register("src/domain/economy/market.js", function (__exports, __require) {
+/**
+ * domain/economy/market.js — 区域市场与供需价格（任务书 4.5 / ECON-04）
+ *
+ * P = base × clamp(1 + α(D−S)/max(S,ε), minFactor, maxFactor)，每日平滑。
+ * 市场挂在星系上；库存/需求由殖民地、船坞、贸易路线与事件驱动。
+ */
+
+const { BAL: BAL } = __require("src/content/constants.js");
+const { tradeableResourceIds: tradeableResourceIds, resourceDef: resourceDef } = __require("src/content/resources.js");
+const { clamp: clamp, lerp: lerp } = __require("src/core/math.js");
+const { emit: emit } = __require("src/core/eventBus.js");
+
+/** 确保星系市场存在 */
+function ensureMarket(world, systemId) {
+  let m = world.economy.markets[systemId];
+  if (!m) {
+    const stock = {};
+    const demand = {};
+    const price = {};
+    for (const rid of tradeableResourceIds()) {
+      stock[rid] = Math.max(40, Math.round(resourceDef(rid).basePrice * BAL.economy.marketBaseStockDays / 4));
+      demand[rid] = 0;
+      price[rid] = resourceDef(rid).basePrice;
+    }
+    m = { systemId, stock, demand, price, embargo: {}, riskFactor: 0 };
+    world.economy.markets[systemId] = m;
+  }
+  return m;
+}
+
+/** 当前价格 */
+function price(world, systemId, resId) {
+  const m = world.economy.markets[systemId];
+  if (!m) return resourceDef(resId).basePrice;
+  return m.price[resId] ?? resourceDef(resId).basePrice;
+}
+
+/** 每日价格更新（DailySystems 调用） */
+function updateMarketPrices(world) {
+  for (const systemId of Object.keys(world.economy.markets).sort()) {
+    const m = world.economy.markets[systemId];
+    for (const rid of tradeableResourceIds()) {
+      const def = resourceDef(rid);
+      const s = Math.max(0, m.stock[rid]);
+      const d = Math.max(0, m.demand[rid]);
+      const ratio = (d - s) / Math.max(s, 25);
+      const raw = 1 + BAL.economy.priceAlpha * ratio;
+      const target = def.basePrice * clamp(raw, BAL.economy.priceMinFactor, BAL.economy.priceMaxFactor);
+      m.price[rid] = Math.round(lerp(m.price[rid], target, BAL.economy.priceSmooth) * 100) / 100;
+    }
+    // 需求每日衰减（需求由当日活动重新注入）
+    for (const rid of tradeableResourceIds()) {
+      m.demand[rid] = Math.round(m.demand[rid] * 0.6);
+    }
+  }
+}
+
+/** 市场挂单需求注入（殖民地/船坞缺料时由其逻辑调用） */
+function addDemand(world, systemId, resId, amount) {
+  const m = ensureMarket(world, systemId);
+  m.demand[resId] = (m.demand[resId] || 0) + Math.max(0, Math.round(amount));
+}
+
+/**
+ * 玩家/AI 市场买入：花 credits，取库存。
+ * 返回 { ok, reason, spent, got }
+ */
+function marketBuy(world, factionId, systemId, resId, amount, ledgerApi) {
+  const m = ensureMarket(world, systemId);
+  const qty = Math.min(amount, Math.floor(m.stock[resId] || 0));
+  if (qty <= 0) return { ok: false, reason: '市场无货' };
+  const embargo = m.embargo[factionId];
+  if (embargo) return { ok: false, reason: '禁运中' };
+  const unit = marketUnitPrice(m, resId, qty, 'buy');
+  const cost = Math.ceil(unit * qty);
+  if (!ledgerApi.debit(world, factionId, 'credits', cost, `marketBuy:${resId}`, systemId)) {
+    return { ok: false, reason: '信用点不足' };
+  }
+  m.stock[resId] -= qty;
+  return { ok: true, spent: cost, got: qty, unitPrice: unit };
+}
+
+/** 市场卖出 */
+function marketSell(world, factionId, systemId, resId, amount, ledgerApi) {
+  const m = ensureMarket(world, systemId);
+  if (m.embargo[factionId]) return { ok: false, reason: '禁运中' };
+  const qty = Math.max(0, Math.round(amount));
+  if (qty <= 0) return { ok: false, reason: '数量无效' };
+  const unit = marketUnitPrice(m, resId, qty, 'sell');
+  const gain = Math.floor(unit * qty);
+  m.stock[resId] += qty;
+  ledgerApi.credit(world, factionId, 'credits', gain, `marketSell:${resId}`, systemId);
+  return { ok: true, gained: gain, unitPrice: unit };
+}
+
+/** 单价（买入贵 / 卖出贱 的价差模型） */
+function marketUnitPrice(m, resId, qty, side) {
+  const p = m.price[resId] ?? resourceDef(resId).basePrice;
+  const impact = 1 + clamp(qty / Math.max(200, (m.stock[resId] || 0) + qty), 0, 0.25) * (side === 'buy' ? 0.2 : -0.15);
+  return Math.max(0.1, Math.round(p * impact * 100) / 100);
+}
+
+/** 禁运（外交命令调用） */
+function setEmbargo(world, systemId, factionId, on) {
+  const m = ensureMarket(world, systemId);
+  if (on) m.embargo[factionId] = true;
+  else delete m.embargo[factionId];
+  emit(world, 'EmbargoChanged', { systemId, factionId, on }, 'economy');
+}
+
+/** 贸易路线执行：把货物从殖民地搬到目标市场（由 convoy 逻辑每小时调用） */
+function deliverToMarket(world, systemId, resId, qty) {
+  const m = ensureMarket(world, systemId);
+  m.stock[resId] = (m.stock[resId] || 0) + qty;
+}
+
+function takeFromMarket(world, systemId, resId, qty) {
+  const m = ensureMarket(world, systemId);
+  const take = Math.min(qty, Math.floor(m.stock[resId] || 0));
+  m.stock[resId] -= take;
+  return take;
+}
+
+Object.assign(__exports, { ensureMarket, price, updateMarketPrices, addDemand, marketBuy, marketSell, marketUnitPrice, setEmbargo, deliverToMarket, takeFromMarket });
+
+});
+__register("src/content/resources.js", function (__exports, __require) {
+/**
+ * content/resources.js — 资源定义（任务书 4.4 / 13.3：不少于 18 种）
+ *
+ * 每种资源：id、nameKey、category、unit、basePrice、mass、volume、
+ * storageClass、rarity、isTradeable、isStrategic、decayRule、sourceTypes、sinkTypes。
+ * 所有计量为整数单位（显示层格式化 K/M/B —— 任务书 2.5）。
+ */
+
+const RESOURCES = [
+  // —— 基础矿物 ——
+  { id: 'ferro', nameKey: 'res.ferro', category: 'baseMineral', unit: 't', basePrice: 4, mass: 1.0, volume: 0.35, storageClass: 'bulk', rarity: 1, isTradeable: true, isStrategic: false, decayRule: null, sourceTypes: ['mine'], sinkTypes: ['refine', 'build'] },
+  { id: 'silicate', nameKey: 'res.silicate', category: 'baseMineral', unit: 't', basePrice: 3, mass: 1.0, volume: 0.4, storageClass: 'bulk', rarity: 1, isTradeable: true, isStrategic: false, decayRule: null, sourceTypes: ['mine'], sinkTypes: ['refine', 'build'] },
+  { id: 'rareEarth', nameKey: 'res.rareEarth', category: 'baseMineral', unit: 't', basePrice: 18, mass: 1.0, volume: 0.25, storageClass: 'crate', rarity: 3, isTradeable: true, isStrategic: true, decayRule: null, sourceTypes: ['mine'], sinkTypes: ['refine', 'build'] },
+  { id: 'heavyMetal', nameKey: 'res.heavyMetal', category: 'baseMineral', unit: 't', basePrice: 10, mass: 1.3, volume: 0.2, storageClass: 'crate', rarity: 2, isTradeable: true, isStrategic: false, decayRule: null, sourceTypes: ['mine'], sinkTypes: ['refine'] },
+
+  // —— 工业材料 ——
+  { id: 'alloy', nameKey: 'res.alloy', category: 'industrial', unit: 't', basePrice: 22, mass: 1.0, volume: 0.3, storageClass: 'crate', rarity: 2, isTradeable: true, isStrategic: true, decayRule: null, sourceTypes: ['refine'], sinkTypes: ['build', 'ship', 'repair'] },
+  { id: 'polymer', nameKey: 'res.polymer', category: 'industrial', unit: 't', basePrice: 14, mass: 0.8, volume: 0.5, storageClass: 'crate', rarity: 2, isTradeable: true, isStrategic: false, decayRule: null, sourceTypes: ['refine'], sinkTypes: ['build', 'ship'] },
+  { id: 'composite', nameKey: 'res.composite', category: 'industrial', unit: 't', basePrice: 34, mass: 0.7, volume: 0.4, storageClass: 'crate', rarity: 3, isTradeable: true, isStrategic: true, decayRule: null, sourceTypes: ['factory'], sinkTypes: ['ship', 'module'] },
+  { id: 'ceramic', nameKey: 'res.ceramic', category: 'industrial', unit: 't', basePrice: 20, mass: 0.9, volume: 0.35, storageClass: 'crate', rarity: 2, isTradeable: true, isStrategic: false, decayRule: null, sourceTypes: ['factory'], sinkTypes: ['module'] },
+  { id: 'conductor', nameKey: 'res.conductor', category: 'industrial', unit: 't', basePrice: 30, mass: 0.6, volume: 0.2, storageClass: 'crate', rarity: 3, isTradeable: true, isStrategic: true, decayRule: null, sourceTypes: ['factory'], sinkTypes: ['module', 'building'] },
+
+  // —— 挥发物 ——
+  { id: 'hydrogen', nameKey: 'res.hydrogen', category: 'volatile', unit: 't', basePrice: 2, mass: 0.1, volume: 1.2, storageClass: 'tank', rarity: 1, isTradeable: true, isStrategic: false, decayRule: { perDayPct: 0.1 }, sourceTypes: ['mine', 'gasGiant'], sinkTypes: ['fuel', 'refine'] },
+  { id: 'helium3', nameKey: 'res.helium3', category: 'volatile', unit: 't', basePrice: 16, mass: 0.1, volume: 1.0, storageClass: 'tank', rarity: 2, isTradeable: true, isStrategic: true, decayRule: null, sourceTypes: ['gasGiant', 'mine'], sinkTypes: ['reactor'] },
+  { id: 'deuterium', nameKey: 'res.deuterium', category: 'volatile', unit: 't', basePrice: 26, mass: 0.1, volume: 0.8, storageClass: 'tank', rarity: 3, isTradeable: true, isStrategic: true, decayRule: null, sourceTypes: ['refine'], sinkTypes: ['reactor', 'weapon'] },
+  { id: 'inertGas', nameKey: 'res.inertGas', category: 'volatile', unit: 't', basePrice: 8, mass: 0.1, volume: 1.1, storageClass: 'tank', rarity: 1, isTradeable: true, isStrategic: false, decayRule: null, sourceTypes: ['gasGiant'], sinkTypes: ['refine', 'terraform'] },
+  { id: 'reagents', nameKey: 'res.reagents', category: 'volatile', unit: 't', basePrice: 12, mass: 0.5, volume: 0.6, storageClass: 'crate', rarity: 2, isTradeable: true, isStrategic: false, decayRule: { perDayPct: 0.2 }, sourceTypes: ['factory'], sinkTypes: ['refine', 'medicine'] },
+
+  // —— 生态资源 ——
+  { id: 'food', nameKey: 'res.food', category: 'bio', unit: 't', basePrice: 3, mass: 1.0, volume: 0.9, storageClass: 'bulk', rarity: 1, isTradeable: true, isStrategic: false, decayRule: { perDayPct: 0.3 }, sourceTypes: ['farm'], sinkTypes: ['population'] },
+  { id: 'water', nameKey: 'res.water', category: 'bio', unit: 't', basePrice: 1, mass: 1.0, volume: 0.9, storageClass: 'tank', rarity: 1, isTradeable: true, isStrategic: false, decayRule: null, sourceTypes: ['mine', 'recycler'], sinkTypes: ['population', 'farm', 'terraform'] },
+  { id: 'oxygen', nameKey: 'res.oxygen', category: 'bio', unit: 't', basePrice: 2, mass: 0.1, volume: 1.3, storageClass: 'tank', rarity: 1, isTradeable: true, isStrategic: false, decayRule: null, sourceTypes: ['farm'], sinkTypes: ['population'] },
+  { id: 'biomass', nameKey: 'res.biomass', category: 'bio', unit: 't', basePrice: 6, mass: 0.9, volume: 0.8, storageClass: 'bulk', rarity: 2, isTradeable: true, isStrategic: false, decayRule: { perDayPct: 0.3 }, sourceTypes: ['farm'], sinkTypes: ['medicine', 'terraform'] },
+  { id: 'medicine', nameKey: 'res.medicine', category: 'bio', unit: '箱', basePrice: 24, mass: 0.3, volume: 0.3, storageClass: 'crate', rarity: 2, isTradeable: true, isStrategic: false, decayRule: { perDayPct: 0.2 }, sourceTypes: ['factory'], sinkTypes: ['population', 'groundMission'] },
+
+  // —— 能源 ——
+  { id: 'powerCell', nameKey: 'res.powerCell', category: 'energy', unit: '组', basePrice: 28, mass: 0.5, volume: 0.25, storageClass: 'crate', rarity: 2, isTradeable: true, isStrategic: false, decayRule: null, sourceTypes: ['factory'], sinkTypes: ['building', 'ship', 'groundMission'] },
+  { id: 'reactorFuel', nameKey: 'res.reactorFuel', category: 'energy', unit: '组', basePrice: 40, mass: 0.4, volume: 0.3, storageClass: 'crate', rarity: 3, isTradeable: true, isStrategic: true, decayRule: null, sourceTypes: ['refine'], sinkTypes: ['ship', 'station'] },
+
+  // —— 高级资源 ——
+  { id: 'quantumCrystal', nameKey: 'res.quantumCrystal', category: 'advanced', unit: '克拉', basePrice: 120, mass: 0.1, volume: 0.05, storageClass: 'vault', rarity: 5, isTradeable: true, isStrategic: true, decayRule: null, sourceTypes: ['refine', 'anomaly'], sinkTypes: ['module', 'research'] },
+  { id: 'darkMatter', nameKey: 'res.darkMatter', category: 'advanced', unit: '样本', basePrice: 400, mass: 0.0, volume: 0.02, storageClass: 'vault', rarity: 5, isTradeable: false, isStrategic: true, decayRule: null, sourceTypes: ['anomaly'], sinkTypes: ['research', 'crisis'] },
+  { id: 'exoticMatter', nameKey: 'res.exoticMatter', category: 'advanced', unit: '样本', basePrice: 320, mass: 0.0, volume: 0.02, storageClass: 'vault', rarity: 5, isTradeable: false, isStrategic: true, decayRule: null, sourceTypes: ['anomaly', 'crisis'], sinkTypes: ['research', 'module'] },
+  { id: 'ancientData', nameKey: 'res.ancientData', category: 'advanced', unit: '份', basePrice: 150, mass: 0.0, volume: 0.0, storageClass: 'vault', rarity: 4, isTradeable: false, isStrategic: false, decayRule: null, sourceTypes: ['anomaly', 'survey'], sinkTypes: ['research', 'story'] },
+
+  // —— 经济资源 ——
+  { id: 'credits', nameKey: 'res.credits', category: 'economic', unit: 'Cr', basePrice: 1, mass: 0, volume: 0, storageClass: 'abstract', rarity: 1, isTradeable: false, isStrategic: false, decayRule: null, sourceTypes: ['tax', 'trade', 'mission'], sinkTypes: ['build', 'ship', 'policy', 'diplomacy'] },
+  { id: 'influence', nameKey: 'res.influence', category: 'economic', unit: '点', basePrice: 0, mass: 0, volume: 0, storageClass: 'abstract', rarity: 1, isTradeable: false, isStrategic: false, decayRule: null, sourceTypes: ['politics', 'events'], sinkTypes: ['policy', 'diplomacy', 'claims'] },
+  { id: 'researchData', nameKey: 'res.researchData', category: 'economic', unit: '份', basePrice: 10, mass: 0, volume: 0, storageClass: 'abstract', rarity: 2, isTradeable: true, isStrategic: false, decayRule: null, sourceTypes: ['survey', 'anomaly', 'lab'], sinkTypes: ['research'] },
+  { id: 'intelPoints', nameKey: 'res.intelPoints', category: 'economic', unit: '点', basePrice: 0, mass: 0, volume: 0, storageClass: 'abstract', rarity: 2, isTradeable: false, isStrategic: false, decayRule: null, sourceTypes: ['intel'], sinkTypes: ['intel', 'diplomacy'] },
+];
+
+const byId = new Map(RESOURCES.map((r) => [r.id, r]));
+
+/** 读取资源定义（未知 id 抛错 —— 防止静默伪造资源） */
+function resourceDef(id) {
+  const r = byId.get(id);
+  if (!r) throw new Error(`未知资源: ${id}`);
+  return r;
+}
+
+function isResource(id) {
+  return byId.has(id);
+}
+
+function allResourceIds() {
+  return RESOURCES.map((r) => r.id);
+}
+
+/** 可市场交易资源 */
+function tradeableResourceIds() {
+  return RESOURCES.filter((r) => r.isTradeable).map((r) => r.id);
+}
+
+Object.assign(__exports, { RESOURCES, resourceDef, isResource, allResourceIds, tradeableResourceIds });
 
 });
 __register("src/domain/combat/engagement.js", function (__exports, __require) {
@@ -27643,6 +28419,11 @@ const { blueprintsForPlanet: blueprintsForPlanet } = __require("src/content/miss
 const { creditColony: creditColony, debitColony: debitColony } = __require("src/domain/economy/ledger.js");
 const { MISSION_TEMPLATES: MISSION_TEMPLATES, findMissionTemplate: findMissionTemplate } = __require("src/content/missions.js");
 const { BUILDINGS: BUILDINGS } = __require("src/content/buildings.js");
+// —— doc18 WP-2/3/4：异星生态科考与五阶段遗迹（域层纯函数 + 确定性相位插值） ——
+const { derivePlanetEcology: derivePlanetEcology, ensurePlanetEco: ensurePlanetEco, getPlanetSpeciesCount: getPlanetSpeciesCount, getSpeciesStage: getSpeciesStage, SPECIES_STAGE: SPECIES_STAGE, ecoSurveyProgress: ecoSurveyProgress } = __require("src/domain/ground/xenobiology.js");
+const { ensurePlanetRuin: ensurePlanetRuin, deriveRuinLayout: deriveRuinLayout, towerRotOf: towerRotOf, RUIN_STAGE: RUIN_STAGE } = __require("src/domain/ground/monolithRuins.js");
+const { derivePlanetSeedsExtended: derivePlanetSeedsExtended } = __require("src/domain/ground/planetSeeds.js");
+const { faunaPhaseOffset: faunaPhaseOffset } = __require("src/render/gl/BioFloraPass.js");
 
 // ———— 常量 ————————————————————————————————————————————————
 
@@ -28515,6 +29296,20 @@ const GroundView = {
     const w = this.app.world;
     this.planet = planet;
     this.sw = createSurfaceWorld(w, planet.id);   // 种子 = world.seed ^ hash32(planetId)：同 seed 同地貌
+    // —— WP-0.3（doc18 v0.1.1）：工程模式建筑型号轮换面板（与 PlaceBuilding/miningDepositOk
+    //     同口径过滤矿脉要求；[ / ] / B 键循环，自由探索 HUD 明示名称/造价/矿脉要求） ——
+    const depMap3 = {
+      bld_mine_ferro: 'ferro', bld_mine_silicate: 'silicate', bld_mine_rare: 'rareEarth',
+      bld_mine_heavy: 'heavyMetal', bld_volatile_well: 'hydrogen', bld_gas_harvester: 'helium3',
+    };
+    const deposits3 = planet.deposits || {};
+    this._availableBuildDefs = BUILDINGS.filter((d) => {
+      const need = depMap3[d.id];
+      return !need || deposits3[need] > 0;
+    });
+    this._selectedBuildDefIndex = 0;
+    this._selectedBuildDefId = null;   // null = 默认采掘站（保持 GATE-02 既有口径）
+    this._buildHudNoteT = -1e9;        // 型号切换提示的剩余显示时长锚（_clock 秒）
     // —— 人工任务核心蓝图实例化（doc7 TASK-2.2：SDF 三层关卡 + 首屏构图） ——
     const bp = blueprintsForPlanet(planet, planet.primaryThemeId || null)[0] || null;
     this._site = bp ? getSiteInstance(w, planet.id, bp.id) : null;
@@ -28543,10 +29338,11 @@ const GroundView = {
     this.field.siteModifier = (fx, fz, base) => {
       let siteDy = 0;
       let eff = base;
+      let baseRes = null;
       if (baseSiteMod) {
-        const m = baseSiteMod(fx, fz, base);
-        if (m && Number.isFinite(m.dy)) {
-          siteDy = m.dy;
+        baseRes = baseSiteMod(fx, fz, base);
+        if (baseRes && Number.isFinite(baseRes.dy)) {
+          siteDy = baseRes.dy;
           eff = { ...base, y: (Number.isFinite(base.y) ? base.y : 0) + siteDy };
         }
       }
@@ -28554,7 +29350,18 @@ const GroundView = {
       // 总 dy = 站点 SDF dy + 采掘凹陷 dy（terrainField 仅应用单层 mod.dy）
       const dentDy = dent && Number.isFinite(dent.dy) ? dent.dy : 0;
       const total = siteDy + dentDy;
-      return total !== 0 ? { dy: total } : null;
+      // WP-0（doc18 v0.1.1）：语义旗完整透传（flags/clearFlags/weights/biomeId）——
+      // 此前仅回 {dy} 会令 rebuildDirtyChunks 增量重建区块时丢失坪面路面材质与
+      // clearFlags 安全豁免位（P0-D 坪面清险被渲染场域静默回退）
+      if (!baseRes && total === 0) return null;
+      return {
+        ...(baseRes || null),
+        dy: total,
+        flags: (baseRes && baseRes.flags) || 0,
+        clearFlags: (baseRes && baseRes.clearFlags) || 0,
+        weights: (baseRes && baseRes.weights) || null,
+        biomeId: (baseRes && baseRes.biomeId) != null ? baseRes.biomeId : null,
+      };
     };
     // —— P0-3 修复（doc9 §3.1）：激活 POI 账本与持久化地形编辑仓库 ——
     //     attachTerrainEdits 自动组合在既有 siteModifier 链之上（内部保存
@@ -28569,6 +29376,20 @@ const GroundView = {
     this.missionId = mission ? mission.id : null;
     this._layoutColony();
     this._conveyor = this._buildConveyorPaths();
+
+    // —— doc18 WP-2/3/4：异星生态物种名录 + 五阶段遗迹实例化（确定性派生，零 rng 消费） ——
+    this._species = derivePlanetEcology(w, planet);   // null = 不育天体（气态巨行星/碎环月）
+    ensurePlanetEco(w, planet);
+    ensurePlanetRuin(w, planet, this.field);
+    this._ruinLayout = deriveRuinLayout(w, planet);
+    // 分析面罩（V 键）：锁定计时/目标物种/档位进度；扫描波环经 uFootsteps 槽位 7
+    this._visorOn = false;
+    this._visorLockT = 0;
+    this._visorTarget = -1;
+    this._visorObserved = false;
+    this._pendingMastery = [];       // 采样后基因逆向延时队列 [{speciesIdx, t}]
+    this._warden = null;             // 阶段 4 机偶守卫（视图侧遭遇战，域侧仅存战果位）
+    this._buildBioInstances();
 
     // —— P0-1 修复（doc9 §3.1）：首帧初始位置对齐真实地表 ——
     //     任务模式按 coordSpace 映射（site_meters = 场域米制直读，体素 = 线性映射）；
@@ -28885,6 +29706,11 @@ const GroundView = {
       case 'KeyE':
         this._oneShot.interact = true;
         break;
+      case 'KeyV':
+        // doc18 WP-4：科考分析面罩开关（60m 目击 / 25m 光谱识别锁定）
+        this._visorOn = !this._visorOn;
+        this._visorLockT = 0;
+        break;
       case 'KeyR':
         this._tryRestoreTerrain();
         break;
@@ -28892,6 +29718,14 @@ const GroundView = {
         // WP-4：工程刷子循环 flatten（压平地基）→ smooth（平滑坡道）→ lower（采掘刻槽）
         this._shapeBrushOp = this._shapeBrushOp === 'flatten' ? 'smooth'
           : this._shapeBrushOp === 'smooth' ? 'lower' : 'flatten';
+        break;
+      case 'BracketLeft':
+        // WP-0.3（doc18 v0.1.1）：工程模式建筑型号循环（箭头键为移动键不占用，doc17 §4.1 口径）
+        this._cycleBuildDef(-1);
+        break;
+      case 'BracketRight':
+      case 'KeyB':
+        this._cycleBuildDef(1);
         break;
       case 'Tab':
         e.preventDefault();
@@ -29173,6 +30007,333 @@ const GroundView = {
   },
 
   /**
+   * WP-0.3（doc18 v0.1.1）：工程模式（技能 5）建筑型号循环切换。
+   * dir = ±1；选定型号同步写 _selectedBuildDefId（_fieldPlace 右键建造消费）。
+   */
+  _cycleBuildDef(dir) {
+    if (!this._buildMode) return;
+    const list = this._availableBuildDefs;
+    if (!list || !list.length) return;
+    const idx = ((this._selectedBuildDefIndex || 0) + dir + list.length) % list.length;
+    this._selectedBuildDefIndex = idx;
+    this._selectedBuildDefId = list[idx].id;
+    this._renderBuildHudNotification();
+  },
+
+  /** WP-0.3：型号切换 HUD 提示（自由探索面板顶部高亮 3s；_drawHudFree 消费） */
+  _renderBuildHudNotification() {
+    this._buildHudNoteT = this._clock;
+  },
+
+  /**
+   * doc18 WP-4：构建 BioFloraPass 实例集（确定性派生，mount 时一次上传；
+   * 渲染循环零分配——实例锚点静态，动物游荡在 VS 内按相位方程求值）。
+   * 通道 A：植被十字片（每物种 12 株，5 斑块散布，≤1024）；通道 B：动物
+   * 每物种 8 只 × 4 部件（躯干/头/双足），游荡锚点锁定植被簇 12m 环带（doc17 §2.1）。
+   */
+  _buildBioInstances() {
+    const FLORA_MAX = 1024;
+    const FAUNA_MAX = 128;
+    this._bioFloraBuf = new Float32Array(FLORA_MAX * 8);
+    this._bioFaunaBuf = new Float32Array(FAUNA_MAX * 9);
+    this._faunaAgents = [];
+    const floraCount = this._species ? this._species.species.filter((s) => s.trophic === 1).length : 0;
+    if (!this._species || !this.field) {
+      this._bioInstances = { flora: this._bioFloraBuf, floraCount: 0, fauna: this._bioFaunaBuf, faunaCount: 0 };
+      return;
+    }
+    // 5 斑块锚点（与 ensurePlanetEco 斑块一一对应：72° 均布 + 种子扰动，场域坐标）
+    const seedsHere = derivePlanetSeedsExtended(this.app.world, this.planet.id);
+    const patchAnchors = [];
+    for (let p = 0; p < 5; p++) {
+      const ang = (p * 72 / 180) * Math.PI + (seedsHere.biomeSeed >>> (p * 3)) % 157 / 100;
+      const rad = 110 + ((seedsHere.biomeSeed >>> (10 + p * 4)) % 90);
+      patchAnchors.push({ x: 256 + Math.cos(ang) * rad, z: 256 + Math.sin(ang) * rad });
+    }
+    let nf = 0;
+    for (const sp of this._species.species) {
+      if (sp.trophic !== 1) continue;
+      const hue = sp.genome.hueIdx;
+      const glow = sp.genome.biolume ? 0.9 : 0.15;
+      const hM = 0.6 + sp.genome.sizeClass * 0.8;      // 0.6m ~ 3.8m
+      for (let k = 0; k < 12 && nf < FLORA_MAX; k++) {
+        // 确定性散布：物种 idx 与株序号共同驱动（零 rng）
+        const h1 = (seedsHere.floraSeed(sp.idx + k * 16) >>> 8) / 4294967296;
+        const h2 = (seedsHere.floraSeed(sp.idx + k * 16 + 1) >>> 8) / 4294967296;
+        const patch = patchAnchors[(sp.idx + k) % 5];
+        const fx = patch.x + (h1 - 0.5) * 56;
+        const fz = patch.z + (h2 - 0.5) * 56;
+        const s = sampleTerrain(this.field, fx, fz);
+        if (!s || Number.isFinite(s.y) === false) continue;
+        const o = nf * 8;
+        this._bioFloraBuf[o] = fx; this._bioFloraBuf[o + 1] = s.y;
+        this._bioFloraBuf[o + 2] = fz;
+        this._bioFloraBuf[o + 3] = hM;
+        this._bioFloraBuf[o + 4] = h1 * 62.8;          // 相位
+        this._bioFloraBuf[o + 5] = h2 * 6.28;          // 朝向
+        this._bioFloraBuf[o + 6] = hue;
+        this._bioFloraBuf[o + 7] = glow;
+        nf++;
+      }
+    }
+    let na = 0;
+    for (const sp of this._species.species) {
+      if (sp.trophic === 1) continue;
+      const bodyLen = 0.6 + sp.genome.sizeClass * 0.45;
+      const speed = 0.25 + (seedsHere.faunaSeed(sp.idx) % 40) / 100;   // 0.25~0.65 rad/s
+      for (let k = 0; k < 8 && na + 4 <= FAUNA_MAX; k++) {
+        // 锚点 = 某植被簇锚（环带 12m，doc17 §2.1 确定性圆周相位方程）
+        const fl = this._species.species[k % Math.max(1, floraCount)];
+        const h1 = (seedsHere.faunaSeed(sp.idx + k * 8) >>> 8) / 4294967296;
+        const h2 = (seedsHere.faunaSeed(sp.idx + k * 8 + 3) >>> 8) / 4294967296;
+        const patch = patchAnchors[(sp.idx + k) % 5];
+        const ax = patch.x + (h1 - 0.5) * 44;
+        const az = patch.z + (h2 - 0.5) * 44;
+        const s = sampleTerrain(this.field, ax, az);
+        if (!s || !Number.isFinite(s.y)) continue;
+        const radius = 5 + h2 * 7;                     // ≤12m 环带
+        const phase0 = h1 * 62.8;
+        this._faunaAgents.push({ speciesIdx: sp.idx, ax, az, ay: s.y, radius, phase0, speed, name: sp.name });
+        // 4 部件实例（躯干 0 / 头 3 / 足 1,2）——limb 编码进 iExtra.y
+        const parts = [[0, 0], [3, 0], [1, -0.35], [2, 0.35]];
+        for (const [limb] of parts) {
+          const o = na * 9;
+          this._bioFaunaBuf[o] = ax; this._bioFaunaBuf[o + 1] = s.y; this._bioFaunaBuf[o + 2] = az;
+          this._bioFaunaBuf[o + 3] = bodyLen;
+          this._bioFaunaBuf[o + 4] = phase0;
+          this._bioFaunaBuf[o + 5] = speed;
+          this._bioFaunaBuf[o + 6] = radius;
+          this._bioFaunaBuf[o + 7] = sp.genome.hueIdx;
+          this._bioFaunaBuf[o + 8] = limb;
+          na++;
+        }
+      }
+    }
+    this._bioInstances = {
+      flora: this._bioFloraBuf, floraCount: nf,
+      fauna: this._bioFaunaBuf, faunaCount: na,
+    };
+  },
+
+  /**
+   * doc18 WP-4：动物当前世界坐标（CPU 与 VS 同源相位方程——faunaPhaseOffset）。
+   * 扫描锁定与采样交互的唯一坐标来源（零 per-creature 持久对象，FFF #176 纪律）。
+   */
+  _faunaWorldPos(agent) {
+    const off = faunaPhaseOffset(agent.ax, agent.az, agent.radius, agent.phase0, agent.speed, this._clock);
+    return { x: agent.ax + off.dx, z: agent.az + off.dz, y: agent.ay };
+  },
+
+  /**
+   * doc18 WP-4：分析面罩逐帧推进（60m 1.0s Observed / 25m 持续至 3.0s Identified；
+   * 扫描触发时向 uFootsteps 槽位 7 写入高斯扩张扫描波环）+ 采样后基因逆向延时。
+   */
+  _updateVisor(dt) {
+    if (!this._species || !this.planet) return;
+    // 1) 采样 → Mastered 延时队列（基因逆向 1.5s，无殖民星球亦可完成）
+    for (let i = this._pendingMastery.length - 1; i >= 0; i--) {
+      const pm = this._pendingMastery[i];
+      pm.t += dt;
+      if (pm.t >= 1.5) {
+        this._pendingMastery.splice(i, 1);
+        const wasAwarded = this.planet.eco.surveyAwarded;
+        this.app.dispatch('ScanPlanetarySpecimens', {
+          planetId: this.planet.id, speciesIdx: pm.speciesIdx, targetStage: 3,
+        });
+        if (!wasAwarded && this.planet.eco.surveyAwarded) {
+          toast('行星生态完全测绘达成！奖励已入账（+500 信用点 / +60 科研）', { kind: 'ok' });
+        }
+      }
+    }
+    // 2) 面罩锁定
+    if (!this._visorOn) { this._visorLockT = 0; this._visorTarget = -1; this._visorObserved = false; return; }
+    const c = this.char3d;
+    let best = null;
+    let bd = 60;
+    for (const ag of this._faunaAgents) {
+      const p = this._faunaWorldPos(ag);
+      const d = Math.hypot(p.x - c.x, p.z - c.z);
+      if (d < bd) { bd = d; best = ag; }
+    }
+    if (!best) { this._visorLockT = 0; this._visorTarget = -1; return; }
+    if (best.speciesIdx !== this._visorTarget) {
+      this._visorTarget = best.speciesIdx;
+      this._visorLockT = 0;
+      this._visorObserved = false;
+    }
+    this._visorLockT += dt;
+    if (!this._visorObserved && this._visorLockT >= 1.0) {
+      this._visorObserved = true;
+      const res = this.app.dispatch('ScanPlanetarySpecimens', {
+        planetId: this.planet.id, speciesIdx: best.speciesIdx, targetStage: 1,
+      });
+      if (res.ok) this._fireScanPulse(c);
+    }
+    if (bd <= 25 && this._visorLockT >= 3.0) {
+      const stage = getSpeciesStage(this.planet, best.speciesIdx);
+      if (stage === SPECIES_STAGE.OBSERVED) {
+        const res = this.app.dispatch('ScanPlanetarySpecimens', {
+          planetId: this.planet.id, speciesIdx: best.speciesIdx, targetStage: 2,
+        });
+        if (res.ok) this._fireScanPulse(c);
+        this._visorLockT = 0;   // 已识别：重新积累（避免逐帧重发）
+      }
+    }
+  },
+
+  /** uFootsteps 槽位 7：高斯扩张扫描波环（doc18 WP-4；场域坐标 + 双倍强度） */
+  _fireScanPulse(c) {
+    if (!this._footstepRing || !this.scene) return;
+    const o = 7 * 4;
+    this._footstepRing[o] = c.x + FIELD_OFFSET;
+    this._footstepRing[o + 1] = c.z + FIELD_OFFSET;
+    this._footstepRing[o + 2] = this._clock;
+    this._footstepRing[o + 3] = 1.8;
+    this.scene.setFootsteps(this._footstepRing);
+  },
+
+  /**
+   * doc18 WP-2/3：E 键生态/遗迹交互（优先级：遗迹副碑/导流塔/主碑 > 活体采样 > POI）。
+   * 全部经 CommandBus 命令（ScanPlanetarySpecimens/SamplePlanetarySpecimen/AdvanceMonolithStage）。
+   */
+  _tryEcoInteract() {
+    if (!this.planet || !this.planet.eco) return false;
+    const c = this.char3d;
+    const ruin = this.planet.eco.ruin;
+    const L = this._ruinLayout;
+    if (ruin && L) {
+      const stage = ruin[0];
+      // 副碑拓印（stage 2）
+      if (stage === RUIN_STAGE.DIALECT) {
+        for (let i = 0; i < 3; i++) {
+          if ((ruin[1] & (1 << i)) !== 0) continue;
+          const d = Math.hypot(L.pylons[i].x - c.x, L.pylons[i].z - c.z);
+          if (d <= 4.0) {
+            const res = this.app.dispatch('AdvanceMonolithStage', { planetId: this.planet.id, action: 'inscribe', pylonIdx: i });
+            toast(res.ok ? (res.advanced ? '方言拓印完成：三碑齐拓，谐振导流塔已激活' : `方言拓印成功（语素 ${i + 1}/3）`) : (res.reason || '拓印失败'), { kind: res.ok ? 'ok' : 'warn' });
+            return true;
+          }
+        }
+      }
+      // 导流塔旋转（stage 3）
+      if (stage === RUIN_STAGE.RESONANCE) {
+        for (let i = 0; i < 3; i++) {
+          const d = Math.hypot(L.towers[i].x - c.x, L.towers[i].z - c.z);
+          if (d <= 4.0) {
+            const ruinNow = this.planet.eco.ruin;
+            this.app.dispatch('AdvanceMonolithStage', { planetId: this.planet.id, action: 'rotate', towerIdx: i });
+            const st2 = ruinNow[0];
+            if (st2 >= RUIN_STAGE.GUARDIAN) {
+              toast('光路合龙！先驱者机偶守卫苏醒——准备战斗', { kind: 'warn' });
+              this._spawnWarden();
+            } else if (st2 === RUIN_STAGE.RESONANCE) {
+              toast(`导流塔已旋转至 ${towerRotOf(ruinNow, i) * 45}°（E 继续调整）`, { kind: 'info' });
+            }
+            return true;
+          }
+        }
+      }
+      // 主碑交互（stage 1 除障检测 / stage 5 核心提取）
+      const dCore = Math.hypot(L.coreX - c.x, L.coreZ - c.z);
+      if (dCore <= 4.5 && stage === RUIN_STAGE.EXCAVATION) {
+        this.app.dispatch('AdvanceMonolithStage', { planetId: this.planet.id, action: 'excavate' });
+        const st2 = this.planet.eco.ruin[0];
+        toast(st2 >= RUIN_STAGE.DIALECT ? '覆土清除完毕：主碑激活，外围三座方言副碑已点亮' : '主碑仍被覆土掩埋：用工程刻槽刷（F→采掘）削平基座周边岩土', { kind: st2 >= RUIN_STAGE.DIALECT ? 'ok' : 'warn' });
+        return true;
+      }
+      if (dCore <= 4.5 && stage === RUIN_STAGE.CORE && !ruin[4]) {
+        this.app.dispatch('AdvanceMonolithStage', { planetId: this.planet.id, action: 'extract' });
+        const harvested = this.planet.eco.ruin[4];
+        toast(harvested ? '先驱者核心破译完成（遗落科技已点亮，+15 ancientData）' : '核心提取条件未满足', { kind: harvested ? 'ok' : 'warn' });
+        return true;
+      }
+    }
+    // 活体采样（Analyzed 里程碑：已识别物种 3m 内按 E）
+    let bestAg = null;
+    let bd = 3.0;
+    for (const ag of this._faunaAgents) {
+      const p = this._faunaWorldPos(ag);
+      const d = Math.hypot(p.x - c.x, p.z - c.z);
+      if (d < bd) { bd = d; bestAg = ag; }
+    }
+    if (bestAg) {
+      const stage = getSpeciesStage(this.planet, bestAg.speciesIdx);
+      if (stage >= SPECIES_STAGE.IDENTIFIED) {
+        const eco = this.planet.eco;
+        const wasSampled = !!(eco.sampleMask & (1 << bestAg.speciesIdx));
+        const res = this.app.dispatch('SamplePlanetarySpecimen', { planetId: this.planet.id, speciesIdx: bestAg.speciesIdx });
+        if (res.ok && !wasSampled) {
+          toast(`已采集 ${bestAg.name} 组织样本（基因逆向中…）`, { kind: 'ok' });
+          this._pendingMastery.push({ speciesIdx: bestAg.speciesIdx, t: 0 });
+        } else if (res.ok) {
+          toast(`再次采样 ${bestAg.name}（图鉴档位已锁定）`, { kind: 'info' });
+        }
+        return true;
+      }
+      toast('目标未完成光谱识别：先用 V 面罩在 25m 内锁定扫描', { kind: 'info' });
+      return true;
+    }
+    return false; // 未消费：回退 POI 采样
+  },
+
+  /** doc18 WP-3：阶段 4 机偶守卫（视图侧遭遇战实体；域侧仅存战果位） */
+  _spawnWarden() {
+    const L = this._ruinLayout;
+    if (!L) return;
+    const gy = this._groundAt(L.coreX, L.coreZ);
+    this._warden = {
+      x: L.coreX + 6, z: L.coreZ + 6, y: Number.isFinite(gy) ? gy : 0,
+      hp: 600, hpMax: 600, facing: 0, state: 'chase',
+      atkCd: 1.0, flash: 0, aggroR: 40, attackR: 5.0, speed: 1.6,
+    };
+  },
+
+  /** doc18 WP-3：机偶守卫遭遇战逐帧推进（近战/射击伤害 + 守卫冲撞反击） */
+  _updateWarden(dt) {
+    const wd = this._warden;
+    if (!wd) return;
+    const c = this.char3d;
+    wd.flash = Math.max(0, wd.flash - dt * 3);
+    const d = Math.hypot(wd.x - c.x, wd.z - c.z);
+    // 玩家攻击（one-shot 意图：任务态由 FSM 消费，自由态在此消费）
+    if (this._oneShot.attack) {
+      const kind = this._oneShot.attack;
+      this._oneShot.attack = null;
+      const reach = kind === 'ranged' ? 14 : 4.2;
+      if (d <= reach) {
+        const dmg = kind === 'light' ? 25 : kind === 'heavy' ? 45 : 30;
+        wd.hp -= dmg;
+        wd.flash = 1;
+        if (wd.hp <= 0) {
+          this.app.dispatch('AdvanceMonolithStage', { planetId: this.planet.id, action: 'guardianDefeated' });
+          const defeated = this.planet.eco.ruin[3] === 1;
+          this._warden = null;
+          toast(defeated ? '机偶守卫已瘫痪！主碑核心可提取（靠近按 E）' : '守卫战果上报失败', { kind: defeated ? 'ok' : 'warn' });
+          return;
+        }
+      }
+    }
+    // 守卫 AI：追逐 + 冲撞
+    if (d > wd.attackR && d < wd.aggroR) {
+      const nx = wd.x + ((c.x - wd.x) / d) * wd.speed * dt;
+      const nz = wd.z + ((c.z - wd.z) / d) * wd.speed * dt;
+      wd.x = clamp(nx, FIELD_WALK_MIN, FIELD_WALK_MAX);
+      wd.z = clamp(nz, FIELD_WALK_MIN, FIELD_WALK_MAX);
+      const gy = this._groundAt(wd.x, wd.z);
+      if (Number.isFinite(gy)) wd.y = gy;
+      wd.facing = Math.atan2(c.z - wd.z, c.x - wd.x);
+    } else if (d <= wd.attackR) {
+      wd.atkCd -= dt;
+      if (wd.atkCd <= 0) {
+        wd.atkCd = 1.5;
+        c.hp = Math.max(0, c.hp - 12);
+        c.flash = 1;
+        if (c.hp <= 0) toast('警告：先驱者机偶重创外骨骼（撤离或继续交战）', { kind: 'warn' });
+      }
+    }
+  },
+
+  /**
    * WP-4 场域左键工程作业（技能 5 建造模式）：ORE 矿脉 → 地质采掘入账
    * （HarvestTerrainOre 域命令，无矿脉静默跳过）；地形整形刷子（F 键切换
    * flatten/smooth/lower）→ ShapeTerrain 连续雕刻，彻底取代体素占位盒
@@ -29190,6 +30351,20 @@ const GroundView = {
     const radius = op === 'lower' ? 3.5 : 6.0;
     const strength = op === 'lower' ? 0.6 : 0.8;
     this._shapeTerrainAt(fx, fz, op, radius, strength);
+    // doc18 WP-3：主碑除障联动——刻槽作业后自动检验阶段 1 覆土清除（世界记住工程行为）
+    if (op === 'lower' && this.planet && this.planet.eco && this.planet.eco.ruin
+      && this.planet.eco.ruin[0] === RUIN_STAGE.EXCAVATION) {
+      const rz = this.planet.eco.ruin;
+      const fxWorld = fx - FIELD_OFFSET;   // 场域 → 世界（ruin 布局持世界坐标）
+      const fzWorld = fz - FIELD_OFFSET;
+      const dCore = Math.hypot(rz[5] / 10 - fxWorld, rz[6] / 10 - fzWorld);
+      if (dCore <= 10) {
+        this.app.dispatch('AdvanceMonolithStage', { planetId: this.planet.id, action: 'excavate' }, null, { silent: true });
+        if (this.planet.eco.ruin[0] >= RUIN_STAGE.DIALECT) {
+          toast('主碑基座覆土清除完毕：遗迹激活，方言副碑已点亮', { kind: 'ok' });
+        }
+      }
+    }
     if (this._aim) this._aim.dug = true;
     this._fx.dig.push({ x: hit.px, y: hit.py, z: hit.pz, matId: 255 });
     if (Number.isFinite(hit.vx) && Number.isFinite(hit.vz)) this._markFieldDirty(hit.vx, hit.vz);
@@ -29291,8 +30466,11 @@ const GroundView = {
     this._updateAim(dt);
     if (this._oneShot.interact) {
       this._oneShot.interact = false;
-      this._tryHarvestPoi();
+      // doc18 WP-2/3：生态采样/遗迹交互优先（未消费回退 POI 采样）
+      if (!this._tryEcoInteract()) this._tryHarvestPoi();
     }
+    this._updateVisor(dt);
+    this._updateWarden(dt);
     this._freePhysics(dt);
     this._updateFx(dt);
     this._renderFrame(null, dt);
@@ -29723,11 +30901,14 @@ const GroundView = {
         this._stepDist = (this._stepDist || 0) + Math.hypot(dx, dz);
         if (this._stepDist >= 1.5) {
           this._stepDist = 0;
+          // WP-0（doc18 v0.1.1）：缓冲持场域坐标（渲染层 draw 时按 uWorldOffset=[+32,0,+32]
+          // 平移到着色器 world 系）；char3d 为世界系，需先内收 FIELD_OFFSET 防二次叠加
+          const isRunning = !!(this.keys.ShiftLeft || this.keys.ShiftRight);
           const off = this._footstepIdx * 4;
-          this._footstepRing[off] = c.x;
-          this._footstepRing[off + 1] = c.z;
+          this._footstepRing[off] = c.x + FIELD_OFFSET;
+          this._footstepRing[off + 1] = c.z + FIELD_OFFSET;
           this._footstepRing[off + 2] = this._clock;
-          this._footstepRing[off + 3] = 1.0;
+          this._footstepRing[off + 3] = isRunning ? 1.0 : 0.5;
           this._footstepIdx = (this._footstepIdx + 1) % 8;
           this.scene.setFootsteps(this._footstepRing);
         }
@@ -30221,6 +31402,7 @@ const GroundView = {
           dt,
           camera: { eye, target: tgt },
           actors: rd,
+          bioInstances: this._bioInstances,   // doc18 WP-4：生态双通道实例集（≤2 DC）
         }, {});
 
         // —— 2. 对象 pass：敌人/殖民者/传送带/角色七部件/贴花/特效（外部相机） ——
@@ -30258,6 +31440,17 @@ const GroundView = {
         digEvents: this._fx.dig,
       },
     };
+    // doc18 WP-3：阶段 4 机偶守卫（自由探索遭遇战；世界坐标直读，域侧仅存战果位）
+    if (this._warden) {
+      const wd = this._warden;
+      rd.enemies.push({
+        kind: 'automata_warden',
+        x: wd.x, y: wd.y, z: wd.z,
+        yaw: -wd.facing, phase: 0,
+        flash: wd.flash, hp: wd.hp, hpMax: wd.hpMax,
+        state: 'chase',
+      });
+    }
     if (!view) return rd;
 
     const m = this.mission;
@@ -30660,6 +31853,115 @@ const GroundView = {
     // WP-4：工程刷子状态（F 键循环）随建造模式明示
     const brushZh = this._shapeBrushOp === 'smooth' ? '平滑' : this._shapeBrushOp === 'lower' ? '采掘' : '压平';
     ctx.fillText(`采掘/建造模式：${this._buildMode ? `开（${brushZh}刷）` : '关'} · F 切换工程刷 · Esc 升空返回`, 22, 100);
+    // —— WP-0.3（doc18 v0.1.1）：工程模式建筑型号面板（[ / ] / B 循环，右上顶部区）——
+    if (this._buildMode && this._availableBuildDefs && this._availableBuildDefs.length) {
+      const defs = this._availableBuildDefs;
+      const idx = (this._selectedBuildDefIndex || 0) % defs.length;
+      const def = defs[idx];
+      const noteFresh = (this._clock - (this._buildHudNoteT || -1e9)) < 3.0;
+      const costTxt = Object.entries(def.cost || {})
+        .map(([k, v]) => `${k}×${v}`)
+        .join(' ') || '无';
+      const depMap = {
+        bld_mine_ferro: 'ferro', bld_mine_silicate: 'silicate', bld_mine_rare: 'rareEarth',
+        bld_mine_heavy: 'heavyMetal', bld_volatile_well: 'hydrogen', bld_gas_harvester: 'helium3',
+      };
+      const need = depMap[def.id];
+      const depTxt = need
+        ? `矿脉要求 ${need}（${(this.planet.deposits || {})[need] > 0 ? '已确认' : '未发现'}）`
+        : '无矿脉要求';
+      const px = W - 356;
+      ctx.fillStyle = noteFresh ? 'rgba(20,50,44,0.85)' : 'rgba(8,14,22,0.72)';
+      ctx.fillRect(px, 62, 344, 40);
+      ctx.strokeStyle = noteFresh ? 'rgba(93,235,223,0.65)' : 'rgba(140,170,200,0.3)';
+      ctx.strokeRect(px + 0.5, 62.5, 343.5, 39.5);
+      ctx.fillStyle = noteFresh ? '#5debdf' : '#cfe3f2';
+      ctx.font = 'bold 12px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText(`[ ] 建筑型号 ${idx + 1}/${defs.length}：${def.nameZh || def.id}`, px + 10, 79);
+      ctx.fillStyle = '#9fb6c9';
+      ctx.font = '11px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText(`造价 ${costTxt} · ${depTxt}`, px + 10, 94);
+    }
+
+    // —— doc18 WP-4：科考分析面罩 HUD（V 键；青色测距六边形阵列 + 声谱波形 + 目标档案） ——
+    if (this._visorOn) {
+      const hx = W / 2;
+      const hy = H / 2;
+      ctx.strokeStyle = 'rgba(93,235,223,0.55)';
+      ctx.lineWidth = 1;
+      for (let ring = 1; ring <= 3; ring++) {
+        const r = 22 * ring + (this._clock * 6) % 22;
+        ctx.beginPath();
+        for (let k = 0; k <= 6; k++) {
+          const a = (k / 6) * Math.PI * 2;
+          const vx = hx + Math.cos(a) * r;
+          const vy = hy + Math.sin(a) * r * 0.62;
+          if (k === 0) ctx.moveTo(vx, vy); else ctx.lineTo(vx, vy);
+        }
+        ctx.stroke();
+      }
+      // 声谱波形
+      ctx.beginPath();
+      for (let x = 0; x <= 120; x += 4) {
+        const yv = hy + 46 + Math.sin(x * 0.35 + this._clock * 9) * 6 * Math.sin(x * 0.045 + this._clock * 2.2);
+        if (x === 0) ctx.moveTo(hx - 60 + x, yv); else ctx.lineTo(hx - 60 + x, yv);
+      }
+      ctx.stroke();
+      // 目标档案卡
+      const tgt2 = this._visorTarget >= 0 ? this._faunaAgents.find((ag) => ag.speciesIdx === this._visorTarget) : null;
+      const totalSp = getPlanetSpeciesCount(this.planet || {});
+      const progress = this.planet ? ecoSurveyProgress(this.planet) : 1;
+      ctx.fillStyle = 'rgba(6,26,30,0.78)';
+      ctx.fillRect(12, 62, 250, 40);
+      ctx.strokeStyle = 'rgba(93,235,223,0.5)';
+      ctx.strokeRect(12.5, 62.5, 249.5, 39.5);
+      ctx.fillStyle = '#5debdf';
+      ctx.font = 'bold 12px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText(`分析面罩 · 图鉴 ${Math.round(progress * 100)}%（${totalSp} 种）· V 关闭`, 22, 78);
+      ctx.fillStyle = '#9fb6c9';
+      ctx.font = '11px "Segoe UI", system-ui, sans-serif';
+      if (tgt2) {
+        const stage = getSpeciesStage(this.planet, tgt2.speciesIdx);
+        const stageZh = ['未发现', '目击', '识别', '掌握'][stage] || '?';
+        const lockPct = Math.min(100, Math.round(this._visorLockT / 3.0 * 100));
+        ctx.fillText(`锁定：${tgt2.name}［${stageZh}］· 距离 ${Math.round(Math.hypot(tgt2.ax - this.char3d.x, tgt2.az - this.char3d.z))}m · ${lockPct}%`, 22, 94);
+      } else {
+        ctx.fillText('视野内无生命信号：靠近荧光生物群落扫描', 22, 94);
+      }
+    }
+
+    // —— doc18 WP-3：五阶段遗迹追踪（阶段名 + 当前目标提示） ——
+    if (this.planet && this.planet.eco && this.planet.eco.ruin) {
+      const rz = this.planet.eco.ruin;
+      const stageNames = ['', '除障：刻槽清除主碑覆土', '方言拓印：寻找 3 座副碑（120m 环带）', '谐振对光：旋转 3 座导流塔对准主碑', '守卫战：瘫痪先驱者机偶（600 HP）', '核心破译：提取先驱者核心'];
+      const stageTxt = rz[4] ? '遗迹已破译（先驱者科技点亮）' : stageNames[rz[0]] || '';
+      if (stageTxt) {
+        ctx.fillStyle = 'rgba(40,26,10,0.75)';
+        ctx.fillRect(W / 2 - 150, 62, 300, 22);
+        ctx.strokeStyle = 'rgba(230,180,90,0.4)';
+        ctx.strokeRect(W / 2 - 149.5, 62.5, 299.5, 21.5);
+        ctx.fillStyle = '#e6c88a';
+        ctx.font = 'bold 11px "Segoe UI", system-ui, sans-serif';
+        ctx.fillText(`先驱者巨石遗迹 · ${stageTxt}`, W / 2 - 140, 77);
+      }
+    }
+
+    // —— doc18 WP-3：机偶守卫血条 ——
+    if (this._warden) {
+      const wd = this._warden;
+      const bw = 260;
+      const bx = W / 2 - bw / 2;
+      const by = 90;
+      ctx.fillStyle = 'rgba(8,14,22,0.75)';
+      ctx.fillRect(bx, by, bw, 14);
+      ctx.fillStyle = '#c05a5a';
+      ctx.fillRect(bx + 1, by + 1, (bw - 2) * Math.max(0, wd.hp / wd.hpMax), 12);
+      ctx.strokeStyle = 'rgba(230,120,90,0.6)';
+      ctx.strokeRect(bx + 0.5, by + 0.5, bw - 1, 13);
+      ctx.fillStyle = '#f2d8c8';
+      ctx.font = 'bold 10px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText(`先驱者机偶守卫 ${Math.max(0, Math.round(wd.hp))}/${wd.hpMax}`, bx + 8, by + 10);
+    }
     // —— 最近未勘探 POI 罗盘（doc5 P1-04：方位 + 距离 + E 采样提示） ——
     if (this._pois) {
       let best = null;
@@ -30825,6 +32127,368 @@ const GroundView = {
 };
 
 Object.assign(__exports, { stepCharacterVertical, computeSpringArm, GroundView });
+
+});
+__register("src/render/gl/BioFloraPass.js", function (__exports, __require) {
+/**
+ * render/gl/BioFloraPass.js — 异星生态双通道实例化渲染器（doc18 v0.2 WP-4 / doc17 §3.4）
+ *
+ * 通道契约（doc18 红线 4：全图程序化植物与动物必须合流本通道，严格 2 次 Draw Call）：
+ *   通道 A（植被风摆 1 DC）：单 VAO 图集 ≤1024 实例；VS 按 uTime/uWind 对
+ *     y > 0.3m 顶点施加正弦摇摆 + 生物荧光呼吸脉冲（aGlow × uBiolumePulse）。
+ *   通道 B（生物群落 1 DC）：单 VAO 图集 ≤128 实例；aLimb 编码肢体部位
+ *     （0 躯干 / 1,2 足 / 3 头颈），四足迈步在 VS 内按 aSpeed × aPhase 代数求值，
+ *     CPU 零骨骼更新负担（FFF #176 / 确定性相位插值纪律）。
+ *
+ * 确定性纪律：实例锚点（场域坐标）由 GroundView 从 xenobiology 物种名录确定性
+ * 派生并在 sync() 一次性上传；游荡相位 CPU/GPU 同源（faunaPhaseOffset 纯函数
+ * 与 VS 内同一公式），渲染层只消费快照、零 per-creature 对象。
+ *
+ * 性能守则：tier≥3 惰性（draw 0 dc 安全空操作）；无实例 0 dc；状态隔离
+ * （进入前状态恢复，doc6 §3.3 C）；顶层不触碰 document/window（Node 可 import）；
+ * 上下文丢失安全；destroy 对失效句柄删除为空操作。
+ */
+
+const { GLSL_VERSION: GLSL_VERSION } = __require("src/render/gl/GLCore.js");
+
+/** 通道 A 实例上限（植被） */
+const FLORA_MAX_INSTANCES = 1024;
+/** 通道 B 实例上限（动物） */
+const FAUNA_MAX_INSTANCES = 128;
+
+/**
+ * 动物游荡相位偏移（CPU 口径；与 VS 内公式逐位同源——doc17 §2.1 确定性圆周方程）。
+ * 锚点锁定第一营养级植物簇 12m 环带（调用方给定 anchor/radius）。
+ * @param {number} anchorX 锚点场域 x
+ * @param {number} anchorZ 锚点场域 z
+ * @param {number} radius 游荡半径 m
+ * @param {number} phase0 初相位（种子派生）
+ * @param {number} speed 角速度 rad/s
+ * @param {number} time 视觉时钟秒
+ * @returns {{dx:number, dz:number, yaw:number}} 当前偏移与朝向（yaw = 行进方向）
+ */
+function faunaPhaseOffset(anchorX, anchorZ, radius, phase0, speed, time) {
+  const ph = phase0 + time * speed;
+  const dx = Math.cos(ph) * radius;
+  const dz = Math.sin(ph) * radius;
+  const yaw = ph + Math.PI / 2; // 圆周切线方向
+  return { dx, dz, yaw };
+}
+
+/** 通道 A 顶点着色器：十字双面片 × 风摆 + 荧光脉冲（GLSL ES 3.0，#version 前置自动） */
+const FLORA_VS = GLSL_VERSION + `
+layout(location=0) in vec2 aPos;        // 单位片 [-0.5..0.5]²（x 半区选十字片朝向）
+layout(location=1) in vec3 iOffset;     // 实例锚点（场域坐标）
+layout(location=2) in vec3 iParam;      // x: 高度 m, y: 相位, z: 朝向角
+layout(location=3) in vec2 iExtra;      // x: hueIdx, y: glow(0..1)
+uniform mat4 uVP;
+uniform vec3 uWorldOffset;
+uniform vec2 uWind;                     // x: 风向角, y: 风强 0..1
+uniform float uTime;
+uniform float uBiolumePulse;
+out float vGlow;
+out float vHue;
+void main() {
+  float h = iParam.x;
+  // 十字双片：第二片（aPos.x > 0）绕 Y 轴再转 90°
+  float ang = iParam.z + (aPos.x > 0.0 ? 0.0 : 1.5707963);
+  float ca = cos(ang), sa = sin(ang);
+  vec3 local = vec3(aPos.x * max(0.6, h * 0.5), aPos.y * max(0.4, h), 0.0);
+  // 风摆：y > 0.3m 顶点按高度平方加权正弦偏移（doc18 通道 A 契约）
+  float swayW = smoothstep(0.3, max(0.35, h), local.y) * (0.15 + 0.35 * uWind.y);
+  float sway = sin(uTime * (1.6 + iParam.y * 0.13) + iParam.y) * swayW;
+  local.x += sway;
+  local.z += sway * 0.6;
+  vec3 world = vec3(
+    iOffset.x + local.x * ca - local.z * sa,
+    iOffset.y + local.y,
+    iOffset.z + local.x * sa + local.z * ca
+  ) + uWorldOffset;
+  vGlow = iExtra.y * (0.55 + 0.45 * sin(uTime * 2.1 + iParam.y)) * uBiolumePulse;
+  vHue = iExtra.x;
+  gl_Position = uVP * vec4(world, 1.0);
+}
+`;
+
+const FLORA_FS = GLSL_VERSION + `
+precision mediump float;
+in float vGlow;
+in float vHue;
+uniform vec3 uColA;      // 主题植被基色（linear）
+uniform vec3 uColB;      // 植被强调色（linear）
+uniform float uHdr;
+out vec4 fragColor;
+void main() {
+  vec3 base = mix(uColA, uColB, clamp(vHue / 5.0, 0.0, 1.0));
+  vec3 col = base + vec3(0.35, 1.0, 0.85) * vGlow;   // 生物荧光呼吸（青绿谱）
+  fragColor = vec4(col * uHdr, 1.0);
+}
+`;
+
+/** 通道 B 顶点着色器：盒体躯干 × aLimb 肢体部位四足迈步代数（CPU 零骨骼） */
+const FAUNA_VS = GLSL_VERSION + `
+layout(location=0) in vec3 aPos;        // 单位盒 [-0.5..0.5]³
+layout(location=1) in vec3 iAnchor;     // 游荡锚点（场域坐标）
+layout(location=2) in vec4 iParam;      // x: 体长 m, y: 相位, z: 角速度, w: 游荡半径
+layout(location=3) in vec2 iExtra;      // x: hueIdx, y: limb 编码（0 躯干/1,2 足/3 头）
+uniform mat4 uVP;
+uniform vec3 uWorldOffset;
+uniform float uTime;
+out float vHue;
+out float vLimb;
+void main() {
+  // 游荡圆周相位方程（与 CPU faunaPhaseOffset 同源，doc17 §2.1）
+  float ph = iParam.y + uTime * iParam.z;
+  vec2 wander = vec2(cos(ph), sin(ph)) * iParam.w;
+  float yaw = ph + 1.5707963;
+  float ca = cos(yaw), sa = sin(yaw);
+  vec3 local = aPos * max(0.3, iParam.x);
+  // 四足迈步：足部（limb 1/2）按相位 ±π 交替抬升；躯干轻微起伏
+  float limb = iExtra.y;
+  if (limb > 0.5 && limb < 2.5) {
+    float side = limb > 1.5 ? 3.14159265 : 0.0;
+    float stepPh = ph * 4.0 + side + (limb > 1.5 ? 1.5707963 : 0.0);
+    local.y += max(0.0, sin(stepPh)) * iParam.x * 0.18;
+    local.z += cos(stepPh) * iParam.x * 0.10;
+    local.x *= 0.22; local.y *= 0.5; // 足部细柱
+  } else if (limb > 2.5) {
+    local *= 0.32;                   // 头颈
+    local.z += iParam.x * 0.55;
+  }
+  vec3 world = vec3(
+    iAnchor.x + wander.x + local.x * ca - local.z * sa,
+    iAnchor.y + local.y,
+    iAnchor.z + wander.y + local.x * sa + local.z * ca
+  ) + uWorldOffset;
+  vHue = iExtra.x;
+  vLimb = limb;
+  gl_Position = uVP * vec4(world, 1.0);
+}
+`;
+
+const FAUNA_FS = GLSL_VERSION + `
+precision mediump float;
+in float vHue;
+in float vLimb;
+uniform vec3 uColA;
+uniform vec3 uColB;
+uniform float uHdr;
+out vec4 fragColor;
+void main() {
+  vec3 base = mix(uColA, uColB, clamp(vHue / 5.0, 0.0, 1.0));
+  vec3 col = base * (vLimb > 2.5 ? 1.25 : 1.0);      // 头部提亮
+  fragColor = vec4(col * uHdr, 1.0);
+}
+`;
+
+/** 单位十字片几何：2 片 × 4 角 = 8 顶点（vec2 x,y；x 半区选片），4 三角 = 12 索引 */
+const FLORA_QUAD_VERTS = new Float32Array([
+  // 片 1（x < 0）
+  -0.5, 0.0, 0.5, 0.0, -0.5, 1.0, 0.5, 1.0,
+  // 片 2（x > 0）
+  -0.5, 0.0, 0.5, 0.0, -0.5, 1.0, 0.5, 1.0,
+]);
+const FLORA_IDX = new Uint16Array([0, 1, 2, 2, 1, 3, 4, 5, 6, 6, 5, 7]);
+
+/** 单位盒体（24 顶点 12 面 → 肢体编码由实例属性注入；6 顶点条带式简化盒） */
+const FAUNA_CUBE_VERTS = new Float32Array([
+  -0.5, -0.5, -0.5, 0.5, -0.5, -0.5, 0.5, 0.5, -0.5,
+  -0.5, 0.5, -0.5, -0.5, -0.5, 0.5, 0.5, -0.5, 0.5,
+  0.5, 0.5, 0.5, -0.5, 0.5, 0.5,
+]);
+const FAUNA_IDX = new Uint16Array([
+  0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7,
+  0, 4, 5, 0, 5, 1, 3, 2, 6, 3, 6, 7,
+  0, 3, 7, 0, 7, 4, 1, 5, 6, 1, 6, 2,
+]);
+
+class BioFloraPass {
+  /**
+   * @param {import('./GLCore.js').GLContext} glc GLContext 实例（CanvasManager.glc）
+   * @param {number} tier 渲染档位（≥3 整体惰性）
+   */
+  constructor(glc, tier) {
+    this._glc = glc;
+    this.tier = tier;
+    this._destroyed = false;
+    this._progFlora = null;
+    this._progFauna = null;
+    this._vaoFlora = null;
+    this._vaoFauna = null;
+    this._floraCount = 0;   // 实例数（0 = 跳过 draw → 0 dc）
+    this._faunaCount = 0;
+    if (glc && glc.gl && tier < 3) this._init(glc.gl);
+  }
+
+  _init(gl) {
+    const glc = this._glc;
+    this._progFlora = glc.createProgram(FLORA_VS, FLORA_FS, { label: 'bioflora:flora' });
+    this._progFauna = glc.createProgram(FAUNA_VS, FAUNA_FS, { label: 'bioflora:fauna' });
+    if (!this._progFlora || !this._progFauna) return;
+    const uf = (prog, names) => {
+      const o = {};
+      for (const n of names) o[n] = gl.getUniformLocation(prog, n);
+      return o;
+    };
+    this._uFlora = uf(this._progFlora, ['uVP', 'uWorldOffset', 'uWind', 'uTime', 'uBiolumePulse', 'uColA', 'uColB', 'uHdr']);
+    this._uFauna = uf(this._progFauna, ['uVP', 'uWorldOffset', 'uTime', 'uColA', 'uColB', 'uHdr']);
+
+    // —— 通道 A VAO：单位片 + 实例属性（offset vec3 / param vec3 / extra vec2） ——
+    this._vaoFlora = glc.createVAO(() => {
+      this._vboFloraQuad = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, this._vboFloraQuad);
+      gl.bufferData(gl.ARRAY_BUFFER, FLORA_QUAD_VERTS, gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 8, 0);
+      this._iboFlora = gl.createBuffer();
+      // 注意本机 ANGLE 坑：索引缓冲必须以 ELEMENT 目标直传（memory: browser-automation-gotchas）
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this._iboFlora);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, FLORA_IDX, gl.STATIC_DRAW);
+      this._vboFloraInst = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, this._vboFloraInst);
+      // 3 + 3 + 2 = 8 floats/instance，容量上限预分配（sync 时 bufferSubData 覆盖）
+      gl.bufferData(gl.ARRAY_BUFFER, FLORA_MAX_INSTANCES * 8 * 4, gl.DYNAMIC_DRAW);
+      gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 32, 0);
+      gl.vertexAttribDivisor(1, 1);
+      gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 32, 12);
+      gl.vertexAttribDivisor(2, 1);
+      gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 2, gl.FLOAT, false, 32, 24);
+      gl.vertexAttribDivisor(3, 1);
+    });
+    // —— 通道 B VAO：单位盒 + 实例属性（anchor vec3 / param vec4 / extra vec2） ——
+    this._vaoFauna = glc.createVAO(() => {
+      this._vboFaunaQuad = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, this._vboFaunaQuad);
+      gl.bufferData(gl.ARRAY_BUFFER, FAUNA_CUBE_VERTS, gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
+      this._iboFauna = gl.createBuffer();
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this._iboFauna);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, FAUNA_IDX, gl.STATIC_DRAW);
+      this._vboFaunaInst = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, this._vboFaunaInst);
+      gl.bufferData(gl.ARRAY_BUFFER, FAUNA_MAX_INSTANCES * 9 * 4, gl.DYNAMIC_DRAW);
+      gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 36, 0);
+      gl.vertexAttribDivisor(1, 1);
+      gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 4, gl.FLOAT, false, 36, 12);
+      gl.vertexAttribDivisor(2, 1);
+      gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 2, gl.FLOAT, false, 36, 28);
+      gl.vertexAttribDivisor(3, 1);
+    });
+    // CPU 侧暂存（sync 直传用；渲染循环零分配）
+    this._floraStaging = new Float32Array(FLORA_MAX_INSTANCES * 8);
+    this._faunaStaging = new Float32Array(FAUNA_MAX_INSTANCES * 9);
+  }
+
+  /**
+   * 上传实例集（场域坐标锚点；实例数超限截断到通道上限）。
+   * @param {{flora:Float32Array, floraCount:number, fauna:Float32Array, faunaCount:number}} inst
+   */
+  sync(inst) {
+    if (this._destroyed || this.tier >= 3 || !this._progFlora) return this;
+    const gl = this._glc.gl;
+    if (!gl || gl.isContextLost()) return this;
+    if (inst && inst.flora && inst.floraCount > 0) {
+      const n = Math.min(inst.floraCount, FLORA_MAX_INSTANCES);
+      this._floraStaging.set(inst.flora.subarray(0, n * 8));
+      gl.bindBuffer(gl.ARRAY_BUFFER, this._vboFloraInst);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, this._floraStaging.subarray(0, n * 8));
+      this._floraCount = n;
+    } else {
+      this._floraCount = 0;
+    }
+    if (inst && inst.fauna && inst.faunaCount > 0) {
+      const n = Math.min(inst.faunaCount, FAUNA_MAX_INSTANCES);
+      this._faunaStaging.set(inst.fauna.subarray(0, n * 9));
+      gl.bindBuffer(gl.ARRAY_BUFFER, this._vboFaunaInst);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, this._faunaStaging.subarray(0, n * 9));
+      this._faunaCount = n;
+    } else {
+      this._faunaCount = 0;
+    }
+    return this;
+  }
+
+  /**
+   * 双通道绘制（严格 ≤2 drawArraysInstanced；深度测试沿用场景状态，植被关背面剔除）。
+   * @param {WebGL2RenderingContext} gl
+   * @param {{vp:Float32Array, eye:Array<number>, time:number, hdr:number, worldOffset:Array<number>, colA:Array<number>, colB:Array<number>, biolumePulse:number, windAngle:number, windStrength:number}} view
+   * @returns {{drawCalls:number}}
+   */
+  draw(gl, view) {
+    const out = { drawCalls: 0 };
+    if (this._destroyed || this.tier >= 3 || !gl || gl.isContextLost()) return out;
+    if (!this._progFlora || !this._progFauna) return out;
+    const v = view || {};
+    if (this._floraCount === 0 && this._faunaCount === 0) return out;
+    const wo = v.worldOffset || [0, 0, 0];
+    const glc = this._glc;
+
+    gl.disable(gl.CULL_FACE);                       // 十字双面片
+    const depthOn = gl.isEnabled(gl.DEPTH_TEST);
+    if (!depthOn) gl.enable(gl.DEPTH_TEST);
+    const prevProg = gl.getParameter(gl.CURRENT_PROGRAM);
+
+    if (this._floraCount > 0) {
+      gl.useProgram(this._progFlora);
+      const u = this._uFlora;
+      gl.uniformMatrix4fv(u.uVP, false, v.vp);
+      gl.uniform3f(u.uWorldOffset, wo[0], wo[1], wo[2]);
+      gl.uniform2f(u.uWind, v.windAngle || 0, v.windStrength != null ? v.windStrength : 0.4);
+      gl.uniform1f(u.uTime, v.time || 0);
+      gl.uniform1f(u.uBiolumePulse, v.biolumePulse != null ? v.biolumePulse : 1);
+      const ca = v.colA || [0.24, 0.42, 0.22];
+      const cb = v.colB || [0.45, 0.60, 0.30];
+      gl.uniform3f(u.uColA, ca[0], ca[1], ca[2]);
+      gl.uniform3f(u.uColB, cb[0], cb[1], cb[2]);
+      gl.uniform1f(u.uHdr, v.hdr != null ? v.hdr : 1.0);
+      gl.bindVertexArray(this._vaoFlora);
+      gl.drawElementsInstanced(gl.TRIANGLES, 12, gl.UNSIGNED_SHORT, 0, this._floraCount);
+      out.drawCalls++;
+    }
+    if (this._faunaCount > 0) {
+      gl.useProgram(this._progFauna);
+      const u = this._uFauna;
+      gl.uniformMatrix4fv(u.uVP, false, v.vp);
+      gl.uniform3f(u.uWorldOffset, wo[0], wo[1], wo[2]);
+      gl.uniform1f(u.uTime, v.time || 0);
+      const ca = v.colA || [0.35, 0.30, 0.24];
+      const cb = v.colB || [0.55, 0.44, 0.30];
+      gl.uniform3f(u.uColA, ca[0], ca[1], ca[2]);
+      gl.uniform3f(u.uColB, cb[0], cb[1], cb[2]);
+      gl.uniform1f(u.uHdr, v.hdr != null ? v.hdr : 1.0);
+      gl.bindVertexArray(this._vaoFauna);
+      gl.drawElementsInstanced(gl.TRIANGLES, 36, gl.UNSIGNED_SHORT, 0, this._faunaCount);
+      out.drawCalls++;
+    }
+
+    gl.bindVertexArray(null);
+    gl.useProgram(prevProg);
+    if (depthOn) gl.enable(gl.DEPTH_TEST); else gl.disable(gl.DEPTH_TEST);
+    gl.enable(gl.CULL_FACE);
+    void glc;
+    return out;
+  }
+
+  /** 释放全部 GL 资源（TERRAIN-08 清册纪律；失效句柄安全） */
+  destroy() {
+    if (this._destroyed) return;
+    this._destroyed = true;
+    const glc = this._glc;
+    if (!glc || !glc.gl) return;
+    const gl = glc.gl;
+    for (const key of ['_progFlora', '_progFauna']) {
+      if (this[key]) { try { gl.deleteProgram(this[key]); } catch (_) { /* 失效句柄 */ } this[key] = null; }
+    }
+    if (this._vaoFlora) { try { gl.deleteVertexArray(this._vaoFlora); } catch (_) { /* 失效句柄 */ } this._vaoFlora = null; }
+    if (this._vaoFauna) { try { gl.deleteVertexArray(this._vaoFauna); } catch (_) { /* 失效句柄 */ } this._vaoFauna = null; }
+    for (const key of ['_vboFloraQuad', '_iboFlora', '_vboFloraInst', '_vboFaunaQuad', '_iboFauna', '_vboFaunaInst']) {
+      if (this[key]) { try { gl.deleteBuffer(this[key]); } catch (_) { /* 失效句柄 */ } this[key] = null; }
+    }
+  }
+}
+
+Object.assign(__exports, { FLORA_MAX_INSTANCES, FAUNA_MAX_INSTANCES, faunaPhaseOffset, BioFloraPass });
 
 });
 __register("src/render/meshes/landmarkMeshes.js", function (__exports, __require) {
@@ -33352,6 +35016,7 @@ const { mat4: mat4, mat4Multiply: mat4Multiply, mat4Perspective: mat4Perspective
 const { PlanetTerrainMesh: PlanetTerrainMesh } = __require("src/render/gl/PlanetTerrainMesh.js");
 const { PlanetAtmosphere: PlanetAtmosphere } = __require("src/render/gl/PlanetAtmosphere.js");
 const { PlanetWater: PlanetWater, tideWaterLevel: tideWaterLevel, WATERLEVEL_NONE: WATERLEVEL_NONE } = __require("src/render/gl/PlanetWater.js");
+const { BioFloraPass: BioFloraPass } = __require("src/render/gl/BioFloraPass.js");
 const { buildTerrainField: buildTerrainField } = __require("src/domain/ground/terrainField.js");
 
 function clamp(v, lo, hi) {
@@ -33385,11 +35050,16 @@ class PlanetSurfaceScene {
     this._terrain = null;
     this._atmosphere = null;
     this._water = null;
+    // —— doc18 WP-4：异星生态双通道实例化渲染器（植被风摆 1 DC + 动物群 1 DC） ——
+    this._bio = null;
+    this._bioColA = null;      // 主题植被基色（setTheme 时从 matColors 提取）
+    this._bioColB = null;      // 主题植被强调色
     if (canGL) {
       this._terrain = new PlanetTerrainMesh(glc, this.tier);
       this._atmosphere = new PlanetAtmosphere(glc, this.tier);
       // —— doc9 P0-3：五层水下光学海面层挂载（地形之后、天气之前绘制） ——
       this._water = new PlanetWater(glc, this.tier);
+      this._bio = new BioFloraPass(glc, this.tier);
       if (opts.planetRadiusMeters) this._terrain.setPlanetRadius(opts.planetRadiusMeters);
     }
 
@@ -33450,6 +35120,11 @@ class PlanetSurfaceScene {
         sun: t.sun || tt.sun,
         fog: t.fog || tt.fog,
       });
+      // —— doc18 WP-4：BioFloraPass 主题植被色提取（matColors[2] 生态高光 / [0] 地表基色） ——
+      if (Array.isArray(tt.matColors) && tt.matColors.length >= 3) {
+        this._bioColA = tt.matColors[2];
+        this._bioColB = tt.matColors[0];
+      }
     }
     if (this._atmosphere) {
       this._atmosphere.setTheme({
@@ -33616,11 +35291,31 @@ class PlanetSurfaceScene {
       }).drawCalls;
     }
 
-    // —— 3. 对象占位 pass（Phase 1 切片：空数组/未提供时安全跳过，0 dc；
+    // —— 3. 异星生态双通道（doc18 WP-4：BioFloraPass 植被风摆 + 动物群落，≤2 DC） ——
+    if (this._bio && rd.bioInstances) {
+      this._bio.sync(rd.bioInstances);
+      const bioCol = this._bioColA || [0.24, 0.42, 0.22];
+      const bioColB = this._bioColB || [0.45, 0.60, 0.30];
+      dc += this._bio.draw(gl, {
+        vp: cam.vp,
+        eye: cam.eye,
+        time,
+        hdr,
+        worldOffset: this._worldOffset || [0, 0, 0],
+        colA: bioCol,
+        colB: bioColB,
+        biolumePulse: (this._terrain._themeFx && this._terrain._themeFx[1] != null)
+          ? Math.max(0.2, this._terrain._themeFx[1]) : 1.0,
+        windAngle: 0.8,
+        windStrength: 0.4,
+      }).drawCalls;
+    }
+
+    // —— 4. 对象占位 pass（Phase 1 切片：空数组/未提供时安全跳过，0 dc；
     //      实例化绘制由后续对象 pass 波次在此接入） ——
     dc += this._drawActorPlaceholders(gl, rd.actors);
 
-    // —— 4. 天气粒子（地形之后、深度测试遮挡、加性；密度 0 时不产生 dc） ——
+    // —— 5. 天气粒子（地形之后、深度测试遮挡、加性；密度 0 时不产生 dc） ——
     dc += this._atmosphere.drawWeather(gl, {
       vp: cam.vp, view: cam.view, eye: cam.eye, time, hdr,
     });
@@ -33740,9 +35435,11 @@ class PlanetSurfaceScene {
     if (this._terrain) { try { this._terrain.destroy(); } catch (_) { /* 失效句柄安全 */ } }
     if (this._atmosphere) { try { this._atmosphere.destroy(); } catch (_) { /* 同上 */ } }
     if (this._water) { try { this._water.destroy(); } catch (_) { /* 同上 */ } }
+    if (this._bio) { try { this._bio.destroy(); } catch (_) { /* 同上 */ } this._bio = null; }
     this._terrain = new PlanetTerrainMesh(glc, this.tier);
     this._atmosphere = new PlanetAtmosphere(glc, this.tier);
     this._water = new PlanetWater(glc, this.tier);
+    this._bio = new BioFloraPass(glc, this.tier);
     if (this._worldOffset) this._water.setWorldOffset(this._worldOffset);
     if (this._planetInfo && this._planetInfo.visualRadiusMeters) {
       this._terrain.setPlanetRadius(this._planetInfo.visualRadiusMeters);
@@ -33775,9 +35472,11 @@ class PlanetSurfaceScene {
     if (this._terrain) { try { this._terrain.destroy(); } catch (_) { /* 失效句柄安全 */ } }
     if (this._atmosphere) { try { this._atmosphere.destroy(); } catch (_) { /* 同上 */ } }
     if (this._water) { try { this._water.destroy(); } catch (_) { /* 同上 */ } }
+    if (this._bio) { try { this._bio.destroy(); } catch (_) { /* 同上 */ } }
     this._terrain = null;
     this._atmosphere = null;
     this._water = null;
+    this._bio = null;
     this._field = null;
     this._inited = false;
   }
@@ -34981,7 +36680,7 @@ class PlanetTerrainMesh {
    *  matColors : [4]×vec3 linear        —— 4 通道材质基色
    *  heatZones : [{x,z,radius,intensity}]（≤8，radius<=0 的项忽略）
    *  themeFx   : { waterLevel, biolumePulse, lavaEmissive }（debugMode 走 setDebugMode）
-   *  footsteps : [8]×{x,z,time,strength} 或 [x,z,time,s] 四元组（不足补零）
+   *  footsteps : Float32Array(32) 平面环形缓冲（8 槽×[x,z,time,strength]，场域坐标）或 [8]×{x,z,time,strength} 元组（不足补零）
    *  fog       : { color:[r,g,b], range:[near,far] }
    *  sun       : { dir:[x,y,z], color:[r,g,b] }（dir 自动归一化）
    * @param {object} [theme]
@@ -35017,7 +36716,11 @@ class PlanetTerrainMesh {
       if (fx.biolumePulse != null) this._themeFx[1] = fx.biolumePulse;
       if (fx.lavaEmissive != null) this._themeFx[2] = fx.lavaEmissive;
     }
-    if (Array.isArray(t.footsteps)) {
+    // WP-0（doc18 v0.1.1）：GroundView 8 槽环形缓冲为 Float32Array(32) 平面布局，
+    // 旧 Array.isArray 判定会静默拦截导致 uFootsteps 恒零——直通复制，防丢帧涟漪
+    if (t.footsteps instanceof Float32Array && t.footsteps.length === this._footsteps.length) {
+      this._footsteps.set(t.footsteps);
+    } else if (Array.isArray(t.footsteps)) {
       this._footsteps.fill(0);
       for (let i = 0; i < 8 && i < t.footsteps.length; i++) {
         const f = t.footsteps[i];
