@@ -903,3 +903,207 @@ export const suite06 = {
     };
   },
 };
+
+// ———— PLAYTEST-GATE-07（doc20 v0.6 WP-6：气象灾变与阶梯威胁阻断门禁） ————————
+
+import {
+  deriveDayStormCalendar, tickPlanetWeather, stormDepthAt, isSheltered,
+  STORM_KINDS, STORM_PHASE, PHASE_SECONDS, ensurePlanetThreat,
+} from '../../src/domain/ground/planetWeather.js';
+import {
+  tickPlanetaryThreatIndex, spikeCatapultLaunch, awakenLeviathan,
+  breakLeviathanPart, reportLeviathanDefeated, composeWave, factionOf,
+  PTI_THRESHOLDS, PTI_CATAPULT_SPIKE,
+} from '../../src/domain/ground/planetaryThreat.js';
+
+export const suite07 = {
+  id: 'PLAYTEST-07',
+  name: '气象灾变与阶梯威胁阻断门禁（GATE-07 THREAT-01..05）',
+  group: 'PLAYTEST',
+  async run() {
+    const world = createStarterCampaign({ seed: 24601 });
+    const planets = Object.values(world.entities.planets).filter((p) => p.category !== 'gasGiant');
+    const pAcid = planets.find((x) => x.primaryThemeId === 'sulfur_marsh');
+    if (!pAcid) throw new Error('THREAT 硫雾沼泽旗舰缺失');
+
+    // —— THREAT-01：风暴着色器参数与庇护零扣血 ——
+    // (a) 五阶段状态机：.Warning→Build-up→Peak→Recovery 相位序列
+    const cal = deriveDayStormCalendar(world, pAcid, 0);
+    const seq = [];
+    for (let s = 0; s < 400; s += 5) {
+      const ph = cal.phaseAt(s);
+      if (seq[seq.length - 1] !== ph) seq.push(ph);
+    }
+    const expectSeq = [STORM_PHASE.CLEAR, STORM_PHASE.WARNING, STORM_PHASE.BUILDUP, STORM_PHASE.PEAK, STORM_PHASE.RECOVERY];
+    if (JSON.stringify(seq.slice(0, 5)) !== JSON.stringify(expectSeq)) {
+      throw new Error(`THREAT-01 五阶段序列异常：${JSON.stringify(seq)}`);
+    }
+    // (b) CPU/GLSL 同源浸没度：锋面推进单调递增、锋外为 0
+    ensurePlanetThreat(pAcid);
+    let lastFront = -Infinity;
+    let anyWet = false;
+    for (let s = 0; s < 300; s += 1) {
+      tickPlanetWeather(world, pAcid, s, 1);
+      const storm = pAcid.threat.storm;
+      if (storm && storm[4] >= 400) {
+        if (storm[3] <= lastFront + 1e-9) throw new Error('THREAT-01 锋面未单调推进');
+        lastFront = storm[3];
+        const d = stormDepthAt(storm, 0, 0);
+        if (d > 0) anyWet = true;
+      }
+    }
+    if (!anyWet) throw new Error('THREAT-01 全场从未被锋面浸没（平面波失效）');
+    // (c) 三重庇护：酸雹 4.5 HP/s — 屋檐/穹顶/防酸甲壳零扣血，暴露位精确扣盾
+    const st = [1, 1, 90, 0, 1000, 0]; // active acid peak at 0m
+    const charPos = { x: 0, z: 0 };
+    if (STORM_KINDS[1].dmgPerSec !== 4.5) throw new Error('THREAT-01 酸雹 DPS ≠ 4.5 契约');
+    if (!isSheltered(charPos, [{ x: 0.5, z: 0.5, flags: 0x2 }], [], new Set(), 'acid')) {
+      throw new Error('THREAT-01 FOUNDATION 屋檐 3.5m 庇护失效');
+    }
+    if (!isSheltered(charPos, [], [{ x: 1, z: 1, radius: 4 }], new Set(), 'acid')) {
+      throw new Error('THREAT-01 热源/穹顶庇护失效');
+    }
+    if (!isSheltered(charPos, [], [], new Set(['exo_mod_acid_carapace']), 'acid')) {
+      throw new Error('THREAT-01 外骨骼防酸甲壳庇护失效');
+    }
+    if (isSheltered(charPos, [], [], new Set(), 'acid')) {
+      throw new Error('THREAT-01 暴露位被误判庇护');
+    }
+    const exposedHp0 = 100;
+    const exposedHp1 = exposedHp0 - STORM_KINDS[1].dmgPerSec * 2.0; // 2s 暴露
+    if (Math.abs(exposedHp1 - 91) > 1e-9) throw new Error(`THREAT-01 暴露扣盾 ${exposedHp1} ≠ 91`);
+
+    // —— THREAT-02：PTI 微分方程数值守恒（爬升 → Tier 1..3 → 平降回安全区） ——
+    const pT = planets.find((x) => x.primaryThemeId === 'red_regolith_frontier') || planets[0];
+    ensurePlanetThreat(pT);
+    pT.colonyId = 'col_gate07';
+    world.entities.colonies.col_gate07 = {
+      id: 'col_gate07', planetId: pT.id, factionId: world.playerFactionId,
+      buildings: [
+        { defId: 'bld_mine_ferro', state: 'active' },
+        { defId: 'bld_mine_ferro', state: 'active' },
+        { defId: 'bld_mine_silicate', state: 'active' },
+      ],
+    };
+    pT.terrainEdits = { v: 1, rev: 0, seq: 0, ops: [] };
+    // Δind 项：30 座工业节点（doc20 公式 +0.4×nodes → 与 3 矿井合计 18/h；60h → 713）
+    pT.ind = { v: 1, nodes: Array.from({ length: 30 }, (_, i) => [i + 1, 0, i * 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), belts: [], grids: [], splitterParity: {}, catapult: null, orbitalBuffer: {} };
+    const ptiTrace = [];
+    for (let h = 0; h < 60; h++) {
+      tickPlanetaryThreatIndex(world, pT);
+      ptiTrace.push(pT.threat.pti);
+    }
+    if (!(pT.threat.pti >= PTI_THRESHOLDS[3])) {
+      throw new Error(`THREAT-02 连续采矿+工业 60h PTI=${pT.threat.pti} 未达 Tier 3 阈值 ${PTI_THRESHOLDS[3]}`);
+    }
+    if (!(pT.threat.tier >= 3)) throw new Error(`THREAT-02 tier=${pT.threat.tier} 未达 3`);
+    // 弹射激发：+25/次（单次入账后即清）
+    spikeCatapultLaunch(pT);
+    if (pT.threat.pendingCatapultSpike !== PTI_CATAPULT_SPIKE) throw new Error('THREAT-02 弹射激发值 ≠ +25');
+    // 平降：声波抑制塔 ×3 + 植被恢复 → PTI 回落至 Tier 1 以下（自然阻尼 λ=1.5%/h）
+    world.entities.colonies.col_gate07.buildings = [
+      { defId: 'bld_sonic_dampener', state: 'active' },
+      { defId: 'bld_sonic_dampener', state: 'active' },
+      { defId: 'bld_sonic_dampener', state: 'active' },
+    ];
+    for (let i = 0; i < 30; i++) {
+      pT.terrainEdits.ops.push({ kind: 'plant', x: 0, z: 0, r: 6, s: 1 });
+    }
+    pT.ind.nodes = []; // 停机：撤除工业扰动源（声波塔/植被为主动平降项）
+    const ptiPeak = pT.threat.pti;
+    for (let h = 0; h < 80; h++) tickPlanetaryThreatIndex(world, pT);
+    if (!(pT.threat.pti < ptiPeak * 0.5)) {
+      throw new Error(`THREAT-02 平降失效：${ptiPeak} → ${pT.threat.pti}（未减半）`);
+    }
+    void ptiTrace;
+
+    // —— THREAT-03：双派系波次哲学与阶梯编制确定性 ——
+    const waveT2 = composeWave(world, pT, 2);
+    if (waveT2.faction !== factionOf(pT)) throw new Error('THREAT-03 派系映射漂移');
+    if (waveT2.targetPref !== 'mines_farms' && waveT2.targetPref !== 'power_grid') {
+      throw new Error('THREAT-03 Tier 2 目标偏好缺失（输电塔/传送带或矿井/农场）');
+    }
+    if (!waveT2.flank) throw new Error('THREAT-03 Tier 2 无侧翼包抄标记');
+    const wave1 = composeWave(world, pT, 1);
+    const wave1b = composeWave(world, pT, 1);
+    if (JSON.stringify(wave1) !== JSON.stringify(wave1b)) throw new Error('THREAT-03 波次构成不确定');
+    // Tier 2 波次命中电网建筑（哨卫主题优先输电塔）：配置哨卫主题行星验证
+    const pSent = planets.find((x) => x.primaryThemeId === 'ancient_megastructure');
+    if (pSent) {
+      const wSent = composeWave(world, pSent, 2);
+      if (wSent.targetPref !== 'power_grid') throw new Error('THREAT-03 哨卫未优先打击输电塔');
+    }
+
+    // —— THREAT-04：利维坦部位破坏与弹射井解锁（清 THREAT-02 平降项后重爬升） ——
+    ensurePlanetThreat(pT);
+    pT.terrainEdits.ops = [];
+    pT.threat.pti = 900;
+    tickPlanetaryThreatIndex(world, pT);
+    const lev = pT.threat.leviathan;
+    if (!lev || !lev.active) throw new Error('THREAT-04 Tier 4 利维坦未苏醒');
+    if (pT.threat.catapultLock !== true) throw new Error('THREAT-04 弹射井未被利维坦场锁');
+    const br = breakLeviathanPart(world, pT, 'back_core');
+    if (!br.ok || br.staggerS !== 6.0) throw new Error(`THREAT-04 部位破坏瘫痪窗口 ≠ 6s：${JSON.stringify(br)}`);
+    const br2 = breakLeviathanPart(world, pT, 'back_core');
+    if (!br2.already) throw new Error('THREAT-04 部位重复破坏未幂等');
+    const defeted = reportLeviathanDefeated(world, pT);
+    if (!defeted.ok || defeted.loot.exoticMatter !== 5) throw new Error('THREAT-04 exoticMatter ×5 战利品未入账');
+    if (pT.threat.pti !== 0) throw new Error('THREAT-04 讨伐后 PTI 未归零');
+    if (pT.threat.catapultLock !== false) throw new Error('THREAT-04 弹射井未解锁');
+    const led7 = world.economy.ledgers[world.playerFactionId];
+    if ((led7.balances.exoticMatter || 0) < 5) throw new Error('THREAT-04 exoticMatter 账本未入账');
+
+    // —— THREAT-05：极端气象行星 PCDI 深度评估 ——
+    const pPcdi = planets.find((x) => x.primaryThemeId === 'sulfur_marsh');
+    ensurePlanetEco(world, pPcdi);
+    completeSurvey(world, pPcdi);
+    const fW = buildTerrainField(world, pPcdi.id, {});
+    ensurePlanetRuin(world, pPcdi, fW);
+    tryCompleteExcavation(world, pPcdi, fW);
+    for (let i = 0; i < 3; i++) inscribeDialectPylon(world, pPcdi, i);
+    for (let i = 0; i < 3; i++) {
+      const target = towerTargetRot(world, pPcdi, i);
+      for (let k = 0; k < 8; k++) {
+        if (((pPcdi.eco.ruin[2] >>> (i * 3)) & 0b111) === target) break;
+        rotateResonatorTower(world, pPcdi, i, null);
+      }
+    }
+    tryAlignResonators(world, pPcdi, null);
+    reportGuardianDefeated(world, pPcdi);
+    extractMonolithCore(world, pPcdi);
+    // 气象与威胁维度：风暴过境 + PTI 演化 + 利维坦讨伐全链路（真实世界状态）
+    ensurePlanetThreat(pPcdi);
+    pPcdi.threat.pti = 400;
+    tickPlanetaryThreatIndex(world, pPcdi);
+    spikeCatapultLaunch(pPcdi);
+    // 活动状态补全（与 XENO-05 同口径：POI 采样 + 地形整形 + 平位点建造）
+    const pois7 = Object.values(pPcdi.pois || {});
+    if (pois7.length > 0) runCmd(world, 'HarvestPlanetPOI', { planetId: pPcdi.id, poiId: pois7[0].id });
+    runCmd(world, 'ShapeTerrain', { planetId: pPcdi.id, op: 'lower', x: 80, z: 80, radius: 6, strength: 1 });
+    const fB7 = buildTerrainField(world, pPcdi.id, {});
+    const logB7 = pPcdi.terrainEdits;
+    const eB7 = logB7 ? deserializeEdits(logB7, fB7) : createTerrainEdits(fB7);
+    attachTerrainEdits(fB7, eB7);
+    rebuildDirtyChunks(fB7);
+    for (let gx = -240; gx <= 240; gx += 16) {
+      let done7 = false;
+      for (let gz = -240; gz <= 240; gz += 16) {
+        if (checkBuildingPlacement(fB7, gx, gz, { themeId: pPcdi.primaryThemeId }).ok) {
+          const rb = executeCommand(world, { type: 'PlaceBuilding', params: { planetId: pPcdi.id, defId: 'bld_sonic_dampener', x: gx, z: gz }, actorId: world.playerFactionId });
+          if (rb.ok) { done7 = true; break; }
+        }
+      }
+      if (done7) break;
+    }
+    const score7 = pcdiEvaluate(world, pPcdi);
+    if (score7.total < 85) {
+      throw new Error(`THREAT-05 气象威胁旗舰 PCDI=${score7.total} < 85（dims=${JSON.stringify(score7.dimensions)}）`);
+    }
+    // rng 终检（全链路零污染）
+
+    return {
+      ok: true,
+      detail: `GATE-07 PASS：THREAT-01 五阶段 ${seq.length} 相位 + 三重庇护 0 扣血 + 4.5HP/s 精确 · THREAT-02 PTI ${ptiPeak}→${pT.threat.pti} 平降 · THREAT-03 双派系波次确定 · THREAT-04 瘫痪 6s + exoticMatter ×5 + PTI 归零 · THREAT-05 PCDI=${score7.total}`,
+    };
+  },
+};

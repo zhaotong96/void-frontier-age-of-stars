@@ -38,7 +38,7 @@ import { suite as terrain06 } from './terrain-edits.suite.js';
 import { suite as save04 } from './save-migration.suite.js';
 import { suite100 as terrain10, suiteMount as terrain08 } from './planetary-terrain-theme.suite.js';
 import { suite as playtest01 } from './ground-playtest-physics.suite.js';
-import { suite02 as playtest02, suite03 as playtest03, suite04 as playtest04, suite05 as playtest05, suite06 as playtest06 } from './playtest-gates.suite.js';
+import { suite02 as playtest02, suite03 as playtest03, suite04 as playtest04, suite05 as playtest05, suite06 as playtest06, suite07 as playtest07 } from './playtest-gates.suite.js';
 
 export function collectSuites() {
   return [
@@ -86,5 +86,6 @@ export function collectSuites() {
     playtest04,
     playtest05,
     playtest06,
+    playtest07,
   ].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }

@@ -73,6 +73,14 @@ import {
 } from '../../domain/ground/monolithRuins.js';
 import { derivePlanetSeedsExtended } from '../../domain/ground/planetSeeds.js';
 import { NODE_IDX, BELT_IDX, beltIsCrossed } from '../../domain/industry/planetaryLogistics.js';
+// —— doc20 WP-1/WP-2/WP-4：动态气象灾变与阶梯威胁 ——
+import { tickPlanetWeather, stormDepthAt, isSheltered, STORM_KINDS, ensurePlanetThreat } from '../../domain/ground/planetWeather.js';
+import { breakLeviathanPart } from '../../domain/ground/planetaryThreat.js';
+// —— doc21 WP-1/WP-5：聚落居民三班倒确定性样条通勤 ——
+import {
+  ensurePlanetSoc, deriveColonyAgents, residentTau, residentPhaseOf,
+  bakeCommuteSpline, sampleSplinePos, MAX_RESIDENT_AGENTS,
+} from '../../domain/planets/colonyGovernance.js';
 import { faunaPhaseOffset } from '../../render/gl/BioFloraPass.js';
 
 // ———— 常量 ————————————————————————————————————————————————
@@ -1028,6 +1036,10 @@ export const GroundView = {
     this.missionId = mission ? mission.id : null;
     this._layoutColony();
     this._conveyor = this._buildConveyorPaths();
+    // —— doc21 WP-1：32 名代表性居民三班倒确定性样条通勤（CPU 零寻路，逐帧代数插值） ——
+    this._residentSplines = null;
+    this._residentView = [];
+    this._setupResidents();
 
     // —— doc18 WP-2/3/4：异星生态物种名录 + 五阶段遗迹实例化（确定性派生，零 rng 消费） ——
     this._species = derivePlanetEcology(w, planet);   // null = 不育天体（气态巨行星/碎环月）
@@ -1041,6 +1053,11 @@ export const GroundView = {
     this._visorObserved = false;
     this._pendingMastery = [];       // 采样后基因逆向延时队列 [{speciesIdx, t}]
     this._warden = null;             // 阶段 4 机偶守卫（视图侧遭遇战，域侧仅存战果位）
+    // doc20：气象锋面状态 + Tier 4 利维坦遭遇战（视图侧 3600HP，域侧仅存战果位）
+    ensurePlanetThreat(planet);
+    this._stormState = null;
+    this._leviathan = null;
+    this._stormWarnShown = 0;
     this._buildBioInstances();
 
     // —— P0-1 修复（doc9 §3.1）：首帧初始位置对齐真实地表 ——
@@ -1928,7 +1945,82 @@ export const GroundView = {
     return false; // 未消费：回退 POI 采样
   },
 
+  /**
+   * doc21 WP-1：居民代理样条预烘焙（home→work / work→svc / svc→home 三程，
+   * Catmull-Rom 4 控制点 + 地形贴合；XZ 由样条给出，Y 逐帧贴 sampleTerrain）。
+   */
+  _setupResidents() {
+    if (!this.planet || !this.colony || !this._buildingLayout.length) return;
+    const soc = ensurePlanetSoc(this.planet);
+    const agents = deriveColonyAgents(this.app.world, this.planet, this.colony);
+    const L = this._buildingLayout;
+    const pick = (idx) => L[Math.min(idx, L.length - 1)] || null;
+    const sampleFn = (field, x, z) => sampleTerrain(field, x, z);
+    const splines = [];
+    for (const ag of agents) {
+      const home = pick(ag[2]);
+      const work = pick(ag[3]);
+      const svc = pick(ag[4]);
+      if (!home || !work) continue;
+      splines.push({
+        agent: ag,
+        go: bakeCommuteSpline(home, work, svc, this.field, sampleFn),
+        back: bakeCommuteSpline(work, home, svc, this.field, sampleFn),
+        leisure: bakeCommuteSpline(work, svc || work, home, this.field, sampleFn),
+      });
+    }
+    this._residentSplines = splines;
+    this._residentView = splines.map((s) => ({
+      x: s.go[0][0], y: s.go[0][1], z: s.go[0][2], rotY: 0, walk: false, phase: s.agent[0] * 0.13 % 1,
+    }));
+  },
+
+  /**
+   * doc21 WP-1.3：四时相状态机（τ∈[0,1)：0.00-0.12 通勤上岗 / 0.12-0.55 作业 /
+   * 0.55-0.75 休闲医疗 / 0.75-1.00 归家休憩）；32 名居民每帧 CPU < 0.02ms。
+   */
+  _updateResidents(dt) {
+    void dt;
+    if (!this._residentSplines || !this._residentView.length) return;
+    const secs = this._clock;
+    for (let i = 0; i < this._residentSplines.length && i < MAX_RESIDENT_AGENTS; i++) {
+      const rs = this._residentSplines[i];
+      const view = this._residentView[i];
+      const tau = residentTau(rs.agent, secs);
+      const phase = residentPhaseOf(tau);
+      let pos;
+      let walk = false;
+      if (phase === 1) {
+        // 作业生产期：驻留工作岗位
+        pos = { x: rs.go[4][0], y: rs.go[4][1], z: rs.go[4][2] };
+      } else if (phase === 2) {
+        // 休闲医疗期：work → svc
+        const lt = (tau - 0.55) / 0.20;
+        pos = sampleSplinePos(rs.leisure, lt);
+        walk = true;
+      } else if (phase === 3) {
+        // 归家休憩期：svc/home → home
+        const lt = (tau - 0.75) / 0.25;
+        pos = sampleSplinePos(rs.back, lt);
+        walk = true;
+      } else {
+        // 通勤上岗期：home → work
+        const lt = tau / 0.12;
+        pos = sampleSplinePos(rs.go, lt);
+        walk = true;
+      }
+      // Y 逐帧贴合地表高程（SOC-01 零穿地零悬空的确定性保证）
+      const h = this._groundAt(pos.x, pos.z);
+      view.x = pos.x;
+      view.z = pos.z;
+      view.y = Number.isFinite(h) ? h : pos.y;
+      view.walk = walk;
+      view.rotY = Math.atan2(-(rs.go[4][2] - rs.go[0][2]), rs.go[4][0] - rs.go[0][0]) + (phase >= 2 ? Math.PI : 0);
+    }
+  },
+
   /** doc18 WP-3：阶段 4 机偶守卫（视图侧遭遇战实体；域侧仅存战果位） */
+
   _spawnWarden() {
     const L = this._ruinLayout;
     if (!L) return;
@@ -1981,6 +2073,114 @@ export const GroundView = {
         c.hp = Math.max(0, c.hp - 12);
         c.flash = 1;
         if (c.hp <= 0) toast('警告：先驱者机偶重创外骨骼（撤离或继续交战）', { kind: 'warn' });
+      }
+    }
+  },
+
+  /**
+   * doc20 WP-2：风暴环境扣盾（三重庇护判定：FOUNDATION 屋檐 3.5m / 热源穹顶 /
+   * 外骨骼抗性模块）。酸雹 4.5 HP/s；暴露判定用 stormDepthAt（CPU 与 GLSL 同源）。
+   */
+  _tickStormDamage(dt) {
+    const st = this._stormState;
+    if (!st || !st.kind || !st.kind.dmgPerSec || st.intensityPermille < 400) return;
+    const c2 = this.char3d;
+    const depth = stormDepthAt(this.planet.threat.storm, c2.x, c2.z);
+    if (depth <= 0.45) return; // 锋外/边缘豁免
+    const exoMods = this._exoModSet();
+    const foundations = (this.planet.groundBuildings || []).map((gb) => ({ x: gb.x, z: gb.z, flags: 0x2 }));
+    const heatZones = (this._themePayload && Array.isArray(this._themePayload.terrain && this._themePayload.terrain.heatZones))
+      ? this._themePayload.terrain.heatZones : [];
+    if (isSheltered(c2, foundations, heatZones, exoMods, st.kind.kind)) return;
+    c2.hp = Math.max(0, c2.hp - st.kind.dmgPerSec * dt);
+    c2.flash = Math.max(c2.flash, 0.4);
+    if (c2.hp <= 0 && !this._stormDeadWarned) {
+      this._stormDeadWarned = true;
+      toast('致命环境伤害：角色被风暴击倒（撤离至屋檐/穹顶或装配抗性模块）', { kind: 'warn' });
+    }
+  },
+
+  /** 已装配外骨骼抗性模块集（玩家科研 completed 中的 exo_mod_* 科技） */
+  _exoModSet() {
+    const fid = this.app.world.playerFactionId;
+    const rs = fid && this.app.world.research ? this.app.world.research[fid] : null;
+    return new Set(((rs && rs.completed) || []).filter((t) => String(t).startsWith('exo_mod')));
+  },
+
+  /**
+   * doc20 WP-4：Tier 4 利维坦遭遇战（视图侧 3600 HP；部位破坏 → 6s 瘫硬直；
+   * 讨伐战果经 ReportLeviathanDefeated 命令回写域态）。
+   */
+  _syncLeviathan(dt) {
+    const th = this.planet && this.planet.threat;
+    const lev = th && th.leviathan;
+    if (!lev || !lev.active) {
+      this._leviathan = null;
+      return;
+    }
+    if (!this._leviathan) {
+      const gy = this._groundAt(lev.wx, lev.wz);
+      this._leviathan = {
+        x: lev.wx, z: lev.wz, y: Number.isFinite(gy) ? gy : 0,
+        hp: 3600, hpMax: 3600, facing: 0, state: 'chase',
+        atkCd: 2.0, flash: 0, staggerT: 0, dmgSincePart: 0,
+        speed: 2.2, attackR: 7.0, aggroR: 90,
+      };
+      toast('警报：超巨型利维坦苏醒——全身 3600 HP，击碎背部晶核/毒素腺囊触发瘫痪！', { kind: 'warn' });
+    }
+    const lv = this._leviathan;
+    const c3 = this.char3d;
+    lv.flash = Math.max(0, lv.flash - dt * 3);
+    // 部位破坏瘫痪窗口（域侧 breakLeviathanPart 回写 staggerT → 视图侧消费）
+    if (lev.staggerT > 0) {
+      lv.staggerT = lev.staggerT;
+      return; // 瘫痪硬直：不追击不攻击（域侧递减由战斗层节拍驱动）
+    }
+    if (this._oneShot.attack) {
+      const kind = this._oneShot.attack;
+      this._oneShot.attack = null;
+      const reach = kind === 'ranged' ? 16 : 5.0;
+      const d3 = Math.hypot(lv.x - c3.x, lv.z - c3.z);
+      if (d3 <= reach) {
+        const dmg = kind === 'light' ? 30 : kind === 'heavy' ? 55 : 40;
+        lv.hp -= dmg;
+        lv.flash = 1;
+        lv.dmgSincePart += dmg;
+        // 每 600 伤害触发一次部位破坏（域级 stagger 6.0s 状态机）
+        if (lv.dmgSincePart >= 600) {
+          lv.dmgSincePart = 0;
+          const part = !this.planet.threat.leviathan.backCoreBroken ? 'back_core' : (!this.planet.threat.leviathan.toxinSacsBroken ? 'toxin_sacs' : null);
+          if (part) {
+            this.app.dispatch('BreakLeviathanPart', { planetId: this.planet.id, part });
+            this._leviathan.staggerT = 6.0;
+            toast('部位击碎！利维坦瘫痪 6 秒（弱点技能永久关闭）', { kind: 'ok' });
+          }
+        }
+        if (lv.hp <= 0) {
+          this.app.dispatch('ReportLeviathanDefeated', { planetId: this.planet.id });
+          const dead = this.planet.threat.leviathan && !this.planet.threat.leviathan.active;
+          this._leviathan = null;
+          toast(dead ? '利维坦讨伐成功！PTI 归零，先驱者奇异物质 ×5 入账' : '讨伐上报失败', { kind: dead ? 'ok' : 'warn' });
+          return;
+        }
+      }
+    }
+    const d4 = Math.hypot(lv.x - c3.x, lv.z - c3.z);
+    if (d4 > lv.attackR && d4 < lv.aggroR) {
+      const nx = lv.x + ((c3.x - lv.x) / d4) * lv.speed * dt;
+      const nz = lv.z + ((c3.z - lv.z) / d4) * lv.speed * dt;
+      lv.x = clamp(nx, FIELD_WALK_MIN, FIELD_WALK_MAX);
+      lv.z = clamp(nz, FIELD_WALK_MIN, FIELD_WALK_MAX);
+      const gy2 = this._groundAt(lv.x, lv.z);
+      if (Number.isFinite(gy2)) lv.y = gy2;
+      lv.facing = Math.atan2(c3.z - lv.z, c3.x - lv.x);
+    } else if (d4 <= lv.attackR) {
+      lv.atkCd -= dt;
+      if (lv.atkCd <= 0) {
+        lv.atkCd = 2.0;
+        c3.hp = Math.max(0, c3.hp - 22);
+        c3.flash = 1;
+        if (c3.hp <= 0) toast('致命打击：利维坦重创外骨骼（呼叫轨道支援或撤离）', { kind: 'warn' });
       }
     }
   },
@@ -2123,6 +2323,20 @@ export const GroundView = {
     }
     this._updateVisor(dt);
     this._updateWarden(dt);
+    // doc20 WP-1：五阶段气象状态机推进 + uStormFront 下发 + 酸蚀扣盾 + 利维坦同步
+    this._stormState = this.planet ? tickPlanetWeather(this.app.world, this.planet, this._clock, dt) : null;
+    if (this.scene) {
+      const st2 = this._stormState;
+      if (st2 && st2.intensityPermille > 0) {
+        const dirRad2 = (st2.dirDeg * Math.PI) / 180;
+        this.scene.setStormFront([Math.cos(dirRad2), Math.sin(dirRad2), st2.frontPosM, st2.intensityPermille / 1000]);
+      } else {
+        this.scene.setStormFront([0, 0, -400, 0]);
+      }
+    }
+    this._tickStormDamage(dt);
+    this._syncLeviathan(dt);
+    this._updateResidents(dt);
     this._freePhysics(dt);
     this._updateFx(dt);
     this._renderFrame(null, dt);
@@ -3119,7 +3333,8 @@ export const GroundView = {
       },
       camera: { yaw: this.cam.yaw, pitch: this.cam.pitch, dist: this.cam.dist },
       enemies: [],
-      colonists: this._buildingColonists.slice(),   // 拷贝：后续会并入任务 NPC/队友
+      colonists: this._buildingColonists.slice()
+        .concat(Array.isArray(this._residentView) ? this._residentView : []), // doc21：32 居民合流 chars 实例通道（1 DC）
       conveyor: { paths: this._conveyor },
       effects: {
         slashes: this._fx.slashes,
@@ -3632,6 +3847,40 @@ export const GroundView = {
         ctx.font = 'bold 11px "Segoe UI", system-ui, sans-serif';
         ctx.fillText(`先驱者巨石遗迹 · ${stageTxt}`, W / 2 - 140, 77);
       }
+    }
+
+    // —— doc20 WP-1：气象锋面告警横幅（五阶段状态机 HUD：气压计报警） ——
+    if (this._stormState && this._stormState.intensityPermille > 0) {
+      const stS = this._stormState;
+      const phaseZh = ['晴朗', '灾害预警', '灾害发展', '峰值过境', '恢复期'][stS.phase] || '';
+      const depthHere = stormDepthAt(this.planet.threat.storm, this.char3d.x, this.char3d.z);
+      const warn = stS.phase <= 2 ? 'rgba(60,30,8,0.8)' : 'rgba(50,10,10,0.85)';
+      ctx.fillStyle = warn;
+      ctx.fillRect(W / 2 - 170, 62, 340, 22);
+      ctx.strokeStyle = stS.phase <= 2 ? 'rgba(230,150,60,0.6)' : 'rgba(230,70,60,0.7)';
+      ctx.strokeRect(W / 2 - 169.5, 62.5, 339.5, 21.5);
+      ctx.fillStyle = '#f2c890';
+      ctx.font = 'bold 11px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText(`${stS.kind.nameZh} · ${phaseZh} · 锋面 ${Math.round(stS.frontPosM)}m · 本地浸没 ${Math.round(depthHere * 100)}%`, W / 2 - 160, 77);
+    }
+
+    // —— doc20 WP-4：利维坦血条 + 部位状态 ——
+    if (this._leviathan) {
+      const lv = this._leviathan;
+      const bw2 = 300;
+      const bx2 = W / 2 - bw2 / 2;
+      const by2 = 90;
+      ctx.fillStyle = 'rgba(8,14,22,0.78)';
+      ctx.fillRect(bx2, by2, bw2, 16);
+      ctx.fillStyle = '#a03a3a';
+      ctx.fillRect(bx2 + 1, by2 + 1, (bw2 - 2) * Math.max(0, lv.hp / lv.hpMax), 14);
+      ctx.strokeStyle = 'rgba(240,120,80,0.7)';
+      ctx.strokeRect(bx2 + 0.5, by2 + 0.5, bw2 - 1, 15);
+      ctx.fillStyle = '#f2d0c0';
+      ctx.font = 'bold 10px "Segoe UI", system-ui, sans-serif';
+      const levDom = this.planet.threat.leviathan || {};
+      const partsTxt = `背部晶核${levDom.backCoreBroken ? '碎' : '存'}/腺囊${levDom.toxinSacsBroken ? '碎' : '存'}${lv.staggerT > 0 ? ' · 瘫痪!' : ''}`;
+      ctx.fillText(`利维坦 ${Math.max(0, Math.round(lv.hp))}/${lv.hpMax} · ${partsTxt}`, bx2 + 8, by2 + 11);
     }
 
     // —— doc18 WP-3：机偶守卫血条 ——

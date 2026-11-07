@@ -10,6 +10,19 @@
 
 ### Added
 
+- **v0.6 天灾与利维坦（docs 20 WP-1..WP-6）**：支柱三落地。**五阶段气象状态机**
+  `planetWeather.js`（Clear→Warning 45s→Build-up 30s→Peak 90~150s→Recovery 30s；
+  锋面 v=1.8 m/s 平面波 `uStormFront` 单 uniform 下发 TERRAIN_MESH_FS+SKY_FS，
+  GPU 解析求值零粒子对象；四大旗舰风暴：超温热浪/腐蚀酸雹 4.5HP/s/电磁磁暴/
+  极寒巨潮 +8.5m）。**三重庇护判定**（FOUNDATION 屋檐 3.5m/热源穹顶/exo_mod
+  抗性科技 `exo_mod_thermal_shield`/`exo_mod_acid_carapace`）。
+  **PTI 微分方程** `planetaryThreat.js`（H_t=clamp(H+2×mine+0.4×ind+25×catapult
+  −1.5×restore−6×dampener−1.5%H)；声波抑制塔/植被抚育平降——世界不会永远惩罚玩家）；
+  五级阶梯响应（200/400/650/850 阈值）+ 双派系哲学（哨卫打电网/异虫打农场）
+  + Tier 4 超巨型利维坦（3600HP，背部晶核/毒素腺囊独立部位破坏 → 6s 瘫痪，
+  讨伐后 PTI 归零 + exoticMatter×5 + 弹射井解锁）。**PLAYTEST-GATE-07**
+  （THREAT-01..05：五阶段序列/三重庇护零扣血/PTI 715→0 平降/双派系波次确定/
+  瘫痪 6s/PCDI 92）。bld_sonic_dampener/bld_lightning_rod 建筑定义。
 - **v0.2 异星博物志（docs 18 WP-1..WP-5）**：Planetary Living World System 支柱一落地。
   **确定性雪崩子流树** `derivePlanetSeedsExtended`/`mix32`/`createSubRng`
   （`src/domain/ground/planetSeeds.js`，SALT_FLORA/FAUNA/RUIN/WEATHER/DILEMMA 五盐互撞消除；

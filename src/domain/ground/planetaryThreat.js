@@ -21,6 +21,7 @@
 import { emit, chronicle } from '../../core/eventBus.js';
 import { clamp } from '../../core/math.js';
 import { derivePlanetSeedsExtended } from './planetSeeds.js';
+import { ensurePlanetThreat } from './planetWeather.js';
 import { ensurePlanetInd } from '../industry/planetaryLogistics.js';
 
 /** 警戒阶级阈值（PTI 0..1000） */
