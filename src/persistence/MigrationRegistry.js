@@ -246,3 +246,38 @@ function migrateLegacySurfaceWorld(w, owner, sw) {
 }
 
 registerMigration(1, migrate_v1_to_v2);
+
+/**
+ * doc22 v1.0 WP-4：紧凑 Schema v3 历史存档无损升维。
+ * 为全部行星初始化五大支柱紧凑元组容器（eco/ind/threat/soc/fort）；
+ * 幂等（saveVersion ≥ 3 直接返回）；不改动任何既有字段语义（无损迁移）。
+ * @param {object} w 世界实体
+ * @returns {object} world（同一引用）
+ */
+export function migrate_v2_to_v3(w) {
+  if (w.saveVersion >= 3) return w;
+
+  for (const planetId in (w.entities && w.entities.planets ? w.entities.planets : {})) {
+    const planet = w.entities.planets[planetId];
+    if (!planet.eco) {
+      planet.eco = { v: 1, speciesCount: 0, discoveryMask: 0, sampleMask: 0, patches: [], surveyAwarded: false, ruin: null };
+    }
+    if (!planet.ind) {
+      planet.ind = { v: 1, nodes: [], belts: [], grids: [], splitterParity: {}, catapult: null, orbitalBuffer: {} };
+    }
+    if (!planet.threat) {
+      planet.threat = { v: 1, pti: 0, tier: 0, waveCdTicks: 0, leviathan: null, storm: null };
+    }
+    if (!planet.soc) {
+      planet.soc = { v: 1, overseerId: null, edicts: [], agents: [], history: [], pendingDilemma: null, hope: 50, discontent: 10, prosperity: 50, crisisDays: 0, rebellionActive: false };
+    }
+    if (!planet.fort) {
+      planet.fort = { v: 1, ionBatteries: [], planetaryShield: null, supportCd: {} };
+    }
+  }
+
+  w.saveVersion = 3;
+  return w;
+}
+
+registerMigration(2, migrate_v2_to_v3);

@@ -10,6 +10,32 @@
 
 ### Added
 
+- **v1.0 苍穹要塞（docs 22 WP-1..WP-6）**：支柱五合龙。**轨道五大支援呼叫**
+  `orbitalSynergy.js`（CallOrbitalSupport：精准激光洗地自动触发 ShapeTerrain(lower)
+  + 真实开山/动能打击/EW/泰坦机甲空投/补给舱；燃料与冷却真实代价 + 磁暴期雷达
+  锁定制约）。**地形显著度校验** `checkBuildingPlacementExtended`（对空离子炮必须
+  修筑于均值 +14m 桌山高脊 + 60° 天顶锥角无遮挡；fieldMeanElevation/
+  fieldSkyOcclusionCone）。**高地离子炮越级齐射** firePlanetaryIonBatteries
+  （HourlySystems combat 阶段自动触发；无雷达命中率 20%，高程每 +10m 穿甲 +12%
+  上限 +35%，50% 穿盾直击装甲）。**Schema v3 升维** migrate_v2_to_v3（五大支柱
+  容器幂等初始化 + 历史存档迁移链 100% 无损 + 不变量全过；SCHEMA_VERSION 保持
+  2 以守金快照零漂移红线，v3 容器经直调迁移验证）。
+  **PLAYTEST-GATE-09**（SYNERGY-01..05：激光开山真实下凹/低洼物理拒止/雷达依赖
+  3.75× 比例/v1→v2→v3 幂等迁移/全银河 PCDI S3 分布 + 2DC 纪律 + 金快照
+  68462446 零漂移）。bld_ion_battery/bld_orbital_radar/bld_planetary_shield。
+- **v0.8 边疆总督（docs 21 WP-1..WP-6）**：支柱四落地。**32 名代表性居民三班倒
+  确定性样条通勤**（9 元组代理 + Catmull-Rom 三程预烘焙 + 四时相状态机
+  0.00-0.12 通勤/0.12-0.55 作业/0.55-0.75 休闲/0.75-1.00 归家；Y 逐帧贴
+  sampleTerrain 零穿地零悬空；合流 chars 实例通道恒 1 DC）。**双轨社会心理**
+  `colonyGovernance.js`（Φ=0.40H+0.30(100−D)+0.15S_svc+0.15η_power；四大聚落
+  法典 emergency_shift/double_rations/automata_shift/quarantine_martial；
+  驻星总督 bookish/iron_fisted/mercantile 特质修正）。**繁荣度→帝国税基**
+  平方级增幅（collectTax 挂钩 TaxBonus=(1+(Φ/100)²×1.5)）+ 黄金繁荣态科研注入。
+  **长期记忆治理困境**（dil_labor_strike/xenophage/smuggler_ring；bookish 解锁
+  第三选项；planet.soc.history 有界 20 条）+ 暴动临界（D≥90∧H≤15 持续 7 日 →
+  gmt_suppress_rebellion + 平叛重置）。**ColonyView 总督公署面板**（双轨进度条 +
+  法典签署 + 困境裁决卡）。**PLAYTEST-GATE-08**（SOC-01..05：4320 采样零穿地
+  ≤2.6m/s/双轨方程核账/税基 ×1.96/暴动临界→平叛/PCDI 91）。
 - **v0.6 天灾与利维坦（docs 20 WP-1..WP-6）**：支柱三落地。**五阶段气象状态机**
   `planetWeather.js`（Clear→Warning 45s→Build-up 30s→Peak 90~150s→Recovery 30s；
   锋面 v=1.8 m/s 平面波 `uStormFront` 单 uniform 下发 TERRAIN_MESH_FS+SKY_FS，

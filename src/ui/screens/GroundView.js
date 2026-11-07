@@ -1965,7 +1965,7 @@ export const GroundView = {
       splines.push({
         agent: ag,
         go: bakeCommuteSpline(home, work, svc, this.field, sampleFn),
-        back: bakeCommuteSpline(work, home, svc, this.field, sampleFn),
+        back: bakeCommuteSpline(svc || work, home, svc, this.field, sampleFn),
         leisure: bakeCommuteSpline(work, svc || work, home, this.field, sampleFn),
       });
     }
@@ -1991,8 +1991,9 @@ export const GroundView = {
       let pos;
       let walk = false;
       if (phase === 1) {
-        // 作业生产期：驻留工作岗位
-        pos = { x: rs.go[4][0], y: rs.go[4][1], z: rs.go[4][2] };
+        // 作业生产期：驻留工作岗位（样条末锚点）
+        const last = rs.go[rs.go.length - 1];
+        pos = { x: last[0], y: last[1], z: last[2] };
       } else if (phase === 2) {
         // 休闲医疗期：work → svc
         const lt = (tau - 0.55) / 0.20;
@@ -2015,7 +2016,8 @@ export const GroundView = {
       view.z = pos.z;
       view.y = Number.isFinite(h) ? h : pos.y;
       view.walk = walk;
-      view.rotY = Math.atan2(-(rs.go[4][2] - rs.go[0][2]), rs.go[4][0] - rs.go[0][0]) + (phase >= 2 ? Math.PI : 0);
+      const head = rs.go[rs.go.length - 1];
+      view.rotY = Math.atan2(-(head[2] - rs.go[0][2]), head[0] - rs.go[0][0]) + (phase >= 2 ? Math.PI : 0);
     }
   },
 

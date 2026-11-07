@@ -23,6 +23,7 @@ import { BUILDINGS } from '../../content/buildings.js';
 import { RESOURCES } from '../../content/resources.js';
 import { BAL } from '../../content/constants.js';
 import { storageCapacity, buildingJobSlots } from '../../domain/planets/colony.js';
+import { COLONY_EDICTS, MAX_RESIDENT_AGENTS } from '../../domain/planets/colonyGovernance.js';
 
 /** 快照刷新节流间隔（与 App 的 4Hz 快照节奏对齐） */
 const REFRESH_MS = 250;
@@ -277,6 +278,7 @@ export const ColonyView = {
     this._renderCol1(detail);
     this._renderCol2(detail);
     this._renderCol3(detail);
+    this._renderGovernancePanel(detail);
 
     this._bodyEl.scrollTop = savedTop;
     this._bodyEl.scrollLeft = savedLeft;
@@ -655,6 +657,110 @@ export const ColonyView = {
   },
 
   /** 第三列：库存全表（数量为 0 的隐藏）+ 账本流水摘要 */
+  /**
+   * doc21 WP-5：总督公署与法典全息子面板——希望/不满双轨进度条 + 繁荣度 +
+   * 七大特化类型标签 + 四大法典签署/废止 + 困境裁决卡（非侵入式）。
+   */
+  _renderGovernancePanel(detail) {
+    const planet = this._planetOf(detail);
+    if (!planet) return;
+    const soc = planet.soc || null;
+    const fid = this.app.world.playerFactionId;
+    const research = fid && this.app.world.research ? this.app.world.research[fid] : null;
+    const panel = el('div', { class: 'vf-panel', style: { marginTop: '10px' } });
+    panel.appendChild(el('div', { class: 'vf-panel-title', text: '总督公署与法典（v0.8）' }));
+
+    if (!soc) {
+      panel.appendChild(el('div', {
+        class: 'vf-faint vf-small',
+        text: '首次进入该行星地表后激活聚落治理微模拟（planet.soc）。',
+      }));
+      this._grid.appendChild(panel);
+      return;
+    }
+
+    // 双轨进度条（希望/不满）+ 繁荣度
+    const bar = (label, v, color) => {
+      const w = el('div', { class: 'vf-row', style: { gap: '6px', alignItems: 'center', margin: '2px 0' } });
+      w.appendChild(el('span', { class: 'vf-small vf-dim', text: label, style: { width: '52px' } }));
+      const track = el('div', { style: { flex: '1', height: '8px', background: 'rgba(255,255,255,0.08)', borderRadius: '4px', overflow: 'hidden' } });
+      const fill = el('div', { style: { width: `${Math.max(0, Math.min(100, v))}%`, height: '100%', background: color } });
+      track.appendChild(fill);
+      w.appendChild(track);
+      w.appendChild(el('span', { class: 'vf-small', text: `${Math.round(v)}`, style: { width: '28px', textAlign: 'right' } }));
+      return w;
+    };
+    panel.appendChild(bar('希望', soc.hope, '#5ab8e0'));
+    panel.appendChild(bar('不满', soc.discontent, '#e06a5a'));
+    panel.appendChild(bar('繁荣度', soc.prosperity, '#7ee2a8'));
+    panel.appendChild(el('div', {
+      class: 'vf-small vf-dim',
+      text: `Φ = 0.40·H + 0.30·(100−D) + 0.15·S_svc + 0.15·η_power = ${soc.prosperity}（税基 ×${(1 + Math.pow(soc.prosperity / 100, 2) * 1.5).toFixed(2)}）`,
+    }));
+
+    // 总督
+    const overseerName = soc.overseerId && this.app.world.entities.characters[soc.overseerId]
+      ? this.app.world.entities.characters[soc.overseerId].name : '（未任命）';
+    panel.appendChild(el('div', { class: 'vf-small', text: `驻星总督：${overseerName}` }));
+
+    // 法典签署/废止
+    const edictsRow = el('div', { class: 'vf-row', style: { gap: '6px', flexWrap: 'wrap', margin: '6px 0' } });
+    for (const eid of Object.keys(COLONY_EDICTS)) {
+      const ed = COLONY_EDICTS[eid];
+      const signed = soc.edicts.includes(eid);
+      edictsRow.appendChild(el('button', {
+        class: signed ? 'vf-btn ok' : 'vf-btn',
+        text: `${signed ? '✓ ' : ''}${ed.nameZh}`,
+        title: ed.desc,
+        onClick: () => {
+          this.app.dispatch(signed ? 'RevokeColonyEdict' : 'SignColonyEdict', { planetId: planet.id, edictId: eid });
+          this.refresh();
+        },
+      }));
+    }
+    panel.appendChild(edictsRow);
+
+    // 困境裁决卡（非侵入式）
+    if (soc.pendingDilemma) {
+      const d = soc.pendingDilemma;
+      const card = el('div', { class: 'vf-panel', style: { background: 'rgba(60,40,10,0.35)', margin: '4px 0' } });
+      card.appendChild(el('div', { class: 'vf-small vf-strong', text: `治理困境：${d.id}` }));
+      for (const ch of d.choices) {
+        card.appendChild(el('button', {
+          class: 'vf-btn vf-small',
+          text: ch.nameZh,
+          onClick: () => {
+            const res = this.app.dispatch('ResolveColonyDilemma', { planetId: planet.id, choiceId: ch.id });
+            if (!res.ok) toast(res.reason || '裁决失败', { kind: 'warn' });
+            this.refresh();
+          },
+        }));
+      }
+      panel.appendChild(card);
+    }
+
+    // 暴动状态
+    if (soc.rebellionActive) {
+      panel.appendChild(el('div', {
+        class: 'vf-small', style: { color: '#e06a5a' },
+        text: '⚠ 武装暴动进行中：派遣地面小队执行 gmt_suppress_rebellion 平叛任务。',
+      }));
+    }
+
+    panel.appendChild(el('div', {
+      class: 'vf-faint vf-small',
+      text: `居民代表 ${soc.agents.length}/${MAX_RESIDENT_AGENTS} 名 · 历史记忆 ${soc.history.length} 条 · 特化类型 ${detail.colonyType || '通用'}`,
+    }));
+    void research;
+    this._grid.appendChild(panel);
+  },
+
+  /** 行星实体解析（detail.planetId → world 实体；缺失安全返回 null） */
+  _planetOf(detail) {
+    return detail && detail.planetId && this.app.world.entities.planets
+      ? this.app.world.entities.planets[detail.planetId] : null;
+  },
+
   _renderCol3(detail) {
     const stockRows = Object.keys(detail.stock || {})
       .filter((rid) => (Number(detail.stock[rid]) || 0) > 0)

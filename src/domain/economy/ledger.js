@@ -158,12 +158,31 @@ export function applyDecay(world, factionId, resIds, decayRules) {
   }
 }
 
-/** 税收（殖民地→阵营，源自殖民模块） */
+/** 税收（殖民地→阵营，源自殖民模块；doc21 WP-2.4 繁荣度平方级税基增幅挂钩） */
 export function collectTax(world, colony, amount, reason = 'tax') {
-  const ok = debitColony(world, colony, 'credits', amount, reason);
-  if (ok) credit(world, colony.factionId, 'credits', amount, reason, colony.id, FLOW.TAX);
+  let effective = amount;
+  const planet = world.entities && world.entities.planets ? world.entities.planets[colony.planetId] : null;
+  if (planet && planet.soc && planet.soc.v === 1) {
+    // 聚落繁荣度 TaxBonus = baseTax × (1 + (Φ/100)² × 1.5)，叠加法典/总督税基修正
+    const phi = Math.max(0, Math.min(100, planet.soc.prosperity)) / 100;
+    let mult = 1.0 + phi * phi * 1.5;
+    for (const eid of planet.soc.edicts || []) {
+      const ed = COLONY_EDICT_TAX_MULT[eid];
+      if (ed) mult *= ed;
+    }
+    const soc = planet.soc;
+    const overseer = soc.overseerId && world.entities.characters
+      ? world.entities.characters[soc.overseerId] : null;
+    if (overseer && Array.isArray(overseer.traits) && overseer.traits.includes('mercantile')) mult *= 1.25;
+    effective = amount * mult;
+  }
+  const ok = debitColony(world, colony, 'credits', Math.round(effective), reason);
+  if (ok) credit(world, colony.factionId, 'credits', Math.round(effective), reason, colony.id, FLOW.TAX);
   return ok;
 }
+
+/** doc21：法典税基修正速查（与 colonyGovernance.COLONY_EDICTS 同源常量） */
+const COLONY_EDICT_TAX_MULT = { edict_quarantine_martial: 0.70 };
 
 // —— 殖民地库存（行星级仓储，与阵营账本分离但可互转） ——
 

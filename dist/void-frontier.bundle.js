@@ -1228,6 +1228,10 @@ const { advanceSpeciesDiscovery: advanceSpeciesDiscovery, collectSpecimenSample:
 const { ensurePlanetRuin: ensurePlanetRuin, tryCompleteExcavation: tryCompleteExcavation, inscribeDialectPylon: inscribeDialectPylon, rotateResonatorTower: rotateResonatorTower, reportGuardianDefeated: reportGuardianDefeated, extractMonolithCore: extractMonolithCore } = __require("src/domain/ground/monolithRuins.js");
 const { ensurePlanetInd: ensurePlanetInd, rebuildPowerGrids: rebuildPowerGrids, createBeltTuple: createBeltTuple, NODE_IDX: NODE_IDX, NODE_STATE: NODE_STATE, BELT_IDX: BELT_IDX } = __require("src/domain/industry/planetaryLogistics.js");
 const { feedCatapult: feedCatapult, resIdToIdx: resIdToIdx } = __require("src/domain/industry/catapult.js");
+const { breakLeviathanPart: breakLeviathanPart, reportLeviathanDefeated: reportLeviathanDefeated } = __require("src/domain/ground/planetaryThreat.js");
+const { ensurePlanetSoc: ensurePlanetSoc, deriveColonyAgents: deriveColonyAgents, resolveColonyDilemma: resolveColonyDilemma, reportRebellionSuppressed: reportRebellionSuppressed, COLONY_EDICTS: COLONY_EDICTS } = __require("src/domain/planets/colonyGovernance.js");
+const { ensurePlanetFort: ensurePlanetFort, callOrbitalSupport: callOrbitalSupport, firePlanetaryIonBatteries: firePlanetaryIonBatteries, hostileFleetsInSystemOf: hostileFleetsInSystemOf, announceIonSalvo: announceIonSalvo } = __require("src/domain/strategic/orbitalSynergy.js");
+const { checkBuildingPlacementExtended: checkBuildingPlacementExtended } = __require("src/domain/ground/terrainEdits.js");
 
 function ownFleet(world, cmd) {
   const fleet = getEntity(world, 'fleets', cmd.params.fleetId || cmd.targetId);
@@ -1863,6 +1867,11 @@ function executeShape(ctx, cmd, op) {
   }, 'ground');
 }
 
+/** doc22：loadLiveEdits 域内引用（CallOrbitalSupport 激光开山复用同一口径） */
+function liveEditsFor(world, planetId) {
+  return loadLiveEdits(world, planetId);
+}
+
 registerCommand('ShapeTerrain', {
   desc: '地形整形器：raise/lower/smooth/flatten 刷子与植被移植（TERRAIN-06 增量重建）',
   validate(ctx, cmd) {
@@ -1906,6 +1915,11 @@ registerCommand('PlaceBuilding', {
       footprintHalfM: cmd.params.footprintHalfM,
       themeId: planet.primaryThemeId,
     });
+    // doc22 WP-2：对空离子炮显著度扩展校验（桌山高脊 + 60° 天顶锥角）
+    if (defId && buildingDef(defId) && buildingDef(defId).prominence) {
+      const ext = checkBuildingPlacementExtended(field, cmd.params.x, cmd.params.z, { defId });
+      if (!ext.ok) return { ok: false, code: ext.code || 'PROMINENCE', reason: ext.reason };
+    }
     if (!chk.ok) {
       const reason = chk.code === 'SLOPE_TOO_STEEP'
         ? `坡度过大（${chk.maxSlopeDeg.toFixed(1)}° > 阈值），请先整地推平或改用主题桩基`
@@ -1956,6 +1970,22 @@ registerCommand('PlaceBuilding', {
         0, NODE_STATE.OFFLINE, 0, 0, 0, 0, 0, 0,
       ]);
       rebuildPowerGrids(ind, BUILDINGS);
+    }
+    // doc22 WP-2/WP-3：离子炮入 fort 台账（7 元组 [id, defIdx, x_dm, z_dm, y_dm, online, cdHours]）
+    const defF = BUILDINGS.find((b) => b.id === entry.defId);
+    if (defF && defF.ionBattery) {
+      const fort = ensurePlanetFort(planet);
+      fort.ionBatteries.push([
+        fort.ionBatteries.reduce((m, b) => Math.max(m, b[0]), 0) + 1,
+        defIdx,
+        Math.round(cmd.params.x * 10), Math.round(cmd.params.z * 10),
+        Math.round((entry.foundation && Number.isFinite(entry.foundation.etaHeightM) ? entry.foundation.etaHeightM : 0) * 10),
+        1, 0,
+      ]);
+    }
+    if (defF && defF.planetaryShield) {
+      const fort = ensurePlanetFort(planet);
+      fort.planetaryShield = { hp: 3000, hpMax: 3000 };
     }
   },
 });
@@ -2088,6 +2118,177 @@ registerCommand('CatapultFeed', {
     }
     feedCatapult(planet.ind, resIdToIdx(resId), units);
     emit(ctx.world, 'CatapultFed', { planetId: planet.id, resId, units }, 'ground');
+  },
+});
+
+// —— doc20 v0.6：利维坦部位破坏与讨伐战果命令（WP-4） ——————————————————
+
+registerCommand('BreakLeviathanPart', {
+  desc: '利维坦部位破坏回执（背部散热晶核/毒素腺囊 → 6s 瘫痪硬直；doc20 WP-4）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet || !planet.threat || !planet.threat.leviathan || !planet.threat.leviathan.active) {
+      return { ok: false, code: 'NO_LEVIATHAN', reason: '利维坦未苏醒' };
+    }
+    if (!['back_core', 'toxin_sacs'].includes(cmd.params.part)) {
+      return { ok: false, code: 'BAD_PART', reason: '部位非法' };
+    }
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    const res = breakLeviathanPart(ctx.world, planet, cmd.params.part);
+    if (!res.ok && !res.already) throw new Error(res.reason || '部位破坏失败');
+  },
+});
+
+registerCommand('ReportLeviathanDefeated', {
+  desc: '利维坦讨伐战果上报（PTI 归零 + 弹射井解锁 + exoticMatter ×5；doc20 WP-4）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet || !planet.threat || !planet.threat.leviathan || !planet.threat.leviathan.active) {
+      return { ok: false, code: 'NO_LEVIATHAN', reason: '利维坦未苏醒' };
+    }
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    const res = reportLeviathanDefeated(ctx.world, planet);
+    if (!res.ok) throw new Error(res.reason || '讨伐上报失败');
+  },
+});
+
+// —— doc21 v0.8：驻星总督任命与聚落法典命令（WP-3/WP-4） ——————————————————
+
+registerCommand('AppointOverseer', {
+  desc: '任命驻星总督（world.entities.characters 领袖；性格特质修正聚落微模拟）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    const ch = getEntity(ctx.world, 'characters', cmd.params.characterId);
+    if (!ch) return { ok: false, code: 'NO_CHARACTER', reason: '人物不存在' };
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    ensurePlanetSoc(planet);
+    planet.soc.overseerId = cmd.params.characterId;
+    emit(ctx.world, 'OverseerAppointed', { planetId: planet.id, overseerId: planet.soc.overseerId }, 'ground');
+  },
+});
+
+registerCommand('SignColonyEdict', {
+  desc: '签署聚落法典（四大本地法典；与帝国政策互补；doc21 WP-3.3）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    if (!COLONY_EDICTS[cmd.params.edictId]) return { ok: false, code: 'NO_EDICT', reason: '未知法典' };
+    ensurePlanetSoc(planet);
+    if (planet.soc.edicts.includes(cmd.params.edictId)) {
+      return { ok: false, code: 'ALREADY_SIGNED', reason: '法典已生效' };
+    }
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    planet.soc.edicts.push(cmd.params.edictId);
+    emit(ctx.world, 'ColonyEdictSigned', { planetId: planet.id, edictId: cmd.params.edictId }, 'ground');
+  },
+});
+
+registerCommand('RevokeColonyEdict', {
+  desc: '废止聚落法典',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet || !planet.soc) return { ok: false, code: 'NO_TARGET', reason: '行星无聚落治理态' };
+    if (!planet.soc.edicts.includes(cmd.params.edictId)) {
+      return { ok: false, code: 'NOT_SIGNED', reason: '法典未生效' };
+    }
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    planet.soc.edicts = planet.soc.edicts.filter((e) => e !== cmd.params.edictId);
+    emit(ctx.world, 'ColonyEdictRevoked', { planetId: planet.id, edictId: cmd.params.edictId }, 'ground');
+  },
+});
+
+registerCommand('ResolveColonyDilemma', {
+  desc: '总督治理困境裁决（罢工/疫情/走私；长期记忆写入 planet.soc.history）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet || !planet.soc || !planet.soc.pendingDilemma) {
+      return { ok: false, code: 'NO_DILEMMA', reason: '无待裁决困境' };
+    }
+    if (!planet.soc.pendingDilemma.choices.some((x) => x.id === cmd.params.choiceId)) {
+      return { ok: false, code: 'BAD_CHOICE', reason: '未知裁决选项' };
+    }
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    const colony = Object.values(ctx.world.entities.colonies || {}).find((cc) => cc.planetId === planet.id);
+    const res = resolveColonyDilemma(ctx.world, planet, colony || null, cmd.params.choiceId);
+    if (!res.ok) throw new Error(res.reason || '裁决失败');
+  },
+});
+
+registerCommand('ReportRebellionSuppressed', {
+  desc: '武装平叛战果上报（gmt_suppress_rebellion 成功 → 重置不满/暴动态）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet || !planet.soc || !planet.soc.rebellionActive) {
+      return { ok: false, code: 'NO_REBELLION', reason: '该行星未处于暴动态' };
+    }
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    const res = reportRebellionSuppressed(ctx.world, planet);
+    if (!res.ok) throw new Error(res.reason || '平叛上报失败');
+  },
+});
+
+// —— doc22 v1.0：天地一体协同命令（WP-1/WP-3） ——————————————————————————
+
+registerCommand('CallOrbitalSupport', {
+  desc: '轨道五大战术支援呼叫（激光洗地开山/动能打击/EW/机甲空投/补给舱；doc22 WP-1）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    const kinds = ['support_orbital_laser', 'support_kinetic_strike', 'support_electronic_warfare', 'support_mech_drop', 'support_supply_pod'];
+    if (!kinds.includes(cmd.params.kind)) return { ok: false, code: 'BAD_KIND', reason: '未知支援类型' };
+    if (!Number.isFinite(cmd.params.x) || !Number.isFinite(cmd.params.z)) {
+      return { ok: false, code: 'BAD_COORD', reason: '信标坐标非法' };
+    }
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    const res = callOrbitalSupport(ctx.world, planet, cmd.params.kind, cmd.params.x, cmd.params.z);
+    if (!res.ok) throw new Error(res.reason || '支援呼叫失败');
+    // 激光洗地：扫过区域真实开山（ShapeTerrain lower + HarvestTerrainOre——doc22 WP-1.2）
+    if (cmd.params.kind === 'support_orbital_laser') {
+      const { field: fL, edits: eL } = liveEditsFor(ctx.world, planet.id);
+      applyEdit(fL, eL, { kind: 'lower', x: cmd.params.x, z: cmd.params.z, radius: 5, strength: 1.5 });
+      ctx.world.entities.planets[planet.id].terrainEdits = JSON.parse(serializeEdits(eL));
+      emit(ctx.world, 'OrbitalLaserDug', { planetId: planet.id, x: cmd.params.x, z: cmd.params.z }, 'ground');
+    }
+  },
+});
+
+registerCommand('FirePlanetaryIonBattery', {
+  desc: '高地离子炮越级齐射（HourlySystems combat 阶段亦自动触发；doc22 WP-3）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    return { ok: true };
+  },
+  execute(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    const hostiles = hostileFleetsInSystemOf(ctx.world, planet);
+    const hits = firePlanetaryIonBatteries(ctx.world, planet, hostiles);
+    announceIonSalvo(ctx.world, planet, hits);
   },
 });
 
@@ -11278,12 +11479,31 @@ function applyDecay(world, factionId, resIds, decayRules) {
   }
 }
 
-/** 税收（殖民地→阵营，源自殖民模块） */
+/** 税收（殖民地→阵营，源自殖民模块；doc21 WP-2.4 繁荣度平方级税基增幅挂钩） */
 function collectTax(world, colony, amount, reason = 'tax') {
-  const ok = debitColony(world, colony, 'credits', amount, reason);
-  if (ok) credit(world, colony.factionId, 'credits', amount, reason, colony.id, FLOW.TAX);
+  let effective = amount;
+  const planet = world.entities && world.entities.planets ? world.entities.planets[colony.planetId] : null;
+  if (planet && planet.soc && planet.soc.v === 1) {
+    // 聚落繁荣度 TaxBonus = baseTax × (1 + (Φ/100)² × 1.5)，叠加法典/总督税基修正
+    const phi = Math.max(0, Math.min(100, planet.soc.prosperity)) / 100;
+    let mult = 1.0 + phi * phi * 1.5;
+    for (const eid of planet.soc.edicts || []) {
+      const ed = COLONY_EDICT_TAX_MULT[eid];
+      if (ed) mult *= ed;
+    }
+    const soc = planet.soc;
+    const overseer = soc.overseerId && world.entities.characters
+      ? world.entities.characters[soc.overseerId] : null;
+    if (overseer && Array.isArray(overseer.traits) && overseer.traits.includes('mercantile')) mult *= 1.25;
+    effective = amount * mult;
+  }
+  const ok = debitColony(world, colony, 'credits', Math.round(effective), reason);
+  if (ok) credit(world, colony.factionId, 'credits', Math.round(effective), reason, colony.id, FLOW.TAX);
   return ok;
 }
+
+/** doc21：法典税基修正速查（与 colonyGovernance.COLONY_EDICTS 同源常量） */
+const COLONY_EDICT_TAX_MULT = { edict_quarantine_martial: 0.70 };
 
 // —— 殖民地库存（行星级仓储，与阵营账本分离但可互转） ——
 
@@ -14202,6 +14422,82 @@ const BUILDINGS = [
     wireRadiusM: 10.0,
     indRecipe: { cycleS: 9, in0: 'alloy', in1: 'rareEarth', out: 'conductor' },
   },
+  // ── doc20 v0.6 WP-2/WP-3：灾害防御与威胁平降设施 ──
+  {
+    id: 'bld_sonic_dampener',
+    nameZh: '声波抑制塔',
+    nameEn: 'Sonic Dampener',
+    descZh: '主动声波抵消阵列：显著平降地表开采警戒指数（PTI -6/座/小时），让世界不会永远惩罚玩家。',
+    descEn: 'Active sonic cancellation array steadily lowering the Planetary Threat Index.',
+    category: 'military',
+    techReq: null,
+    cost: { credits: 500, alloy: 12, conductor: 4 },
+    buildHours: 24,
+    jobs: 1,
+    powerUse: -6,
+    upkeep: { credits: 3 },
+  },
+  {
+    id: 'bld_lightning_rod',
+    nameZh: '避雷针阵列',
+    nameEn: 'Lightning Rod Array',
+    descZh: '等离子磁暴期引导落雷入地：保护子电网蓄电池免受 30%/小时 电量流失。',
+    descEn: 'Guides plasma-storm strikes to ground, protecting accumulator banks from EM drain.',
+    category: 'military',
+    techReq: null,
+    cost: { credits: 300, alloy: 8, conductor: 6 },
+    buildHours: 12,
+    jobs: 0,
+    powerUse: 0,
+    upkeep: { credits: 2 },
+  },
+  // ── doc22 v1.0 WP-2：天地协同要塞建筑（对空离子炮/轨道雷达/天幕护盾） ──
+  {
+    id: 'bld_ion_battery',
+    nameZh: '行星对空离子加农炮',
+    nameEn: 'Ion Battery',
+    descZh: '4m×4m 重型对空要塞：25 MW 供电，必须修筑于平均海拔 +14m 以上桌山高脊（显著度校验），向入轨敌舰齐射穿甲离子束。',
+    descEn: 'Heavy anti-orbital fortress requiring topographic prominence (mean elevation +14m) for sky-clear firing cones.',
+    category: 'military',
+    techReq: null,
+    cost: { credits: 1500, alloy: 12, conductor: 6, quantumCrystal: 2 },
+    buildHours: 48,
+    jobs: 2,
+    powerUse: -25,
+    upkeep: { credits: 8 },
+    prominence: true,
+    ionBattery: true,
+  },
+  {
+    id: 'bld_orbital_radar',
+    nameZh: '地面轨道追踪雷达',
+    nameEn: 'Orbital Tracking Radar',
+    descZh: '3m×3m 相控阵：为离子炮提供轨道目标锁定校正（无雷达命中率跌至 20%），并提升己方舰队侦察半径。',
+    descEn: 'Phased-array radar providing orbital target lock calibration for ion batteries.',
+    category: 'military',
+    techReq: null,
+    cost: { credits: 800, alloy: 6, conductor: 8 },
+    buildHours: 24,
+    jobs: 1,
+    powerUse: -8,
+    upkeep: { credits: 4 },
+    orbitalRadar: true,
+  },
+  {
+    id: 'bld_planetary_shield',
+    nameZh: '行星级天幕护盾',
+    nameEn: 'Planetary Shield',
+    descZh: '40 MW 供电的行星级护盾发生器：3000 HP 容量，吸收轨道轰炸与酸雹侵害，由地面电网供能回充。',
+    descEn: 'Planetary shield generator (3000 HP capacity) absorbing orbital bombardment and acid hail.',
+    category: 'military',
+    techReq: null,
+    cost: { credits: 2200, alloy: 30, conductor: 20, powerCell: 6 },
+    buildHours: 60,
+    jobs: 2,
+    powerUse: -40,
+    upkeep: { credits: 12 },
+    planetaryShield: true,
+  },
   {
     id: 'bld_quantum_lattice',
     nameZh: '量子晶格共振仪',
@@ -16306,180 +16602,1473 @@ function cancelByKind(world, kind, filterFn = null) {
 Object.assign(__exports, { registerScheduled, schedule, popDue, runDue, cancelByKind });
 
 });
-__register("src/domain/industry/catapult.js", function (__exports, __require) {
+__register("src/domain/ground/terrainEdits.js", function (__exports, __require) {
 /**
- * domain/industry/catapult.js — 轨道货运弹射井与近地中转站（doc19 v0.4 WP-4）
+ * domain/ground/terrainEdits.js — 地形整形编辑层（doc7 TASK-5.1 / §6.5 地形整形器）
  *
- * 三级天地物流管线（doc16 §4.12）：地表打包弹射 → 近地轨道缓冲仓 →
- * 船坞直供泰坦装配 / 跨星系货运班轮 / 星际市场倾销。
+ * 职责：
+ *  - 编辑日志（ops）：raise / lower / smooth / flatten / restore 五类刷子 + plant / removePlant 植被移植；
+ *  - 刷子生效不直接改 terrainField 数据，而是挂进 field.evalPoint 的 siteModifier 合成链
+ *    （attachTerrainEdits：既有 siteModifier（GroundView._fieldSiteModifier 采掘凹陷等）先评估，
+ *     编辑层后评估 —— flatten / restore 因此可以覆写采掘凹陷，回任自然地貌）；
+ *  - 每次编辑仅把受影响 Chunk 标脏（TERRAIN-06：刷子半径 ≤ chunkMeters/2 → 至多 2×2 = 4 个区块），
+ *    邻接区块由下一帧增量重建；高度预算 [-40,+80] 仍由 evalPoint 统一钳制；
+ *  - 紧凑 JSON 编辑命令序列（serializeEdits / deserializeEdits）供存档确定性重放（SITE-07）；
+ *  - 建筑落位 9 点三角网格投影校验（doc7 TASK-5.2 / §6.8 坡度阈值）与主题专属桩基类型。
  *
- * 天体物理弹射能耗（doc19 WP-4）：
- *   E_launch = E0 · (g / g0) · (1 + β · ρ_atm)
- * 高重力/浓密大气行星弹射昂贵，碎环月（0.25g 真空）能耗趋近 E0 下限。
- *
- * 确定性红线：零 Math.random()、零 world.rng 消费。持久化增量：弹射井与
- * 轨道缓冲仓为紧凑 JSON（≤1KB/星，GATE-06 IND-05 预算内）。
+ * 确定性（doc7 红线 4）：零 Math.random、零 world.rng；smooth 的局部均值与 flatten 的
+ * 目标高度均在 applyEdit 时用 _macro 纯宏观场按固定采样点预计算（缓存可由
+ * deserializeEdits 重建，逐位一致）；植被 seed 由 hash32(内容串) 派生。
+ * 本文件为纯领域层：无 DOM / 无 WebGL。
  */
 
-const { emit: emit, chronicle: chronicle } = __require("src/core/eventBus.js");
-const { clamp: clamp } = __require("src/core/math.js");
-const { createShip: createShip } = __require("src/domain/ships/ship.js");
+const { MIN_HEIGHT: MIN_HEIGHT, MAX_HEIGHT: MAX_HEIGHT, buildTriangulatedChunkMesh: buildTriangulatedChunkMesh } = __require("src/domain/ground/terrainField.js");
+const { hash32: hash32 } = __require("src/domain/ground/SurfaceSandbox.js");
+const { sampleTerrain: sampleTerrain, slopeAt: slopeAt } = __require("src/domain/ground/surfaceQueries.js");
 
-/** 标准轨道货舱容量（单位物资/舱，doc19 WP-4） */
-const POD_CAPACITY_UNITS = 50;
-/** 泰坦装配硬性要求：累计 20 舱装甲模块 + 5 舱量子核心（doc19 WP-4.3） */
-const TITAN_ARMOR_PODS = 20;
-const TITAN_QUANTUM_PODS = 5;
-/** 弹射基准能耗（MWh）：g=g0 真空大气下的地板值 */
-const LAUNCH_E0_MWH = 12;
-/** 大气阻力系数 β（ρ_atm 0..1） */
-const LAUNCH_BETA = 1.6;
+// ———— 常量 ————
 
-/** 弹射井状态紧凑元组：[charged_permille, podsReady, launchedTotal, resTypeIdx] */
-const CATAPULT_IDX = Object.freeze({ CHARGE: 0, PODS: 1, LAUNCHED: 2, RES: 3 });
+/** 编辑日志 schema 版本（存档兼容性标记） */
+const TERRAIN_EDITS_VERSION = 1;
 
 /**
- * 单次弹射能耗（MWh）：E0 · (g/g0) · (1 + β·ρ_atm)；g0 = 1.0。
- * @param {object} planet 行星实体（gravity 0.3~1.9；atmosphere.density 0..1）
+ * 刷子参数上限（TERRAIN-06 增量重建约束）：
+ * 半径 ≤ chunkMeters/2 → 圆盘至多跨 2×2 区块（4 个）；强度上限防止一次刷穿高度预算。
  */
-function launchEnergyMWh(planet) {
-  const g = clamp(Number(planet && planet.gravity) || 1.0, 0.1, 3.0);
-  const atmo = planet && planet.atmosphere;
-  const rho = atmo && Number.isFinite(atmo.density) ? clamp(atmo.density, 0, 1) : 0.5;
-  return LAUNCH_E0_MWH * g * (1 + LAUNCH_BETA * rho);
+const BRUSH_LIMITS = {
+  maxRadiusM: 32,        // 米；512m 场默认 64m 区块 → 至多 4 区块受影响
+  maxStrokeM: 8,         // raise/lower 单次行程上限（米）
+  minStrength: 0.001,
+};
+
+/**
+ * 建筑落位阈值（doc7:273 image17/18 阈值公式图不可读，按 GAME-05..08 门禁语义自定
+ * 并在此文档化 —— 后续读回原文图片时仅需改这里）：
+ *  - 建筑底面 9 点（中心 + 4 角 + 4 边中点）投影到三角网格；
+ *  - 任一点坡度 > maxSlopeDeg(16°，与 surfaceQueries.isBuildableSlope 默认一致) → 拒绝 SLOPE_TOO_STEEP；
+ *  - 9 点最大高差 > maxHeightDeltaM(2.2m) → 拒绝 HEIGHT_DELTA（要求先整地/桩基）；
+ *  - 高差 ≤ foundationGradeDeltaM(0.4m) 直接平铺；否则自动地基承台（graded）并按主题选桩基。
+ */
+const BUILDING_PLACEMENT = {
+  maxSlopeDeg: 16,
+  maxHeightDeltaM: 2.2,
+  foundationGradeDeltaM: 0.4,
+  footprintHalfM: 3, // 6m × 6m 占地
+};
+
+/** 主题专属桩基（doc7 TASK-5.2：浮台 / 隔热基座 / 耐酸桩；未列主题 → 标准承台） */
+const THEME_PILING = {
+  obsidian_lava: 'thermal_base',      // 隔热基座（熔岩地表）
+  sulfur_marsh: 'acid_pile',          // 耐酸桩（毒雾沼泽）
+  abyssal_ocean: 'pontoon',           // 浮台（海洋/潮汐带）
+  cryomethane_sea: 'pontoon',
+  prism_crystal: 'standard',
+  permafrost_furnace: 'insulated_base', // 隔热基座（冻土热区）
+  dry_night_polar: 'insulated_base',
+};
+
+/** 编辑算子集合 */
+const SHAPE_KINDS = new Set(['raise', 'lower', 'smooth', 'flatten', 'restore']);
+
+// ———— 小工具 ————
+
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
 }
 
-/**
- * 地表物资汇集：每 50 单位打包 1 舱（由 stepPlanetIndustry 输出口或手动输送调用）。
- * @returns {{podsReady:number, launched:boolean}} 是否凑满整舱
- */
-function feedCatapult(indState, resTypeIdx, units) {
-  const cat = indState.catapult || (indState.catapult = [0, 0, 0, resTypeIdx]);
-  cat[CATAPULT_IDX.RES] = resTypeIdx;
-  cat[CATAPULT_IDX.PODS] += units / POD_CAPACITY_UNITS;
-  const whole = Math.floor(cat[CATAPULT_IDX.PODS]);
-  return { podsReady: whole, launched: whole > 0 };
+function num(v, dflt) {
+  return Number.isFinite(v) ? v : dflt;
 }
 
-/**
- * 弹射井蓄能推进（由所属子电网 accMWh 扣能；HourlySystems production 调用）。
- * 蓄能达 100% 且舱位就绪 → 触发发射：物资入近地中转站缓冲仓，电网放电。
- * @returns {{launched:number, pods:Array<{resTypeIdx:number, units:number}>}}
- */
-function stepCatapult(world, planet, indState, grid, dtHours = 1) {
-  const cat = indState.catapult;
-  if (!cat || !grid) return { launched: 0, pods: [] };
-  const pods = [];
-  let launched = 0;
-  const wholePods = Math.floor(cat[CATAPULT_IDX.PODS]);
-  if (wholePods <= 0) return { launched: 0, pods };
-
-  const energyNeed = launchEnergyMWh(planet);
-  // 蓄能速率：电网富余功率 × dt（充入弹射井专用电容）
-  const surplusKW = Math.max(0, grid.genKW - grid.loadKW);
-  cat[CATAPULT_IDX.CHARGE] = clamp(cat[CATAPULT_IDX.CHARGE] + (surplusKW / 1000) * dtHours / energyNeed * 1000, 0, 1200);
-
-  if (cat[CATAPULT_IDX.CHARGE] >= 1000) {
-    cat[CATAPULT_IDX.CHARGE] -= 1000;
-    cat[CATAPULT_IDX.PODS] -= 1;
-    cat[CATAPULT_IDX.LAUNCHED] += 1;
-    launched = 1;
-    const units = POD_CAPACITY_UNITS;
-    const resKey = resIdxToId(cat[CATAPULT_IDX.RES]);
-    const buf = indState.orbitalBuffer || (indState.orbitalBuffer = {});
-    buf[resKey] = (buf[resKey] || 0) + units;
-    pods.push({ resTypeIdx: cat[CATAPULT_IDX.RES], resId: resKey, units });
-    grid.accMWh = Math.max(0, grid.accMWh - energyNeed); // 电网放电扣能
-    emit(world, 'FreightCatapultLaunched', { planetId: planet.id, resId: resKey, units, energyMWh: energyNeed }, 'ground');
-    if (cat[CATAPULT_IDX.LAUNCHED] === 1) {
-      chronicle(world, 'economy', `行星 ${planet.name} 货运弹射井首舱入轨（冷青电弧音爆）`, { planetId: planet.id });
-    }
+/** 纯宏观场原始高度（不含 siteModifier 与编辑层）——smooth/flatten 的确定性基准 */
+function pristineHeight(field, wx, wz) {
+  const macro = field._macro;
+  if (!macro || typeof macro.heightAt !== 'function') {
+    throw new Error('terrainEdits: field 缺少 _macro 宏观场（须由 createTerrainField 构建）');
   }
-  return { launched, pods };
+  return clamp(macro.heightAt(wx, wz).y, MIN_HEIGHT, MAX_HEIGHT);
 }
 
-/** 资源 idx → 资源 id（与 content/resources.js 对齐的工业流小子集） */
-const IND_RES_IDS = ['ferro', 'silicate', 'alloy', 'conductor', 'shipModule', 'quantumCore'];
-function resIdxToId(idx) {
-  return IND_RES_IDS[idx] || 'alloy';
-}
-function resIdToIdx(resId) {
-  return IND_RES_IDS.indexOf(resId) >= 0 ? IND_RES_IDS.indexOf(resId) : 2;
+/** 平滑核：(1 - (d/r)^2)^2，d=r 处为 0（C1 连续，避免刷痕硬边） */
+function brushFalloff(d, r) {
+  if (d >= r) return 0;
+  const t = 1 - (d * d) / (r * r);
+  return t * t;
 }
 
 /**
- * 近地中转站三级分发（HourlySystems production 每战略小时结算；doc19 WP-4.3）。
- * 1) 同星系轨道船坞直供 → 泰坦装配台账；2) 跨星系班轮（有母星系中转站则划拨）；
- * 3) 星际市场倾销 → 信用点。确定性顺序结算。
- * @returns {{titanLaid:boolean, shipId?:string, marketCredits:number}}
+ * 压平核：半径内圈（r/2）为全强度平台（建筑 9 点落位足印 ±3m 必须落在平芯内），
+ * 外圈 (1-t²)² 平滑过渡到 0 —— 平芯 + 裙边，符合「压平建筑地基」的工具语义。
  */
-function settleOrbitalBuffer(world, planet, indState) {
-  const out = { titanLaid: false, marketCredits: 0 };
-  const buf = indState.orbitalBuffer || {};
-  const fid = planet.colonyId
-    ? (world.entities.colonies[planet.colonyId] || {}).factionId
-    : world.playerFactionId;
-  if (!fid) return out;
+function flattenFalloff(d, r) {
+  const coreR = r * 0.5;
+  if (d <= coreR) return 1;
+  if (d >= r) return 0;
+  const t = (d - coreR) / (r - coreR);
+  const u = 1 - t * t;
+  return u * u;
+}
 
-  // 1) 同星系轨道船坞直供：泰坦装配台账（装甲模块舱/量子核心舱）
-  const sys = world.entities.systems[planet.systemId];
-  const shipyard = sys ? Object.values(world.entities.stations || {})
-    .find((st) => st.kind === 'shipyard' && st.systemId === sys.id && st.factionId === fid) : null;
-  if (shipyard) {
-    shipyard.titanAssembly ||= { armorPods: 0, quantumPods: 0 };
-    // 缓冲仓持「单位」（50 单位/舱）→ 吸收时换算为整舱，零头单位留在缓冲仓
-    const armorRes = ['alloy', 'shipModule'];
-    for (const r of armorRes) {
-      if (buf[r] > 0) {
-        const pods = Math.floor(buf[r] / POD_CAPACITY_UNITS);
-        if (pods > 0) {
-          shipyard.titanAssembly.armorPods += pods;
-          buf[r] -= pods * POD_CAPACITY_UNITS;
+function chunkKeyOf(field, x, z) {
+  const cx = clamp(Math.floor((x - field.originX) / field.chunkMeters), 0, field.chunksX - 1);
+  const cz = clamp(Math.floor((z - field.originZ) / field.chunkMeters), 0, field.chunksZ - 1);
+  return `${cx},${cz}`;
+}
+
+// ———— 编辑仓库 ————
+
+/**
+ * 创建编辑仓库（挂在一个地形场上，但只通过 siteModifier 合成链接入，
+ * 不直接改写 terrainField 的任何缓冲）。
+ */
+function createTerrainEdits(field) {
+  if (!field || !Array.isArray(field.chunks)) {
+    throw new Error('createTerrainEdits: 需要 createTerrainField 产出的地形场');
+  }
+  return {
+    planetId: field.planetId,
+    revision: 0,   // 每次成功 applyEdit +1（与存档快照 revision 对齐）
+    seq: 0,        // 植被 id 序列（确定性 id 派生）
+    ops: [],       // 时序编辑日志（内部规范形）
+    byChunk: new Map(), // 'cx,cz' → [opIdx...]（按全局顺序追加；渲染增量重建索引）
+    flora: [],     // 在场植被 [{ id, x, z, prefabId, seed }]
+  };
+}
+
+/**
+ * 预计算算子缓存（smooth 局部均值 / flatten 目标高度）。
+ * 固定采样图案：中心 + 内环 8 点(0.55r) + 外环 8 点(0.92r)，全部取纯宏观场高度。
+ * 缓存丢失（反序列化后）时惰性重建 —— 同输入逐位一致。
+ */
+function ensureOpCache(field, op) {
+  if (op.kind === 'flatten') {
+    if (op._targetY === undefined) op._targetY = pristineHeight(field, op.x, op.z);
+    return;
+  }
+  if (op.kind === 'smooth') {
+    if (op._avgY === undefined) {
+      let sum = 0;
+      let n = 0;
+      sum += pristineHeight(field, op.x, op.z); n += 1;
+      for (let ring = 0; ring < 2; ring++) {
+        const rr = op.r * (ring === 0 ? 0.55 : 0.92);
+        for (let a = 0; a < 8; a++) {
+          const ang = (a * Math.PI) / 4;
+          sum += pristineHeight(field, op.x + Math.cos(ang) * rr, op.z + Math.sin(ang) * rr);
+          n += 1;
         }
       }
+      op._avgY = sum / n;
     }
-    if (buf.quantumCore >= POD_CAPACITY_UNITS) {
-      const pods = Math.floor(buf.quantumCore / POD_CAPACITY_UNITS);
-      shipyard.titanAssembly.quantumPods += pods;
-      buf.quantumCore -= pods * POD_CAPACITY_UNITS;
+  }
+}
+
+/**
+ * 应用一次编辑：校验 → 追加日志 → 标脏受影响区块（≤4）。
+ * shape 算子 { kind, x, z, radius, strength }；plant { kind:'plant', x, z, prefabId, seed? }；
+ * removePlant { kind:'removePlant', plantId }。
+ * @returns {{ok:true, op:object, index:number, dirtyChunks:string[], floraId?:string}}
+ * @throws {Error} 参数非法（命令层先行校验并映射错误码）
+ */
+function applyEdit(field, edits, op) {
+  if (!field || !edits || !op || typeof op !== 'object') {
+    throw new Error('applyEdit: 缺少 field/edits/op');
+  }
+  const x = num(op.x, NaN);
+  const z = num(op.z, NaN);
+  if (!Number.isFinite(x) || !Number.isFinite(z)) {
+    throw new Error('applyEdit: 坐标非法');
+  }
+
+  const dirtyChunks = [];
+  let entry;
+
+  if (op.kind === 'plant' || op.kind === 'removePlant') {
+    if (op.kind === 'plant') {
+      if (typeof op.prefabId !== 'string' || op.prefabId.length === 0) {
+        throw new Error('applyEdit: plant 需要 prefabId');
+      }
+      edits.seq += 1;
+      const id = op.id || `flora_${edits.seq}`;
+      const seed = Number.isFinite(op.seed) ? (op.seed >>> 0)
+        : (hash32(`${field.planetId}|${id}|${x.toFixed(3)}|${z.toFixed(3)}|${op.prefabId}`) >>> 0);
+      entry = { kind: 'plant', x, z, id, prefabId: op.prefabId, seed };
+      edits.flora.push({ id, x, z, prefabId: op.prefabId, seed });
+    } else {
+      if (typeof op.plantId !== 'string') throw new Error('applyEdit: removePlant 需要 plantId');
+      entry = { kind: 'removePlant', x, z, plantId: op.plantId };
+      const before = edits.flora.length;
+      edits.flora = edits.flora.filter((f) => f.id !== op.plantId);
+      if (edits.flora.length === before) {
+        throw new Error(`applyEdit: 植被不存在 ${op.plantId}`);
+      }
     }
-    const ta = shipyard.titanAssembly;
-    if (ta.armorPods >= TITAN_ARMOR_PODS && ta.quantumPods >= TITAN_QUANTUM_PODS && !shipyard.titanBuilt) {
-      ta.armorPods -= TITAN_ARMOR_PODS;
-      ta.quantumPods -= TITAN_QUANTUM_PODS;
-      // 泰坦级无畏巨舰合拢龙骨（物料已由弹射舱直供，造舰不再扣账本）
-      const ship = createShip(world, {
-        factionId: fid,
-        hullId: 'hull_titan',
-        moduleIds: [],
-        name: '泰坦级无畏巨舰',
-        systemId: sys.id,
-      });
-      shipyard.titanBuilt = (shipyard.titanBuilt || 0) + 1;
-      out.titanLaid = true;
-      out.shipId = ship.id;
-      chronicle(world, 'economy', `泰坦级无畏巨舰龙骨合拢：行星货运弹射供应链打通天地造舰闭环`, { planetId: planet.id, shipId: ship.id });
-      emit(world, 'TitanKeelLaid', { planetId: planet.id, shipId: ship.id, systemId: sys.id }, 'fleet');
+  } else {
+    if (!SHAPE_KINDS.has(op.kind)) throw new Error(`applyEdit: 未知算子 ${op.kind}`);
+    const radius = num(op.radius, 8);
+    if (!(radius > 0) || radius > Math.max(BRUSH_LIMITS.maxRadiusM, field.chunkMeters / 2)) {
+      throw new Error(`applyEdit: 半径越界（0,${Math.min(BRUSH_LIMITS.maxRadiusM, field.chunkMeters / 2)}]）`);
+    }
+    const strength = num(op.strength, op.kind === 'smooth' || op.kind === 'flatten' ? 1 : 2);
+    if (!(strength >= BRUSH_LIMITS.minStrength)) throw new Error('applyEdit: 强度过小');
+    if ((op.kind === 'raise' || op.kind === 'lower') && strength > BRUSH_LIMITS.maxStrokeM) {
+      throw new Error(`applyEdit: 行程强度上限 ${BRUSH_LIMITS.maxStrokeM}m`);
+    }
+    if ((op.kind === 'smooth' || op.kind === 'flatten') && strength > 1) {
+      throw new Error('applyEdit: smooth/flatten 强度为混合系数 (0,1]');
+    }
+    entry = { kind: op.kind, x, z, r: radius, s: strength };
+    ensureOpCache(field, entry);
+  }
+
+  edits.ops.push(entry);
+  const index = edits.ops.length - 1;
+
+  // 标脏：圆盘 AABB 覆盖的区块（半径 ≤ chunkMeters/2 → 至多 2×2 = 4 个，TERRAIN-06）
+  const reach = entry.kind === 'plant' || entry.kind === 'removePlant' ? 0.5 : entry.r;
+  const cxMin = clamp(Math.floor((x - reach - field.originX) / field.chunkMeters), 0, field.chunksX - 1);
+  const cxMax = clamp(Math.floor((x + reach - field.originX) / field.chunkMeters), 0, field.chunksX - 1);
+  const czMin = clamp(Math.floor((z - reach - field.originZ) / field.chunkMeters), 0, field.chunksZ - 1);
+  const czMax = clamp(Math.floor((z + reach - field.originZ) / field.chunkMeters), 0, field.chunksZ - 1);
+  for (let cz = czMin; cz <= czMax; cz++) {
+    for (let cx = cxMin; cx <= cxMax; cx++) {
+      const key = `${cx},${cz}`;
+      let list = edits.byChunk.get(key);
+      if (!list) {
+        list = [];
+        edits.byChunk.set(key, list);
+      }
+      list.push(index);
+      const chunk = field.chunks[cz * field.chunksX + cx];
+      if (chunk) chunk.dirty = true;
+      dirtyChunks.push(key);
     }
   }
 
-  // 2/3) 余量：跨星系班轮占位（母星系无中转站时直接市场倾销——v0.4 先打通货币闭环）
-  const POD_VALUE = { ferro: 120, silicate: 90, alloy: 240, conductor: 320, shipModule: 900, quantumCore: 1500 };
-  for (const r of Object.keys(buf)) {
-    if (buf[r] > 0) {
-      out.marketCredits += (POD_VALUE[r] || 150) * buf[r];
-      buf[r] = 0;
+  edits.revision += 1;
+  return { ok: true, op: entry, index, dirtyChunks, floraId: entry.kind === 'plant' ? entry.id : undefined };
+}
+
+// ———— evalPoint 合成链挂点 ————
+
+/**
+ * 编辑层逐点求值。restore 覆盖点重置此前全部编辑影响与 siteModifier 影响
+ * （DSP 式「一键恢复自然地貌」）。
+ * @param {number} siteDyIn 既有 siteModifier 已算得的 dy（先于编辑层评估）
+ * @returns {number} 合成总 dy（0 = 无影响；无相关列表时原样透传 siteDyIn）
+ */
+function evalEditsDy(field, edits, wx, wz, baseY, siteDyIn) {
+  const key = chunkKeyOf(field, wx, wz);
+  const list = edits.byChunk.get(key);
+  if (!list || list.length === 0) return siteDyIn;
+
+  let siteApplied = siteDyIn; // 既有 siteModifier 影响（restore 可清零）
+  let extra = 0;              // 编辑层累计
+
+  for (let i = 0; i < list.length; i++) {
+    const op = edits.ops[list[i]];
+    const dx = wx - op.x;
+    const dz = wz - op.z;
+    const d = Math.sqrt(dx * dx + dz * dz);
+
+    if (op.kind === 'restore') {
+      if (d <= op.r) {
+        // 一键恢复：清空此前编辑叠加 + siteModifier 叠加，回到纯宏观地貌
+        extra = 0;
+        siteApplied = 0;
+      }
+      continue;
+    }
+
+    const fall = op.kind === 'flatten' ? flattenFalloff(d, op.r) : brushFalloff(d, op.r);
+    if (fall <= 0) continue;
+    ensureOpCache(field, op);
+
+    if (op.kind === 'raise') extra += op.s * fall;
+    else if (op.kind === 'lower') extra -= op.s * fall;
+    else if (op.kind === 'smooth') {
+      // 盒式模糊语义：向预计算的局部均值收敛（applyEdit 时对纯宏观场采样）
+      extra += (op._avgY - (baseY + siteApplied + extra)) * op.s * fall;
+    } else if (op.kind === 'flatten') {
+      // 压平：向算子中心纯宏观高度收敛 → 覆写采掘凹陷（凹陷先于编辑层计入运行高度）
+      extra += (op._targetY - (baseY + siteApplied + extra)) * op.s * fall;
     }
   }
-  if (out.marketCredits > 0) {
-    const led = world.economy.ledgers[fid];
-    if (led) led.balances.credits = (led.balances.credits || 0) + out.marketCredits;
-    emit(world, 'OrbitalBufferMarketSold', { planetId: planet.id, credits: out.marketCredits }, 'economy');
+  return siteApplied + extra;
+}
+
+/**
+ * 把编辑仓库接入 field.evalPoint 的 siteModifier 合成链：
+ *   最终 dy = 既有 siteModifier dy（先评估；可被 restore 清零） + 编辑层 dy（后评估）。
+ * 可重复调用（幂等）；再次 attach 会保留最初的地基 siteModifier（GroundView 凹陷等）。
+ * @returns {Function} 合成后的 siteModifier（field.siteModifier）
+ */
+function attachTerrainEdits(field, edits) {
+  if (!field || !edits) throw new Error('attachTerrainEdits: 缺少 field/edits');
+  if (field.__terrainEdits === edits && typeof field.siteModifier === 'function' && field.siteModifier.__terrainEdits) {
+    return field.siteModifier; // 已挂接同一仓库
+  }
+  const underlying = field.__baseSiteModifier !== undefined ? field.__baseSiteModifier : field.siteModifier;
+  field.__baseSiteModifier = underlying; // 保留地基（首次 attach 时为 GroundView/_digDents 链）
+
+  const composed = (fx, fz, base) => {
+    const baseY = num(base && base.y, 0);
+    // 1) 既有 siteModifier（任务核心 SDF / 采掘凹陷）
+    let siteDy = 0;
+    let baseRes = null;
+    if (typeof underlying === 'function') {
+      baseRes = underlying(fx, fz, base);
+      if (baseRes && Number.isFinite(baseRes.dy)) siteDy = baseRes.dy;
+    }
+    // 2) 编辑层（后评估：flatten/restore 可覆写凹陷；restore 清零 siteDy）
+    const total = edits.ops.length === 0
+      ? siteDy
+      : evalEditsDy(field, edits, fx, fz, baseY, siteDy);
+    if (!baseRes && total === 0) return null;
+    // WP-0（doc18 v0.1.1）：语义旗透传——增量重建区块时保留路面材质与 clearFlags 安全豁免位
+    return {
+      ...(baseRes || null),
+      dy: total,
+      flags: (baseRes && baseRes.flags) || 0,
+      clearFlags: (baseRes && baseRes.clearFlags) || 0,
+      weights: (baseRes && baseRes.weights) || null,
+      biomeId: (baseRes && baseRes.biomeId) != null ? baseRes.biomeId : null,
+    };
+  };
+  composed.__terrainEdits = true;
+
+  field.siteModifier = composed;
+  field.__terrainEdits = edits;
+  return composed;
+}
+
+// ———— 增量重建 ————
+
+/**
+ * 重建全部脏区块（meshRevision 对齐、dirty 清零）；返回重建数量。
+ * GroundView 的帧同步也可只消费 chunk.dirty 自行重建 —— 本函数供域侧/测试复用。
+ */
+function rebuildDirtyChunks(field) {
+  if (!field || !Array.isArray(field.chunks)) return 0;
+  let n = 0;
+  for (let i = 0; i < field.chunks.length; i++) {
+    const ch = field.chunks[i];
+    if (ch && ch.dirty) {
+      buildTriangulatedChunkMesh(ch, field.evalPoint);
+      n += 1;
+    }
+  }
+  return n;
+}
+
+// ———— 存档序列化（SITE-07：紧凑命令序列，确定性重放） ————
+
+/**
+ * 序列化为紧凑 JSON 字符串（键序固定 → 逐字节可复现；不含运行期缓存 _avgY/_targetY）。
+ */
+function serializeEdits(edits) {
+  if (!edits || !Array.isArray(edits.ops)) throw new Error('serializeEdits: 非法编辑仓库');
+  const ops = [];
+  for (const op of edits.ops) {
+    if (op.kind === 'plant') {
+      ops.push({ kind: 'plant', x: op.x, z: op.z, id: op.id, prefabId: op.prefabId, seed: op.seed });
+    } else if (op.kind === 'removePlant') {
+      ops.push({ kind: 'removePlant', x: op.x, z: op.z, plantId: op.plantId });
+    } else {
+      ops.push({ kind: op.kind, x: op.x, z: op.z, r: op.r, s: op.s });
+    }
+  }
+  return JSON.stringify({ v: TERRAIN_EDITS_VERSION, rev: edits.revision, seq: edits.seq, ops });
+}
+
+/**
+ * 反序列化（接受 JSON 字符串或已解析的 plain 对象）→ 活体编辑仓库。
+ * 空串/缺字段 → 新仓库；shape 算子缓存由 ensureOpCache 在求值时确定性重建。
+ */
+function deserializeEdits(json, field) {
+  let plain = json;
+  if (typeof json === 'string') {
+    plain = json.trim().length === 0 ? null : JSON.parse(json);
+  }
+  const edits = field ? createTerrainEdits(field) : {
+    planetId: null,
+    revision: 0,
+    seq: 0,
+    ops: [],
+    byChunk: new Map(),
+    flora: [],
+  };
+  if (!plain || typeof plain !== 'object') return edits;
+  edits.revision = Number.isFinite(plain.rev) ? plain.rev : 0;
+  edits.seq = Number.isFinite(plain.seq) ? plain.seq : 0;
+  const ops = Array.isArray(plain.ops) ? plain.ops : [];
+  if (!field) {
+    // 轻载模式：仅回放日志与植被（无场可标脏）
+    for (const raw of ops) {
+      const op = { ...raw };
+      edits.ops.push(op);
+      if (op.kind === 'plant') edits.flora.push({ id: op.id, x: op.x, z: op.z, prefabId: op.prefabId, seed: op.seed });
+    }
+    return edits;
+  }
+  // 带场重放：逐条 applyEdit 重建 byChunk 索引与脏标记（确定性；revision/seq 以日志为准）
+  for (const raw of ops) {
+    if (raw && (SHAPE_KINDS.has(raw.kind) || raw.kind === 'plant' || raw.kind === 'removePlant')) {
+      edits.revision = Math.max(0, edits.revision - 1); // applyEdit 会 +1，维持存档 revision
+      if (raw.kind === 'plant') edits.seq = Math.max(0, edits.seq - 1); // applyEdit 会 +1
+      // 紧凑键 (r/s) → applyEdit 规范键 (radius/strength)
+      applyEdit(field, edits, {
+        kind: raw.kind,
+        x: raw.x,
+        z: raw.z,
+        radius: raw.r,
+        strength: raw.s,
+        id: raw.id,
+        prefabId: raw.prefabId,
+        seed: raw.seed,
+        plantId: raw.plantId,
+      });
+    }
+  }
+  if (Number.isFinite(plain.rev)) edits.revision = plain.rev;
+  if (Number.isFinite(plain.seq)) edits.seq = plain.seq;
+  return edits;
+}
+
+// ———— 建筑落位校验（doc7 TASK-5.2 / §6.8；doc7:188） ————
+
+/** 主题 → 桩基类型（未列主题回退标准承台） */
+function foundationTypeForTheme(themeId) {
+  return THEME_PILING[themeId] || 'standard';
+}
+
+/**
+ * 建筑底面 9 点三角网格投影校验：
+ * 采样点 = 中心 + 4 角 + 4 边中点（footprintHalfM 正方形），逐点 sampleTerrain。
+ * @returns {{ ok:boolean, code?:'SLOPE_TOO_STEEP'|'HEIGHT_DELTA'|'OUT_OF_FIELD',
+ *             maxSlopeDeg:number, maxHeightDeltaM:number,
+ *             foundation?:{ kind:'flat'|'graded', piling:string, etaHeightM:number } }}
+ * 通过时 foundation.etaHeightM = 9 点均高（承台基准高），piling 按主题解析。
+ */
+/**
+ * doc22 WP-2：地形显著度（Topographic Prominence）严苛物理校验扩展。
+ * 对空离子加农炮严禁在盆地低洼处盲目落位：
+ *   1) 落位基准高程必须 ≥ 场域平均海拔 + 14.0m（平顶桌山/高脊）；
+ *   2) 上方 60° 锥角视界内无更高山体遮挡（checkSkyOcclusionCone）。
+ * @returns {{ok:boolean, reason?:string, code?:string, maxSlopeDeg?:number, maxHeightDeltaM?:number}}
+ */
+function checkBuildingPlacementExtended(field, x, z, opts = {}) {
+  const baseCheck = checkBuildingPlacement(field, x, z, opts);
+  if (!baseCheck.ok) return baseCheck;
+
+  if (opts.defId === 'bld_ion_battery') {
+    const centerS = sampleTerrain(field, x, z);
+    const centerElev = centerS && Number.isFinite(centerS.y) ? centerS.y : 0.0;
+    const meanElev = fieldMeanElevation(field);
+
+    // 1. 相对高程必须高出全图平均海拔 14.0 米以上（平顶桌山或高脊）
+    if (centerElev < meanElev + 14.0) {
+      return {
+        ok: false,
+        code: 'ProminenceTooLow',
+        reason: `ProminenceTooLow: 必须修筑在平顶桌山或高脊之上（${centerElev.toFixed(1)}m < 均值 ${meanElev.toFixed(1)}m + 14m）`,
+      };
+    }
+
+    // 2. 上方 60 度锥角视界校验（无更高山体遮挡射界）
+    const blocked = fieldSkyOcclusionCone(field, x, z, centerElev, 60.0);
+    if (blocked) {
+      return { ok: false, code: 'SkyObstructed', reason: 'SkyObstructed: 射界被上方高耸山体阻挡' };
+    }
+  }
+  return { ok: true };
+}
+
+/** 场域平均海拔（4m 步长抽样；确定性 O(N)） */
+function fieldMeanElevation(field) {
+  if (!field) return 0.0;
+  let sum = 0;
+  let n = 0;
+  for (let z = field.originZ + 8; z < field.originZ + field.sizeMeters; z += 16) {
+    for (let x = field.originX + 8; x < field.originX + field.sizeMeters; x += 16) {
+      const s = sampleTerrain(field, x, z);
+      if (s && Number.isFinite(s.y)) { sum += s.y; n++; }
+    }
+  }
+  return n > 0 ? sum / n : 0.0;
+}
+
+/** 60° 天顶锥角遮挡校验（8 方向 × 逐 8m 步进射线，任一方向仰角阻挡即 true） */
+function fieldSkyOcclusionCone(field, x, z, elevM, coneDeg) {
+  const tanHalf = Math.tan((coneDeg / 2) * Math.PI / 180);
+  const maxDist = 96;
+  for (let a = 0; a < 8; a++) {
+    const ang = (a / 8) * Math.PI * 2;
+    const dx = Math.cos(ang);
+    const dz = Math.sin(ang);
+    for (let d = 8; d <= maxDist; d += 8) {
+      const s = sampleTerrain(field, x + dx * d, z + dz * d);
+      if (s && Number.isFinite(s.y) && s.y > elevM + tanHalf * d) return true;
+    }
+  }
+  return false;
+}
+
+function checkBuildingPlacement(field, x, z, opts = {}) {
+  const half = num(opts.footprintHalfM, BUILDING_PLACEMENT.footprintHalfM);
+  const maxSlope = num(opts.maxSlopeDeg, BUILDING_PLACEMENT.maxSlopeDeg);
+  const maxDelta = num(opts.maxHeightDeltaM, BUILDING_PLACEMENT.maxHeightDeltaM);
+
+  const offs = [[0, 0], [half, half], [-half, half], [half, -half], [-half, -half],
+    [half, 0], [-half, 0], [0, half], [0, -half]];
+  let maxY = -Infinity;
+  let minY = Infinity;
+  let sum = 0;
+  let n = 0;
+  let maxSlopeSeen = 0;
+
+  for (const [ox, oz] of offs) {
+    const px = x + ox;
+    const pz = z + oz;
+    const s = sampleTerrain(field, px, pz);
+    if (!s) {
+      return { ok: false, code: 'OUT_OF_FIELD', maxSlopeDeg: NaN, maxHeightDeltaM: NaN };
+    }
+    const sl = slopeAt(field, px, pz);
+    if (Number.isFinite(sl) && sl > maxSlopeSeen) maxSlopeSeen = sl;
+    maxY = Math.max(maxY, s.y);
+    minY = Math.min(minY, s.y);
+    sum += s.y;
+    n += 1;
+  }
+
+  const delta = maxY - minY;
+  if (maxSlopeSeen > maxSlope) {
+    return { ok: false, code: 'SLOPE_TOO_STEEP', maxSlopeDeg: maxSlopeSeen, maxHeightDeltaM: delta };
+  }
+  if (delta > maxDelta) {
+    return { ok: false, code: 'HEIGHT_DELTA', maxSlopeDeg: maxSlopeSeen, maxHeightDeltaM: delta };
+  }
+  return {
+    ok: true,
+    maxSlopeDeg: maxSlopeSeen,
+    maxHeightDeltaM: delta,
+    foundation: {
+      kind: delta > BUILDING_PLACEMENT.foundationGradeDeltaM ? 'graded' : 'flat',
+      piling: foundationTypeForTheme(opts.themeId),
+      etaHeightM: sum / n,
+    },
+  };
+}
+
+// ———— P1-2 殖民地等高线感知布局规划器（doc8 §3.2 议题 B2 仲裁落地） ————
+
+/** 黄金角（与 doc8 B2 一致）与过渡环带半径（22m–75m） */
+const COLONY_LAYOUT = { goldenAngle: 2.399963229728653, ringMinM: 22, ringMaxM: 75, footprintHalfM: 2.2, maxSlopeDeg: 16, maxHeightDeltaM: 2.2, minSpacingM: 6, skirtDepthM: 1.8 };
+
+/**
+ * 等高线感知的殖民地布局规划（纯函数、确定性、无 DOM）：
+ *  - groundBuildings（PlaceBuilding 已定三维坐标）原样保留；
+ *  - 未定坐标建筑在过渡环带（22–75m）内按黄金角候选序列搜索
+ *    checkBuildingPlacement（9 点坡度 ≤16°、高差 ≤2.2m）的平坦台地；
+ *  - mining 类优先吸附 TERRAIN_FLAGS.ORE 标记点；
+ *  - 基准高程 = 9 点最高点 × 0.35 + 均高 × 0.65（防止任何一角插入山体）；
+ *  - 朝向对齐等高线切线（梯度垂线）。
+ * @param {object} field terrainField 场域
+ * @param {{entries:Array<{defId:string,state?:string}>, groundBuildings?:Array, center:[number,number], categoryOf:(defId:string)=>string, themeId?:string}} opts
+ * @returns {Array<{defId:string,state:string,fx:number,fz:number,y:number,rotY:number,category:string,placement:Object|null}>}
+ */
+function planColonyLayout(field, opts = {}) {
+  const L = COLONY_LAYOUT;
+  const entries = opts.entries || [];
+  const ground = opts.groundBuildings || [];
+  const center = opts.center || [0, 0];
+  const categoryOf = opts.categoryOf || (() => 'default');
+  const out = [];
+  const placed = [];
+  for (const gb of ground) {
+    if (!gb || !Number.isFinite(gb.x) || !Number.isFinite(gb.z)) continue;
+    placed.push({ x: gb.x, z: gb.z });
+    const chk = checkBuildingPlacement(field, gb.x, gb.z, { footprintHalfM: L.footprintHalfM, maxSlopeDeg: L.maxSlopeDeg, maxHeightDeltaM: L.maxHeightDeltaM });
+    out.push({ defId: gb.defId || 'default', state: gb.state || 'built', fx: gb.x, fz: gb.z, y: gb.y != null ? gb.y : (Number.isFinite(chk.baseY) ? chk.baseY : 0), rotY: gb.rotY || 0, category: categoryOf(gb.defId || 'default'), placement: chk });
+  }
+  for (let i = 0; i < entries.length && out.length < 24; i++) {
+    const e = entries[i];
+    const cat = categoryOf(e.defId);
+    let chosen = null;
+    let lastChk = null;
+    let chosenMaxY = 0;
+    let chosenAvgY = 0;
+    // 黄金角候选序列：过渡环带内的确定性平地寻址（最多 1200 候选；崎岖主题如熔岩/黑曜平坦台地稀疏，需大搜索量）
+    for (let k = 0; k < 1200 && !chosen; k++) {
+      const a = k * L.goldenAngle;
+      const r = L.ringMinM + (L.ringMaxM - L.ringMinM) * ((k * 0.6180339887) % 1);
+      const fx = center[0] + Math.cos(a) * r;
+      const fz = center[1] + Math.sin(a) * r;
+      const chk = checkBuildingPlacement(field, fx, fz, { footprintHalfM: L.footprintHalfM, maxSlopeDeg: L.maxSlopeDeg, maxHeightDeltaM: L.maxHeightDeltaM });
+      lastChk = chk;
+      if (!chk.ok) continue;
+      // 自采样 9 点：chk 不外露 maxY/avgY/flags，布局器自行求基准高程与 ORE 判定
+      const offs = [[0, 0], [2.2, 2.2], [-2.2, 2.2], [2.2, -2.2], [-2.2, -2.2], [2.2, 0], [-2.2, 0], [0, 2.2], [0, -2.2]];
+      let maxY = -Infinity; let sum = 0; let flagsAny = 0; let n = 0;
+      for (const [ox, oz] of offs) {
+        const sp = sampleTerrain(field, fx + ox, fz + oz);
+        if (!sp) continue;
+        maxY = Math.max(maxY, sp.y); sum += sp.y; flagsAny |= sp.flags; n++;
+      }
+      if (!n) continue;
+      const avgY = sum / n;
+      chosenMaxY = maxY;
+      chosenAvgY = avgY;
+      // 间距：距已落位建筑 ≥ minSpacingM
+      let spaced = true;
+      for (const q of placed) {
+        if (Math.hypot(q.x - fx, q.z - fz) < L.minSpacingM) { spaced = false; break; }
+      }
+      if (!spaced) continue;
+      // mining 优先 ORE 标记点（前 60 个候选内未命中 ORE 则放宽，保证必然落位）
+      if (cat === 'mining' && k < 200 && !(flagsAny & 16)) continue;
+      chosen = { fx, fz, chk };
+    }
+    if (!chosen && lastChk && lastChk.ok) chosen = { fx: center[0], fz: center[1], chk: lastChk };
+    if (!chosen) continue; // 生成质量门禁未过 → 该建筑本轮不落位（绝不盲盒撒点）
+    placed.push({ x: chosen.fx, z: chosen.fz });
+    const chk = chosen.chk;
+    // 基准高程：最高点 0.35 + 均高 0.65 加权（doc8 B2 公式）
+    const y = chosenMaxY * 0.35 + chosenAvgY * 0.65;
+    // 朝向：等高线切线 = 梯度垂线
+    const gx = (sampleTerrain(field, chosen.fx + 2, chosen.fz).y - sampleTerrain(field, chosen.fx - 2, chosen.fz).y) || 0;
+    const gz = (sampleTerrain(field, chosen.fx, chosen.fz + 2).y - sampleTerrain(field, chosen.fx, chosen.fz - 2).y) || 0;
+    const rotY = Math.abs(gx) + Math.abs(gz) > 1e-6 ? Math.atan2(gz, gx) + Math.PI / 2 : (i * 0.618) % 1 * Math.PI * 2;
+    out.push({ defId: e.defId, state: e.state || 'built', fx: chosen.fx, fz: chosen.fz, y, rotY, category: cat, placement: chk });
   }
   return out;
 }
 
-Object.assign(__exports, { POD_CAPACITY_UNITS, TITAN_ARMOR_PODS, TITAN_QUANTUM_PODS, LAUNCH_E0_MWH, LAUNCH_BETA, CATAPULT_IDX, launchEnergyMWh, feedCatapult, stepCatapult, resIdxToId, resIdToIdx, settleOrbitalBuffer });
+Object.assign(__exports, { TERRAIN_EDITS_VERSION, BRUSH_LIMITS, BUILDING_PLACEMENT, createTerrainEdits, applyEdit, attachTerrainEdits, rebuildDirtyChunks, serializeEdits, deserializeEdits, foundationTypeForTheme, checkBuildingPlacementExtended, fieldMeanElevation, fieldSkyOcclusionCone, checkBuildingPlacement, COLONY_LAYOUT, planColonyLayout });
+
+});
+__register("src/domain/strategic/orbitalSynergy.js", function (__exports, __require) {
+/**
+ * domain/strategic/orbitalSynergy.js — 天地一体空地战略协同（doc22 v1.0 WP-1/WP-3）
+ *
+ * 轨道向下五大支援（doc16 §4.24）：精准激光（7）/动能打击/EW 压制/机甲空投（8）/
+ * 战术补给舱（9）——每次呼叫受轨道舰队构成/燃料/冷却真实约束（严禁无限免费按钮）。
+ * 激光洗地自动触发 ShapeTerrain(lower) + HarvestTerrainOre（真实开山）。
+ *
+ * 地面向上（doc22 WP-3）：高地离子炮每战略小时向入轨敌对封锁舰队齐射——
+ * 命中率依赖地面雷达在线（无雷达 20%），高程每 +10m 穿甲 +12%（上限 +35%），
+ * 50% 穿盾直击装甲层。
+ *
+ * 确定性红线：零 Math.random()、零 world.rng 消费（弹着散布由种子派生）。
+ */
+
+const { clamp: clamp } = __require("src/core/math.js");
+const { emit: emit, chronicle: chronicle } = __require("src/core/eventBus.js");
+const { applyDamage: applyDamage } = __require("src/domain/ships/ship.js");
+
+/** 轨道支援冷却与消耗（doc22 WP-1.2 契约） */
+const SUPPORT_SPECS = Object.freeze({
+  support_orbital_laser: { cooldownS: 45, fuelCost: 15, key: 'Digit7', needEnergyWeapon: true },
+  support_kinetic_strike: { cooldownS: 180, fuelCost: 30, key: 'Digit6', needMassDriver: true, aoe: 400 },
+  support_electronic_warfare: { cooldownS: 90, fuelCost: 10, key: null, needEwar: true, durationS: 30 },
+  support_mech_drop: { cooldownS: 120, fuelCost: 0, cost: { alloy: 20, powerCell: 2 }, key: 'Digit8', needHangar: true },
+  support_supply_pod: { cooldownS: 60, fuelCost: 5, key: 'Digit9', durationS: 90 },
+});
+
+/**
+ * 检索同星系非受困己方舰队（doc22 WP-1.2 契约：fleet.systemId === planet.systemId
+ * 且 status !== 'stranded'；返回满足能力谓词的主力舰列表）。
+ */
+function findSupportFleet(world, planet, pred) {
+  const fleets = Object.values(world.entities.fleets || {}).filter(
+    (f) => f.systemId === planet.systemId && f.status !== 'stranded'
+      && (!f.factionId || f.factionId === world.playerFactionId),
+  );
+  const ships = [];
+  for (const f of fleets) {
+    for (const sid of f.shipIds || []) {
+      const sh = world.entities.ships[sid];
+      if (sh && sh.status === 'active' && (!pred || pred(sh))) ships.push(sh);
+    }
+  }
+  return ships;
+}
+
+/** 舰船能力谓词（能量武器/质量投射器/电子战/机库） */
+const CAPS = Object.freeze({
+  energyWeapon: (sh) => (sh.modules || []).some((m) => String(m).includes('laser') || String(m).includes('particle')),
+  massDriver: (sh) => (sh.modules || []).some((m) => String(m).includes('railgun') || String(m).includes('mass')),
+  ewar: (sh) => (sh.modules || []).some((m) => String(m).includes('ewar') || String(m).includes('jammer')),
+  hangar: (sh) => (sh.stats && sh.stats.hangar > 0) || sh.hullId === 'hull_carrier',
+});
+
+/**
+ * 轨道支援呼叫域结算（CallOrbitalSupport 命令执行体）。
+ * @returns {{ok:boolean, reason?:string, effect?:object}}
+ */
+function callOrbitalSupport(world, planet, kind, targetWx, targetWz) {
+  const spec = SUPPORT_SPECS[kind];
+  if (!spec) return { ok: false, reason: 'UnknownSupportKind' };
+  // 冷却台账（挂 planet.fort，紧凑持久化）
+  const fort = ensurePlanetFort(planet);
+  const now = world.tick * 3600; // 任务秒口径（Hourly 粒度）
+  const last = fort.supportCd[kind] || -1e9;
+  if (now - last < spec.cooldownS) {
+    return { ok: false, reason: `冷却中（${Math.ceil(spec.cooldownS - (now - last))}s）` };
+  }
+  // 舰队能力约束
+  const pred = spec.needEnergyWeapon ? CAPS.energyWeapon
+    : spec.needMassDriver ? CAPS.massDriver
+      : spec.needEwar ? CAPS.ewar
+        : spec.needHangar ? CAPS.hangar : null;
+  const fleet = findSupportFleet(world, planet, pred);
+  if (spec.needEnergyWeapon || spec.needMassDriver || spec.needEwar || spec.needHangar) {
+    if (fleet.length === 0) return { ok: false, reason: '无满足能力的在轨舰队' };
+  }
+  // 磁暴制约（doc16 §4.24：磁暴期需地面雷达在线方可锁定）
+  if (planet.threat && planet.threat.storm && planet.threat.storm[0]
+    && STORM_IS_PLASMA(planet) && !radarOnline(world, planet)) {
+    return { ok: false, reason: '电磁磁暴：需地面雷达在线方可锁定' };
+  }
+  // 资源消耗
+  const fid = world.playerFactionId;
+  const led = fid ? world.economy.ledgers[fid] : null;
+  if (spec.fuelCost && fleet.length > 0) {
+    const ship = fleet[0];
+    ship.fuel = Math.max(0, ship.fuel - spec.fuelCost);
+  }
+  if (spec.cost && led) {
+    for (const [res, qty] of Object.entries(spec.cost)) {
+      if ((led.balances[res] || 0) < qty) return { ok: false, reason: `${res} 不足` };
+      led.balances[res] -= qty;
+    }
+  }
+  fort.supportCd[kind] = now;
+  const effect = { kind, targetWx, targetWz, durS: spec.durationS || 6, aoe: spec.aoe || 0 };
+  emit(world, 'OrbitalSupportCalled', { planetId: planet.id, ...effect }, 'ground');
+  return { ok: true, effect };
+}
+
+function STORM_IS_PLASMA(planet) {
+  return planet.threat && planet.threat.storm && planet.threat.storm[1] === 2; // kindIdx 2 = plasma
+}
+
+/** 惰性初始化 planet.fort（doc22 WP-4 v3 schema 同形；幂等） */
+function ensurePlanetFort(planet) {
+  if (planet.fort && planet.fort.v === 1) return planet.fort;
+  planet.fort = { v: 1, ionBatteries: [], planetaryShield: null, supportCd: {} };
+  return planet.fort;
+}
+
+/** 地面轨道雷达在线判定（groundBuildings 中 orbitalRadar 定义的建筑） */
+function radarOnline(world, planet) {
+  void world;
+  const gbs = planet.groundBuildings || [];
+  return gbs.some((gb) => {
+    const id = String(gb.defId || '');
+    return id === 'bld_orbital_radar' && (gb.state === undefined || gb.state === 'active');
+  });
+}
+
+/** 行星天幕护盾当前容量（受电网供能回充；轨道轰炸入口扣减） */
+function planetaryShieldHp(world, planet) {
+  void world;
+  const fort = planet.fort;
+  if (!fort || !fort.planetaryShield) return 0;
+  const shield = fort.planetaryShield;
+  return { hp: shield.hp || 0, hpMax: shield.hpMax || 3000 };
+}
+
+/**
+ * 行星高地离子炮向入轨敌对舰队越级齐射（HourlySystems combat 阶段调用；
+ * doc22 WP-3.2 契约实现——高程穿甲增益 + 雷达命中率门槛 + 2 小时冷却）。
+ * @returns {number} 命中次数
+ */
+function firePlanetaryIonBatteries(world, planet, hostileFleetsInSystem) {
+  const fort = planet.fort;
+  if (!fort || !Array.isArray(fort.ionBatteries) || fort.ionBatteries.length === 0) return 0;
+  if (!hostileFleetsInSystem || hostileFleetsInSystem.length === 0) return 0;
+
+  // 必须依赖地面雷达在线支持目标锁定，否则命中率跌落至 20%
+  const radarOnlineFlag = radarOnline(world, planet);
+  const hitChance = radarOnlineFlag ? 1.0 : 0.20;
+
+  let totalHits = 0;
+  for (const bat of fort.ionBatteries) {
+    // bat 元组: [id, defIdx, x_dm, z_dm, y_dm, online, cdHours]
+    if (!bat[5] || bat[4] <= 0) continue;
+    if (bat[6] > 0) { bat[6] -= 1; continue; }
+
+    const targetShip = findHeaviestHostileCapitalShip(world, hostileFleetsInSystem);
+    if (!targetShip) break;
+
+    const elevM = bat[4] / 10;
+    const elevMult = clamp(1.0 + Math.max(0, elevM - 10) * 0.012, 1.0, 1.35);
+    const rawDmg = Math.round(85 * elevMult * hitChance);
+
+    applyDamage(world, targetShip, Math.round(rawDmg * 0.5), 'shield');
+    applyDamage(world, targetShip, Math.round(rawDmg * 0.5), 'armor');
+    bat[6] = 2; // 2 小时冷却
+    totalHits += 1;
+
+    emit(world, 'PlanetaryIonBatteryFired', {
+      planetId: planet.id, batteryId: bat[0], targetShipId: targetShip.id, damage: rawDmg,
+    }, 'combat');
+  }
+  return totalHits;
+}
+
+/** 最重敌舰锁定（结构值最大的主力舰优先） */
+function findHeaviestHostileCapitalShip(world, hostileFleetsInSystem) {
+  let targetShip = null;
+  let bestHullHp = -1;
+  for (const fleet of hostileFleetsInSystem) {
+    for (const sid of fleet.shipIds || []) {
+      const sh = world.entities.ships[sid];
+      if (sh && sh.status === 'active' && sh.hp.structure > bestHullHp) {
+        bestHullHp = sh.hp.structure;
+        targetShip = sh;
+      }
+    }
+  }
+  return targetShip;
+}
+
+/** 入轨敌对封锁舰队集合（HourlySystems combat 阶段检索） */
+function hostileFleetsInSystemOf(world, planet) {
+  return Object.values(world.entities.fleets || {}).filter(
+    (f) => f.systemId === planet.systemId && f.factionId
+      && f.factionId !== world.playerFactionId
+      && f.status !== 'stranded',
+  );
+}
+
+/** chronicle 透传（供 HourlySystems 战果播报） */
+function announceIonSalvo(world, planet, hits) {
+  if (hits > 0) {
+    chronicle(world, 'combat', `行星 ${planet.name} 对空离子炮齐射 ${hits} 轮命中入轨敌舰`, { planetId: planet.id });
+  }
+}
+
+Object.assign(__exports, { SUPPORT_SPECS, findSupportFleet, CAPS, callOrbitalSupport, ensurePlanetFort, radarOnline, planetaryShieldHp, firePlanetaryIonBatteries, findHeaviestHostileCapitalShip, hostileFleetsInSystemOf, announceIonSalvo });
+
+});
+__register("src/domain/planets/colonyGovernance.js", function (__exports, __require) {
+/**
+ * domain/planets/colonyGovernance.js — 殖民聚落自治与社会微模拟（doc21 v0.8）
+ *
+ * 三级社会模拟架构（doc16 §4.19）：L1 人口统计（既有 colony 模拟保留）+
+ * L2 居民群组代理（32 名具名代表，9 元组持久化）+ L3 关键角色（驻星总督）。
+ *
+ * 双轨社会心理（doc21 WP-2）：
+ *   Φ（繁荣度）= clamp(0.40·H + 0.30·(100−D) + 0.15·S_svc + 0.15·η_power, 0, 100)
+ *   H 希望 / D 不满 / S_svc 医疗娱乐覆盖率 / η_power 电网供电率。
+ *
+ * 四大聚落法典（doc21 WP-3.3，挂 planet.soc.edicts，与帝国政策互补）：
+ *   emergency_shift 产出+35% 不满+6 健康−2 / double_rations 食物×1.8 希望+5 不满−4
+ *   automata_shift conductor 维护 staffingEta 保底 0.85 希望上限−10 /
+ *   quarantine_martial 疫情阻断 税基−30% 希望−3。
+ *
+ * 长期记忆（doc16 §4.21）：planet.soc.history 有界记录（≤20），后续事件可引用
+ * 过去抉择；武装暴动临界（D≥90 且 H≤15 持续 7 日）→ gmt_suppress_rebellion。
+ *
+ * 确定性：困境抽取由 dilemmaSeed(tick) 派生；零 Math.random、零 world.rng。
+ * 金快照零漂移：仅对 planet.soc 已初始化的行星生效（未触达星球零写入）。
+ */
+
+const { emit: emit, chronicle: chronicle } = __require("src/core/eventBus.js");
+const { clamp: clamp } = __require("src/core/math.js");
+const { derivePlanetSeedsExtended: derivePlanetSeedsExtended } = __require("src/domain/ground/planetSeeds.js");
+
+/** 四大聚落法典定义（doc21 WP-3.3 契约表） */
+const COLONY_EDICTS = Object.freeze({
+  edict_emergency_shift: {
+    id: 'edict_emergency_shift', nameZh: '《应急双倍班次令》',
+    outputMult: 1.35, discontentPerDay: 6, healthPerDay: -2, hopeCap: 0,
+    desc: '全殖民地采掘与制造产出 +35%；代价为每日不满值 +6、健康度 −2',
+  },
+  edict_double_rations: {
+    id: 'edict_double_rations', nameZh: '《双倍营养配给与津贴》',
+    foodMult: 1.8, hopePerDay: 5, discontentPerDay: -4, popGrowthMult: 1.25, hopeCap: 0,
+    desc: '每日食物消耗 ×1.8；换取希望值 +5、不满值 −4、人口增长率 +25%',
+  },
+  edict_automata_shift: {
+    id: 'edict_automata_shift', nameZh: '《机偶混编作业法案》',
+    upkeepConductor: 2, staffingFloor: 0.85, hopeCap: -10, desc: '消耗 conductor 维护费，用自治机器人填补 40% 岗位空缺；希望值上限降低 10 点',
+  },
+  edict_quarantine_martial: {
+    id: 'edict_quarantine_martial', nameZh: '《生物隔离与检疫戒严》',
+    taxMult: 0.70, hopePerDay: -3, blocksEpidemic: true, desc: '阻断异星孢子疫情扩散并将黑市损耗清零；商业税基暂时 −30%',
+  },
+});
+
+/** 总督性格特质修正（doc21 WP-3.2） */
+const OVERSEER_TRAITS = Object.freeze({
+  bookish: { researchMult: 1.20, desc: '科研产出 +20%，解锁疫情逆向制药选项' },
+  iron_fisted: { discontentDecayMult: 2.0, hopeCap: -15, desc: '不满值自然衰减 ×2；希望值上限降低 15 点' },
+  mercantile: { taxMult: 1.25, desc: '商业税基 +25%；走私风险微增' },
+});
+
+/** 暴动临界（doc21 WP-2.4：D≥90 且 H≤15 持续 7 天） */
+const REBELLION_DISCONTENT = 90;
+const REBELLION_HOPE = 15;
+const REBELLION_DAYS = 7;
+
+/** 居民代理 9 元组下标（doc21 WP-1.2 契约） */
+const AGENT_IDX = Object.freeze({
+  ID: 0, STRATUM: 1, HOME: 2, WORK: 3, SVC: 4, SHIFT: 5, MORALE: 6, HEALTH: 7, TRAIT: 8,
+});
+
+const MAX_RESIDENT_AGENTS = 32;
+/** 微缩昼夜循环（任务秒；180s = 24 战略 tick 的视图周期，doc21 WP-1.3） */
+const DAY_CYCLE_SECONDS = 180;
+
+/** 惰性初始化 planet.soc（幂等；GroundView 首次进入殖民星 / ColonyView 打开时调用） */
+function ensurePlanetSoc(planet) {
+  if (planet.soc && planet.soc.v === 1) return planet.soc;
+  planet.soc = {
+    v: 1,
+    overseerId: null,
+    edicts: [],
+    agents: [],
+    history: [],
+    pendingDilemma: null,
+    hope: 50,
+    discontent: 10,
+    prosperity: 50,
+    crisisDays: 0,
+    rebellionActive: false,
+  };
+  return planet.soc;
+}
+
+/**
+ * 派生 32 名代表性居民代理（doc21 WP-1.2；确定性）。
+ * 节点表：colony.buildings 逐建筑（住宅/生产/服务三类）；每人代表 1~5 统计人口。
+ * @returns {Array<Array<number>>} 9 元组数组（≤32）
+ */
+function deriveColonyAgents(world, planet, colony) {
+  const soc = ensurePlanetSoc(planet);
+  if (soc.agents.length > 0) return soc.agents;
+  const seeds = derivePlanetSeedsExtended(world, planet.id);
+  const blds = (colony && colony.buildings) || [];
+  const homes = [];
+  const works = [];
+  const svcs = [];
+  for (let i = 0; i < blds.length; i++) {
+    const cat = String(blds[i].defId || '');
+    if (cat === 'bld_housing') homes.push(i);
+    else if (cat.startsWith('bld_mine') || ['bld_alloy_plant', 'bld_chem_plant', 'bld_polymer_plant', 'bld_module_factory', 'bld_electronics_plant', 'bld_arc_smelter', 'bld_coil_assembler'].includes(cat)) works.push(i);
+    else if (['bld_medical_center', 'bld_entertainment_center', 'bld_admin_center', 'bld_education_center'].includes(cat)) svcs.push(i);
+  }
+  const pop = (colony && colony.population) || 6;
+  const nAgents = Math.min(MAX_RESIDENT_AGENTS, Math.max(4, Math.ceil(pop / 2)));
+  const agents = [];
+  for (let i = 0; i < nAgents; i++) {
+    const s = seeds.dilemmaSeed(i * 13 + 1);
+    const stratum = i % 4; // 0 工人 1 工程师 2 科学家 3 士兵（错峰均衡）
+    agents.push([
+      i + 1,
+      stratum,
+      homes.length ? homes[i % homes.length] : 0,
+      works.length ? works[i % works.length] : (homes.length ? homes[0] : 0),
+      svcs.length ? svcs[i % svcs.length] : 0,
+      s % 3,               // shiftPhase 0/1/2 三班倒
+      70 + (s % 30),       // morale 初值 70..99
+      80 + ((s >>> 4) % 20), // health 初值 80..99
+      (s >>> 8) & 0xff,    // traitMask
+    ]);
+  }
+  soc.agents = agents;
+  return agents;
+}
+
+/**
+ * 居民四时相行为状态机（doc21 WP-1.3；τ ∈ [0,1)）：
+ *   0.00-0.12 通勤上岗 → 0.12-0.55 作业生产 → 0.55-0.75 休闲医疗 → 0.75-1.00 归家休憩
+ * @param {number} tau 归一化时间（missionSeconds / DAY_CYCLE_SECONDS + shiftPhase 错峰）
+ * @returns {number} 0..3 行为段
+ */
+function residentPhaseOf(tau) {
+  const t = ((tau % 1) + 1) % 1;
+  if (t < 0.12) return 0;
+  if (t < 0.55) return 1;
+  if (t < 0.75) return 2;
+  return 3;
+}
+
+/** Catmull-Rom 基函数（与 GroundView._buildConveyorPaths 同式） */
+function cr(a, b, c, d, t) {
+  const t2 = t * t;
+  const t3 = t2 * t;
+  return 0.5 * ((2 * b) + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (-a + 3 * b - 3 * c + d) * t3);
+}
+
+/**
+ * 通勤样条预烘焙（doc21 WP-1：地面道路 4~6 控制点；GroundView._layoutColony 调用）。
+ * 纯函数 of (homePos, workPos, svcPos, field)：高度逐点贴合 sampleTerrain。
+ * @returns {Array<Array<number>>} 控制点 [x,y,z]×5
+ */
+function bakeCommuteSpline(homePos, workPos, svcPos, field, sampleTerrainFn) {
+  const p0 = [homePos.x, homePos.y, homePos.z];
+  const p3 = [workPos.x, workPos.y, workPos.z];
+  const p1 = [p0[0] + (p3[0] - p0[0]) * 0.3, p0[1], p0[2] + (p3[2] - p0[2]) * 0.3];
+  const p2 = [p0[0] + (p3[0] - p0[0]) * 0.7, p3[1], p0[2] + (p3[2] - p0[2]) * 0.7];
+  const pts = [[p0[0], Number.isFinite(sampleTerrainFn(field, p0[0], p0[2]) && sampleTerrainFn(field, p0[0], p0[2]).y) ? sampleTerrainFn(field, p0[0], p0[2]).y + 0.05 : p0[1], p0[2]]];
+  for (let k = 1; k <= 3; k++) {
+    const t = k / 4;
+    const x = cr(p0[0], p1[0], p2[0], p3[0], t);
+    const z = cr(p0[2], p1[2], p2[2], p3[2], t);
+    const sy = cr(p0[1], p1[1], p2[1], p3[1], t);
+    const h = sampleTerrainFn(field, x, z);
+    pts.push([x, Number.isFinite(h && h.y) ? h.y + 0.05 : sy, z]);
+  }
+  const hEnd = sampleTerrainFn(field, p3[0], p3[2]);
+  pts.push([p3[0], Number.isFinite(hEnd && hEnd.y) ? hEnd.y + 0.05 : p3[1], p3[2]]);
+  void svcPos;
+  return pts;
+}
+
+/**
+ * 样条代数相位插值（doc21 WP-1：60Hz 渲染层纯代数求值，零寻路零分配）。
+ * @param {Array<Array<number>>} pts bakeCommuteSpline 控制点
+ * @param {number} tau [0,1) 弧长参数
+ * @returns {{x:number,y:number,z:number}} 位置（SOC-01 断言零穿地零悬空）
+ */
+function sampleSplinePos(pts, tau) {
+  // clamp 语义：tau=1 精确锚定终点（ residentTau 恒 ∈ [0,1)，显式 1 用于相位驻留）
+  const t = Math.min(1, Math.max(0, tau));
+  const segs = pts.length - 1;
+  const s = Math.min(segs - 1e-9, Math.max(0, t * segs));
+  const seg = Math.floor(s);
+  const lt = s - seg;
+  const a = pts[seg];
+  const b = pts[seg + 1];
+  return {
+    x: a[0] + (b[0] - a[0]) * lt,
+    y: a[1] + (b[1] - a[1]) * lt,
+    z: a[2] + (b[2] - a[2]) * lt,
+  };
+}
+
+/** 居民 τ（含三班倒错峰相位） */
+function residentTau(agent, missionSeconds) {
+  const shiftOffset = agent[AGENT_IDX.SHIFT] / 3;
+  return (missionSeconds / DAY_CYCLE_SECONDS + shiftOffset) % 1;
+}
+
+/**
+ * 每日社会结算（DailySystems population 阶段后调用；仅 planet.soc 已初始化的行星）。
+ * @returns {{hope:number, discontent:number, prosperity:number, rebellion:boolean}}
+ */
+function tickColonySociety(world, planet, colony) {
+  const soc = planet.soc;
+  if (!soc || soc.v !== 1) return null;
+  const fid = (colony && colony.factionId) || world.playerFactionId;
+
+  // 1) 法典日结算
+  let hopeCap = 100;
+  let hopeDelta = 0;
+  let discontentDelta = 0;
+  let healthDelta = 0;
+  let staffingFloor = 0;
+  for (const eid of soc.edicts) {
+    const ed = COLONY_EDICTS[eid];
+    if (!ed) continue;
+    hopeDelta += ed.hopePerDay || 0;
+    discontentDelta += ed.discontentPerDay || 0;
+    healthDelta += ed.healthPerDay || 0;
+    if (ed.hopeCap) hopeCap += ed.hopeCap;
+    if (ed.staffingFloor) staffingFloor = Math.max(staffingFloor, ed.staffingFloor);
+  }
+  if (staffingFloor > 0 && colony) {
+    colony.staffingEta = Math.max(colony.staffingEta || 0, staffingFloor);
+    // 机偶维护费（conductor 账本扣减）
+    const led = world.economy.ledgers[fid];
+    if (led) led.balances.conductor = Math.max(0, (led.balances.conductor || 0) - 2);
+  }
+
+  // 2) 总督特质
+  const overseer = soc.overseerId ? world.entities.characters[soc.overseerId] : null;
+  // 角色实体 traits 为数组（crew.js 口径）：取首个命中的治理特质
+  const trait = overseer && Array.isArray(overseer.traits)
+    ? overseer.traits.find((t) => OVERSEER_TRAITS[t]) || null : null;
+  const tDef = trait ? OVERSEER_TRAITS[trait] : null;
+  if (tDef && tDef.hopeCap) hopeCap += tDef.hopeCap;
+
+  // 3) 双轨演化：希望（食物/医疗/科研驱动）与不满（危险/风暴/加班驱动）
+  const foodOk = colony && (colony.stockpile || {}).food !== undefined ? (colony.stockpile.food > 0) : true;
+  const medCov = serviceCoverage(planet, colony);
+  hopeDelta += foodOk ? 1 : -4;         // 食物配给
+  hopeDelta += medCov >= 0.5 ? 2 : -2;  // 医疗覆盖
+  discontentDelta += 1;                  // 危险作业基线
+  if (trait === 'iron_fisted') {
+    discontentDelta *= tDef.discontentDecayMult; // 铁腕：不满衰减 ×2（负值放大）
+    if (discontentDelta > 0) discontentDelta /= tDef.discontentDecayMult;
+  }
+  soc.hope = Math.round(clamp(soc.hope + hopeDelta, 0, Math.max(0, hopeCap)));
+  soc.discontent = Math.round(clamp(soc.discontent + discontentDelta, 0, 100));
+  // 居民代理 morale/health 漂移（群体代表口径）
+  for (const ag of soc.agents) {
+    ag[AGENT_IDX.MORALE] = Math.round(clamp(ag[AGENT_IDX.MORALE] + Math.sign(hopeDelta) * 2, 0, 100));
+    ag[AGENT_IDX.HEALTH] = Math.round(clamp(ag[AGENT_IDX.HEALTH] + healthDelta, 0, 100));
+  }
+
+  // 4) 繁荣度方程（doc21 WP-2.2）
+  const etaPower = powerEtaOf(world, planet);
+  soc.prosperity = Math.round(clamp(
+    0.40 * soc.hope + 0.30 * (100 - soc.discontent) + 0.15 * medCov * 100 + 0.15 * etaPower,
+    0, 100,
+  ));
+
+  // 5) 暴动临界判定（D≥90 且 H≤15 持续 7 日）
+  if (soc.discontent >= REBELLION_DISCONTENT && soc.hope <= REBELLION_HOPE) {
+    soc.crisisDays++;
+    if (soc.crisisDays >= REBELLION_DAYS && !soc.rebellionActive) {
+      soc.rebellionActive = true;
+      chronicle(world, 'crisis', `行星 ${planet.name} 聚落陷入武装暴动：gmt_suppress_rebellion 任务生成`, { planetId: planet.id });
+      emit(world, 'ColonyRebellionTriggered', { planetId: planet.id }, 'ground');
+    }
+  } else {
+    soc.crisisDays = Math.max(0, soc.crisisDays - 1);
+  }
+  return { hope: soc.hope, discontent: soc.discontent, prosperity: soc.prosperity, rebellion: soc.rebellionActive };
+}
+
+/** 服务设施人口覆盖率（医疗+娱乐岗位 / 人口；S_svc ∈ 0..1） */
+function serviceCoverage(planet, colony) {
+  const blds = (colony && colony.buildings) || [];
+  const svc = blds.filter((b) => ['bld_medical_center', 'bld_entertainment_center'].includes(b.defId)).length;
+  const pop = (colony && colony.population) || 6;
+  return clamp(svc * 8 / pop, 0, 1);
+}
+
+/** 所属子电网平均供电充足率（无工业层 = 1.0 基线） */
+function powerEtaOf(world, planet) {
+  void world;
+  if (!planet.ind || !Array.isArray(planet.ind.grids) || planet.ind.grids.length === 0) return 1.0;
+  const sum = planet.ind.grids.reduce((a, g) => a + (g.etaPermille || 1000), 0);
+  return sum / planet.ind.grids.length / 1000;
+}
+
+/**
+ * 4X 战略收益转化（doc21 WP-2.4）：帝国每日税基平方级增幅。
+ * TaxBonus = baseTax × (1 + (Φ/100)² × 1.5)；黄金繁荣态（Φ≥75）科研注入。
+ * @returns {{tax:number, bonus:number, goldenResearch:number}}
+ */
+function prosperityTaxMultiplier(soc, baseTax) {
+  if (!soc) return { tax: baseTax, bonus: 0, goldenResearch: 0 };
+  const phi = clamp(soc.prosperity, 0, 100) / 100;
+  const mult = 1.0 + phi * phi * 1.5;
+  // 法典/总督税基修正
+  let edictMult = 1.0;
+  for (const eid of soc.edicts) {
+    const ed = COLONY_EDICTS[eid];
+    if (ed && ed.taxMult) edictMult *= ed.taxMult;
+  }
+  const goldenResearch = soc.prosperity >= 75 ? 3 : 0;
+  return {
+    tax: baseTax * mult * edictMult,
+    bonus: baseTax * (mult - 1) * edictMult,
+    goldenResearch,
+  };
+}
+
+/**
+ * 治理困境触发（doc21 WP-4.2；dilemmaSeed(tick) 确定性抽取）。
+ * 条件：不满 ≥ 55 或疫情/走私环境满足；非侵入式全息汇报卡（pendingDilemma）。
+ */
+function maybeTriggerDilemma(world, planet, colony) {
+  const soc = planet.soc;
+  if (!soc || soc.pendingDilemma) return null;
+  if (soc.discontent < 55) return null;
+  const seeds = derivePlanetSeedsExtended(world, planet.id);
+  const s = seeds.dilemmaSeed(world.tick);
+  const pool = ['dil_labor_strike', 'dil_xenophage_outbreak', 'dil_smuggler_ring'];
+  const id = pool[s % pool.length];
+  const overseer = soc.overseerId ? world.entities.characters[soc.overseerId] : null;
+  const bookish = overseer && Array.isArray(overseer.traits) && overseer.traits.includes('bookish');
+  const dilemma = {
+    id,
+    tick: world.tick,
+    choices: dilemmaChoicesOf(id, bookish),
+  };
+  soc.pendingDilemma = dilemma;
+  emit(world, 'ColonyDilemmaTriggered', { planetId: planet.id, dilemmaId: id }, 'ground');
+  return dilemma;
+}
+
+/** 困境选项表（bookish 总督解锁高收益第三项——doc21 WP-4.2） */
+function dilemmaChoicesOf(dilemmaId, bookish) {
+  if (dilemmaId === 'dil_labor_strike') {
+    const c = [
+      { id: 'allowance', nameZh: '提高安全津贴', costCredits: 400, hope: 6, discontent: -8 },
+      { id: 'crackdown', nameZh: '铁腕复工', hope: -5, discontent: 10, historySeed: 'extreme_workers_org' },
+    ];
+    if (bookish) c.push({ id: 'consult', nameZh: '学者斡旋', hope: 4, discontent: -4 });
+    return c;
+  }
+  if (dilemmaId === 'dil_xenophage_outbreak') {
+    const c = [
+      { id: 'isolate', nameZh: '就地物理隔离', health: -3, discontent: 4 },
+      { id: 'serum', nameZh: '调派科考队研发血清', researchData: 40, hope: 5 },
+    ];
+    if (bookish) c.push({ id: 'reverse_pharma', nameZh: '疫情逆向制药', credits: 600, hope: 6 });
+    return c;
+  }
+  return [
+    { id: 'crackdown_smuggle', nameZh: '严厉查抄', discontent: 6, credits: 300 },
+    { id: 'tolerate', nameZh: '默许抽成分润', credits: 700, discontent: -3, historySeed: 'smuggle_ring' },
+  ];
+}
+
+/** 裁决执行（ResolveColonyDilemma 命令执行体；写 history 长期记忆） */
+function resolveColonyDilemma(world, planet, colony, choiceId) {
+  const soc = planet.soc;
+  if (!soc || !soc.pendingDilemma) return { ok: false, reason: 'NoPendingDilemma' };
+  const d = soc.pendingDilemma;
+  const choice = d.choices.find((x) => x.id === choiceId);
+  if (!choice) return { ok: false, reason: 'BadChoice' };
+  const fid = world.playerFactionId;
+  const led = fid ? world.economy.ledgers[fid] : null;
+  if (choice.costCredits && led) {
+    if ((led.balances.credits || 0) < choice.costCredits) return { ok: false, reason: 'NO_FUNDS' };
+    led.balances.credits -= choice.costCredits;
+  }
+  if (choice.credits && led) led.balances.credits = (led.balances.credits || 0) + choice.credits;
+  if (choice.researchData && led) led.balances.researchData = (led.balances.researchData || 0) + choice.researchData;
+  soc.hope = clamp(soc.hope + (choice.hope || 0), 0, 100);
+  soc.discontent = clamp(soc.discontent + (choice.discontent || 0), 0, 100);
+  // 长期记忆：historySeed 埋下后续回响（≤20 有界；doc16 §4.21）
+  soc.history.push({ tick: world.tick, dilemmaId: d.id, choiceId: choice.id, seed: choice.historySeed || null });
+  if (soc.history.length > 20) soc.history.splice(0, soc.history.length - 20);
+  soc.pendingDilemma = null;
+  emit(world, 'ColonyDilemmaResolved', { planetId: planet.id, dilemmaId: d.id, choiceId: choice.id }, 'ground');
+  return { ok: true, choice };
+}
+
+/** 平叛战果回执（gmt_suppress_rebellion 成功）：重置不满/暴动态 */
+function reportRebellionSuppressed(world, planet) {
+  const soc = planet.soc;
+  if (!soc) return { ok: false, reason: 'NoSoc' };
+  soc.rebellionActive = false;
+  soc.discontent = Math.min(soc.discontent, 40);
+  soc.crisisDays = 0;
+  soc.history.push({ tick: world.tick, dilemmaId: 'gmt_suppress_rebellion', choiceId: 'victory', seed: null });
+  emit(world, 'ColonyRebellionSuppressed', { planetId: planet.id }, 'ground');
+  return { ok: true };
+}
+
+Object.assign(__exports, { COLONY_EDICTS, OVERSEER_TRAITS, REBELLION_DISCONTENT, REBELLION_HOPE, REBELLION_DAYS, AGENT_IDX, MAX_RESIDENT_AGENTS, DAY_CYCLE_SECONDS, ensurePlanetSoc, deriveColonyAgents, residentPhaseOf, bakeCommuteSpline, sampleSplinePos, residentTau, tickColonySociety, serviceCoverage, prosperityTaxMultiplier, maybeTriggerDilemma, dilemmaChoicesOf, resolveColonyDilemma, reportRebellionSuppressed });
+
+});
+__register("src/domain/ground/planetaryThreat.js", function (__exports, __require) {
+/**
+ * domain/ground/planetaryThreat.js — 开采警戒指数与阶梯威胁（doc20 v0.6 WP-3/WP-4）
+ *
+ * PTI 微分演化方程（doc20 WP-3.2，0..1000 千分比口径）：
+ *   H_t = clamp(H_{t-1} + Δmine + Δind + Δcatapult − Δrestore − Δdampener − λH_{t-1}, 0, 1000)
+ *   Δmine = +2.0 × 运行矿井数；Δind = +0.4 × 工业节点数；Δcatapult = +25.0/次发射；
+ *   Δrestore = −1.5 × (plant/RestoreTerrain) 次数；Δdampener = −6.0 × 抑制塔数；
+ *   λ = 1.5%/小时（自然阻尼——世界不会永远惩罚玩家，doc16 §11）。
+ *
+ * 阶梯响应（doc16 §4.17 / doc20 WP-3.4）：
+ *   Tier 0 潜伏（0-199）→ Tier 1 侦测（200-399，120s 侦察波）→
+ *   Tier 2 袭扰（400-649，90s 侧翼波，优先打输电塔/传送带）→
+ *   Tier 3 围攻（650-849，75s 攻城波）→ Tier 4 利维坦苏醒（850-1000）。
+ *
+ * 双派系哲学（doc20 WP-3.3）：远古哨卫（机械/极地/晶原主题）优先打击电网与
+ * 弹射井；原生异虫（自然主题）优先打击农场/矿井/居民区。
+ *
+ * 确定性红线：零 Math.random()、零 world.rng 消费（波次构成由 planetSeed 派生）。
+ */
+
+const { emit: emit, chronicle: chronicle } = __require("src/core/eventBus.js");
+const { clamp: clamp } = __require("src/core/math.js");
+const { derivePlanetSeedsExtended: derivePlanetSeedsExtended } = __require("src/domain/ground/planetSeeds.js");
+const { ensurePlanetThreat: ensurePlanetThreat } = __require("src/domain/ground/planetWeather.js");
+const { ensurePlanetInd: ensurePlanetInd } = __require("src/domain/industry/planetaryLogistics.js");
+
+/** 警戒阶级阈值（PTI 0..1000） */
+const PTI_THRESHOLDS = Object.freeze([0, 200, 400, 650, 850]);
+
+/** 增援波次间隔（任务秒；Tier 1/2/3） */
+const WAVE_INTERVAL_S = Object.freeze({ 1: 120, 2: 90, 3: 75 });
+
+/** 弹射单次激发（doc20 WP-3.2 契约） */
+const PTI_CATAPULT_SPIKE = 25.0;
+
+/** 利维坦原型（按行星类别确定性派生） */
+function leviathanArchetypeOf(planet) {
+  if (planet.category === 'lava') return 'lev_magma_colossus';
+  if (planet.category === 'ocean') return 'lev_abyssal_kraken';
+  return 'lev_automata_dreadnought';
+}
+
+/** 主题 → 威胁派系（doc20 WP-3.3：机械/极地/晶原 = 远古哨卫，其余 = 原生异虫） */
+function factionOf(planet) {
+  const sentinelThemes = ['ancient_megastructure', 'magnetar_aurora', 'prism_crystal', 'dry_night_polar', 'permafrost_furnace', 'glassstorm_barrens', 'fractured_moon', 'cloud_giant_atolls'];
+  return sentinelThemes.includes(planet.primaryThemeId) ? 'sentinel' : 'xeno_swarm';
+}
+
+/**
+ * 每战略小时 PTI 微分推进（HourlySystems production 后调用；O(nodes) 线性）。
+ * @returns {{pti:number, tier:number, escalated:boolean}}
+ */
+function tickPlanetaryThreatIndex(world, planet) {
+  const th = ensurePlanetThreat(planet);
+  const ind = ensurePlanetInd(planet);
+
+  // 1) 扰动增量与消减项统计（只读账本化状态，不重载地形场）
+  const colony = planet.colonyId ? world.entities.colonies[planet.colonyId] : null;
+  const buildings = (colony && colony.buildings) || [];
+  let mines = 0;
+  let dampeners = 0;
+  for (const b of buildings) {
+    if (b.state === 'active' || b.state === undefined) {
+      if (String(b.defId || '').startsWith('bld_mine')) mines++;
+      if (b.defId === 'bld_sonic_dampener') dampeners++;
+    }
+  }
+  const indNodes = (ind.nodes || []).length;
+  const edits = planet.terrainEdits && Array.isArray(planet.terrainEdits.ops)
+    ? planet.terrainEdits.ops : [];
+  let restores = 0;
+  for (const op of edits) {
+    if (op.kind === 'plant' || op.kind === 'restore') restores++;
+  }
+
+  const deltaMine = 2.0 * mines;
+  const deltaInd = 0.4 * indNodes;
+  const deltaCatapult = (planet.threat.pendingCatapultSpike || 0);
+  const deltaRestore = 1.5 * restores;
+  const deltaDampener = 6.0 * dampeners;
+  const damping = th.pti * 0.015; // λ = 1.5%/小时
+
+  th.pti = Math.round(clamp(th.pti + deltaMine + deltaInd + deltaCatapult - deltaRestore - deltaDampener - damping, 0, 1000));
+  planet.threat.pendingCatapultSpike = 0; // 单次激发消费即清
+
+  // 2) 阶梯跃迁判定
+  let newTier = 0;
+  for (let t = PTI_THRESHOLDS.length - 1; t >= 0; t--) {
+    if (th.pti >= PTI_THRESHOLDS[t]) { newTier = t; break; }
+  }
+  let escalated = false;
+  if (newTier > th.tier) {
+    th.tier = newTier;
+    escalated = true;
+    th.waveCdTicks = 2; // 2 战略小时后首波
+    emit(world, 'PlanetaryThreatEscalated', { planetId: planet.id, tier: newTier, pti: th.pti }, 'ground');
+    if (newTier >= 4 && !th.leviathan) {
+      awakenLeviathan(world, planet);
+    }
+  } else if (newTier < th.tier && (!th.leviathan || !th.leviathan.active)) {
+    th.tier = newTier; // 平降（恢复手段奏效）
+  }
+  if (th.waveCdTicks > 0) th.waveCdTicks--;
+  return { pti: th.pti, tier: th.tier, escalated };
+}
+
+/** 弹射发射瞬间的 PTI 激发（catapult.js 发射路径调用；hourly 结算时入账） */
+function spikeCatapultLaunch(planet) {
+  ensurePlanetThreat(planet);
+  planet.threat.pendingCatapultSpike = (planet.threat.pendingCatapultSpike || 0) + PTI_CATAPULT_SPIKE;
+}
+
+/**
+ * Tier 4：超巨型漫游利维坦苏醒（3600 HP / 14m 级；三阶段部位破坏由战斗层消费）。
+ * 持久化紧凑元组：{ active, archetype, hpPermille, wx, wz, phase }
+ */
+function awakenLeviathan(world, planet) {
+  const th = ensurePlanetThreat(planet);
+  if (th.leviathan && th.leviathan.active) return th.leviathan;
+  const seeds = derivePlanetSeedsExtended(world, planet.id);
+  const ang = ((seeds.faunaSeed(99) % 3600) / 3600) * Math.PI * 2;
+  th.leviathan = {
+    active: true,
+    archetype: leviathanArchetypeOf(planet),
+    hpPermille: 1000,
+    wx: Math.round(Math.cos(ang) * 190),
+    wz: Math.round(Math.sin(ang) * 190),
+    phase: 1,
+    backCoreBroken: 0,
+    toxinSacsBroken: 0,
+    staggerT: 0,
+  };
+  planet.threat.catapultLock = true; // 利维坦场锁死货运弹射井（doc20 WP-4 战略后果）
+  chronicle(world, 'crisis', `行星 ${planet.name} 采掘扰动突破临界，超巨型利维坦苏醒！`, { planetId: planet.id });
+  emit(world, 'LeviathanAwakened', { planetId: planet.id, archetype: th.leviathan.archetype }, 'ground');
+  return th.leviathan;
+}
+
+/**
+ * 利维坦部位破坏（战斗层命中回执）：背部散热晶核/双侧毒素腺囊独立判定体积，
+ * 击碎触发 6.0s stagger 瘫痪硬直并永久关闭该部位 AoE。
+ */
+function breakLeviathanPart(world, planet, part) {
+  const th = ensurePlanetThreat(planet);
+  const lev = th.leviathan;
+  if (!lev || !lev.active) return { ok: false, reason: 'NoLeviathan' };
+  if (part !== 'back_core' && part !== 'toxin_sacs') return { ok: false, reason: 'BadPart' };
+  if (part === 'back_core' && !lev.backCoreBroken) {
+    lev.backCoreBroken = 1;
+    lev.staggerT = 6.0;
+  } else if (part === 'toxin_sacs' && !lev.toxinSacsBroken) {
+    lev.toxinSacsBroken = 1;
+    lev.staggerT = 6.0;
+  } else {
+    return { ok: true, already: true };
+  }
+  emit(world, 'LeviathanPartBroken', { planetId: planet.id, part, staggerS: 6.0 }, 'ground');
+  return { ok: true, staggerS: 6.0 };
+}
+
+/**
+ * 利维坦讨伐战果（战斗层上报）：PTI 归零、弹射井解锁、传奇战利品入账。
+ * @returns {{ok:boolean, loot?:object}}
+ */
+function reportLeviathanDefeated(world, planet) {
+  const th = ensurePlanetThreat(planet);
+  const lev = th.leviathan;
+  if (!lev || !lev.active) return { ok: false, reason: 'NoLeviathan' };
+  lev.active = false;
+  lev.phase = 0;
+  th.pti = 0;
+  th.tier = 0;
+  th.catapultLock = false;
+  const fid = world.playerFactionId;
+  const loot = { exoticMatter: 5, leviathanGene: 1 };
+  if (fid && world.economy.ledgers[fid]) {
+    const led = world.economy.ledgers[fid];
+    led.balances.exoticMatter = (led.balances.exoticMatter || 0) + loot.exoticMatter;
+  }
+  chronicle(world, 'crisis', `行星 ${planet.name} 利维坦讨伐成功：PTI 归零，先驱者奇异物质 ×5 入账`, { planetId: planet.id });
+  emit(world, 'LeviathanDefeated', { planetId: planet.id, loot }, 'ground');
+  return { ok: true, loot };
+}
+
+/**
+ * 阶梯增援波次构成（纯函数；GroundMission/GroundView 刷怪消费）。
+ * 编制随 Tier 与派系哲学差异化（哨卫打电网/异虫打农场——目标偏好由调用方消费）。
+ */
+function composeWave(world, planet, tier) {
+  const seeds = derivePlanetSeedsExtended(world, planet.id);
+  const s = seeds.faunaSeed(50 + tier * 7 + (planet.threat ? planet.threat.wavesSpawned || 0 : 0));
+  const fac = factionOf(planet);
+  if (tier <= 1) {
+    return { faction: fac, units: [{ kind: 'grunt', count: 2 + (s % 2) }], targetPref: 'probe' };
+  }
+  if (tier === 2) {
+    return { faction: fac, units: [{ kind: 'grunt', count: 4 }, { kind: 'heavy', count: 1 }], targetPref: fac === 'sentinel' ? 'power_grid' : 'mines_farms', flank: true };
+  }
+  if (tier === 3) {
+    return { faction: fac, units: [{ kind: 'grunt', count: 6 }, { kind: 'heavy', count: 2 }, { kind: 'mortar', count: 1 }], targetPref: 'power_core', flank: true };
+  }
+  return { faction: fac, units: [{ kind: 'leviathan', count: 1 }], targetPref: 'all' };
+}
+
+Object.assign(__exports, { PTI_THRESHOLDS, WAVE_INTERVAL_S, PTI_CATAPULT_SPIKE, leviathanArchetypeOf, factionOf, tickPlanetaryThreatIndex, spikeCatapultLaunch, awakenLeviathan, breakLeviathanPart, reportLeviathanDefeated, composeWave });
 
 });
 __register("src/domain/industry/planetaryLogistics.js", function (__exports, __require) {
@@ -16818,6 +18407,390 @@ function segIntersect(a1, a2, b1, b2) {
 }
 
 Object.assign(__exports, { NODE_IDX, BELT_IDX, NODE_STATE, ITEM_SPACING_MM, BELT_SPEED_MM_S, BELT_MAX_ITEMS, SLOT_CAP, ensurePlanetInd, rebuildPowerGrids, stepTransportLineO1, routeSplitter, computeProductionEfficiency, stepPlanetIndustry, createBeltTuple, beltIsCrossed });
+
+});
+__register("src/domain/ground/planetWeather.js", function (__exports, __require) {
+/**
+ * domain/ground/planetWeather.js — 动态气象灾变（doc20 v0.6 WP-1 / doc16 §4.14~4.15）
+ *
+ * 五阶段气象状态机（doc16 §4.14）：
+ *   Clear → Warning(45s) → Build-up(30s) → Peak(90~150s) → Recovery(30s) → Clear …
+ * 锋面以 v = 1.8 m/s 沿风向角从场域一侧横扫（uStormFront 平面波，GPU 解析求值，
+ * 严禁 CPU 逐粒子对象——doc20 红线 2 / FFF #176 纪律）。
+ *
+ * 确定性：气象循环由 derivePlanetSeedsExtended().weatherCycleSeed(dayIndex) 驱动，
+ * 零 Math.random()、零 world.rng 消费。持久化仅 planet.threat.storm 6 元组：
+ *   [active, kindIdx, dirDeg, frontPosM, intensityPermille, remainTicks]
+ * （≤2KB/星，GATE-07 预算）。
+ */
+
+const { derivePlanetSeedsExtended: derivePlanetSeedsExtended } = __require("src/domain/ground/planetSeeds.js");
+const { TERRAIN_FLAGS: TERRAIN_FLAGS } = __require("src/domain/ground/terrainField.js");
+
+/** 风暴阶段（五状态机） */
+const STORM_PHASE = Object.freeze({
+  CLEAR: 0,
+  WARNING: 1,
+  BUILDUP: 2,
+  PEAK: 3,
+  RECOVERY: 4,
+});
+
+/** 阶段时长（任务秒；doc20 WP-1.2 契约） */
+const PHASE_SECONDS = Object.freeze({
+  WARNING: 45,
+  BUILDUP: 30,
+  PEAK_MIN: 90,
+  PEAK_MAX: 150,
+  RECOVERY: 30,
+});
+
+/** 锋面推进速度（m/s）与场域半宽 */
+const STORM_FRONT_SPEED_M_S = 1.8;
+const FIELD_HALF_M = 256;
+
+/** 四大旗舰极端风暴（kindIdx 0..3；doc20 WP-1.4 规则表） */
+const STORM_KINDS = Object.freeze([
+  {
+    id: 'super_thermal_gale', nameZh: '超温热浪风暴',
+    themes: ['obsidian_lava', 'red_regolith_frontier'],
+    fogRangeScale: 0.22, solarOutput: 0.15, windOutput: 2.5, jetDrainMult: 2.0,
+    dmgPerSec: 0, kind: 'heat',
+  },
+  {
+    id: 'corrosive_acid_hail', nameZh: '腐蚀酸雹风暴',
+    themes: ['sulfur_marsh', 'fungal_catacombs'],
+    fogRangeScale: 0.30, solarOutput: 0.5, windOutput: 1.2, jetDrainMult: 1.0,
+    dmgPerSec: 4.5, tiltDeg: 35, kind: 'acid',
+  },
+  {
+    id: 'em_plasma_superstorm', nameZh: '电磁等离子磁暴',
+    themes: ['magnetar_aurora', 'prism_crystal', 'dry_night_polar'],
+    fogRangeScale: 0.40, solarOutput: 0.3, windOutput: 1.0, jetDrainMult: 1.0,
+    dmgPerSec: 0, lightningEveryS: 8, batteryDrainPctPerHour: 30, kind: 'plasma',
+  },
+  {
+    id: 'cryo_whiteout_mega_tide', nameZh: '极寒白毛风与巨潮',
+    themes: ['permafrost_furnace', 'abyssal_ocean', 'cryomethane_sea'],
+    fogRangeScale: 0.25, solarOutput: 0.4, windOutput: 1.4, jetDrainMult: 1.5,
+    dmgPerSec: 0, tideRiseM: 8.5, heatZoneShrink: 0.4, kind: 'cryo',
+  },
+]);
+
+/** 主题 → 风暴档位（无匹配主题的行星按四档轮换——每颗星球都有天气身份） */
+function stormKindIdxFor(planet, dayIndex) {
+  const themeId = planet.primaryThemeId || '';
+  for (let i = 0; i < STORM_KINDS.length; i++) {
+    if (STORM_KINDS[i].themes.includes(themeId)) return i;
+  }
+  return dayIndex % STORM_KINDS.length;
+}
+
+/** 惰性初始化 planet.threat（doc20 WP-3 契约同形；storm 为 6 元组或 null） */
+function ensurePlanetThreat(planet) {
+  if (planet.threat && planet.threat.v === 1) return planet.threat;
+  planet.threat = { v: 1, pti: 0, tier: 0, waveCdTicks: 0, leviathan: null, storm: null };
+  return planet.threat;
+}
+
+/**
+ * 单日气象日历派生（纯函数；渲染/HUD 预报消费）。
+ * 每游戏日（24 战略 tick）0~2 场风暴：kindIdx/dirDeg/起始任务秒/峰持续全由种子定。
+ * @returns {{kindIdx:number, dirDeg:number, startS:number, peakS:number, phaseAt:(elapsedS:number)=>number}}
+ */
+function deriveDayStormCalendar(world, planet, dayIndex) {
+  const seeds = derivePlanetSeedsExtended(world, planet.id);
+  const s = seeds.weatherCycleSeed(dayIndex);
+  const kindIdx = stormKindIdxFor(planet, dayIndex);
+  const dirDeg = (s >>> 4) % 360;
+  const startS = ((s >>> 12) % 200) + 30;          // 30~229s 首风暴起点
+  const peakS = PHASE_SECONDS.PEAK_MIN + ((s >>> 22) % (PHASE_SECONDS.PEAK_MAX - PHASE_SECONDS.PEAK_MIN + 1));
+  const count = planet.category === 'gasGiant' ? 2 : ((s >>> 28) % 2) + 1; // 1~2 场/日
+  const phaseAt = (elapsedS) => {
+    const t = elapsedS - startS;
+    if (t < 0 || t >= PHASE_SECONDS.WARNING + PHASE_SECONDS.BUILDUP + peakS + PHASE_SECONDS.RECOVERY) {
+      return STORM_PHASE.CLEAR;
+    }
+    if (t < PHASE_SECONDS.WARNING) return STORM_PHASE.WARNING;
+    if (t < PHASE_SECONDS.WARNING + PHASE_SECONDS.BUILDUP) return STORM_PHASE.BUILDUP;
+    if (t < PHASE_SECONDS.WARNING + PHASE_SECONDS.BUILDUP + peakS) return STORM_PHASE.PEAK;
+    return STORM_PHASE.RECOVERY;
+  };
+  return { kindIdx, dirDeg, startS, peakS, count, phaseAt };
+}
+
+/**
+ * 任务秒级气象推进（GroundView 帧驱动；写入 planet.threat.storm 6 元组）。
+ * storm = [active, kindIdx, dirDeg, frontPosM, intensityPermille, remainTicks]
+ * 锋面：Peak 期 frontPosM 以 1.8 m/s 沿 dirDeg 从 −256 扫到 +256。
+ * @param {number} missionSeconds 任务已进行秒数（场景时钟）
+ * @param {number} dtSeconds 帧步长
+ */
+function tickPlanetWeather(world, planet, missionSeconds, dtSeconds) {
+  ensurePlanetThreat(planet);
+  const th = planet.threat;
+  const dayIndex = Math.floor(missionSeconds / 240); // 微缩日 = 240 任务秒（24 tick × 10s）
+  const cal = deriveDayStormCalendar(world, planet, dayIndex);
+  const phase = cal.phaseAt(missionSeconds);
+
+  if (phase === STORM_PHASE.CLEAR) {
+    th.storm = null;
+    return null;
+  }
+  const intensityByPhase = phase === STORM_PHASE.WARNING ? 120
+    : phase === STORM_PHASE.BUILDUP ? 450
+      : phase === STORM_PHASE.PEAK ? 1000
+        : 300; // Recovery 残余
+  // 锋面推进：Warning 起跑（预锋面），Peak 全速，Recovery 停滞
+  const speed = phase === STORM_PHASE.PEAK ? STORM_FRONT_SPEED_M_S
+    : phase === STORM_PHASE.BUILDUP ? STORM_FRONT_SPEED_M_S * 0.5
+      : phase === STORM_PHASE.WARNING ? STORM_FRONT_SPEED_M_S * 0.25
+        : 0;
+  let storm = th.storm;
+  if (!storm || storm[1] !== cal.kindIdx || storm[5] === undefined) {
+    storm = [1, cal.kindIdx, cal.dirDeg, -FIELD_HALF_M - 40, 0, 0];
+  }
+  storm[0] = 1;
+  storm[1] = cal.kindIdx;
+  storm[2] = cal.dirDeg;
+  storm[4] = intensityByPhase;
+  storm[5] = (storm[5] || 0) + Math.round(dtSeconds * 100);
+  const prevFront = storm[3];
+  storm[3] = Math.min(FIELD_HALF_M + 40, prevFront + speed * dtSeconds);
+  th.storm = storm;
+  return {
+    phase,
+    kindIdx: storm[1],
+    dirDeg: storm[2],
+    frontPosM: storm[3],
+    intensityPermille: storm[4],
+    kind: STORM_KINDS[storm[1]],
+  };
+}
+
+/**
+ * 风暴浸没度（世界坐标 → 0..1；CPU 与 GLSL uStormFront 平面波同源口径）。
+ * GLSL: localStorm = smoothstep(-28,28, frontZ − proj) × intensity
+ * @returns {number} 0..1（0 = 锋外）
+ */
+function stormDepthAt(storm, wx, wz) {
+  if (!storm || !storm[0]) return 0;
+  const dirRad = (storm[2] * Math.PI) / 180;
+  const cx = Math.cos(dirRad);
+  const cz = Math.sin(dirRad);
+  const proj = wx * cx + wz * cz;
+  const front = storm[3];
+  const t = (front - proj + 28) / 56; // smoothstep(-28,28, front−proj) 线性近似带沿
+  const s = t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t);
+  return s * (storm[4] / 1000);
+}
+
+/**
+ * 三重庇护判定（doc20 WP-2）：风暴锋面过境时角色免伤判定。
+ * 1) FOUNDATION 建筑屋檐 3.5m；2) 热源/护盾穹顶半径内；3) 外骨骼抗性插件。
+ * @param {{x:number,z:number}} charPos 角色世界坐标
+ * @param {Array<{x:number,z:number,flags:number}>} foundations 地基建筑（TERRAIN_FLAGS.FOUNDATION 已挂旗）
+ * @param {Array<{x:number,z:number,radius:number}>} heatZones uHeatZones
+ * @param {Set<string>} exoMods 已装配外骨骼模块 id 集
+ * @param {string} stormKind 'heat'|'acid'|'plasma'|'cryo'
+ * @returns {boolean} true = 完全免伤
+ */
+function isSheltered(charPos, foundations, heatZones, exoMods, stormKind) {
+  const modFor = { heat: 'exo_mod_thermal_shield', acid: 'exo_mod_acid_carapace', plasma: 'exo_mod_thermal_shield', cryo: 'exo_mod_thermal_shield' };
+  if (exoMods && exoMods.has(modFor[stormKind])) return true;
+  if (Array.isArray(foundations)) {
+    for (const f of foundations) {
+      if (!(f.flags & TERRAIN_FLAGS.FOUNDATION)) continue;
+      if (Math.hypot(f.x - charPos.x, f.z - charPos.z) <= 3.5) return true;
+    }
+  }
+  if (Array.isArray(heatZones)) {
+    for (const hz of heatZones) {
+      if (hz.radius > 0 && Math.hypot(hz.x - charPos.x, hz.z - charPos.z) <= hz.radius) return true;
+    }
+  }
+  return false;
+}
+
+Object.assign(__exports, { STORM_PHASE, PHASE_SECONDS, STORM_FRONT_SPEED_M_S, FIELD_HALF_M, STORM_KINDS, ensurePlanetThreat, deriveDayStormCalendar, tickPlanetWeather, stormDepthAt, isSheltered });
+
+});
+__register("src/domain/industry/catapult.js", function (__exports, __require) {
+/**
+ * domain/industry/catapult.js — 轨道货运弹射井与近地中转站（doc19 v0.4 WP-4）
+ *
+ * 三级天地物流管线（doc16 §4.12）：地表打包弹射 → 近地轨道缓冲仓 →
+ * 船坞直供泰坦装配 / 跨星系货运班轮 / 星际市场倾销。
+ *
+ * 天体物理弹射能耗（doc19 WP-4）：
+ *   E_launch = E0 · (g / g0) · (1 + β · ρ_atm)
+ * 高重力/浓密大气行星弹射昂贵，碎环月（0.25g 真空）能耗趋近 E0 下限。
+ *
+ * 确定性红线：零 Math.random()、零 world.rng 消费。持久化增量：弹射井与
+ * 轨道缓冲仓为紧凑 JSON（≤1KB/星，GATE-06 IND-05 预算内）。
+ */
+
+const { emit: emit, chronicle: chronicle } = __require("src/core/eventBus.js");
+const { clamp: clamp } = __require("src/core/math.js");
+const { createShip: createShip } = __require("src/domain/ships/ship.js");
+const { spikeCatapultLaunch: spikeCatapultLaunch } = __require("src/domain/ground/planetaryThreat.js");
+
+/** 标准轨道货舱容量（单位物资/舱，doc19 WP-4） */
+const POD_CAPACITY_UNITS = 50;
+/** 泰坦装配硬性要求：累计 20 舱装甲模块 + 5 舱量子核心（doc19 WP-4.3） */
+const TITAN_ARMOR_PODS = 20;
+const TITAN_QUANTUM_PODS = 5;
+/** 弹射基准能耗（MWh）：g=g0 真空大气下的地板值 */
+const LAUNCH_E0_MWH = 12;
+/** 大气阻力系数 β（ρ_atm 0..1） */
+const LAUNCH_BETA = 1.6;
+
+/** 弹射井状态紧凑元组：[charged_permille, podsReady, launchedTotal, resTypeIdx] */
+const CATAPULT_IDX = Object.freeze({ CHARGE: 0, PODS: 1, LAUNCHED: 2, RES: 3 });
+
+/**
+ * 单次弹射能耗（MWh）：E0 · (g/g0) · (1 + β·ρ_atm)；g0 = 1.0。
+ * @param {object} planet 行星实体（gravity 0.3~1.9；atmosphere.density 0..1）
+ */
+function launchEnergyMWh(planet) {
+  const g = clamp(Number(planet && planet.gravity) || 1.0, 0.1, 3.0);
+  const atmo = planet && planet.atmosphere;
+  const rho = atmo && Number.isFinite(atmo.density) ? clamp(atmo.density, 0, 1) : 0.5;
+  return LAUNCH_E0_MWH * g * (1 + LAUNCH_BETA * rho);
+}
+
+/**
+ * 地表物资汇集：每 50 单位打包 1 舱（由 stepPlanetIndustry 输出口或手动输送调用）。
+ * @returns {{podsReady:number, launched:boolean}} 是否凑满整舱
+ */
+function feedCatapult(indState, resTypeIdx, units) {
+  const cat = indState.catapult || (indState.catapult = [0, 0, 0, resTypeIdx]);
+  cat[CATAPULT_IDX.RES] = resTypeIdx;
+  cat[CATAPULT_IDX.PODS] += units / POD_CAPACITY_UNITS;
+  const whole = Math.floor(cat[CATAPULT_IDX.PODS]);
+  return { podsReady: whole, launched: whole > 0 };
+}
+
+/**
+ * 弹射井蓄能推进（由所属子电网 accMWh 扣能；HourlySystems production 调用）。
+ * 蓄能达 100% 且舱位就绪 → 触发发射：物资入近地中转站缓冲仓，电网放电。
+ * @returns {{launched:number, pods:Array<{resTypeIdx:number, units:number}>}}
+ */
+function stepCatapult(world, planet, indState, grid, dtHours = 1) {
+  const cat = indState.catapult;
+  if (!cat || !grid) return { launched: 0, pods: [] };
+  const pods = [];
+  let launched = 0;
+  const wholePods = Math.floor(cat[CATAPULT_IDX.PODS]);
+  if (wholePods <= 0) return { launched: 0, pods };
+
+  const energyNeed = launchEnergyMWh(planet);
+  // 蓄能速率：电网富余功率 × dt（充入弹射井专用电容）
+  const surplusKW = Math.max(0, grid.genKW - grid.loadKW);
+  cat[CATAPULT_IDX.CHARGE] = clamp(cat[CATAPULT_IDX.CHARGE] + (surplusKW / 1000) * dtHours / energyNeed * 1000, 0, 1200);
+
+  if (cat[CATAPULT_IDX.CHARGE] >= 1000) {
+    cat[CATAPULT_IDX.CHARGE] -= 1000;
+    cat[CATAPULT_IDX.PODS] -= 1;
+    cat[CATAPULT_IDX.LAUNCHED] += 1;
+    launched = 1;
+    const units = POD_CAPACITY_UNITS;
+    const resKey = resIdxToId(cat[CATAPULT_IDX.RES]);
+    const buf = indState.orbitalBuffer || (indState.orbitalBuffer = {});
+    buf[resKey] = (buf[resKey] || 0) + units;
+    pods.push({ resTypeIdx: cat[CATAPULT_IDX.RES], resId: resKey, units });
+    grid.accMWh = Math.max(0, grid.accMWh - energyNeed); // 电网放电扣能
+    spikeCatapultLaunch(planet); // doc20 WP-3：弹射电磁/地震信号 → PTI +25（hourly 结算入账）
+    emit(world, 'FreightCatapultLaunched', { planetId: planet.id, resId: resKey, units, energyMWh: energyNeed }, 'ground');
+    if (cat[CATAPULT_IDX.LAUNCHED] === 1) {
+      chronicle(world, 'economy', `行星 ${planet.name} 货运弹射井首舱入轨（冷青电弧音爆）`, { planetId: planet.id });
+    }
+  }
+  return { launched, pods };
+}
+
+/** 资源 idx → 资源 id（与 content/resources.js 对齐的工业流小子集） */
+const IND_RES_IDS = ['ferro', 'silicate', 'alloy', 'conductor', 'shipModule', 'quantumCore'];
+function resIdxToId(idx) {
+  return IND_RES_IDS[idx] || 'alloy';
+}
+function resIdToIdx(resId) {
+  return IND_RES_IDS.indexOf(resId) >= 0 ? IND_RES_IDS.indexOf(resId) : 2;
+}
+
+/**
+ * 近地中转站三级分发（HourlySystems production 每战略小时结算；doc19 WP-4.3）。
+ * 1) 同星系轨道船坞直供 → 泰坦装配台账；2) 跨星系班轮（有母星系中转站则划拨）；
+ * 3) 星际市场倾销 → 信用点。确定性顺序结算。
+ * @returns {{titanLaid:boolean, shipId?:string, marketCredits:number}}
+ */
+function settleOrbitalBuffer(world, planet, indState) {
+  const out = { titanLaid: false, marketCredits: 0 };
+  const buf = indState.orbitalBuffer || {};
+  const fid = planet.colonyId
+    ? (world.entities.colonies[planet.colonyId] || {}).factionId
+    : world.playerFactionId;
+  if (!fid) return out;
+
+  // 1) 同星系轨道船坞直供：泰坦装配台账（装甲模块舱/量子核心舱）
+  const sys = world.entities.systems[planet.systemId];
+  const shipyard = sys ? Object.values(world.entities.stations || {})
+    .find((st) => st.kind === 'shipyard' && st.systemId === sys.id && st.factionId === fid) : null;
+  if (shipyard) {
+    shipyard.titanAssembly ||= { armorPods: 0, quantumPods: 0 };
+    // 缓冲仓持「单位」（50 单位/舱）→ 吸收时换算为整舱，零头单位留在缓冲仓
+    const armorRes = ['alloy', 'shipModule'];
+    for (const r of armorRes) {
+      if (buf[r] > 0) {
+        const pods = Math.floor(buf[r] / POD_CAPACITY_UNITS);
+        if (pods > 0) {
+          shipyard.titanAssembly.armorPods += pods;
+          buf[r] -= pods * POD_CAPACITY_UNITS;
+        }
+      }
+    }
+    if (buf.quantumCore >= POD_CAPACITY_UNITS) {
+      const pods = Math.floor(buf.quantumCore / POD_CAPACITY_UNITS);
+      shipyard.titanAssembly.quantumPods += pods;
+      buf.quantumCore -= pods * POD_CAPACITY_UNITS;
+    }
+    const ta = shipyard.titanAssembly;
+    if (ta.armorPods >= TITAN_ARMOR_PODS && ta.quantumPods >= TITAN_QUANTUM_PODS && !shipyard.titanBuilt) {
+      ta.armorPods -= TITAN_ARMOR_PODS;
+      ta.quantumPods -= TITAN_QUANTUM_PODS;
+      // 泰坦级无畏巨舰合拢龙骨（物料已由弹射舱直供，造舰不再扣账本）
+      const ship = createShip(world, {
+        factionId: fid,
+        hullId: 'hull_titan',
+        moduleIds: [],
+        name: '泰坦级无畏巨舰',
+        systemId: sys.id,
+      });
+      shipyard.titanBuilt = (shipyard.titanBuilt || 0) + 1;
+      out.titanLaid = true;
+      out.shipId = ship.id;
+      chronicle(world, 'economy', `泰坦级无畏巨舰龙骨合拢：行星货运弹射供应链打通天地造舰闭环`, { planetId: planet.id, shipId: ship.id });
+      emit(world, 'TitanKeelLaid', { planetId: planet.id, shipId: ship.id, systemId: sys.id }, 'fleet');
+    }
+  }
+
+  // 2/3) 余量：跨星系班轮占位（母星系无中转站时直接市场倾销——v0.4 先打通货币闭环）
+  const POD_VALUE = { ferro: 120, silicate: 90, alloy: 240, conductor: 320, shipModule: 900, quantumCore: 1500 };
+  for (const r of Object.keys(buf)) {
+    if (buf[r] > 0) {
+      out.marketCredits += (POD_VALUE[r] || 150) * buf[r];
+      buf[r] = 0;
+    }
+  }
+  if (out.marketCredits > 0) {
+    const led = world.economy.ledgers[fid];
+    if (led) led.balances.credits = (led.balances.credits || 0) + out.marketCredits;
+    emit(world, 'OrbitalBufferMarketSold', { planetId: planet.id, credits: out.marketCredits }, 'economy');
+  }
+  return out;
+}
+
+Object.assign(__exports, { POD_CAPACITY_UNITS, TITAN_ARMOR_PODS, TITAN_QUANTUM_PODS, LAUNCH_E0_MWH, LAUNCH_BETA, CATAPULT_IDX, launchEnergyMWh, feedCatapult, stepCatapult, resIdxToId, resIdToIdx, settleOrbitalBuffer });
 
 });
 __register("src/domain/ground/monolithRuins.js", function (__exports, __require) {
@@ -18163,6 +20136,27 @@ const TECHNOLOGIES = [
     ],
     unlocks: [], special: 'crisis',
   },
+  // ── doc20 v0.6 WP-2：特种外骨骼环境抗性模块（风暴庇护三重判定的第三重） ──
+  {
+    id: 'exo_mod_thermal_shield',
+    nameZh: '外骨骼耐热盾模块',
+    nameEn: 'Exo Thermal Shield',
+    descZh: '特种外骨骼插件：热浪与极寒风暴中完全免除环境扣血与喷气散热惩罚。',
+    descEn: 'Exosuit module granting full environmental immunity in thermal and cryo storms.',
+    category: 'bio', tier: 3, cost: 420, prereqs: ['tech_bio_2'],
+    effects: [{ stat: 'stormResist', mode: 'add', value: 1 }],
+    unlocks: [], special: 'exo_mod',
+  },
+  {
+    id: 'exo_mod_acid_carapace',
+    nameZh: '外骨骼防酸甲壳',
+    nameEn: 'Exo Acid Carapace',
+    descZh: '特种外骨骼插件：酸雹风暴中完全免除 4.5 HP/s 腐蚀扣盾。',
+    descEn: 'Exosuit carapace nullifying corrosive acid-hail damage on exposed operators.',
+    category: 'bio', tier: 3, cost: 420, prereqs: ['tech_bio_2'],
+    effects: [{ stat: 'stormResistAcid', mode: 'add', value: 1 }],
+    unlocks: [], special: 'exo_mod',
+  },
   // ── 先驱者遗落科技（doc18 WP-3：仅能由五阶段巨石遗迹核心破译解锁，常规科研不可研发） ──
   {
     id: 'tech_precursor_shield_harmonics',
@@ -18487,588 +20481,6 @@ function ecoSurveyProgress(planet) {
 }
 
 Object.assign(__exports, { SPECIES_STAGE, ECO_PATCH_COUNT, PLANET_ECO_FLAVOR, derivePlanetEcology, ensurePlanetEco, getPlanetSpeciesCount, getSpeciesStage, advanceSpeciesDiscovery, collectSpecimenSample, tickPlanetEcology, ecoSurveyProgress });
-
-});
-__register("src/domain/ground/terrainEdits.js", function (__exports, __require) {
-/**
- * domain/ground/terrainEdits.js — 地形整形编辑层（doc7 TASK-5.1 / §6.5 地形整形器）
- *
- * 职责：
- *  - 编辑日志（ops）：raise / lower / smooth / flatten / restore 五类刷子 + plant / removePlant 植被移植；
- *  - 刷子生效不直接改 terrainField 数据，而是挂进 field.evalPoint 的 siteModifier 合成链
- *    （attachTerrainEdits：既有 siteModifier（GroundView._fieldSiteModifier 采掘凹陷等）先评估，
- *     编辑层后评估 —— flatten / restore 因此可以覆写采掘凹陷，回任自然地貌）；
- *  - 每次编辑仅把受影响 Chunk 标脏（TERRAIN-06：刷子半径 ≤ chunkMeters/2 → 至多 2×2 = 4 个区块），
- *    邻接区块由下一帧增量重建；高度预算 [-40,+80] 仍由 evalPoint 统一钳制；
- *  - 紧凑 JSON 编辑命令序列（serializeEdits / deserializeEdits）供存档确定性重放（SITE-07）；
- *  - 建筑落位 9 点三角网格投影校验（doc7 TASK-5.2 / §6.8 坡度阈值）与主题专属桩基类型。
- *
- * 确定性（doc7 红线 4）：零 Math.random、零 world.rng；smooth 的局部均值与 flatten 的
- * 目标高度均在 applyEdit 时用 _macro 纯宏观场按固定采样点预计算（缓存可由
- * deserializeEdits 重建，逐位一致）；植被 seed 由 hash32(内容串) 派生。
- * 本文件为纯领域层：无 DOM / 无 WebGL。
- */
-
-const { MIN_HEIGHT: MIN_HEIGHT, MAX_HEIGHT: MAX_HEIGHT, buildTriangulatedChunkMesh: buildTriangulatedChunkMesh } = __require("src/domain/ground/terrainField.js");
-const { hash32: hash32 } = __require("src/domain/ground/SurfaceSandbox.js");
-const { sampleTerrain: sampleTerrain, slopeAt: slopeAt } = __require("src/domain/ground/surfaceQueries.js");
-
-// ———— 常量 ————
-
-/** 编辑日志 schema 版本（存档兼容性标记） */
-const TERRAIN_EDITS_VERSION = 1;
-
-/**
- * 刷子参数上限（TERRAIN-06 增量重建约束）：
- * 半径 ≤ chunkMeters/2 → 圆盘至多跨 2×2 区块（4 个）；强度上限防止一次刷穿高度预算。
- */
-const BRUSH_LIMITS = {
-  maxRadiusM: 32,        // 米；512m 场默认 64m 区块 → 至多 4 区块受影响
-  maxStrokeM: 8,         // raise/lower 单次行程上限（米）
-  minStrength: 0.001,
-};
-
-/**
- * 建筑落位阈值（doc7:273 image17/18 阈值公式图不可读，按 GAME-05..08 门禁语义自定
- * 并在此文档化 —— 后续读回原文图片时仅需改这里）：
- *  - 建筑底面 9 点（中心 + 4 角 + 4 边中点）投影到三角网格；
- *  - 任一点坡度 > maxSlopeDeg(16°，与 surfaceQueries.isBuildableSlope 默认一致) → 拒绝 SLOPE_TOO_STEEP；
- *  - 9 点最大高差 > maxHeightDeltaM(2.2m) → 拒绝 HEIGHT_DELTA（要求先整地/桩基）；
- *  - 高差 ≤ foundationGradeDeltaM(0.4m) 直接平铺；否则自动地基承台（graded）并按主题选桩基。
- */
-const BUILDING_PLACEMENT = {
-  maxSlopeDeg: 16,
-  maxHeightDeltaM: 2.2,
-  foundationGradeDeltaM: 0.4,
-  footprintHalfM: 3, // 6m × 6m 占地
-};
-
-/** 主题专属桩基（doc7 TASK-5.2：浮台 / 隔热基座 / 耐酸桩；未列主题 → 标准承台） */
-const THEME_PILING = {
-  obsidian_lava: 'thermal_base',      // 隔热基座（熔岩地表）
-  sulfur_marsh: 'acid_pile',          // 耐酸桩（毒雾沼泽）
-  abyssal_ocean: 'pontoon',           // 浮台（海洋/潮汐带）
-  cryomethane_sea: 'pontoon',
-  prism_crystal: 'standard',
-  permafrost_furnace: 'insulated_base', // 隔热基座（冻土热区）
-  dry_night_polar: 'insulated_base',
-};
-
-/** 编辑算子集合 */
-const SHAPE_KINDS = new Set(['raise', 'lower', 'smooth', 'flatten', 'restore']);
-
-// ———— 小工具 ————
-
-function clamp(v, lo, hi) {
-  return v < lo ? lo : v > hi ? hi : v;
-}
-
-function num(v, dflt) {
-  return Number.isFinite(v) ? v : dflt;
-}
-
-/** 纯宏观场原始高度（不含 siteModifier 与编辑层）——smooth/flatten 的确定性基准 */
-function pristineHeight(field, wx, wz) {
-  const macro = field._macro;
-  if (!macro || typeof macro.heightAt !== 'function') {
-    throw new Error('terrainEdits: field 缺少 _macro 宏观场（须由 createTerrainField 构建）');
-  }
-  return clamp(macro.heightAt(wx, wz).y, MIN_HEIGHT, MAX_HEIGHT);
-}
-
-/** 平滑核：(1 - (d/r)^2)^2，d=r 处为 0（C1 连续，避免刷痕硬边） */
-function brushFalloff(d, r) {
-  if (d >= r) return 0;
-  const t = 1 - (d * d) / (r * r);
-  return t * t;
-}
-
-/**
- * 压平核：半径内圈（r/2）为全强度平台（建筑 9 点落位足印 ±3m 必须落在平芯内），
- * 外圈 (1-t²)² 平滑过渡到 0 —— 平芯 + 裙边，符合「压平建筑地基」的工具语义。
- */
-function flattenFalloff(d, r) {
-  const coreR = r * 0.5;
-  if (d <= coreR) return 1;
-  if (d >= r) return 0;
-  const t = (d - coreR) / (r - coreR);
-  const u = 1 - t * t;
-  return u * u;
-}
-
-function chunkKeyOf(field, x, z) {
-  const cx = clamp(Math.floor((x - field.originX) / field.chunkMeters), 0, field.chunksX - 1);
-  const cz = clamp(Math.floor((z - field.originZ) / field.chunkMeters), 0, field.chunksZ - 1);
-  return `${cx},${cz}`;
-}
-
-// ———— 编辑仓库 ————
-
-/**
- * 创建编辑仓库（挂在一个地形场上，但只通过 siteModifier 合成链接入，
- * 不直接改写 terrainField 的任何缓冲）。
- */
-function createTerrainEdits(field) {
-  if (!field || !Array.isArray(field.chunks)) {
-    throw new Error('createTerrainEdits: 需要 createTerrainField 产出的地形场');
-  }
-  return {
-    planetId: field.planetId,
-    revision: 0,   // 每次成功 applyEdit +1（与存档快照 revision 对齐）
-    seq: 0,        // 植被 id 序列（确定性 id 派生）
-    ops: [],       // 时序编辑日志（内部规范形）
-    byChunk: new Map(), // 'cx,cz' → [opIdx...]（按全局顺序追加；渲染增量重建索引）
-    flora: [],     // 在场植被 [{ id, x, z, prefabId, seed }]
-  };
-}
-
-/**
- * 预计算算子缓存（smooth 局部均值 / flatten 目标高度）。
- * 固定采样图案：中心 + 内环 8 点(0.55r) + 外环 8 点(0.92r)，全部取纯宏观场高度。
- * 缓存丢失（反序列化后）时惰性重建 —— 同输入逐位一致。
- */
-function ensureOpCache(field, op) {
-  if (op.kind === 'flatten') {
-    if (op._targetY === undefined) op._targetY = pristineHeight(field, op.x, op.z);
-    return;
-  }
-  if (op.kind === 'smooth') {
-    if (op._avgY === undefined) {
-      let sum = 0;
-      let n = 0;
-      sum += pristineHeight(field, op.x, op.z); n += 1;
-      for (let ring = 0; ring < 2; ring++) {
-        const rr = op.r * (ring === 0 ? 0.55 : 0.92);
-        for (let a = 0; a < 8; a++) {
-          const ang = (a * Math.PI) / 4;
-          sum += pristineHeight(field, op.x + Math.cos(ang) * rr, op.z + Math.sin(ang) * rr);
-          n += 1;
-        }
-      }
-      op._avgY = sum / n;
-    }
-  }
-}
-
-/**
- * 应用一次编辑：校验 → 追加日志 → 标脏受影响区块（≤4）。
- * shape 算子 { kind, x, z, radius, strength }；plant { kind:'plant', x, z, prefabId, seed? }；
- * removePlant { kind:'removePlant', plantId }。
- * @returns {{ok:true, op:object, index:number, dirtyChunks:string[], floraId?:string}}
- * @throws {Error} 参数非法（命令层先行校验并映射错误码）
- */
-function applyEdit(field, edits, op) {
-  if (!field || !edits || !op || typeof op !== 'object') {
-    throw new Error('applyEdit: 缺少 field/edits/op');
-  }
-  const x = num(op.x, NaN);
-  const z = num(op.z, NaN);
-  if (!Number.isFinite(x) || !Number.isFinite(z)) {
-    throw new Error('applyEdit: 坐标非法');
-  }
-
-  const dirtyChunks = [];
-  let entry;
-
-  if (op.kind === 'plant' || op.kind === 'removePlant') {
-    if (op.kind === 'plant') {
-      if (typeof op.prefabId !== 'string' || op.prefabId.length === 0) {
-        throw new Error('applyEdit: plant 需要 prefabId');
-      }
-      edits.seq += 1;
-      const id = op.id || `flora_${edits.seq}`;
-      const seed = Number.isFinite(op.seed) ? (op.seed >>> 0)
-        : (hash32(`${field.planetId}|${id}|${x.toFixed(3)}|${z.toFixed(3)}|${op.prefabId}`) >>> 0);
-      entry = { kind: 'plant', x, z, id, prefabId: op.prefabId, seed };
-      edits.flora.push({ id, x, z, prefabId: op.prefabId, seed });
-    } else {
-      if (typeof op.plantId !== 'string') throw new Error('applyEdit: removePlant 需要 plantId');
-      entry = { kind: 'removePlant', x, z, plantId: op.plantId };
-      const before = edits.flora.length;
-      edits.flora = edits.flora.filter((f) => f.id !== op.plantId);
-      if (edits.flora.length === before) {
-        throw new Error(`applyEdit: 植被不存在 ${op.plantId}`);
-      }
-    }
-  } else {
-    if (!SHAPE_KINDS.has(op.kind)) throw new Error(`applyEdit: 未知算子 ${op.kind}`);
-    const radius = num(op.radius, 8);
-    if (!(radius > 0) || radius > Math.max(BRUSH_LIMITS.maxRadiusM, field.chunkMeters / 2)) {
-      throw new Error(`applyEdit: 半径越界（0,${Math.min(BRUSH_LIMITS.maxRadiusM, field.chunkMeters / 2)}]）`);
-    }
-    const strength = num(op.strength, op.kind === 'smooth' || op.kind === 'flatten' ? 1 : 2);
-    if (!(strength >= BRUSH_LIMITS.minStrength)) throw new Error('applyEdit: 强度过小');
-    if ((op.kind === 'raise' || op.kind === 'lower') && strength > BRUSH_LIMITS.maxStrokeM) {
-      throw new Error(`applyEdit: 行程强度上限 ${BRUSH_LIMITS.maxStrokeM}m`);
-    }
-    if ((op.kind === 'smooth' || op.kind === 'flatten') && strength > 1) {
-      throw new Error('applyEdit: smooth/flatten 强度为混合系数 (0,1]');
-    }
-    entry = { kind: op.kind, x, z, r: radius, s: strength };
-    ensureOpCache(field, entry);
-  }
-
-  edits.ops.push(entry);
-  const index = edits.ops.length - 1;
-
-  // 标脏：圆盘 AABB 覆盖的区块（半径 ≤ chunkMeters/2 → 至多 2×2 = 4 个，TERRAIN-06）
-  const reach = entry.kind === 'plant' || entry.kind === 'removePlant' ? 0.5 : entry.r;
-  const cxMin = clamp(Math.floor((x - reach - field.originX) / field.chunkMeters), 0, field.chunksX - 1);
-  const cxMax = clamp(Math.floor((x + reach - field.originX) / field.chunkMeters), 0, field.chunksX - 1);
-  const czMin = clamp(Math.floor((z - reach - field.originZ) / field.chunkMeters), 0, field.chunksZ - 1);
-  const czMax = clamp(Math.floor((z + reach - field.originZ) / field.chunkMeters), 0, field.chunksZ - 1);
-  for (let cz = czMin; cz <= czMax; cz++) {
-    for (let cx = cxMin; cx <= cxMax; cx++) {
-      const key = `${cx},${cz}`;
-      let list = edits.byChunk.get(key);
-      if (!list) {
-        list = [];
-        edits.byChunk.set(key, list);
-      }
-      list.push(index);
-      const chunk = field.chunks[cz * field.chunksX + cx];
-      if (chunk) chunk.dirty = true;
-      dirtyChunks.push(key);
-    }
-  }
-
-  edits.revision += 1;
-  return { ok: true, op: entry, index, dirtyChunks, floraId: entry.kind === 'plant' ? entry.id : undefined };
-}
-
-// ———— evalPoint 合成链挂点 ————
-
-/**
- * 编辑层逐点求值。restore 覆盖点重置此前全部编辑影响与 siteModifier 影响
- * （DSP 式「一键恢复自然地貌」）。
- * @param {number} siteDyIn 既有 siteModifier 已算得的 dy（先于编辑层评估）
- * @returns {number} 合成总 dy（0 = 无影响；无相关列表时原样透传 siteDyIn）
- */
-function evalEditsDy(field, edits, wx, wz, baseY, siteDyIn) {
-  const key = chunkKeyOf(field, wx, wz);
-  const list = edits.byChunk.get(key);
-  if (!list || list.length === 0) return siteDyIn;
-
-  let siteApplied = siteDyIn; // 既有 siteModifier 影响（restore 可清零）
-  let extra = 0;              // 编辑层累计
-
-  for (let i = 0; i < list.length; i++) {
-    const op = edits.ops[list[i]];
-    const dx = wx - op.x;
-    const dz = wz - op.z;
-    const d = Math.sqrt(dx * dx + dz * dz);
-
-    if (op.kind === 'restore') {
-      if (d <= op.r) {
-        // 一键恢复：清空此前编辑叠加 + siteModifier 叠加，回到纯宏观地貌
-        extra = 0;
-        siteApplied = 0;
-      }
-      continue;
-    }
-
-    const fall = op.kind === 'flatten' ? flattenFalloff(d, op.r) : brushFalloff(d, op.r);
-    if (fall <= 0) continue;
-    ensureOpCache(field, op);
-
-    if (op.kind === 'raise') extra += op.s * fall;
-    else if (op.kind === 'lower') extra -= op.s * fall;
-    else if (op.kind === 'smooth') {
-      // 盒式模糊语义：向预计算的局部均值收敛（applyEdit 时对纯宏观场采样）
-      extra += (op._avgY - (baseY + siteApplied + extra)) * op.s * fall;
-    } else if (op.kind === 'flatten') {
-      // 压平：向算子中心纯宏观高度收敛 → 覆写采掘凹陷（凹陷先于编辑层计入运行高度）
-      extra += (op._targetY - (baseY + siteApplied + extra)) * op.s * fall;
-    }
-  }
-  return siteApplied + extra;
-}
-
-/**
- * 把编辑仓库接入 field.evalPoint 的 siteModifier 合成链：
- *   最终 dy = 既有 siteModifier dy（先评估；可被 restore 清零） + 编辑层 dy（后评估）。
- * 可重复调用（幂等）；再次 attach 会保留最初的地基 siteModifier（GroundView 凹陷等）。
- * @returns {Function} 合成后的 siteModifier（field.siteModifier）
- */
-function attachTerrainEdits(field, edits) {
-  if (!field || !edits) throw new Error('attachTerrainEdits: 缺少 field/edits');
-  if (field.__terrainEdits === edits && typeof field.siteModifier === 'function' && field.siteModifier.__terrainEdits) {
-    return field.siteModifier; // 已挂接同一仓库
-  }
-  const underlying = field.__baseSiteModifier !== undefined ? field.__baseSiteModifier : field.siteModifier;
-  field.__baseSiteModifier = underlying; // 保留地基（首次 attach 时为 GroundView/_digDents 链）
-
-  const composed = (fx, fz, base) => {
-    const baseY = num(base && base.y, 0);
-    // 1) 既有 siteModifier（任务核心 SDF / 采掘凹陷）
-    let siteDy = 0;
-    let baseRes = null;
-    if (typeof underlying === 'function') {
-      baseRes = underlying(fx, fz, base);
-      if (baseRes && Number.isFinite(baseRes.dy)) siteDy = baseRes.dy;
-    }
-    // 2) 编辑层（后评估：flatten/restore 可覆写凹陷；restore 清零 siteDy）
-    const total = edits.ops.length === 0
-      ? siteDy
-      : evalEditsDy(field, edits, fx, fz, baseY, siteDy);
-    if (!baseRes && total === 0) return null;
-    // WP-0（doc18 v0.1.1）：语义旗透传——增量重建区块时保留路面材质与 clearFlags 安全豁免位
-    return {
-      ...(baseRes || null),
-      dy: total,
-      flags: (baseRes && baseRes.flags) || 0,
-      clearFlags: (baseRes && baseRes.clearFlags) || 0,
-      weights: (baseRes && baseRes.weights) || null,
-      biomeId: (baseRes && baseRes.biomeId) != null ? baseRes.biomeId : null,
-    };
-  };
-  composed.__terrainEdits = true;
-
-  field.siteModifier = composed;
-  field.__terrainEdits = edits;
-  return composed;
-}
-
-// ———— 增量重建 ————
-
-/**
- * 重建全部脏区块（meshRevision 对齐、dirty 清零）；返回重建数量。
- * GroundView 的帧同步也可只消费 chunk.dirty 自行重建 —— 本函数供域侧/测试复用。
- */
-function rebuildDirtyChunks(field) {
-  if (!field || !Array.isArray(field.chunks)) return 0;
-  let n = 0;
-  for (let i = 0; i < field.chunks.length; i++) {
-    const ch = field.chunks[i];
-    if (ch && ch.dirty) {
-      buildTriangulatedChunkMesh(ch, field.evalPoint);
-      n += 1;
-    }
-  }
-  return n;
-}
-
-// ———— 存档序列化（SITE-07：紧凑命令序列，确定性重放） ————
-
-/**
- * 序列化为紧凑 JSON 字符串（键序固定 → 逐字节可复现；不含运行期缓存 _avgY/_targetY）。
- */
-function serializeEdits(edits) {
-  if (!edits || !Array.isArray(edits.ops)) throw new Error('serializeEdits: 非法编辑仓库');
-  const ops = [];
-  for (const op of edits.ops) {
-    if (op.kind === 'plant') {
-      ops.push({ kind: 'plant', x: op.x, z: op.z, id: op.id, prefabId: op.prefabId, seed: op.seed });
-    } else if (op.kind === 'removePlant') {
-      ops.push({ kind: 'removePlant', x: op.x, z: op.z, plantId: op.plantId });
-    } else {
-      ops.push({ kind: op.kind, x: op.x, z: op.z, r: op.r, s: op.s });
-    }
-  }
-  return JSON.stringify({ v: TERRAIN_EDITS_VERSION, rev: edits.revision, seq: edits.seq, ops });
-}
-
-/**
- * 反序列化（接受 JSON 字符串或已解析的 plain 对象）→ 活体编辑仓库。
- * 空串/缺字段 → 新仓库；shape 算子缓存由 ensureOpCache 在求值时确定性重建。
- */
-function deserializeEdits(json, field) {
-  let plain = json;
-  if (typeof json === 'string') {
-    plain = json.trim().length === 0 ? null : JSON.parse(json);
-  }
-  const edits = field ? createTerrainEdits(field) : {
-    planetId: null,
-    revision: 0,
-    seq: 0,
-    ops: [],
-    byChunk: new Map(),
-    flora: [],
-  };
-  if (!plain || typeof plain !== 'object') return edits;
-  edits.revision = Number.isFinite(plain.rev) ? plain.rev : 0;
-  edits.seq = Number.isFinite(plain.seq) ? plain.seq : 0;
-  const ops = Array.isArray(plain.ops) ? plain.ops : [];
-  if (!field) {
-    // 轻载模式：仅回放日志与植被（无场可标脏）
-    for (const raw of ops) {
-      const op = { ...raw };
-      edits.ops.push(op);
-      if (op.kind === 'plant') edits.flora.push({ id: op.id, x: op.x, z: op.z, prefabId: op.prefabId, seed: op.seed });
-    }
-    return edits;
-  }
-  // 带场重放：逐条 applyEdit 重建 byChunk 索引与脏标记（确定性；revision/seq 以日志为准）
-  for (const raw of ops) {
-    if (raw && (SHAPE_KINDS.has(raw.kind) || raw.kind === 'plant' || raw.kind === 'removePlant')) {
-      edits.revision = Math.max(0, edits.revision - 1); // applyEdit 会 +1，维持存档 revision
-      if (raw.kind === 'plant') edits.seq = Math.max(0, edits.seq - 1); // applyEdit 会 +1
-      // 紧凑键 (r/s) → applyEdit 规范键 (radius/strength)
-      applyEdit(field, edits, {
-        kind: raw.kind,
-        x: raw.x,
-        z: raw.z,
-        radius: raw.r,
-        strength: raw.s,
-        id: raw.id,
-        prefabId: raw.prefabId,
-        seed: raw.seed,
-        plantId: raw.plantId,
-      });
-    }
-  }
-  if (Number.isFinite(plain.rev)) edits.revision = plain.rev;
-  if (Number.isFinite(plain.seq)) edits.seq = plain.seq;
-  return edits;
-}
-
-// ———— 建筑落位校验（doc7 TASK-5.2 / §6.8；doc7:188） ————
-
-/** 主题 → 桩基类型（未列主题回退标准承台） */
-function foundationTypeForTheme(themeId) {
-  return THEME_PILING[themeId] || 'standard';
-}
-
-/**
- * 建筑底面 9 点三角网格投影校验：
- * 采样点 = 中心 + 4 角 + 4 边中点（footprintHalfM 正方形），逐点 sampleTerrain。
- * @returns {{ ok:boolean, code?:'SLOPE_TOO_STEEP'|'HEIGHT_DELTA'|'OUT_OF_FIELD',
- *             maxSlopeDeg:number, maxHeightDeltaM:number,
- *             foundation?:{ kind:'flat'|'graded', piling:string, etaHeightM:number } }}
- * 通过时 foundation.etaHeightM = 9 点均高（承台基准高），piling 按主题解析。
- */
-function checkBuildingPlacement(field, x, z, opts = {}) {
-  const half = num(opts.footprintHalfM, BUILDING_PLACEMENT.footprintHalfM);
-  const maxSlope = num(opts.maxSlopeDeg, BUILDING_PLACEMENT.maxSlopeDeg);
-  const maxDelta = num(opts.maxHeightDeltaM, BUILDING_PLACEMENT.maxHeightDeltaM);
-
-  const offs = [[0, 0], [half, half], [-half, half], [half, -half], [-half, -half],
-    [half, 0], [-half, 0], [0, half], [0, -half]];
-  let maxY = -Infinity;
-  let minY = Infinity;
-  let sum = 0;
-  let n = 0;
-  let maxSlopeSeen = 0;
-
-  for (const [ox, oz] of offs) {
-    const px = x + ox;
-    const pz = z + oz;
-    const s = sampleTerrain(field, px, pz);
-    if (!s) {
-      return { ok: false, code: 'OUT_OF_FIELD', maxSlopeDeg: NaN, maxHeightDeltaM: NaN };
-    }
-    const sl = slopeAt(field, px, pz);
-    if (Number.isFinite(sl) && sl > maxSlopeSeen) maxSlopeSeen = sl;
-    maxY = Math.max(maxY, s.y);
-    minY = Math.min(minY, s.y);
-    sum += s.y;
-    n += 1;
-  }
-
-  const delta = maxY - minY;
-  if (maxSlopeSeen > maxSlope) {
-    return { ok: false, code: 'SLOPE_TOO_STEEP', maxSlopeDeg: maxSlopeSeen, maxHeightDeltaM: delta };
-  }
-  if (delta > maxDelta) {
-    return { ok: false, code: 'HEIGHT_DELTA', maxSlopeDeg: maxSlopeSeen, maxHeightDeltaM: delta };
-  }
-  return {
-    ok: true,
-    maxSlopeDeg: maxSlopeSeen,
-    maxHeightDeltaM: delta,
-    foundation: {
-      kind: delta > BUILDING_PLACEMENT.foundationGradeDeltaM ? 'graded' : 'flat',
-      piling: foundationTypeForTheme(opts.themeId),
-      etaHeightM: sum / n,
-    },
-  };
-}
-
-// ———— P1-2 殖民地等高线感知布局规划器（doc8 §3.2 议题 B2 仲裁落地） ————
-
-/** 黄金角（与 doc8 B2 一致）与过渡环带半径（22m–75m） */
-const COLONY_LAYOUT = { goldenAngle: 2.399963229728653, ringMinM: 22, ringMaxM: 75, footprintHalfM: 2.2, maxSlopeDeg: 16, maxHeightDeltaM: 2.2, minSpacingM: 6, skirtDepthM: 1.8 };
-
-/**
- * 等高线感知的殖民地布局规划（纯函数、确定性、无 DOM）：
- *  - groundBuildings（PlaceBuilding 已定三维坐标）原样保留；
- *  - 未定坐标建筑在过渡环带（22–75m）内按黄金角候选序列搜索
- *    checkBuildingPlacement（9 点坡度 ≤16°、高差 ≤2.2m）的平坦台地；
- *  - mining 类优先吸附 TERRAIN_FLAGS.ORE 标记点；
- *  - 基准高程 = 9 点最高点 × 0.35 + 均高 × 0.65（防止任何一角插入山体）；
- *  - 朝向对齐等高线切线（梯度垂线）。
- * @param {object} field terrainField 场域
- * @param {{entries:Array<{defId:string,state?:string}>, groundBuildings?:Array, center:[number,number], categoryOf:(defId:string)=>string, themeId?:string}} opts
- * @returns {Array<{defId:string,state:string,fx:number,fz:number,y:number,rotY:number,category:string,placement:Object|null}>}
- */
-function planColonyLayout(field, opts = {}) {
-  const L = COLONY_LAYOUT;
-  const entries = opts.entries || [];
-  const ground = opts.groundBuildings || [];
-  const center = opts.center || [0, 0];
-  const categoryOf = opts.categoryOf || (() => 'default');
-  const out = [];
-  const placed = [];
-  for (const gb of ground) {
-    if (!gb || !Number.isFinite(gb.x) || !Number.isFinite(gb.z)) continue;
-    placed.push({ x: gb.x, z: gb.z });
-    const chk = checkBuildingPlacement(field, gb.x, gb.z, { footprintHalfM: L.footprintHalfM, maxSlopeDeg: L.maxSlopeDeg, maxHeightDeltaM: L.maxHeightDeltaM });
-    out.push({ defId: gb.defId || 'default', state: gb.state || 'built', fx: gb.x, fz: gb.z, y: gb.y != null ? gb.y : (Number.isFinite(chk.baseY) ? chk.baseY : 0), rotY: gb.rotY || 0, category: categoryOf(gb.defId || 'default'), placement: chk });
-  }
-  for (let i = 0; i < entries.length && out.length < 24; i++) {
-    const e = entries[i];
-    const cat = categoryOf(e.defId);
-    let chosen = null;
-    let lastChk = null;
-    let chosenMaxY = 0;
-    let chosenAvgY = 0;
-    // 黄金角候选序列：过渡环带内的确定性平地寻址（最多 1200 候选；崎岖主题如熔岩/黑曜平坦台地稀疏，需大搜索量）
-    for (let k = 0; k < 1200 && !chosen; k++) {
-      const a = k * L.goldenAngle;
-      const r = L.ringMinM + (L.ringMaxM - L.ringMinM) * ((k * 0.6180339887) % 1);
-      const fx = center[0] + Math.cos(a) * r;
-      const fz = center[1] + Math.sin(a) * r;
-      const chk = checkBuildingPlacement(field, fx, fz, { footprintHalfM: L.footprintHalfM, maxSlopeDeg: L.maxSlopeDeg, maxHeightDeltaM: L.maxHeightDeltaM });
-      lastChk = chk;
-      if (!chk.ok) continue;
-      // 自采样 9 点：chk 不外露 maxY/avgY/flags，布局器自行求基准高程与 ORE 判定
-      const offs = [[0, 0], [2.2, 2.2], [-2.2, 2.2], [2.2, -2.2], [-2.2, -2.2], [2.2, 0], [-2.2, 0], [0, 2.2], [0, -2.2]];
-      let maxY = -Infinity; let sum = 0; let flagsAny = 0; let n = 0;
-      for (const [ox, oz] of offs) {
-        const sp = sampleTerrain(field, fx + ox, fz + oz);
-        if (!sp) continue;
-        maxY = Math.max(maxY, sp.y); sum += sp.y; flagsAny |= sp.flags; n++;
-      }
-      if (!n) continue;
-      const avgY = sum / n;
-      chosenMaxY = maxY;
-      chosenAvgY = avgY;
-      // 间距：距已落位建筑 ≥ minSpacingM
-      let spaced = true;
-      for (const q of placed) {
-        if (Math.hypot(q.x - fx, q.z - fz) < L.minSpacingM) { spaced = false; break; }
-      }
-      if (!spaced) continue;
-      // mining 优先 ORE 标记点（前 60 个候选内未命中 ORE 则放宽，保证必然落位）
-      if (cat === 'mining' && k < 200 && !(flagsAny & 16)) continue;
-      chosen = { fx, fz, chk };
-    }
-    if (!chosen && lastChk && lastChk.ok) chosen = { fx: center[0], fz: center[1], chk: lastChk };
-    if (!chosen) continue; // 生成质量门禁未过 → 该建筑本轮不落位（绝不盲盒撒点）
-    placed.push({ x: chosen.fx, z: chosen.fz });
-    const chk = chosen.chk;
-    // 基准高程：最高点 0.35 + 均高 0.65 加权（doc8 B2 公式）
-    const y = chosenMaxY * 0.35 + chosenAvgY * 0.65;
-    // 朝向：等高线切线 = 梯度垂线
-    const gx = (sampleTerrain(field, chosen.fx + 2, chosen.fz).y - sampleTerrain(field, chosen.fx - 2, chosen.fz).y) || 0;
-    const gz = (sampleTerrain(field, chosen.fx, chosen.fz + 2).y - sampleTerrain(field, chosen.fx, chosen.fz - 2).y) || 0;
-    const rotY = Math.abs(gx) + Math.abs(gz) > 1e-6 ? Math.atan2(gz, gx) + Math.PI / 2 : (i * 0.618) % 1 * Math.PI * 2;
-    out.push({ defId: e.defId, state: e.state || 'built', fx: chosen.fx, fz: chosen.fz, y, rotY, category: cat, placement: chk });
-  }
-  return out;
-}
-
-Object.assign(__exports, { TERRAIN_EDITS_VERSION, BRUSH_LIMITS, BUILDING_PLACEMENT, createTerrainEdits, applyEdit, attachTerrainEdits, rebuildDirtyChunks, serializeEdits, deserializeEdits, foundationTypeForTheme, checkBuildingPlacement, COLONY_LAYOUT, planColonyLayout });
 
 });
 __register("src/domain/economy/market.js", function (__exports, __require) {
@@ -29197,6 +30609,11 @@ const { derivePlanetEcology: derivePlanetEcology, ensurePlanetEco: ensurePlanetE
 const { ensurePlanetRuin: ensurePlanetRuin, deriveRuinLayout: deriveRuinLayout, towerRotOf: towerRotOf, RUIN_STAGE: RUIN_STAGE } = __require("src/domain/ground/monolithRuins.js");
 const { derivePlanetSeedsExtended: derivePlanetSeedsExtended } = __require("src/domain/ground/planetSeeds.js");
 const { NODE_IDX: NODE_IDX, BELT_IDX: BELT_IDX, beltIsCrossed: beltIsCrossed } = __require("src/domain/industry/planetaryLogistics.js");
+// —— doc20 WP-1/WP-2/WP-4：动态气象灾变与阶梯威胁 ——
+const { tickPlanetWeather: tickPlanetWeather, stormDepthAt: stormDepthAt, isSheltered: isSheltered, STORM_KINDS: STORM_KINDS, ensurePlanetThreat: ensurePlanetThreat } = __require("src/domain/ground/planetWeather.js");
+const { breakLeviathanPart: breakLeviathanPart } = __require("src/domain/ground/planetaryThreat.js");
+// —— doc21 WP-1/WP-5：聚落居民三班倒确定性样条通勤 ——
+const { ensurePlanetSoc: ensurePlanetSoc, deriveColonyAgents: deriveColonyAgents, residentTau: residentTau, residentPhaseOf: residentPhaseOf, bakeCommuteSpline: bakeCommuteSpline, sampleSplinePos: sampleSplinePos, MAX_RESIDENT_AGENTS: MAX_RESIDENT_AGENTS } = __require("src/domain/planets/colonyGovernance.js");
 const { faunaPhaseOffset: faunaPhaseOffset } = __require("src/render/gl/BioFloraPass.js");
 
 // ———— 常量 ————————————————————————————————————————————————
@@ -30152,6 +31569,10 @@ const GroundView = {
     this.missionId = mission ? mission.id : null;
     this._layoutColony();
     this._conveyor = this._buildConveyorPaths();
+    // —— doc21 WP-1：32 名代表性居民三班倒确定性样条通勤（CPU 零寻路，逐帧代数插值） ——
+    this._residentSplines = null;
+    this._residentView = [];
+    this._setupResidents();
 
     // —— doc18 WP-2/3/4：异星生态物种名录 + 五阶段遗迹实例化（确定性派生，零 rng 消费） ——
     this._species = derivePlanetEcology(w, planet);   // null = 不育天体（气态巨行星/碎环月）
@@ -30165,6 +31586,11 @@ const GroundView = {
     this._visorObserved = false;
     this._pendingMastery = [];       // 采样后基因逆向延时队列 [{speciesIdx, t}]
     this._warden = null;             // 阶段 4 机偶守卫（视图侧遭遇战，域侧仅存战果位）
+    // doc20：气象锋面状态 + Tier 4 利维坦遭遇战（视图侧 3600HP，域侧仅存战果位）
+    ensurePlanetThreat(planet);
+    this._stormState = null;
+    this._leviathan = null;
+    this._stormWarnShown = 0;
     this._buildBioInstances();
 
     // —— P0-1 修复（doc9 §3.1）：首帧初始位置对齐真实地表 ——
@@ -31052,7 +32478,84 @@ const GroundView = {
     return false; // 未消费：回退 POI 采样
   },
 
+  /**
+   * doc21 WP-1：居民代理样条预烘焙（home→work / work→svc / svc→home 三程，
+   * Catmull-Rom 4 控制点 + 地形贴合；XZ 由样条给出，Y 逐帧贴 sampleTerrain）。
+   */
+  _setupResidents() {
+    if (!this.planet || !this.colony || !this._buildingLayout.length) return;
+    const soc = ensurePlanetSoc(this.planet);
+    const agents = deriveColonyAgents(this.app.world, this.planet, this.colony);
+    const L = this._buildingLayout;
+    const pick = (idx) => L[Math.min(idx, L.length - 1)] || null;
+    const sampleFn = (field, x, z) => sampleTerrain(field, x, z);
+    const splines = [];
+    for (const ag of agents) {
+      const home = pick(ag[2]);
+      const work = pick(ag[3]);
+      const svc = pick(ag[4]);
+      if (!home || !work) continue;
+      splines.push({
+        agent: ag,
+        go: bakeCommuteSpline(home, work, svc, this.field, sampleFn),
+        back: bakeCommuteSpline(svc || work, home, svc, this.field, sampleFn),
+        leisure: bakeCommuteSpline(work, svc || work, home, this.field, sampleFn),
+      });
+    }
+    this._residentSplines = splines;
+    this._residentView = splines.map((s) => ({
+      x: s.go[0][0], y: s.go[0][1], z: s.go[0][2], rotY: 0, walk: false, phase: s.agent[0] * 0.13 % 1,
+    }));
+  },
+
+  /**
+   * doc21 WP-1.3：四时相状态机（τ∈[0,1)：0.00-0.12 通勤上岗 / 0.12-0.55 作业 /
+   * 0.55-0.75 休闲医疗 / 0.75-1.00 归家休憩）；32 名居民每帧 CPU < 0.02ms。
+   */
+  _updateResidents(dt) {
+    void dt;
+    if (!this._residentSplines || !this._residentView.length) return;
+    const secs = this._clock;
+    for (let i = 0; i < this._residentSplines.length && i < MAX_RESIDENT_AGENTS; i++) {
+      const rs = this._residentSplines[i];
+      const view = this._residentView[i];
+      const tau = residentTau(rs.agent, secs);
+      const phase = residentPhaseOf(tau);
+      let pos;
+      let walk = false;
+      if (phase === 1) {
+        // 作业生产期：驻留工作岗位（样条末锚点）
+        const last = rs.go[rs.go.length - 1];
+        pos = { x: last[0], y: last[1], z: last[2] };
+      } else if (phase === 2) {
+        // 休闲医疗期：work → svc
+        const lt = (tau - 0.55) / 0.20;
+        pos = sampleSplinePos(rs.leisure, lt);
+        walk = true;
+      } else if (phase === 3) {
+        // 归家休憩期：svc/home → home
+        const lt = (tau - 0.75) / 0.25;
+        pos = sampleSplinePos(rs.back, lt);
+        walk = true;
+      } else {
+        // 通勤上岗期：home → work
+        const lt = tau / 0.12;
+        pos = sampleSplinePos(rs.go, lt);
+        walk = true;
+      }
+      // Y 逐帧贴合地表高程（SOC-01 零穿地零悬空的确定性保证）
+      const h = this._groundAt(pos.x, pos.z);
+      view.x = pos.x;
+      view.z = pos.z;
+      view.y = Number.isFinite(h) ? h : pos.y;
+      view.walk = walk;
+      const head = rs.go[rs.go.length - 1];
+      view.rotY = Math.atan2(-(head[2] - rs.go[0][2]), head[0] - rs.go[0][0]) + (phase >= 2 ? Math.PI : 0);
+    }
+  },
+
   /** doc18 WP-3：阶段 4 机偶守卫（视图侧遭遇战实体；域侧仅存战果位） */
+
   _spawnWarden() {
     const L = this._ruinLayout;
     if (!L) return;
@@ -31105,6 +32608,114 @@ const GroundView = {
         c.hp = Math.max(0, c.hp - 12);
         c.flash = 1;
         if (c.hp <= 0) toast('警告：先驱者机偶重创外骨骼（撤离或继续交战）', { kind: 'warn' });
+      }
+    }
+  },
+
+  /**
+   * doc20 WP-2：风暴环境扣盾（三重庇护判定：FOUNDATION 屋檐 3.5m / 热源穹顶 /
+   * 外骨骼抗性模块）。酸雹 4.5 HP/s；暴露判定用 stormDepthAt（CPU 与 GLSL 同源）。
+   */
+  _tickStormDamage(dt) {
+    const st = this._stormState;
+    if (!st || !st.kind || !st.kind.dmgPerSec || st.intensityPermille < 400) return;
+    const c2 = this.char3d;
+    const depth = stormDepthAt(this.planet.threat.storm, c2.x, c2.z);
+    if (depth <= 0.45) return; // 锋外/边缘豁免
+    const exoMods = this._exoModSet();
+    const foundations = (this.planet.groundBuildings || []).map((gb) => ({ x: gb.x, z: gb.z, flags: 0x2 }));
+    const heatZones = (this._themePayload && Array.isArray(this._themePayload.terrain && this._themePayload.terrain.heatZones))
+      ? this._themePayload.terrain.heatZones : [];
+    if (isSheltered(c2, foundations, heatZones, exoMods, st.kind.kind)) return;
+    c2.hp = Math.max(0, c2.hp - st.kind.dmgPerSec * dt);
+    c2.flash = Math.max(c2.flash, 0.4);
+    if (c2.hp <= 0 && !this._stormDeadWarned) {
+      this._stormDeadWarned = true;
+      toast('致命环境伤害：角色被风暴击倒（撤离至屋檐/穹顶或装配抗性模块）', { kind: 'warn' });
+    }
+  },
+
+  /** 已装配外骨骼抗性模块集（玩家科研 completed 中的 exo_mod_* 科技） */
+  _exoModSet() {
+    const fid = this.app.world.playerFactionId;
+    const rs = fid && this.app.world.research ? this.app.world.research[fid] : null;
+    return new Set(((rs && rs.completed) || []).filter((t) => String(t).startsWith('exo_mod')));
+  },
+
+  /**
+   * doc20 WP-4：Tier 4 利维坦遭遇战（视图侧 3600 HP；部位破坏 → 6s 瘫硬直；
+   * 讨伐战果经 ReportLeviathanDefeated 命令回写域态）。
+   */
+  _syncLeviathan(dt) {
+    const th = this.planet && this.planet.threat;
+    const lev = th && th.leviathan;
+    if (!lev || !lev.active) {
+      this._leviathan = null;
+      return;
+    }
+    if (!this._leviathan) {
+      const gy = this._groundAt(lev.wx, lev.wz);
+      this._leviathan = {
+        x: lev.wx, z: lev.wz, y: Number.isFinite(gy) ? gy : 0,
+        hp: 3600, hpMax: 3600, facing: 0, state: 'chase',
+        atkCd: 2.0, flash: 0, staggerT: 0, dmgSincePart: 0,
+        speed: 2.2, attackR: 7.0, aggroR: 90,
+      };
+      toast('警报：超巨型利维坦苏醒——全身 3600 HP，击碎背部晶核/毒素腺囊触发瘫痪！', { kind: 'warn' });
+    }
+    const lv = this._leviathan;
+    const c3 = this.char3d;
+    lv.flash = Math.max(0, lv.flash - dt * 3);
+    // 部位破坏瘫痪窗口（域侧 breakLeviathanPart 回写 staggerT → 视图侧消费）
+    if (lev.staggerT > 0) {
+      lv.staggerT = lev.staggerT;
+      return; // 瘫痪硬直：不追击不攻击（域侧递减由战斗层节拍驱动）
+    }
+    if (this._oneShot.attack) {
+      const kind = this._oneShot.attack;
+      this._oneShot.attack = null;
+      const reach = kind === 'ranged' ? 16 : 5.0;
+      const d3 = Math.hypot(lv.x - c3.x, lv.z - c3.z);
+      if (d3 <= reach) {
+        const dmg = kind === 'light' ? 30 : kind === 'heavy' ? 55 : 40;
+        lv.hp -= dmg;
+        lv.flash = 1;
+        lv.dmgSincePart += dmg;
+        // 每 600 伤害触发一次部位破坏（域级 stagger 6.0s 状态机）
+        if (lv.dmgSincePart >= 600) {
+          lv.dmgSincePart = 0;
+          const part = !this.planet.threat.leviathan.backCoreBroken ? 'back_core' : (!this.planet.threat.leviathan.toxinSacsBroken ? 'toxin_sacs' : null);
+          if (part) {
+            this.app.dispatch('BreakLeviathanPart', { planetId: this.planet.id, part });
+            this._leviathan.staggerT = 6.0;
+            toast('部位击碎！利维坦瘫痪 6 秒（弱点技能永久关闭）', { kind: 'ok' });
+          }
+        }
+        if (lv.hp <= 0) {
+          this.app.dispatch('ReportLeviathanDefeated', { planetId: this.planet.id });
+          const dead = this.planet.threat.leviathan && !this.planet.threat.leviathan.active;
+          this._leviathan = null;
+          toast(dead ? '利维坦讨伐成功！PTI 归零，先驱者奇异物质 ×5 入账' : '讨伐上报失败', { kind: dead ? 'ok' : 'warn' });
+          return;
+        }
+      }
+    }
+    const d4 = Math.hypot(lv.x - c3.x, lv.z - c3.z);
+    if (d4 > lv.attackR && d4 < lv.aggroR) {
+      const nx = lv.x + ((c3.x - lv.x) / d4) * lv.speed * dt;
+      const nz = lv.z + ((c3.z - lv.z) / d4) * lv.speed * dt;
+      lv.x = clamp(nx, FIELD_WALK_MIN, FIELD_WALK_MAX);
+      lv.z = clamp(nz, FIELD_WALK_MIN, FIELD_WALK_MAX);
+      const gy2 = this._groundAt(lv.x, lv.z);
+      if (Number.isFinite(gy2)) lv.y = gy2;
+      lv.facing = Math.atan2(c3.z - lv.z, c3.x - lv.x);
+    } else if (d4 <= lv.attackR) {
+      lv.atkCd -= dt;
+      if (lv.atkCd <= 0) {
+        lv.atkCd = 2.0;
+        c3.hp = Math.max(0, c3.hp - 22);
+        c3.flash = 1;
+        if (c3.hp <= 0) toast('致命打击：利维坦重创外骨骼（呼叫轨道支援或撤离）', { kind: 'warn' });
       }
     }
   },
@@ -31247,6 +32858,20 @@ const GroundView = {
     }
     this._updateVisor(dt);
     this._updateWarden(dt);
+    // doc20 WP-1：五阶段气象状态机推进 + uStormFront 下发 + 酸蚀扣盾 + 利维坦同步
+    this._stormState = this.planet ? tickPlanetWeather(this.app.world, this.planet, this._clock, dt) : null;
+    if (this.scene) {
+      const st2 = this._stormState;
+      if (st2 && st2.intensityPermille > 0) {
+        const dirRad2 = (st2.dirDeg * Math.PI) / 180;
+        this.scene.setStormFront([Math.cos(dirRad2), Math.sin(dirRad2), st2.frontPosM, st2.intensityPermille / 1000]);
+      } else {
+        this.scene.setStormFront([0, 0, -400, 0]);
+      }
+    }
+    this._tickStormDamage(dt);
+    this._syncLeviathan(dt);
+    this._updateResidents(dt);
     this._freePhysics(dt);
     this._updateFx(dt);
     this._renderFrame(null, dt);
@@ -32243,7 +33868,8 @@ const GroundView = {
       },
       camera: { yaw: this.cam.yaw, pitch: this.cam.pitch, dist: this.cam.dist },
       enemies: [],
-      colonists: this._buildingColonists.slice(),   // 拷贝：后续会并入任务 NPC/队友
+      colonists: this._buildingColonists.slice()
+        .concat(Array.isArray(this._residentView) ? this._residentView : []), // doc21：32 居民合流 chars 实例通道（1 DC）
       conveyor: { paths: this._conveyor },
       effects: {
         slashes: this._fx.slashes,
@@ -32756,6 +34382,40 @@ const GroundView = {
         ctx.font = 'bold 11px "Segoe UI", system-ui, sans-serif';
         ctx.fillText(`先驱者巨石遗迹 · ${stageTxt}`, W / 2 - 140, 77);
       }
+    }
+
+    // —— doc20 WP-1：气象锋面告警横幅（五阶段状态机 HUD：气压计报警） ——
+    if (this._stormState && this._stormState.intensityPermille > 0) {
+      const stS = this._stormState;
+      const phaseZh = ['晴朗', '灾害预警', '灾害发展', '峰值过境', '恢复期'][stS.phase] || '';
+      const depthHere = stormDepthAt(this.planet.threat.storm, this.char3d.x, this.char3d.z);
+      const warn = stS.phase <= 2 ? 'rgba(60,30,8,0.8)' : 'rgba(50,10,10,0.85)';
+      ctx.fillStyle = warn;
+      ctx.fillRect(W / 2 - 170, 62, 340, 22);
+      ctx.strokeStyle = stS.phase <= 2 ? 'rgba(230,150,60,0.6)' : 'rgba(230,70,60,0.7)';
+      ctx.strokeRect(W / 2 - 169.5, 62.5, 339.5, 21.5);
+      ctx.fillStyle = '#f2c890';
+      ctx.font = 'bold 11px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText(`${stS.kind.nameZh} · ${phaseZh} · 锋面 ${Math.round(stS.frontPosM)}m · 本地浸没 ${Math.round(depthHere * 100)}%`, W / 2 - 160, 77);
+    }
+
+    // —— doc20 WP-4：利维坦血条 + 部位状态 ——
+    if (this._leviathan) {
+      const lv = this._leviathan;
+      const bw2 = 300;
+      const bx2 = W / 2 - bw2 / 2;
+      const by2 = 90;
+      ctx.fillStyle = 'rgba(8,14,22,0.78)';
+      ctx.fillRect(bx2, by2, bw2, 16);
+      ctx.fillStyle = '#a03a3a';
+      ctx.fillRect(bx2 + 1, by2 + 1, (bw2 - 2) * Math.max(0, lv.hp / lv.hpMax), 14);
+      ctx.strokeStyle = 'rgba(240,120,80,0.7)';
+      ctx.strokeRect(bx2 + 0.5, by2 + 0.5, bw2 - 1, 15);
+      ctx.fillStyle = '#f2d0c0';
+      ctx.font = 'bold 10px "Segoe UI", system-ui, sans-serif';
+      const levDom = this.planet.threat.leviathan || {};
+      const partsTxt = `背部晶核${levDom.backCoreBroken ? '碎' : '存'}/腺囊${levDom.toxinSacsBroken ? '碎' : '存'}${lv.staggerT > 0 ? ' · 瘫痪!' : ''}`;
+      ctx.fillText(`利维坦 ${Math.max(0, Math.round(lv.hp))}/${lv.hpMax} · ${partsTxt}`, bx2 + 8, by2 + 11);
     }
 
     // —— doc18 WP-3：机偶守卫血条 ——
@@ -36004,6 +37664,17 @@ class PlanetSurfaceScene {
     this._lastThemeRef = null; // 强制下一帧重新合并 sceneData.theme
   }
 
+  /**
+   * doc20 WP-1.3：风暴锋面统一下发（地形 FS 锋面/雾距收窄 + 天幕方向压暗）。
+   * @param {Array<number>} v [cos(dir), sin(dir), frontAdvanceMeters, intensity 0..1]
+   * @returns {PlanetSurfaceScene} this
+   */
+  setStormFront(v) {
+    if (this._terrain) this._terrain.setStormFront(v);
+    if (this._atmosphere) this._atmosphere.setStormFront(v);
+    return this;
+  }
+
   /** 视觉行星半径（米）透传（默认 1800，doc7 曲率公式） */
   setPlanetRadius(r) {
     if (this._terrain) this._terrain.setPlanetRadius(r);
@@ -36840,6 +38511,8 @@ uniform float uTime;
 uniform float uHdr;
 uniform int uSkyMode;      /* 0=clear 1=aurora 2=gas 3=dust */
 uniform vec3 uModeParams;  /* x=auroraStrength y=gasHeight(仰角阈值) z=dustDensity */
+/* doc20 WP-1.3：uStormFront = (cos(dir), sin(dir), frontAdvanceMeters, intensity 0..1) */
+uniform vec4 uStormFront;
 out vec4 fragColor;
 float hash12(vec2 p) {
   vec3 p3 = fract(vec3(p.x, p.y, p.x) * 0.1031);
@@ -36901,6 +38574,12 @@ void main() {
     float band = smoothstep(-0.05, 0.35, up) * smoothstep(0.9, 0.2, up);
     col = mix(col, mix(col, vec3(0.62, 0.47, 0.30), streak), dens * band * (0.35 + 0.65 * streak));
     col = mix(col, vec3(0.55, 0.42, 0.28), dens * smoothstep(0.12, -0.2, up) * 0.6);
+  }
+  /* doc20 WP-1.3：锋面方向天幕压暗（朝向锋面一侧；dir 由反投影重构） */
+  if (uStormFront.w > 0.01) {
+    float toStorm = clamp(dot(normalize(dir.xz), uStormFront.xy), 0.0, 1.0);
+    float skyStorm = uStormFront.w * (0.35 + 0.65 * toStorm);
+    col = mix(col, col * vec3(0.75, 0.62, 0.55), skyStorm * 0.75);
   }
   fragColor = vec4(col * uHdr, 1.0);
 }`;
@@ -36992,13 +38671,15 @@ class PlanetAtmosphere {
     this.tier = tier;
     this._destroyed = false;
     this.stats = { drawCalls: 0, weatherCount: 0 };
+    // doc20：风暴锋面状态（setStormFront；缺省 = 无风暴）
+    this._stormFront = [0, 0, -400, 0.0];
     const gl = this.gl;
 
     this.progSky = glc.createProgram(SKY_VS, SKY_FS, { label: 'atmosphere:sky', attributes: { aPos: 0 } });
     this.progWeather = glc.createProgram(WEATHER_VS, WEATHER_FS, { label: 'atmosphere:weather', attributes: { aPos: 0 } });
     this._uSky = locMap(gl, this.progSky, [
       'uInvVP', 'uCamPos', 'uZenith', 'uHorizon', 'uGround', 'uSunDir', 'uSunColor',
-      'uStars', 'uTime', 'uHdr', 'uSkyMode', 'uModeParams',
+      'uStars', 'uTime', 'uHdr', 'uSkyMode', 'uModeParams', 'uStormFront',
     ]);
     this._uWx = locMap(gl, this.progWeather, [
       'uVP', 'uCamPos', 'uBox', 'uWind', 'uTime', 'uFall', 'uSize', 'uRight', 'uUp',
@@ -37096,6 +38777,17 @@ class PlanetAtmosphere {
    * @param {WebGL2RenderingContext} gl
    * @param {{invVp:Float32Array, eye:Array<number>, time:number, hdr:number}} view
    */
+  /**
+   * doc20 WP-1.3：风暴锋面天幕 uniform（[cos(dir), sin(dir), frontM, intensity]）。
+   * @private 状态槽在构造器初始化
+   */
+  setStormFront(v) {
+    if (Array.isArray(v) && v.length >= 4 && v.every(Number.isFinite)) {
+      this._stormFront = [v[0], v[1], v[2], v[3]];
+    }
+    return this;
+  }
+
   drawSky(gl, view) {
     if (this._destroyed || this.tier >= 3 || !gl || gl.isContextLost()) return 0;
     const v = view || {};
@@ -37120,6 +38812,9 @@ class PlanetAtmosphere {
     gl.uniform1f(u.uHdr, v.hdr != null ? v.hdr : 1.0);
     gl.uniform1i(u.uSkyMode, this._skyMode);
     gl.uniform3fv(u.uModeParams, this._modeParams);
+    if (u.uStormFront) {
+      gl.uniform4f(u.uStormFront, this._stormFront[0], this._stormFront[1], this._stormFront[2], this._stormFront[3]);
+    }
     gl.bindVertexArray(this._skyVao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.bindVertexArray(null);
@@ -37321,6 +39016,8 @@ uniform vec3 uMatCol2;
 uniform vec3 uMatCol3;
 uniform vec4 uThemeFx;      /* x=waterLevel y=biolumePulse z=lavaEmissive w=debugMode */
 uniform vec4 uFootsteps[8]; /* (x, z, triggerTime, strength) */
+/* doc20 WP-1.3：uStormFront = (cos(dir), sin(dir), frontAdvanceMeters, intensity 0..1) */
+uniform vec4 uStormFront;
 out vec4 fragColor;
 
 float hash31(vec3 p) {
@@ -37438,8 +39135,20 @@ void main() {
     lit *= exp(-depth * vec3(0.12, 0.038, 0.014)); /* 红衰减最快，蓝青穿透最深 */
   }
 
-  /* ———— 距离雾 ———— */
-  float fog = smoothstep(uFogRange.x, uFogRange.y, distance(vWorldPos, uCamPos));
+  /* ———— doc20 WP-1.3：动态风暴锋面（连续平面波，GPU 解析求值，零粒子对象） ———— */
+  float stormStrength = uStormFront.w;
+  float localStorm = 0.0;
+  if (stormStrength > 0.01) {
+    float proj = vWorldPos.x * uStormFront.x + vWorldPos.z * uStormFront.y;
+    localStorm = smoothstep(-28.0, 28.0, uStormFront.z - proj) * stormStrength;
+    float gust = noise3D(vec3(vWorldPos.xz * 0.25 - uStormFront.xy * uTime * 3.8, uTime * 0.9));
+    vec3 stormTint = mix(uFogColor, uMatCol3, 0.35);
+    lit = mix(lit, stormTint * (0.65 + 0.35 * gust), localStorm * 0.55);
+  }
+
+  /* ———— 距离雾（锋面内视距压缩至 22%） ———— */
+  vec2 effectiveFogRange = mix(uFogRange, uFogRange * vec2(0.18, 0.22), localStorm);
+  float fog = smoothstep(effectiveFogRange.x, effectiveFogRange.y, distance(vWorldPos, uCamPos));
   fragColor = vec4(mix(lit, uFogColor, fog) * uHdr, 1.0);
 }`;
 
@@ -37488,6 +39197,8 @@ class PlanetTerrainMesh {
     this._heatZoneCount = 0;
     this._themeFx = new Float32Array([-1000.0, 0.0, 0.0, 0.0]); // 水位默认关闭（<-90 视为无水）
     this._footsteps = new Float32Array(32);
+    // doc20：风暴锋面状态（setStormFront 下发；[cx, cz, frontM, intensity]）
+    this._stormFront = [0, 0, -400, 0.0];
     this._fogColor = [0.62, 0.65, 0.70];
     this._fogRange = [60.0, 420.0];
     this._sunDir = [0.42, 0.78, 0.32];
@@ -37504,7 +39215,7 @@ class PlanetTerrainMesh {
     this._u = locMap(gl, this.progTerrain, [
       'uVP', 'uCamPos', 'uWorldOffset', 'uPlanetCurveInv2R', 'uHeatZoneCount', 'uHeatZones', 'uMorphT',
       'uSunDir', 'uSunColor', 'uFogColor', 'uFogRange', 'uTime', 'uHdr',
-      'uMatCol0', 'uMatCol1', 'uMatCol2', 'uMatCol3', 'uThemeFx', 'uFootsteps',
+      'uMatCol0', 'uMatCol1', 'uMatCol2', 'uMatCol3', 'uThemeFx', 'uFootsteps', 'uStormFront',
     ]);
 
     // —— 逐 Chunk GPU 缓存（sync 惰性填充；下标 = cx*4096+cz 不可靠（外部数组序），
@@ -37523,6 +39234,17 @@ class PlanetTerrainMesh {
    * GroundView 集成：offset (-224,0,-224) → 场域中心 (256,256) 对齐体素 (32,32)。
    * @param {Array<number>} o [x,y,z]
    */
+  /**
+   * doc20 WP-1.3：风暴锋面 uniform 下发。
+   * @param {Array<number>} v [cos(dir), sin(dir), frontAdvanceMeters, intensity 0..1]
+   */
+  setStormFront(v) {
+    if (Array.isArray(v) && v.length >= 4 && v.every(Number.isFinite)) {
+      this._stormFront = [v[0], v[1], v[2], v[3]];
+    }
+    return this;
+  }
+
   setWorldOffset(o) {
     if (Array.isArray(o) && o.length >= 3 && o.every(Number.isFinite)) {
       this._worldOffset = [o[0], o[1], o[2]];
@@ -38086,6 +39808,9 @@ class PlanetTerrainMesh {
     } else {
       gl.uniform4fv(u.uHeatZones, this._heatZones);
       gl.uniform4fv(u.uFootsteps, this._footsteps);
+    }
+    if (u.uStormFront) {
+      gl.uniform4f(u.uStormFront, this._stormFront[0], this._stormFront[1], this._stormFront[2], this._stormFront[3]);
     }
     gl.uniform3fv(u.uSunDir, this._sunDir);
     gl.uniform3fv(u.uSunColor, this._sunColor);
@@ -43816,6 +45541,7 @@ const { BUILDINGS: BUILDINGS } = __require("src/content/buildings.js");
 const { RESOURCES: RESOURCES } = __require("src/content/resources.js");
 const { BAL: BAL } = __require("src/content/constants.js");
 const { storageCapacity: storageCapacity, buildingJobSlots: buildingJobSlots } = __require("src/domain/planets/colony.js");
+const { COLONY_EDICTS: COLONY_EDICTS, MAX_RESIDENT_AGENTS: MAX_RESIDENT_AGENTS } = __require("src/domain/planets/colonyGovernance.js");
 
 /** 快照刷新节流间隔（与 App 的 4Hz 快照节奏对齐） */
 const REFRESH_MS = 250;
@@ -44070,6 +45796,7 @@ const ColonyView = {
     this._renderCol1(detail);
     this._renderCol2(detail);
     this._renderCol3(detail);
+    this._renderGovernancePanel(detail);
 
     this._bodyEl.scrollTop = savedTop;
     this._bodyEl.scrollLeft = savedLeft;
@@ -44448,6 +46175,110 @@ const ColonyView = {
   },
 
   /** 第三列：库存全表（数量为 0 的隐藏）+ 账本流水摘要 */
+  /**
+   * doc21 WP-5：总督公署与法典全息子面板——希望/不满双轨进度条 + 繁荣度 +
+   * 七大特化类型标签 + 四大法典签署/废止 + 困境裁决卡（非侵入式）。
+   */
+  _renderGovernancePanel(detail) {
+    const planet = this._planetOf(detail);
+    if (!planet) return;
+    const soc = planet.soc || null;
+    const fid = this.app.world.playerFactionId;
+    const research = fid && this.app.world.research ? this.app.world.research[fid] : null;
+    const panel = el('div', { class: 'vf-panel', style: { marginTop: '10px' } });
+    panel.appendChild(el('div', { class: 'vf-panel-title', text: '总督公署与法典（v0.8）' }));
+
+    if (!soc) {
+      panel.appendChild(el('div', {
+        class: 'vf-faint vf-small',
+        text: '首次进入该行星地表后激活聚落治理微模拟（planet.soc）。',
+      }));
+      this._grid.appendChild(panel);
+      return;
+    }
+
+    // 双轨进度条（希望/不满）+ 繁荣度
+    const bar = (label, v, color) => {
+      const w = el('div', { class: 'vf-row', style: { gap: '6px', alignItems: 'center', margin: '2px 0' } });
+      w.appendChild(el('span', { class: 'vf-small vf-dim', text: label, style: { width: '52px' } }));
+      const track = el('div', { style: { flex: '1', height: '8px', background: 'rgba(255,255,255,0.08)', borderRadius: '4px', overflow: 'hidden' } });
+      const fill = el('div', { style: { width: `${Math.max(0, Math.min(100, v))}%`, height: '100%', background: color } });
+      track.appendChild(fill);
+      w.appendChild(track);
+      w.appendChild(el('span', { class: 'vf-small', text: `${Math.round(v)}`, style: { width: '28px', textAlign: 'right' } }));
+      return w;
+    };
+    panel.appendChild(bar('希望', soc.hope, '#5ab8e0'));
+    panel.appendChild(bar('不满', soc.discontent, '#e06a5a'));
+    panel.appendChild(bar('繁荣度', soc.prosperity, '#7ee2a8'));
+    panel.appendChild(el('div', {
+      class: 'vf-small vf-dim',
+      text: `Φ = 0.40·H + 0.30·(100−D) + 0.15·S_svc + 0.15·η_power = ${soc.prosperity}（税基 ×${(1 + Math.pow(soc.prosperity / 100, 2) * 1.5).toFixed(2)}）`,
+    }));
+
+    // 总督
+    const overseerName = soc.overseerId && this.app.world.entities.characters[soc.overseerId]
+      ? this.app.world.entities.characters[soc.overseerId].name : '（未任命）';
+    panel.appendChild(el('div', { class: 'vf-small', text: `驻星总督：${overseerName}` }));
+
+    // 法典签署/废止
+    const edictsRow = el('div', { class: 'vf-row', style: { gap: '6px', flexWrap: 'wrap', margin: '6px 0' } });
+    for (const eid of Object.keys(COLONY_EDICTS)) {
+      const ed = COLONY_EDICTS[eid];
+      const signed = soc.edicts.includes(eid);
+      edictsRow.appendChild(el('button', {
+        class: signed ? 'vf-btn ok' : 'vf-btn',
+        text: `${signed ? '✓ ' : ''}${ed.nameZh}`,
+        title: ed.desc,
+        onClick: () => {
+          this.app.dispatch(signed ? 'RevokeColonyEdict' : 'SignColonyEdict', { planetId: planet.id, edictId: eid });
+          this.refresh();
+        },
+      }));
+    }
+    panel.appendChild(edictsRow);
+
+    // 困境裁决卡（非侵入式）
+    if (soc.pendingDilemma) {
+      const d = soc.pendingDilemma;
+      const card = el('div', { class: 'vf-panel', style: { background: 'rgba(60,40,10,0.35)', margin: '4px 0' } });
+      card.appendChild(el('div', { class: 'vf-small vf-strong', text: `治理困境：${d.id}` }));
+      for (const ch of d.choices) {
+        card.appendChild(el('button', {
+          class: 'vf-btn vf-small',
+          text: ch.nameZh,
+          onClick: () => {
+            const res = this.app.dispatch('ResolveColonyDilemma', { planetId: planet.id, choiceId: ch.id });
+            if (!res.ok) toast(res.reason || '裁决失败', { kind: 'warn' });
+            this.refresh();
+          },
+        }));
+      }
+      panel.appendChild(card);
+    }
+
+    // 暴动状态
+    if (soc.rebellionActive) {
+      panel.appendChild(el('div', {
+        class: 'vf-small', style: { color: '#e06a5a' },
+        text: '⚠ 武装暴动进行中：派遣地面小队执行 gmt_suppress_rebellion 平叛任务。',
+      }));
+    }
+
+    panel.appendChild(el('div', {
+      class: 'vf-faint vf-small',
+      text: `居民代表 ${soc.agents.length}/${MAX_RESIDENT_AGENTS} 名 · 历史记忆 ${soc.history.length} 条 · 特化类型 ${detail.colonyType || '通用'}`,
+    }));
+    void research;
+    this._grid.appendChild(panel);
+  },
+
+  /** 行星实体解析（detail.planetId → world 实体；缺失安全返回 null） */
+  _planetOf(detail) {
+    return detail && detail.planetId && this.app.world.entities.planets
+      ? this.app.world.entities.planets[detail.planetId] : null;
+  },
+
   _renderCol3(detail) {
     const stockRows = Object.keys(detail.stock || {})
       .filter((rid) => (Number(detail.stock[rid]) || 0) > 0)
@@ -50636,7 +52467,42 @@ function migrateLegacySurfaceWorld(w, owner, sw) {
 
 registerMigration(1, migrate_v1_to_v2);
 
-Object.assign(__exports, { registerMigration, migratePayload, registeredMigrations, migrate_v1_to_v2 });
+/**
+ * doc22 v1.0 WP-4：紧凑 Schema v3 历史存档无损升维。
+ * 为全部行星初始化五大支柱紧凑元组容器（eco/ind/threat/soc/fort）；
+ * 幂等（saveVersion ≥ 3 直接返回）；不改动任何既有字段语义（无损迁移）。
+ * @param {object} w 世界实体
+ * @returns {object} world（同一引用）
+ */
+function migrate_v2_to_v3(w) {
+  if (w.saveVersion >= 3) return w;
+
+  for (const planetId in (w.entities && w.entities.planets ? w.entities.planets : {})) {
+    const planet = w.entities.planets[planetId];
+    if (!planet.eco) {
+      planet.eco = { v: 1, speciesCount: 0, discoveryMask: 0, sampleMask: 0, patches: [], surveyAwarded: false, ruin: null };
+    }
+    if (!planet.ind) {
+      planet.ind = { v: 1, nodes: [], belts: [], grids: [], splitterParity: {}, catapult: null, orbitalBuffer: {} };
+    }
+    if (!planet.threat) {
+      planet.threat = { v: 1, pti: 0, tier: 0, waveCdTicks: 0, leviathan: null, storm: null };
+    }
+    if (!planet.soc) {
+      planet.soc = { v: 1, overseerId: null, edicts: [], agents: [], history: [], pendingDilemma: null, hope: 50, discontent: 10, prosperity: 50, crisisDays: 0, rebellionActive: false };
+    }
+    if (!planet.fort) {
+      planet.fort = { v: 1, ionBatteries: [], planetaryShield: null, supportCd: {} };
+    }
+  }
+
+  w.saveVersion = 3;
+  return w;
+}
+
+registerMigration(2, migrate_v2_to_v3);
+
+Object.assign(__exports, { registerMigration, migratePayload, registeredMigrations, migrate_v1_to_v2, migrate_v2_to_v3 });
 
 });
 __register("src/domain/world/galaxyGen.js", function (__exports, __require) {
@@ -52165,6 +54031,7 @@ const { dailyObjectiveSweep: dailyObjectiveSweep } = __require("src/domain/event
 const { dailyPolicySettlement: dailyPolicySettlement } = __require("src/domain/politics/policy.js");
 const { buildingDef: buildingDef } = __require("src/domain/planets/colony.js");
 const { dailyPopulation: dailyPopulation } = __require("src/domain/planets/colony.js");
+const { tickColonySociety: tickColonySociety, maybeTriggerDilemma: maybeTriggerDilemma } = __require("src/domain/planets/colonyGovernance.js");
 const { closeDailyLedgers: closeDailyLedgers, applyDecay: applyDecay } = __require("src/domain/economy/ledger.js");
 const { updateMarketPrices: updateMarketPrices } = __require("src/domain/economy/market.js");
 const { dailyColonyCommerce: dailyColonyCommerce, restockMarkets: restockMarkets } = __require("src/domain/economy/colonyTrade.js");
@@ -52179,6 +54046,12 @@ registerDaily('population', (world) => {
     const r = dailyPopulation(world, colony);
     if (r.after <= 0 && r.before > 0) {
       emit(world, 'ColonyLost', { colonyId: id, planetId: colony.planetId }, 'colony');
+    }
+    // doc21 v0.8 WP-2：社会微模拟日结算——仅 planet.soc 已初始化的行星（金快照零漂移）
+    const planet = world.entities.planets[colony.planetId];
+    if (planet && planet.soc && planet.soc.v === 1) {
+      tickColonySociety(world, planet, colony);
+      maybeTriggerDilemma(world, planet, colony);
     }
   }
 });
@@ -52338,6 +54211,16 @@ registerHourly('navigation', (world) => {
 });
 
 registerHourly('combat', (world) => {
+  // doc22 WP-3：高地离子炮越级齐射（仅 planet.fort 已初始化的行星；金快照零漂移）
+  for (const pid of Object.keys(world.entities.planets).sort()) {
+    const planet = world.entities.planets[pid];
+    if (!planet.fort || planet.fort.v !== 1) continue;
+    const hostiles = hostileFleetsInSystemOf(world, planet);
+    if (hostiles.length > 0) {
+      const hits = firePlanetaryIonBatteries(world, planet, hostiles);
+      announceIonSalvo(world, planet, hits);
+    }
+  }
   checkEngagements(world);
   stepBattles(world);
   settleCombatCharacterFx(world);
@@ -52395,6 +54278,11 @@ registerHourly('production', (world) => {
         : grid0;
       stepCatapult(world, planet, planet.ind, grid, 1);
       settleOrbitalBuffer(world, planet, planet.ind);
+    }
+    // doc20 WP-3：PTI 微分推进——仅对已初始化 threat 的行星（曾登陆/激活威胁系统），
+    // 未触达星球零写入（金快照 68462446 零漂移红线）
+    if (planet.threat && planet.threat.v === 1) {
+      tickPlanetaryThreatIndex(world, planet);
     }
     void fid;
   }
