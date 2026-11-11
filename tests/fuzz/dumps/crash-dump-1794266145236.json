@@ -1,0 +1,620 @@
+{
+  "timestamp": 1794266145236,
+  "gameVersion": "0.1.0",
+  "seed": 24601,
+  "lastRoute": {
+    "screen": "menu",
+    "param": null
+  },
+  "activeViewId": null,
+  "error": {
+    "name": "Error",
+    "message": "scheduler: atTick 非法",
+    "stack": "Error: scheduler: atTick 非法\n    at Module.schedule (file:///c:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/src/core/scheduler.js:19:39)\n    at file:///c:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/tests/fuzz/StateMachineFuzzer.js:87:64\n    at async StateMachineFuzzer.startStorm (file:///c:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/tests/fuzz/StateMachineFuzzer.js:208:11)\n    at async Object.run (file:///c:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/tests/suites/fuzz-stability.suite.js:75:7)\n    at async runSuitePass (file:///c:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/tests/tools/run-suites.mjs:55:11)\n    at async file:///c:/Users/zt/My%20Drive/work/void-frontier-age-of-stars/tests/tools/run-suites.mjs:91:17"
+  },
+  "breadcrumbs": [
+    {
+      "step": 641,
+      "type": "route",
+      "detail": "#/fleet/flt_1 → fleet/flt_1",
+      "time": 47
+    },
+    {
+      "step": 642,
+      "type": "route",
+      "detail": "#/ground/plt_1 → ground/plt_1",
+      "time": 47
+    },
+    {
+      "step": 643,
+      "type": "command",
+      "detail": "AssembleFleet {\"ruinId\":\"<script>alert(1)</script>\",\"missionId\":\"INVALID_ENTITY_ID_9999\",\"resTypeIdx\":\"<script>alert(1)</scr → NO_SHIP",
+      "time": 47,
+      "cmd": {
+        "type": "AssembleFleet",
+        "actorId": "",
+        "targetId": null,
+        "params": {
+          "ruinId": "<script>alert(1)</script>",
+          "missionId": "INVALID_ENTITY_ID_9999",
+          "resTypeIdx": "<script>alert(1)</script>"
+        }
+      }
+    },
+    {
+      "step": 644,
+      "type": "command",
+      "detail": "HarvestPlanetPOI {\"missionId\":\"   \",\"targetFactionId\":null,\"edictId\":\"<script>alert(1)</script>\",\"techId\":\"flt_563\"} → NO_TARGET",
+      "time": 47,
+      "cmd": {
+        "type": "HarvestPlanetPOI",
+        "actorId": "<script>alert(1)</script>",
+        "targetId": null,
+        "params": {
+          "missionId": "   ",
+          "targetFactionId": null,
+          "edictId": "<script>alert(1)</script>",
+          "techId": "flt_563"
+        }
+      }
+    },
+    {
+      "step": 645,
+      "type": "command",
+      "detail": "ShipyardBuild {\"resId\":\"\",\"blueprintId\":\"<script>alert(1)</script>\",\"units\":\"flt_686\",\"targetFactionId\":\"flt_682\",\"targetId\" → NO_BLUEPRINT",
+      "time": 47,
+      "cmd": {
+        "type": "ShipyardBuild",
+        "actorId": "fac_553",
+        "targetId": null,
+        "params": {
+          "resId": "",
+          "blueprintId": "<script>alert(1)</script>",
+          "units": "flt_686",
+          "targetFactionId": "flt_682",
+          "targetId": "fleetId",
+          "fleetId": "planetId",
+          "planetId": "systemId"
+        }
+      }
+    },
+    {
+      "step": 646,
+      "type": "command",
+      "detail": "ExpandOrbitalRingSegment {\"input\":\"raise\",\"anomalyId\":\"aggressive\",\"op\":\"\"} → NO_TARGET",
+      "time": 47,
+      "cmd": {
+        "type": "ExpandOrbitalRingSegment",
+        "actorId": "__proto__",
+        "targetId": null,
+        "params": {
+          "input": "raise",
+          "anomalyId": "aggressive",
+          "op": ""
+        }
+      }
+    },
+    {
+      "step": 647,
+      "type": "route",
+      "detail": "#/research → research/null",
+      "time": 47
+    },
+    {
+      "step": 648,
+      "type": "command",
+      "detail": "ActivatePrecursorRelic {\"eventId\":-999999,\"level\":1.7976931348623157e+308,\"hullId\":1e-7,\"edictId\":null} → BAD_PARAM",
+      "time": 47,
+      "cmd": {
+        "type": "ActivatePrecursorRelic",
+        "actorId": null,
+        "targetId": null,
+        "params": {
+          "eventId": -999999,
+          "level": 1.7976931348623157e+308,
+          "hullId": 1e-7,
+          "edictId": null
+        }
+      }
+    },
+    {
+      "step": 649,
+      "type": "route",
+      "detail": "#/system/sys_01#fragment → system/sys_01#fragment",
+      "time": 47
+    },
+    {
+      "step": 650,
+      "type": "command",
+      "detail": "IssueScanOrder {\"poiId\":\"<script>alert(1)</script>\"} → NO_TARGET",
+      "time": 47,
+      "cmd": {
+        "type": "IssueScanOrder",
+        "actorId": "fac_553",
+        "targetId": null,
+        "params": {
+          "poiId": "<script>alert(1)</script>"
+        }
+      }
+    },
+    {
+      "step": 651,
+      "type": "command",
+      "detail": "ExecuteAscensionProject {\"templateId\":\"flt_613\",\"resTypeIdx\":\"patrol\"} → BAD_PARAM",
+      "time": 47,
+      "cmd": {
+        "type": "ExecuteAscensionProject",
+        "actorId": null,
+        "targetId": null,
+        "params": {
+          "templateId": "flt_613",
+          "resTypeIdx": "patrol"
+        }
+      }
+    },
+    {
+      "step": 652,
+      "type": "route",
+      "detail": "#/EVENTS → EVENTS/null",
+      "time": 47
+    },
+    {
+      "step": 653,
+      "type": "route",
+      "detail": "# → menu/null",
+      "time": 47
+    },
+    {
+      "step": 654,
+      "type": "sim",
+      "detail": "+50t tick=2880",
+      "time": 47.07
+    },
+    {
+      "step": 655,
+      "type": "command",
+      "detail": "RevokePolicy {\"stationId\":\"   \"} → NOT_ACTIVE",
+      "time": 47.07,
+      "cmd": {
+        "type": "RevokePolicy",
+        "actorId": "INVALID_ENTITY_ID_9999",
+        "targetId": null,
+        "params": {
+          "stationId": "   "
+        }
+      }
+    },
+    {
+      "step": 656,
+      "type": "sim",
+      "detail": "+32t tick=2912",
+      "time": 47.14
+    },
+    {
+      "step": 657,
+      "type": "route",
+      "detail": "#/colony/col_1 → colony/col_1",
+      "time": 47.14
+    },
+    {
+      "step": 658,
+      "type": "route",
+      "detail": "# → menu/null",
+      "time": 47.14
+    },
+    {
+      "step": 659,
+      "type": "command",
+      "detail": "PlaceBuilding {\"level\":\"flt_659\",\"squadCharacterIds\":\"   \"} → NO_TARGET",
+      "time": 47.14,
+      "cmd": {
+        "type": "PlaceBuilding",
+        "actorId": null,
+        "targetId": null,
+        "params": {
+          "level": "flt_659",
+          "squadCharacterIds": "   "
+        }
+      }
+    },
+    {
+      "step": 660,
+      "type": "command",
+      "detail": "OfferTreaty {\"op\":1.7976931348623157e+308} → NO_TARGET",
+      "time": 47.14,
+      "cmd": {
+        "type": "OfferTreaty",
+        "actorId": null,
+        "targetId": null,
+        "params": {
+          "op": 1.7976931348623157e+308
+        }
+      }
+    },
+    {
+      "step": 661,
+      "type": "sim",
+      "detail": "+37t tick=2949",
+      "time": 47.18
+    },
+    {
+      "step": 662,
+      "type": "sim",
+      "detail": "+28t tick=2977",
+      "time": 47.2
+    },
+    {
+      "step": 663,
+      "type": "route",
+      "detail": "#/ → menu/null",
+      "time": 47.2
+    },
+    {
+      "step": 664,
+      "type": "command",
+      "detail": "DispatchObjectiveFleet {\"strength\":-999999,\"modules\":\"   \",\"targetId\":\"fleetId\",\"fleetId\":\"planetId\",\"planetId\":\"systemId\"} → NO_TARGET",
+      "time": 47.2,
+      "cmd": {
+        "type": "DispatchObjectiveFleet",
+        "actorId": null,
+        "targetId": null,
+        "params": {
+          "strength": -999999,
+          "modules": "   ",
+          "targetId": "fleetId",
+          "fleetId": "planetId",
+          "planetId": "systemId"
+        }
+      }
+    },
+    {
+      "step": 665,
+      "type": "route",
+      "detail": "#/system/<script> → system/<script>",
+      "time": 47.2
+    },
+    {
+      "step": 666,
+      "type": "sim",
+      "detail": "+18t tick=2995",
+      "time": 47.21
+    },
+    {
+      "step": 667,
+      "type": "route",
+      "detail": "#/../../etc → ../../etc",
+      "time": 47.21
+    },
+    {
+      "step": 668,
+      "type": "route",
+      "detail": "#/events → events/null",
+      "time": 47.21
+    },
+    {
+      "step": 669,
+      "type": "route",
+      "detail": "#/SYSTEM/%20%20 → SYSTEM/%20%20",
+      "time": 47.21
+    },
+    {
+      "step": 670,
+      "type": "route",
+      "detail": "#// → /null",
+      "time": 47.21
+    },
+    {
+      "step": 671,
+      "type": "sim",
+      "detail": "+40t tick=3035",
+      "time": 47.23
+    },
+    {
+      "step": 672,
+      "type": "command",
+      "detail": "FirePlanetaryIonBattery {\"stance\":\"INVALID_ENTITY_ID_9999\"} → NO_TARGET",
+      "time": 47.23,
+      "cmd": {
+        "type": "FirePlanetaryIonBattery",
+        "actorId": "fac_553",
+        "targetId": null,
+        "params": {
+          "stance": "INVALID_ENTITY_ID_9999"
+        }
+      }
+    },
+    {
+      "step": 673,
+      "type": "route",
+      "detail": "#/government → government/null",
+      "time": 47.23
+    },
+    {
+      "step": 674,
+      "type": "sim",
+      "detail": "+9t tick=3044",
+      "time": 47.24
+    },
+    {
+      "step": 675,
+      "type": "route",
+      "detail": "#/government → government/null",
+      "time": 47.24
+    },
+    {
+      "step": 676,
+      "type": "command",
+      "detail": "QueueResearch {\"targetFactionId\":\"<script>alert(1)</script>\"} → NO_RESEARCH",
+      "time": 47.24,
+      "cmd": {
+        "type": "QueueResearch",
+        "actorId": "<script>alert(1)</script>",
+        "targetId": null,
+        "params": {
+          "targetFactionId": "<script>alert(1)</script>"
+        }
+      }
+    },
+    {
+      "step": 677,
+      "type": "command",
+      "detail": "ResolveAnomalyDagBranch {\"poiId\":-1,\"stance\":\"__proto__\"} → NO_TARGET",
+      "time": 47.24,
+      "cmd": {
+        "type": "ResolveAnomalyDagBranch",
+        "actorId": null,
+        "targetId": null,
+        "params": {
+          "poiId": -1,
+          "stance": "__proto__"
+        }
+      }
+    },
+    {
+      "step": 678,
+      "type": "route",
+      "detail": "#/colony/col_1 → colony/col_1",
+      "time": 47.24
+    },
+    {
+      "step": 679,
+      "type": "route",
+      "detail": "#/diplomacy#/galaxy → diplomacy#/galaxy",
+      "time": 47.24
+    },
+    {
+      "step": 680,
+      "type": "route",
+      "detail": "#/combat/bat_1 → combat/bat_1",
+      "time": 47.24
+    },
+    {
+      "step": 681,
+      "type": "route",
+      "detail": "#/chronicle → chronicle/null",
+      "time": 47.24
+    },
+    {
+      "step": 682,
+      "type": "route",
+      "detail": "# → menu/null",
+      "time": 47.24
+    },
+    {
+      "step": 683,
+      "type": "command",
+      "detail": "RestoreTerrain {\"blueprintId\":\"flt_682\",\"op\":\"INVALID_ENTITY_ID_9999\",\"colonyId\":\"INVALID_ENTITY_ID_9999\"} → NO_TARGET",
+      "time": 47.24,
+      "cmd": {
+        "type": "RestoreTerrain",
+        "actorId": "",
+        "targetId": null,
+        "params": {
+          "blueprintId": "flt_682",
+          "op": "INVALID_ENTITY_ID_9999",
+          "hullId": null,
+          "colonyId": "INVALID_ENTITY_ID_9999"
+        }
+      }
+    },
+    {
+      "step": 684,
+      "type": "route",
+      "detail": "#/research → research/null",
+      "time": 47.24
+    },
+    {
+      "step": 685,
+      "type": "command",
+      "detail": "CatapultFeed {\"slot\":1e-7,\"units\":1e-7} → NO_TARGET",
+      "time": 47.24,
+      "cmd": {
+        "type": "CatapultFeed",
+        "actorId": "   ",
+        "targetId": "INVALID_ENTITY_ID_9999",
+        "params": {
+          "slot": 1e-7,
+          "units": 1e-7
+        }
+      }
+    },
+    {
+      "step": 686,
+      "type": "sim",
+      "detail": "+50t tick=3094",
+      "time": 47.26
+    },
+    {
+      "step": 687,
+      "type": "command",
+      "detail": "DesignateCrisisFocusTarget {\"level\":\"flt_663\"} → BAD_PARAM",
+      "time": 47.26,
+      "cmd": {
+        "type": "DesignateCrisisFocusTarget",
+        "actorId": "fac_553",
+        "targetId": null,
+        "params": {
+          "level": "flt_663"
+        }
+      }
+    },
+    {
+      "step": 688,
+      "type": "command",
+      "detail": "TriggerDamageControlRestore {\"modules\":\"escort\"} → NO_TARGET",
+      "time": 47.26,
+      "cmd": {
+        "type": "TriggerDamageControlRestore",
+        "actorId": null,
+        "targetId": null,
+        "params": {
+          "modules": "escort"
+        }
+      }
+    },
+    {
+      "step": 689,
+      "type": "route",
+      "detail": "#/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "time": 47.26
+    },
+    {
+      "step": 690,
+      "type": "command",
+      "detail": "MarketSell {\"squadCharacterIds\":0,\"x\":\"flt_586\"} → BAD_PARAM",
+      "time": 47.26,
+      "cmd": {
+        "type": "MarketSell",
+        "actorId": "",
+        "targetId": "__proto__",
+        "params": {
+          "squadCharacterIds": 0,
+          "x": "flt_586"
+        }
+      }
+    },
+    {
+      "step": 691,
+      "type": "route",
+      "detail": "#/ → menu/null",
+      "time": 47.26
+    },
+    {
+      "step": 692,
+      "type": "command",
+      "detail": "StartResearch {\"input\":\"flt_640\"} → PREREQ",
+      "time": 47.26,
+      "cmd": {
+        "type": "StartResearch",
+        "actorId": "__proto__",
+        "targetId": null,
+        "params": {
+          "input": "flt_640"
+        }
+      }
+    },
+    {
+      "step": 693,
+      "type": "sim",
+      "detail": "+43t tick=3137",
+      "time": 47.33
+    },
+    {
+      "step": 694,
+      "type": "command",
+      "detail": "OrderFleetAttack {\"resTypeIdx\":\"aggressive\",\"choiceId\":1e-7} → NO_TARGET",
+      "time": 47.33,
+      "cmd": {
+        "type": "OrderFleetAttack",
+        "actorId": null,
+        "targetId": null,
+        "params": {
+          "resTypeIdx": "aggressive",
+          "choiceId": 1e-7
+        }
+      }
+    },
+    {
+      "step": 695,
+      "type": "command",
+      "detail": "ImproveRelations {\"fleetId\":\"<script>alert(1)</script>\",\"brush\":\"__proto__\",\"stationId\":null} → VALIDATE_ERROR",
+      "time": 47.33,
+      "cmd": {
+        "type": "ImproveRelations",
+        "actorId": "__proto__",
+        "targetId": null,
+        "params": {
+          "fleetId": "<script>alert(1)</script>",
+          "brush": "__proto__",
+          "stationId": null
+        }
+      }
+    },
+    {
+      "step": 696,
+      "type": "command",
+      "detail": "MarketBuy {\"siteId\":100000000000000000000,\"planetId\":1e-7} → NO_TARGET",
+      "time": 47.33,
+      "cmd": {
+        "type": "MarketBuy",
+        "actorId": "__proto__",
+        "targetId": null,
+        "params": {
+          "siteId": 100000000000000000000,
+          "planetId": 1e-7
+        }
+      }
+    },
+    {
+      "step": 697,
+      "type": "sim",
+      "detail": "+7t tick=3144",
+      "time": 47.33
+    },
+    {
+      "step": 698,
+      "type": "command",
+      "detail": "TriggerDamageControlRestore {\"factionId\":\"   \",\"colonyId\":\"INVALID_ENTITY_ID_9999\",\"fleetId\":\"planetId\",\"targetId\":\"fleetId\",\"planetId\":\"s → NO_TARGET",
+      "time": 47.33,
+      "cmd": {
+        "type": "TriggerDamageControlRestore",
+        "actorId": "INVALID_ENTITY_ID_9999",
+        "targetId": null,
+        "params": {
+          "factionId": "   ",
+          "colonyId": "INVALID_ENTITY_ID_9999",
+          "fleetId": "planetId",
+          "targetId": "fleetId",
+          "planetId": "systemId"
+        }
+      }
+    },
+    {
+      "step": 699,
+      "type": "combo",
+      "detail": "war+market+research+abort x5",
+      "time": 47.35
+    },
+    {
+      "step": 700,
+      "type": "FAULT",
+      "detail": "scheduler_nan_atTick",
+      "time": 47.36
+    }
+  ],
+  "systemProfile": {
+    "jsHeapUsedMB": null,
+    "activeDOMNodes": null,
+    "webGLContextLost": null,
+    "fps": null
+  },
+  "worldSnapshot": {
+    "tick": 3159,
+    "seq": 1804,
+    "playerFactionId": "fac_553",
+    "seed": 24601,
+    "worldKind": "starter",
+    "hashSafe": "e562cb91"
+  },
+  "canvasFrame": null
+}

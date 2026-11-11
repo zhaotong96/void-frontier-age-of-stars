@@ -8,6 +8,8 @@ import { restockMarkets } from '../domain/economy/colonyTrade.js';
 import { getRelation } from '../domain/diplomacy/war.js';
 import { chronicle } from '../core/eventBus.js';
 import { registerCrisis } from '../domain/events/crisis.js';
+import { settleMegastructureOutputs } from '../domain/strategic/megastructures.js';
+import { recoverRaidedRoutes } from '../domain/economy/tradeRoutes.js';
 
 registerCrisis();
 
@@ -40,4 +42,10 @@ registerMonthly('chronicle-archive', (world) => {
     world.stats.archivedChronicle = (world.stats.archivedChronicle || 0) + cut;
     world.events.chronicle.splice(0, cut);
   }
+});
+
+// doc35 WP-P1-1/P2-1：巨构月度产出结算 + 被劫航线自愈（均惰性：无巨构/未激活航线时零开销）
+registerMonthly('megastructure-output', (world) => {
+  settleMegastructureOutputs(world);
+  recoverRaidedRoutes(world);
 });

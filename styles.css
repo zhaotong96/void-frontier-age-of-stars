@@ -714,8 +714,18 @@ input[type="range"] { accent-color: var(--accent); }
   left: var(--vf-safe-left-expanded);
 }
 .vf-view-head h2 { margin: 0; font-size: 14px; letter-spacing: 2px; color: var(--ink); font-weight: 500; }
-.vf-view-body { flex: 1; position: relative; overflow: auto; }
-.vf-view-body.pad { padding: 12px; }
+/* [SPEC-39 Bug 2] 底栏避让：.vf-bottombar 为 fixed bottom:8px + 高 32px（占视口底部
+   8..40px），主滚动容器滚动触底时最后一张卡片/操作按钮会被遮挡形成点击死区。
+   统一追加 84px 底部安全区（40px 栏体 + ≥20px 视觉余量 + 滚动条缓冲），
+   保证触底时最后一个交互元素 100% 位于底栏上边缘之上且可点击。 */
+.vf-view-body {
+  flex: 1;
+  position: relative;
+  overflow: auto;
+  padding-bottom: 84px !important;
+  box-sizing: border-box;
+}
+.vf-view-body.pad { padding: 12px; padding-bottom: 84px !important; }
 .vf-view-canvas { position: absolute; inset: 0; }
 .vf-view-canvas canvas { display: block; }
 

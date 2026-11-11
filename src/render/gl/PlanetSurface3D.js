@@ -1791,15 +1791,20 @@ export class PlanetSurface3D {
     const gl = this.gl;
     if (!gl) return;
     const delBuf = (b) => { if (b) gl.deleteBuffer(b); };
-    if (this._terr) { delBuf(this._terr.vboP); delBuf(this._terr.vboN); delBuf(this._terr.vboC); gl.deleteVertexArray(this._terr.vao); }
+    if (this._terr) { delBuf(this._terr.vboP); delBuf(this._terr.vboN); delBuf(this._terr.vboC); this.glc.destroyVAO(this._terr.vao); }
     for (const e of [this._box, this._actor]) {
-      if (e) { delBuf(e.inst); gl.deleteVertexArray(e.vao); }
+      if (e) { delBuf(e.inst); this.glc.destroyVAO(e.vao); }
     }
-    if (this._char) { delBuf(this._char.inst); gl.deleteVertexArray(this._char.vao); }
+    if (this._char) { delBuf(this._char.inst); this.glc.destroyVAO(this._char.vao); }
     for (const e of [this._fx, this._decal, this._particle]) {
-      if (e) { delBuf(e.vbo); gl.deleteVertexArray(e.vao); }
+      if (e) { delBuf(e.vbo); this.glc.destroyVAO(e.vao); }
     }
-    if (this._skyVao) gl.deleteVertexArray(this._skyVao);
+    // F-09：_skyVao 由 glc.createVAO 创建（在 _tracked.vaos / _vaoOwned 清册内），
+    // 必须走 destroyVAO 注销清册，原生 deleteVertexArray 会遗留孤儿句柄
+    if (this._skyVao) {
+      this.glc.destroyVAO(this._skyVao);
+      this._skyVao = null;
+    }
     for (const p of [this.progSky, this.progTerrain, this.progBox, this.progActor, this.progChar, this.progQuadC, this.progPart]) {
       if (p) gl.deleteProgram(p);
     }

@@ -16,6 +16,14 @@ export function areHostile(world, a, b) {
   return !!rel.warId;
 }
 
+/** F-10：检测舰队是否包含可用武器（活体舰船且武器列表非空） */
+function fleetHasWeapons(world, fleet) {
+  return (fleet.shipIds || []).some((sid) => {
+    const s = world.entities.ships[sid];
+    return s && s.status === 'active' && ((s.weapons && s.weapons.length > 0) || (s.stats?.weapons && s.stats.weapons.length > 0));
+  });
+}
+
 /** 每小时交战检查（HourlySystems 由 combat 阶段前置调用） */
 export function checkEngagements(world) {
   // 按星系聚合舰队
@@ -28,14 +36,19 @@ export function checkEngagements(world) {
     bySystem.get(fleet.systemId).push(fleet);
   }
   for (const [systemId, fleets] of bySystem) {
+    // F-10：优先将具备武装的战斗舰队排在前面，保持确定性排序
+    //（移除「A.factionId > B.factionId 跳过」——该口径在派系迭代序与 ID 序不一致时
+    //  会永久跳过敌对舰队，导致战斗集成停局；i<j 配对本身已保证每对只处理一次）
+    fleets.sort((a, b) => (fleetHasWeapons(world, b) - fleetHasWeapons(world, a)) || (a.id < b.id ? -1 : 1));
     for (let i = 0; i < fleets.length; i++) {
       for (let j = i + 1; j < fleets.length; j++) {
         const A = fleets[i];
         const B = fleets[j];
         if (!areHostile(world, A.factionId, B.factionId)) continue;
-        if (A.factionId > B.factionId) continue; // 每对只处理一次
         if (inBattle(world, A.id) || inBattle(world, B.id)) continue;
         if (A.stance === 'hold' && B.stance === 'hold' && !warActiveBetween(world, A.factionId, B.factionId)) continue;
+        // F-10：若双方均无任何武器，不建立无意义的消耗死局
+        if (!fleetHasWeapons(world, A) && !fleetHasWeapons(world, B)) continue;
         createBattleFromFleets(world, systemId, A, B);
       }
     }
@@ -83,7 +96,7 @@ export function createBattleFromFleets(world, systemId, fleetA, fleetB) {
       a: fleetA.shipIds.length,
       b: fleetB.shipIds.length,
     },
-    endCondition: { kind: 'annihilate' },
+    endCondition: { kind: 'annihilate', timeoutSeconds: 600 }, // F-10：歼灭战亦携带硬性超时上限兜底
   };
 
   let idx = 0;

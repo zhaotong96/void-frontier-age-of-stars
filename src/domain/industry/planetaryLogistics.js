@@ -195,7 +195,10 @@ export function stepPlanetIndustry(world, planet, indState, buildingDefs, dtHour
     const def = buildingDefs[n[NODE_IDX.DEF]];
     const g = (indState.grids || []).find((x) => x.id === n[NODE_IDX.GRID]);
     if (!g || !def) continue;
-    if (def.powerUse > 0) g.genKW += def.powerUse * 1000;
+    // F-12 修复：powerGen（colony 口径发电）计入工业电网 genKW——
+    // 修复前内容侧无任何 powerUse>0 的并网发电节点，弹射井蓄能恒 0（死循环）
+    if (def.powerGen > 0) g.genKW += def.powerGen * 1000;
+    else if (def.powerUse > 0) g.genKW += def.powerUse * 1000;
     else g.loadKW += -def.powerUse * 1000;
     if (def.accMaxMWh) g.accMaxMWh += def.accMaxMWh;
   }

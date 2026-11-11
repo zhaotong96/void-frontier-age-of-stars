@@ -10,7 +10,8 @@
 import { emit } from '../../core/eventBus.js';
 import { safeInt } from '../../core/math.js';
 
-/** 流量类别（写入 daily 流水的键） */
+/** 流量类别（写入 daily 流水的键；doc35 WP-P1-1 扩展 SMUGGLE/BOUNTY 为惰性键——
+ *  ensureDaily 默认形状不变，仅实际发生该流水的世界才写入新键 → 金快照零漂移） */
 export const FLOW = {
   PRODUCE: 'produced',
   CONSUME: 'consumed',
@@ -20,6 +21,8 @@ export const FLOW = {
   DECAY: 'decay',
   TRANSFER: 'transfer', // 阵营/殖民地间划拨
   TAX: 'tax',
+  SMUGGLE: 'smuggled',  // 黑市走私流水（doc35 WP-P1-1）
+  BOUNTY: 'bounty',     // 私掠赏金流水（doc35 WP-P1-1）
 };
 
 /** 确保阵营账本存在 */
@@ -46,7 +49,9 @@ export function balance(world, factionId, resId) {
 
 /** 记一笔流水（内部） */
 function record(world, factionId, resId, flow, delta, reason, sourceId) {
-  ensureDaily(world, factionId, resId)[flow] += delta;
+  const slot = ensureDaily(world, factionId, resId);
+  slot[flow] = (slot[flow] || 0) + delta; // doc35 惰性流键（SMUGGLE/BOUNTY）NaN 防护
+
   world.economy.transactions.push({
     tick: world.tick,
     factionId,
@@ -133,8 +138,10 @@ export function verifyLedgerConsistency(world, factionId, openingBalances, dayFl
   for (const resId of resIds) {
     const open = openingBalances?.[resId] ?? 0;
     const f = dayFlow?.[resId] || {};
+    // doc35 WP-P1-1：SMUGGLE/BOUNTY 为入账流（惰性键——未发生该流水的世界与旧口径逐位一致）
     const expected = open +
-      (f.produced || 0) + (f.imported || 0) + (f.loot || 0) + (f.transfer || 0) + (f.tax || 0) -
+      (f.produced || 0) + (f.imported || 0) + (f.loot || 0) + (f.transfer || 0) + (f.tax || 0) +
+      (f.smuggled || 0) + (f.bounty || 0) -
       ((f.consumed || 0) + (f.exported || 0) + (f.decay || 0));
     const actual = world.economy.ledgers[factionId]?.balances[resId] ?? 0;
     if (expected !== actual) {

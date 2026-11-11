@@ -13,6 +13,7 @@
  */
 
 import { emit, chronicle } from '../../core/eventBus.js';
+import { credit, FLOW } from '../economy/ledger.js';
 import { clamp } from '../../core/math.js';
 import { createShip } from '../ships/ship.js';
 import { spikeCatapultLaunch } from '../ground/planetaryThreat.js';
@@ -166,7 +167,7 @@ export function settleOrbitalBuffer(world, planet, indState) {
   }
   if (out.marketCredits > 0) {
     const led = world.economy.ledgers[fid];
-    if (led) led.balances.credits = (led.balances.credits || 0) + out.marketCredits;
+    if (led) credit(world, fid, 'credits', out.marketCredits, 'orbitalMarketSales', planet.id, FLOW.PRODUCE);
     emit(world, 'OrbitalBufferMarketSold', { planetId: planet.id, credits: out.marketCredits }, 'economy');
   }
   return out;

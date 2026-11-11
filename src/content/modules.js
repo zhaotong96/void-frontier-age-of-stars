@@ -562,4 +562,24 @@ export const MODULES = [
     effects: [{ stat: 'cargoCapacity', mode: 'add', value: 80 }],
     supplyRoles: ['fuel', 'ammo'],
   },
+
+  // doc35 WP-P1-1：走私屏蔽货舱（低槽；stats.shieldedCargo 由 computeShipStats effects 管道注入；
+  //  AI 仅按既有蓝图画船 → 新模块零漂移）
+  {
+    id: 'mod_cargo_shielded',
+    nameZh: '走私屏蔽货舱',
+    nameEn: 'Shielded Cargo Bay',
+    descZh: '法拉第笼衬层与扫描诱饵阵列，为 40 单位违禁品提供海关扫描屏蔽，并降低舰船电磁特征。',
+    descEn: 'Faraday-lined hold with scan decoys; shields 40 units of contraband from customs sweeps and reduces electromagnetic signature.',
+    slotType: 'low',
+    category: 'utility',
+    techReq: 'tech_logistics_1',
+    cost: { credits: 240, alloy: 18, conductor: 8, ceramic: 6 },
+    mass: 15, power: -3, cpu: 1,
+    effects: [
+      { stat: 'cargoCapacity', mode: 'add', value: 45 },
+      { stat: 'shieldedCargo', mode: 'add', value: 40 },
+      { stat: 'signature', mode: 'add', value: -64 },
+    ],
+  },
 ];

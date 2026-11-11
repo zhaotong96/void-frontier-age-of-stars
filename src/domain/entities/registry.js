@@ -9,6 +9,12 @@
 import { nextId } from '../../core/ids.js';
 import { ENTITY_TYPES } from '../world/World.js';
 
+/** 危险键守卫（F-14）：'__proto__'/'constructor' 等键经 getEntity/赋值路径
+ *  会触碰对象原型——模糊测试实证 `world.entities.planets['__proto__']` 返回
+ *  Object.prototype，ensure* 工厂随即污染全局原型（所有后续世界继承
+ *  ind/threat 容器 → 每 tick 工业步进 + 金快照漂移）。 */
+const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
 /** 创建实体并插入集合，返回实体 */
 export function createEntity(world, collection, fields) {
   const type = ENTITY_TYPES[collection];
@@ -16,15 +22,17 @@ export function createEntity(world, collection, fields) {
   if (world.entities[collection] === undefined) {
     world.entities[collection] = {};
   }
-  const id = fields.id || nextId(world, type);
+  const rawId = fields.id || nextId(world, type);
+  const id = DANGEROUS_KEYS.has(rawId) ? nextId(world, type) : rawId;
   const e = { id, type, createdAtTick: world.tick, ...fields };
   e.id = id; // 防止 fields 覆盖
   world.entities[collection][id] = e;
   return e;
 }
 
-/** 读取实体（不存在返回 undefined） */
+/** 读取实体（不存在返回 undefined；F-14 危险键一律返回 undefined） */
 export function getEntity(world, collection, id) {
+  if (id == null || typeof id !== 'string' || DANGEROUS_KEYS.has(id)) return undefined;
   return world.entities[collection]?.[id];
 }
 

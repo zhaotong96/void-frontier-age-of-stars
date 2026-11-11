@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark" />
+  <title>玩法自治 Agent 五阶段闭环 — 实机可视化巡检（doc25 SPEC-TEST-025）</title>
+  <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+  <link rel="stylesheet" href="./styles.css" />
+  <style>
+    /* —— Agent 巡检仪表盘（叠加于真实游戏画面之上，不侵入 src/） —— */
+    #agent-hud {
+      position: fixed; top: 12px; right: 12px; width: 420px; max-height: 92vh;
+      overflow: auto; z-index: 9999; pointer-events: auto;
+      background: rgba(6, 14, 24, 0.88); border: 1px solid rgba(90, 200, 250, 0.35);
+      border-radius: 10px; padding: 12px 14px; color: #cfeaff;
+      font: 12px/1.55 "Cascadia Code", Consolas, monospace;
+      box-shadow: 0 0 24px rgba(0, 140, 255, 0.25); backdrop-filter: blur(6px);
+    }
+    #agent-hud h1 { font-size: 14px; margin: 0 0 6px; color: #7fdcff; letter-spacing: 1px; }
+    #agent-hud .sub { color: #6fa8c9; margin-bottom: 8px; }
+    #agent-hud .phase { margin: 4px 0; padding: 4px 8px; border-left: 3px solid #2a5a78; background: rgba(20, 50, 70, 0.35); }
+    #agent-hud .phase.ok { border-left-color: #46e08a; }
+    #agent-hud .phase.run { border-left-color: #ffd166; }
+    #agent-hud .phase.fail { border-left-color: #ff5d5d; }
+    #agent-hud .badge {
+      margin-top: 10px; padding: 10px; text-align: center; border-radius: 8px;
+      font-size: 15px; font-weight: 700; letter-spacing: 2px;
+    }
+    #agent-hud .badge.green { background: rgba(30, 160, 90, 0.25); border: 1px solid #46e08a; color: #7dffb0; }
+    #agent-hud .badge.red { background: rgba(160, 30, 30, 0.25); border: 1px solid #ff5d5d; color: #ff9c9c; }
+    #agent-hud .trace { color: #7d9db5; max-height: 180px; overflow: auto; margin-top: 8px; }
+    #agent-hud .fps { color: #9fd0ea; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="boot" class="boot-screen">
+      <div class="boot-title">VOID FRONTIER</div>
+      <div class="boot-sub">Agent 实机巡检 · 初始化…</div>
+      <div class="boot-status" id="boot-status">加载核心模块</div>
+    </div>
+  </div>
+
+  <div id="agent-hud">
+    <h1>AUTONOMOUS GAMEPLAY AGENT</h1>
+    <div class="sub">SPEC-TEST-025 五阶段闭环 · seed 24601 · 零 Mock 纯外部驱动</div>
+    <div id="agent-phases"></div>
+    <div id="agent-badge"></div>
+    <div class="trace" id="agent-trace"></div>
+    <div class="fps" id="agent-fps">FPS: --</div>
+  </div>
+
+  <script type="module">
+    // 与生产 main.js 同源启动链：真实 App、真实视图、真实命令总线
+    // （相对路径：本页位于 tests/tools/，src/ 在仓库根 → 必须 ../../src/）
+    import { App } from '../../src/app/App.js';
+    import { registerAll as registerLocalization } from '../../src/content/localization/index.js';
+    import { navigate } from '../../src/app/Router.js';
+    import { AutonomousGameplayAgent } from '../agent/AutonomousGameplayAgent.js';
+
+    const hudPhases = document.getElementById('agent-phases');
+    const hudBadge = document.getElementById('agent-badge');
+    const hudTrace = document.getElementById('agent-trace');
+    const hudFps = document.getElementById('agent-fps');
+    const PHASES = [
+      ['jump', '阶段 1 · 星系跃迁'],
+      ['orbit', '阶段 2 · 轨道切入'],
+      ['landing', '阶段 3 · 地表着陆'],
+      ['settlement', '阶段 4 · 资源/事件结算'],
+      ['saveRoundtrip', '阶段 5 · 存档冷重启'],
+    ];
+    function phaseEl(key) {
+      const [_, label] = PHASES.find(([k]) => k === key);
+      const div = document.createElement('div');
+      div.className = 'phase run';
+      div.id = `phase-${key}`;
+      div.textContent = `▶ ${label} …`;
+      hudPhases.appendChild(div);
+      return div;
+    }
+    // 阶段预占位（按执行序点亮）
+    PHASES.forEach(([k]) => phaseEl(k));
+
+    // IAB/失焦 rAF 看门狗：lastFrame 超 600ms 手动补帧（app 内已有同款机制）
+    let lastRaf = performance.now();
+    const origRaf = window.requestAnimationFrame.bind(window);
+    window.requestAnimationFrame = (cb) => origRaf((t) => { lastRaf = t; return cb(t); });
+    setInterval(() => {
+      if (document.hasFocus() && performance.now() - lastRaf > 600 && window.__VF_APP) {
+        try { window.__VF_APP._frame(performance.now()); } catch { /* 忽略补帧异常 */ }
+      }
+    }, 600);
+
+    let frames = 0; let fpsT0 = performance.now();
+    setInterval(() => {
+      const now = performance.now();
+      const fps = (frames * 1000) / Math.max(1, now - fpsT0);
+      hudFps.textContent = `FPS: ${fps.toFixed(1)} · speed 0 · 影像化步进（GroundView rAF 消费）`;
+      frames = 0; fpsT0 = now;
+    }, 1000);
+    const countFrame = () => { frames++; requestAnimationFrame(countFrame); };
+    requestAnimationFrame(countFrame);
+
+    async function main() {
+      window.__agentRunnerErrors = [];
+      window.addEventListener('error', (ev) => window.__agentRunnerErrors.push(String(ev.error || ev.message)));
+      window.addEventListener('unhandledrejection', (ev) => window.__agentRunnerErrors.push(String(ev.reason)));
+
+      registerLocalization();
+      const app = new App(document.getElementById('app'));
+      await app.boot();
+      await app.startNewGame({ seed: 24601 });
+      app.setSpeed(0); // 战略时钟冻结：影像化节奏完全由 Agent 与 GroundView rAF 驱动
+      window.focus();
+
+      const agent = new AutonomousGameplayAgent(
+        {
+          world: app.world,
+          saveManager: app.saveManager,
+          ui: {
+            navigate: async (s, p) => {
+              navigate(s, p);
+              // hashchange 派发时序在宿主环境有抖动：轮询等待路由落位（≤2s）
+              const t0 = performance.now();
+              while (app._route !== s && performance.now() - t0 < 2000) {
+                await new Promise((r) => requestAnimationFrame(() => r()));
+              }
+            },
+            activeScreen: () => app._activeViewObj?.id,
+          },
+        },
+        {
+          seed: 24601,
+          stepMode: 'external', // GroundView rAF 消费输入并步进（30 FPS 实机节奏）
+          awaitFrame: () => new Promise((r) => requestAnimationFrame(() => r())),
+          getView: () => app._activeViewObj,
+        },
+      );
+
+      // 阶段点亮：traceLog 轮询刷新
+      const traceTimer = setInterval(() => {
+        hudTrace.textContent = agent.traceLog.slice(-14)
+          .map((t) => `#${t.step}[${t.phase}] ${t.type}: ${t.detail}`).join('\n');
+      }, 200);
+
+      let report = null; let fatal = null;
+      try {
+        report = await agent.runFullLoop();
+      } catch (err) {
+        fatal = err;
+      } finally {
+        clearInterval(traceTimer);
+      }
+
+      // 点亮阶段卡
+      const ph = report ? report.phases : {};
+      for (const [key, label] of PHASES) {
+        const el = document.getElementById(`phase-${key}`);
+        const p = ph[key];
+        if (p && p.ok) {
+          el.className = 'phase ok';
+          el.textContent = `✔ ${label} — ${phaseBrief(key, p)}`;
+        } else if (!p && !fatal) {
+          el.className = 'phase';
+          el.textContent = `– ${label}（跳过）`;
+        } else {
+          el.className = 'phase fail';
+          el.textContent = `✘ ${label} — ${fatal ? fatal.message : '失败'}`;
+        }
+      }
+      if (report && report.success) {
+        hudBadge.className = 'badge green';
+        hudBadge.textContent = `✔ 五阶段闭环全绿验收 · Hash ${ph.saveRoundtrip.hashA} ≡ ${ph.saveRoundtrip.hashB} · ${(report.totalDurationMs / 1000).toFixed(1)}s`;
+      } else {
+        hudBadge.className = 'badge red';
+        hudBadge.textContent = `✘ 巡检失败：${fatal ? `${fatal.agentPhase || ''} ${fatal.message}` : '未知'}`;
+      }
+      // 供外部自动化（CDP/IAB evaluate）取证
+      window.__agentReport = report || { success: false, fatal: String(fatal && fatal.message) };
+      window.__agentTrace = agent.traceLog;
+    }
+
+    function phaseBrief(key, p) {
+      switch (key) {
+        case 'jump': return `${p.elapsedTicks}t(eta${p.etaTicks}) 燃料-${p.fuelDrained}`;
+        case 'orbit': return `调查L${p.surveyLevel} ${p.planetCount}行星`;
+        case 'landing': return `台阶${p.stepDh} 网格${p.gridMs}ms`;
+        case 'settlement': return `${p.missionStatus}(${p.missionSteps}步) ${p.rewards.map((r) => `${r.resId}+${r.amount}`).join(',')}`;
+        case 'saveRoundtrip': return `Hash ${p.hashA}≡${p.hashB}`;
+        default: return '';
+      }
+    }
+
+    main();
+  </script>
+</body>
+</html>

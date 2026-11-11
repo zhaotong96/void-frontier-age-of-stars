@@ -317,13 +317,18 @@ export class PlanetWater {
     }
 
     // —— GL 资源（重建先释放旧句柄；对失效句柄删除为空操作） ——
-    if (this._vao) gl.deleteVertexArray(this._vao);
-    if (this._ibo) gl.deleteBuffer(this._ibo);
-    const vboPos = glc.createBuffer(pos);
-    const vboAux = glc.createBuffer(aux);
-    const ibo = gl.createBuffer();
-    glc._tracked.buffers.push(ibo);
+    if (this._vao) this.glc.destroyVAO(this._vao); // F-09：连带装配期 inner buffer
+    if (this._ibo) { gl.deleteBuffer(this._ibo); this._ibo = null; }
+
+    // F-09：将 vboPos/vboAux 创建收纳进 createVAO 回调内部，回调内经
+    // gl.createBuffer 拦截器建立的句柄记入 _vaoOwned —— destroyVAO 时
+    // 自动级联释放，杜绝孤儿 VBO（此前装配在回调外，_vaoOwned 无法追溯）
     this._vao = glc.createVAO((g) => {
+      const vboPos = glc.createBuffer(pos);
+      const vboAux = glc.createBuffer(aux);
+      const ibo = gl.createBuffer();
+      glc._tracked.buffers.push(ibo);
+      this._ibo = ibo;
       g.bindBuffer(g.ARRAY_BUFFER, vboPos);
       g.enableVertexAttribArray(0);
       g.vertexAttribPointer(0, 3, g.FLOAT, false, 12, 0);
@@ -336,7 +341,6 @@ export class PlanetWater {
     });
     gl.bindVertexArray(null);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
-    this._ibo = ibo;
     this._indexCount = indices.length;
   }
 
@@ -413,7 +417,7 @@ export class PlanetWater {
     this._destroyed = true;
     const gl = this.gl;
     if (!gl) return;
-    if (this._vao) gl.deleteVertexArray(this._vao);
+    if (this._vao) this.glc.destroyVAO(this._vao); // F-09：连带装配期 inner buffer
     if (this._ibo) gl.deleteBuffer(this._ibo);
     if (this.progWater) gl.deleteProgram(this.progWater);
     this._vao = null;

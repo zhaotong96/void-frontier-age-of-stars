@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark" />
+  <title>端到端战役里程碑全景观摩 — CAMPAIGN-01 边疆回声（doc28 SPEC-TEST-028）</title>
+  <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+  <link rel="stylesheet" href="./styles.css" />
+  <style>
+    #camp-hud {
+      position: fixed; top: 12px; right: 12px; width: 460px; max-height: 92vh; overflow: auto;
+      z-index: 9999; background: rgba(14, 10, 4, 0.9); border: 1px solid rgba(255, 200, 90, 0.4);
+      border-radius: 10px; padding: 12px 14px; color: #ffedc9; backdrop-filter: blur(6px);
+      font: 12px/1.55 "Cascadia Code", Consolas, monospace;
+      box-shadow: 0 0 24px rgba(255, 180, 40, 0.22);
+    }
+    #camp-hud h1 { font-size: 14px; margin: 0 0 6px; color: #ffd47d; letter-spacing: 1px; }
+    #camp-hud .phase { margin: 4px 0; padding: 4px 8px; border-left: 3px solid #6b5a2a; background: rgba(70, 55, 20, 0.35); }
+    #camp-hud .phase.ok { border-left-color: #46e08a; }
+    #camp-hud .phase.fail { border-left-color: #ff5d5d; }
+    #camp-hud .badge { margin-top: 10px; padding: 10px; text-align: center; border-radius: 8px; font-size: 15px; font-weight: 700; letter-spacing: 2px; }
+    #camp-hud .badge.green { background: rgba(30, 160, 90, 0.25); border: 1px solid #46e08a; color: #7dffb0; }
+    #camp-hud .badge.red { background: rgba(160, 30, 30, 0.25); border: 1px solid #ff5d5d; color: #ff9c9c; }
+    #camp-hud .chron { max-height: 150px; overflow: auto; color: #c9b98f; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="boot" class="boot-screen">
+      <div class="boot-title">VOID FRONTIER</div>
+      <div class="boot-sub">战役观摩 · 初始化…</div>
+      <div class="boot-status" id="boot-status">加载核心模块</div>
+    </div>
+  </div>
+  <div id="camp-hud">
+    <h1>CAMPAIGN-01 边疆回声 · E2E 里程碑观摩</h1>
+    <div id="camp-phases"></div>
+    <div class="badge" id="camp-badge">运行中…（各里程碑为长同步推演，页面将短暂无响应）</div>
+    <div class="chron" id="camp-chron"></div>
+  </div>
+
+  <script type="module">
+    // 与生产 main.js 同源启动链；四大里程碑经官方命令总线真实推进
+    import { App } from '../../src/app/App.js';
+    import { registerAll as registerLocalization } from '../../src/content/localization/index.js';
+    import { CampaignMilestoneRunner } from '../e2e/CampaignMilestoneRunner.js';
+
+    const PHASES = [
+      ['M1', '里程碑 1 · 拓荒序章'],
+      ['M2', '里程碑 2 · 星际开拓与深空战役'],
+      ['M3', '里程碑 3 · 天地物流与第二殖民地'],
+      ['M4', '里程碑 4 · 巨构工程与星海霸权'],
+    ];
+    const hud = document.getElementById('camp-phases');
+    for (const [k, label] of PHASES) {
+      const div = document.createElement('div');
+      div.className = 'phase';
+      div.id = `camp-${k}`;
+      div.textContent = `▶ ${label} …`;
+      hud.appendChild(div);
+    }
+
+    // IAB 失焦 rAF 看门狗
+    let lastRaf = performance.now();
+    const origRaf = window.requestAnimationFrame.bind(window);
+    window.requestAnimationFrame = (cb) => origRaf((t) => { lastRaf = t; return cb(t); });
+    setInterval(() => {
+      if (document.hasFocus() && performance.now() - lastRaf > 600 && window.__VF_APP) {
+        try { window.__VF_APP._frame(performance.now()); } catch { /* 补帧异常忽略 */ }
+      }
+    }, 600);
+
+    async function main() {
+      window.__campaignErrors = [];
+      window.addEventListener('error', (ev) => window.__campaignErrors.push(String(ev.error || ev.message)));
+      window.addEventListener('unhandledrejection', (ev) => window.__campaignErrors.push(String(ev.reason)));
+
+      registerLocalization();
+      const app = new App(document.getElementById('app'));
+      await app.boot();
+      await app.startNewGame({ seed: 24601, galaxySize: 'story' });
+      app.setSpeed(0);
+      window.focus();
+
+      const runner = new CampaignMilestoneRunner(
+        { world: app.world, ui: null },
+        { seed: 24601, logMilestones: false },
+      );
+      // 逐里程碑执行（里程碑间让出主线程刷新 HUD；里程碑内部为长同步推演）
+      const report = { campaign: runner.constructor ? 'CAMPAIGN-01' : '', milestones: [], passed: false };
+      let fatal = null;
+      try {
+        const ctx = { world: app.world, options: runner.options, ui: null };
+        const stages = (await import('../e2e/CampaignMilestoneRunner.js')).__stages;
+        for (const [id, Stage] of stages) {
+          const t0 = performance.now();
+          const m = await new Stage(ctx).execute();
+          m.id = id; m.durationMs = performance.now() - t0; m.tickAtEnd = ctx.world.tick;
+          report.milestones.push(m);
+          const el = document.getElementById(`camp-${id}`);
+          el.className = 'phase ok';
+          el.textContent = `✔ ${id} — ${m.detail.slice(0, 90)}（${m.durationMs.toFixed(0)}ms @tick${m.tickAtEnd}）`;
+          await new Promise((r) => setTimeout(r, 30));
+        }
+        report.passed = report.milestones.length === 4 && report.milestones.every((m) => m.success);
+      } catch (err) {
+        fatal = err;
+        const failedEl = document.querySelector('.phase:not(.ok)');
+        if (failedEl) { failedEl.className = 'phase fail'; failedEl.textContent = `✘ ${failedEl.textContent} — ${err.message.slice(0, 120)}`; }
+      }
+
+      const badge = document.getElementById('camp-badge');
+      const ch = app.world.events.chronicle || [];
+      document.getElementById('camp-chron').textContent =
+        ch.slice(-8).map((e) => `t${e.tick} [${e.type}] ${e.text}`).join('\n');
+      if (report.passed) {
+        badge.className = 'badge green';
+        badge.textContent = `✔ 四大里程碑全通 · ${app.world.victory.ended ? `胜利：${app.world.victory.ended.endingId} @tick${app.world.victory.ended.tick}` : ''} · 编年史 ${ch.length} 条`;
+      } else {
+        badge.className = 'badge red';
+        badge.textContent = `✘ 战役失败：${fatal ? fatal.message.slice(0, 90) : '里程碑未全通'}`;
+      }
+      window.__campaignReport = { passed: report.passed, milestones: report.milestones.map((m) => ({ id: m.id, success: m.success, detail: m.detail })), chronicle: ch.length, errors: window.__campaignErrors.slice(0, 5) };
+    }
+
+    main();
+  </script>
+</body>
+</html>

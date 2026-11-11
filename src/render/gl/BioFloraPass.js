@@ -346,8 +346,16 @@ export class BioFloraPass {
     for (const key of ['_progFlora', '_progFauna']) {
       if (this[key]) { try { gl.deleteProgram(this[key]); } catch (_) { /* 失效句柄 */ } this[key] = null; }
     }
-    if (this._vaoFlora) { try { gl.deleteVertexArray(this._vaoFlora); } catch (_) { /* 失效句柄 */ } this._vaoFlora = null; }
-    if (this._vaoFauna) { try { gl.deleteVertexArray(this._vaoFauna); } catch (_) { /* 失效句柄 */ } this._vaoFauna = null; }
+    // F-09：VAO 由 glc.createVAO 创建（_tracked.vaos / _vaoOwned 清册内），
+    // 优先走 destroyVAO 注销清册，原生 deleteVertexArray 会遗留孤儿句柄
+    if (this._vaoFlora) {
+      try { if (this._glc) this._glc.destroyVAO(this._vaoFlora); else gl.deleteVertexArray(this._vaoFlora); } catch (_) { /* 失效句柄 */ }
+      this._vaoFlora = null;
+    }
+    if (this._vaoFauna) {
+      try { if (this._glc) this._glc.destroyVAO(this._vaoFauna); else gl.deleteVertexArray(this._vaoFauna); } catch (_) { /* 失效句柄 */ }
+      this._vaoFauna = null;
+    }
     for (const key of ['_vboFloraQuad', '_iboFlora', '_vboFloraInst', '_vboFaunaQuad', '_iboFauna', '_vboFaunaInst']) {
       if (this[key]) { try { gl.deleteBuffer(this[key]); } catch (_) { /* 失效句柄 */ } this[key] = null; }
     }

@@ -1,7 +1,7 @@
 # VOID FRONTIER: AGE OF STARS — 二次返工（沉浸式 HUD + 行星地表 3D 体素沙盒）竣工报告
 
 **返工依据**：`rework2.md`（全栈深度代码审计与沉浸式星际沙盒二次返工架构规范）
-**仓库**：`C:\PUBLIC\stella\void-frontier`（分支 `main`）
+**仓库**：`[REDACTED]\void-frontier`（分支 `main`）
 **前置基线**：`report.md`（一次返工 R1-R4 竣工：静态自足、WebGL2 底座、3D 银河/星系、3D 战斗；46/46 测试全绿）
 **返工范围**：Phase R5 → R9 五阶段，全部按 `rework2.md` 第 133-139 行《质量门禁矩阵》逐条对映实施并闭环验证。
 

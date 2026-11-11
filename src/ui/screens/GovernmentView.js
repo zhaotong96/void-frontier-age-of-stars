@@ -6,8 +6,8 @@
  *      （超载时红色警告文案）+ 影响力/人口/殖民地数/星系数 kvList；
  *   2) 行政容量 explain 面板（governmentView.explainAdmin：逐项来源与数值）；
  *   3) 政策面板：当前已颁布政策（policies 为空显示「未颁布政策」）；
- *      可用政策为明确的禁用占位卡片——政策系统未实现，真实状态标注
- *      「政策系统将在后续版本开放」，不伪造可点击的按钮。
+ *      政策颁布/撤销（EnactPolicy/RevokePolicy）与聚落法典（SignColonyEdict）
+ *      均已闭环实装；生效法令真实概览见 _edictOverviewPanel（SPEC-39 Bug 4）。
  *
  * 数据来源纪律：只读消费 governmentView（ViewModels）；本视图纯展示，
  * 无写操作、无监听、无 rAF；onSnapshot 250ms 节流重建；unmount 清引用。
@@ -19,6 +19,7 @@ import { statBar } from '../components/bars.js';
 import { gauge } from '../charts/index.js';
 import { L } from '../../core/i18n.js';
 import { governmentView } from '../../simulation/ViewModels.js';
+import { COLONY_EDICTS } from '../../domain/planets/colonyGovernance.js';
 
 /** 气质/人格中文标签（未知回退原文） */
 const TAG_ZH = {
@@ -89,10 +90,68 @@ export const GovernmentView = {
     this._titleExtra.textContent = `${g.name} · ${TAG_ZH[g.personality] || g.personality || ''}`;
 
     body.appendChild(this._overviewPanel(g));
+    body.appendChild(this._edictOverviewPanel());
     body.appendChild(this._explainPanel(g));
     body.appendChild(this._policyPanel(g));
     body.appendChild(this._policiesPanel());
     body.appendChild(this._crewPanel());
+  },
+
+  /**
+   * [SPEC-39 Bug 4] 生效法令概览栏（真实数据）：聚合全部殖民地当前生效的
+   * 聚落法典（colonyGovernance.COLONY_EDICTS）——激活法令总数、每日维护费
+   * （automata_shift 的 conductor 消耗，逐聚落 min(2, 库存) 口径）、以及希望/不满
+   * 每日净修正率（hopePerDay/discontentPerDay 求和）。取代已过时的
+   * 「政策系统尚未实装」静态免责横幅。
+   */
+  _edictOverviewPanel() {
+    const w = this.app.world;
+    const p = panel({ title: '生效法令概览', open: true, dense: true });
+    const rows = [];
+    let totalActive = 0;
+    let totalUpkeep = 0;
+    let hopeNet = 0;
+    let discontentNet = 0;
+    for (const c of Object.values(w.entities.colonies || {})) {
+      if (c.factionId !== w.playerFactionId) continue;
+      const planet = w.entities.planets[c.planetId];
+      const soc = planet && planet.soc;
+      if (!soc || !Array.isArray(soc.edicts) || soc.edicts.length === 0) continue;
+      let colonyUpkeep = 0;
+      for (const eid of soc.edicts) {
+        const ed = COLONY_EDICTS[eid];
+        if (!ed) continue;
+        totalActive++;
+        hopeNet += ed.hopePerDay || 0;
+        discontentNet += ed.discontentPerDay || 0;
+        if (ed.upkeepConductor) colonyUpkeep += ed.upkeepConductor;
+      }
+      if (colonyUpkeep > 0) {
+        // 与 tickColonySociety 同口径：实际结算 min(维护费, conductor 库存)
+        const led = w.economy.ledgers[w.playerFactionId];
+        colonyUpkeep = Math.min(colonyUpkeep, (led && led.balances && led.balances.conductor) || 0);
+        totalUpkeep += colonyUpkeep;
+      }
+      const edNames = soc.edicts.map((eid) => (COLONY_EDICTS[eid] || {}).nameZh || eid).join('、');
+      rows.push([planet ? planet.name : c.planetId, `${soc.edicts.length} 项 · ${edNames}`]);
+    }
+    p.appendChild(kvList([
+      ['激活法令总数', totalActive],
+      ['每日维护费', `conductor −${totalUpkeep}/日`],
+      ['希望净修正', `${hopeNet >= 0 ? '+' : ''}${hopeNet}/日`],
+      ['不满净修正', `${discontentNet >= 0 ? '+' : ''}${discontentNet}/日`],
+    ]));
+    if (!rows.length) {
+      p.appendChild(el('div', { class: 'vf-faint vf-small', text: '当前无聚落激活任何法令（进入行星地表并任命总督后可签署法典）。' }));
+    } else {
+      for (const [name, desc] of rows) {
+        p.appendChild(el('div', { class: 'vf-row', style: { borderBottom: '1px solid rgba(29,42,58,0.4)', padding: '2px 0' } }, [
+          el('span', { class: 'vf-grow vf-small', text: name }),
+          el('span', { class: 'vf-dim vf-small', text: desc }),
+        ]));
+      }
+    }
+    return p;
   },
 
   /** 概览面板：稳定度 gauge + 行政容量 statBar + 基础 kvList */
@@ -166,8 +225,8 @@ export const GovernmentView = {
   },
 
   /**
-   * 政策面板：当前已颁布政策 + 可用政策占位（真实状态：政策系统未实现）。
-   * 占位卡片必须可见且明确说明锁定原因，不伪造可交互按钮。
+   * 政策面板：当前已颁布政策（真实状态：政策系统已实装；
+   * [SPEC-39 Bug 4] 陈旧「未实装」免责占位横幅已移除）。
    */
   _policyPanel(g) {
     const p = panel({ title: '政策', open: true });
@@ -191,18 +250,9 @@ export const GovernmentView = {
     }
     p.appendChild(cur);
 
-    // —— 可用政策占位（禁用卡片，明确锁定说明） ——
-    const locked = el('div', {
-      class: 'vf-col mt-2',
-      style: {
-        border: '1px dashed rgba(113,131,154,0.45)', borderRadius: '4px',
-        padding: '10px', opacity: '0.75', background: 'rgba(113,131,154,0.05)',
-      },
-    }, [
-      el('div', { class: 'vf-dim', text: '政策系统将在后续版本开放' }),
-      el('div', { class: 'vf-faint vf-small', text: '政策颁布、切换与效果结算尚未实现；当前版本仅展示已存在的政策数据，无可用操作。' }),
-    ]);
-    p.appendChild(locked);
+    // [SPEC-39 Bug 4] 陈旧的「政策系统将在后续版本开放/尚未实现」免责占位横幅已移除——
+    // 政策颁布/撤销（EnactPolicy/RevokePolicy）与聚落法典（SignColonyEdict）均已闭环实装；
+    // 真实生效概览见 _edictOverviewPanel（激活法令数/日维护费/希望不满净修正）。
     return p;
   },
 

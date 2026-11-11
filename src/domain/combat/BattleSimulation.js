@@ -12,6 +12,8 @@
 import { BAL } from '../../content/constants.js';
 import { emit } from '../../core/eventBus.js';
 import { chronicle } from '../../core/eventBus.js';
+// doc35 WP-P0-2：战术 v2（world.combatV2 门控；金快照零漂移）
+import { initBattleV2, stepSquadrons } from './subsystemsAndEw.js';
 
 const DT = BAL.combat.dt;
 
@@ -163,11 +165,18 @@ export function stepOneBattle(world, battle, dt) {
     finishBattle(world, battle, aliveA.length === 0 ? 'b' : 'a');
     return;
   }
-  if (battle.endCondition?.kind === 'timeout' && battle.time >= battle.endCondition.timeoutSeconds) {
+  // F-10：无论 endCondition 为 timeout 还是携带 timeoutSeconds 的歼灭战，
+  // 超时均强制收束防卡死（无武装对峙、目标互不可达等极端情形的硬性兜底）
+  if (battle.endCondition?.timeoutSeconds && battle.time >= battle.endCondition.timeoutSeconds) {
     finishBattle(world, battle, null);
     return;
   }
 
+  // doc35 WP-P0-2：战术 v2 初始化与舰载机中队（world.combatV2 门控）
+  if (world.combatV2 === true) {
+    initBattleV2(world, battle);
+    stepSquadrons(world, battle, dt);
+  }
   // 单位行为（武器系统在阶段08注入：unitBehaviors 注册表）
   for (const behavior of unitBehaviors) behavior(world, battle, dt);
   for (const behavior of projectileBehaviors) behavior(world, battle, dt);

@@ -5,6 +5,8 @@
 import { el } from '../components/dom.js';
 import { L } from '../../core/i18n.js';
 import { dateStr } from '../../core/clock.js';
+import { eventTypeZh } from '../../content/eventNames.js';
+import { buildingDef } from '../../domain/planets/colony.js';
 
 export class BottomBar {
   constructor(root, app) {
@@ -58,7 +60,10 @@ export class BottomBar {
       const c = w.entities.colonies[cid];
       for (const job of c.constructionQueue || []) {
         if (count++ > 8) break;
-        box.appendChild(el('div', { class: 'vf-log-line', text: `建造：${job.defId} @ ${w.entities.planets[c.planetId]?.name || cid}（${job.state}）` }));
+        const bDef = buildingDef(job.defId);
+        const bName = bDef && bDef.nameZh ? bDef.nameZh : '未知设施';
+        const bStateZh = { queued: '排队', construction: '施工中', paused: '暂停' }[job.state] || job.state || '';
+        box.appendChild(el('div', { class: 'vf-log-line', text: `建造：${bName} @ ${w.entities.planets[c.planetId]?.name || cid}（${bStateZh}）` }));
       }
     }
     // 在途舰队
@@ -125,7 +130,7 @@ function alertText(a) {
     case 'FirstContact': return '首次接触';
     case 'TechCompleted': return '科研完成';
     case 'ShipDestroyed': return '舰船损失';
-    default: return a.type;
+    default: return eventTypeZh(a.type);
   }
 }
 
@@ -165,6 +170,6 @@ function shortEventText(e) {
     case 'TreatySigned': return `条约签署`;
     case 'WarDeclared': return `宣战`;
     case 'FirstContact': return `首次接触`;
-    default: return e.type;
+    default: return eventTypeZh(e.type);
   }
 }

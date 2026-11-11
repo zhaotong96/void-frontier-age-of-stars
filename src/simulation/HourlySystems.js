@@ -7,6 +7,7 @@
  */
 
 import { registerHourly } from './TickPipeline.js';
+import { BUILDINGS } from '../content/buildings.js';
 import { BAL } from '../content/constants.js';
 import { stepBattles } from '../domain/combat/BattleSimulation.js';
 import { stepMission } from '../domain/ground/GroundMission.js';
@@ -20,6 +21,13 @@ import { createShip } from '../domain/ships/ship.js';
 import { getMod } from '../domain/factions/modifiers.js';
 import { registerAI } from '../domain/ai/FactionAI.js';
 import { factionShipMods } from '../domain/fleets/fleet.js';
+import { stepPlanetIndustry, NODE_IDX } from '../domain/industry/planetaryLogistics.js';
+import { stepCatapult, settleOrbitalBuffer } from '../domain/industry/catapult.js';
+// doc35 WP-P1-1/P1-2：太空电梯（elevator online 时替代弹射井路径）+ 物理商队步进
+import { stepSpaceElevator } from '../domain/strategic/megastructures.js';
+import { stepTradeRoutes } from '../domain/economy/tradeRoutes.js';
+import { tickPlanetaryThreatIndex } from '../domain/ground/planetaryThreat.js';
+import { firePlanetaryIonBatteries, hostileFleetsInSystemOf, announceIonSalvo } from '../domain/strategic/orbitalSynergy.js';
 
 registerHourly('orders', (world) => {
   // AI 命令超时与目标清理（防无限重试 —— RISK-06）
@@ -97,18 +105,25 @@ registerHourly('production', (world) => {
     if (!planet.ind || !planet.ind.v) continue;
     const colony = Object.values(world.entities.colonies).find((cc) => cc.planetId === pid);
     const fid = colony ? colony.factionId : world.playerFactionId;
-    const defs = BUILDINGS_ALL;
+    const defs = BUILDINGS;
     stepPlanetIndustry(world, planet, planet.ind, defs, 1);
     const grid0 = (planet.ind.grids || [])[0] || null;
     const cat0 = planet.ind.catapult;
     if (cat0 && grid0) {
       // 弹射井由其所属子电网供能（取 catapult 节点的 gridId）
       const catNode = (planet.ind.nodes || []).find((n) => n[NODE_IDX.DEF] >= 0
-        && BUILDINGS_ALL[n[NODE_IDX.DEF]] && BUILDINGS_ALL[n[NODE_IDX.DEF]].catapult);
+        && BUILDINGS[n[NODE_IDX.DEF]] && BUILDINGS[n[NODE_IDX.DEF]].catapult);
       const grid = catNode
         ? (planet.ind.grids || []).find((g) => g.id === catNode[NODE_IDX.GRID]) || grid0
         : grid0;
-      stepCatapult(world, planet, planet.ind, grid, 1);
+      // doc35 WP-P1-2：太空电梯在线时由电梯接管舱段提拉（能耗 -93%、PTI 增量恒 0）；
+      // 未建电梯的行星走既有弹射井路径（金快照零漂移）
+      const elev = planet.ind.elevator;
+      if (elev && elev[3] === 1) {
+        stepSpaceElevator(world, planet, planet.ind, grid, 1);
+      } else {
+        stepCatapult(world, planet, planet.ind, grid, 1);
+      }
       settleOrbitalBuffer(world, planet, planet.ind);
     }
     // doc20 WP-3：PTI 微分推进——仅对已初始化 threat 的行星（曾登陆/激活威胁系统），
@@ -199,3 +214,8 @@ function countBuildings(world, factionId, category) {
   }
   return n;
 }
+
+// doc35 WP-P1-1：物理商队航线步进（tradeRoutesActive 旗标未置位时零开销直返 → 金快照零漂移）
+registerHourly('trade-routes', (world) => {
+  stepTradeRoutes(world);
+});

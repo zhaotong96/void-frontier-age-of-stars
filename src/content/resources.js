@@ -49,6 +49,13 @@ export const RESOURCES = [
   { id: 'influence', nameKey: 'res.influence', category: 'economic', unit: '点', basePrice: 0, mass: 0, volume: 0, storageClass: 'abstract', rarity: 1, isTradeable: false, isStrategic: false, decayRule: null, sourceTypes: ['politics', 'events'], sinkTypes: ['policy', 'diplomacy', 'claims'] },
   { id: 'researchData', nameKey: 'res.researchData', category: 'economic', unit: '份', basePrice: 10, mass: 0, volume: 0, storageClass: 'abstract', rarity: 2, isTradeable: true, isStrategic: false, decayRule: null, sourceTypes: ['survey', 'anomaly', 'lab'], sinkTypes: ['research'] },
   { id: 'intelPoints', nameKey: 'res.intelPoints', category: 'economic', unit: '点', basePrice: 0, mass: 0, volume: 0, storageClass: 'abstract', rarity: 2, isTradeable: false, isStrategic: false, decayRule: null, sourceTypes: ['intel'], sinkTypes: ['intel', 'diplomacy'] },
+
+// —— doc35 WP-P1-1：四大违禁科技品（isTradeable=false：不进正规市场 ensureMarket 结构，
+//    仅黑市渠道流通 → 金快照 markets 字节零漂移；黑市交易走舰队货舱 + FLOW.SMUGGLE） ——
+  { id: 'contra_ai_core', nameKey: 'res.contra_ai_core', category: 'contraband', unit: '台', basePrice: 360, mass: 0.4, volume: 0.3, storageClass: 'crate', rarity: 5, isTradeable: false, isStrategic: true, decayRule: null, sourceTypes: ['blackMarket'], sinkTypes: ['colonyIndustry'] },
+  { id: 'contra_neuro_stim', nameKey: 'res.contra_neuro_stim', category: 'contraband', unit: '箱', basePrice: 95, mass: 0.2, volume: 0.2, storageClass: 'crate', rarity: 4, isTradeable: false, isStrategic: false, decayRule: { perDayPct: 0.5 }, sourceTypes: ['blackMarket'], sinkTypes: ['colonyMorale'] },
+  { id: 'contra_xeno_serum', nameKey: 'res.contra_xeno_serum', category: 'contraband', unit: '剂', basePrice: 280, mass: 0.1, volume: 0.1, storageClass: 'crate', rarity: 5, isTradeable: false, isStrategic: true, decayRule: null, sourceTypes: ['blackMarket'], sinkTypes: ['bioWarfare'] },
+  { id: 'contra_heavy_arms', nameKey: 'res.contra_heavy_arms', category: 'contraband', unit: '箱', basePrice: 180, mass: 1.5, volume: 0.8, storageClass: 'crate', rarity: 4, isTradeable: false, isStrategic: true, decayRule: null, sourceTypes: ['blackMarket'], sinkTypes: ['pirateArsenal'] },
 ];
 
 const byId = new Map(RESOURCES.map((r) => [r.id, r]));

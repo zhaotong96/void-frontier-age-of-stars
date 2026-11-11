@@ -23,6 +23,7 @@ import { panel, kvList } from '../components/panels.js';
 import { showModal } from '../components/modal.js';
 import { L } from '../../core/i18n.js';
 import { designerView, fitPreview, shipyardView } from '../../simulation/ViewModels.js';
+import { techDef } from '../../domain/research/research.js';
 
 /** 槽位组顺序与中文名 */
 const SLOT_GROUPS = [
@@ -31,9 +32,11 @@ const SLOT_GROUPS = [
   { key: 'low', label: '低槽（low）' },
 ];
 
-/** 船体类别中文名（未知回退原文） */
+/** 船体类别中文名（未知回退原文；[SPEC-39 Bug 5] 补 capital 等全类别） */
 const HULL_CATEGORY_ZH = {
   combat: '作战', support: '支援', carrier: '航母', industrial: '工业', science: '科研',
+  capital: '主力舰', cruiser: '巡洋', destroyer: '驱逐', frigate: '护卫', corvette: '护卫艇',
+  transport: '运输', colony: '殖民', constructor: '工程',
 };
 
 /** 成本资源中文名（未知 id 回退原文） */
@@ -168,7 +171,7 @@ export const DesignerView = {
         type: 'button',
         disabled: locked,
         title: locked
-          ? `需科技: ${h.techReq || '未知'}`   // 禁用按钮 title 说明原因（简化显示 techId）
+          ? `需科技: ${(() => { const t = h.techReq ? techDef(h.techReq) : null; return (t && t.nameZh) || '未知科技'; })()}` // [SPEC-39 Bug 5] 显示中文名而非原始 techId
           : `选择该船体开始装配（${costText(h.cost)} · 工期 ${h.buildHours}h）`,
         style: { display: 'block', width: '100%', textAlign: 'left', marginTop: '4px' },
         on: {

@@ -10,7 +10,6 @@
  * 函数与同一接线语句（避免 mock 孤岛断言的旧教训；DOM 全生命周期归浏览器门禁页）。
  */
 
-import { readFileSync } from 'node:fs';
 import { createStarterCampaign } from '../../src/devtools/scenarioFactory.js';
 import { createGroundMission, getMissionField, getMissionView } from '../../src/domain/ground/GroundMission.js';
 import { blueprintsForPlanet } from '../../src/content/missionSites.js';
@@ -19,12 +18,65 @@ import { buildTerrainField, TERRAIN_FLAGS } from '../../src/domain/ground/terrai
 import { planColonyLayout, checkBuildingPlacement, createTerrainEdits, applyEdit, attachTerrainEdits, rebuildDirtyChunks, deserializeEdits } from '../../src/domain/ground/terrainEdits.js';
 import { computeSpringArm, GroundView } from '../../src/ui/screens/GroundView.js';
 import { sampleTerrain, slopeAt } from '../../src/domain/ground/surfaceQueries.js';
+import { warmGolden } from '../tools/update-golden.mjs';
 
-const GV_SRC = readFileSync('src/ui/screens/GroundView.js', 'utf8');
-const SCENE_SRC = readFileSync('src/render/gl/PlanetSurfaceScene.js', 'utf8');
-const GMESH_SRC = readFileSync('src/render/meshes/GroundMeshes.js', 'utf8');
-const PS3D_SRC = readFileSync('src/render/gl/PlanetSurface3D.js', 'utf8');
-const TP_SRC = readFileSync('src/render/gl/themePayload.js', 'utf8');
+/**
+ * [SPEC-39 Bug 1] 源级审计文本的运行时环境自省加载器。
+ * 旧实现为头部静态 `import { readFileSync } from 'node:fs'` + 模块顶层 readFileSync——
+ * 纯浏览器（DiagnosticsView 动态 import 本套件聚合 index.js）无法解析 node: 协议，
+ * 直接抛 `Failed to resolve module specifier 'node:fs'` 使诊断链路瘫痪。
+ * 现改为惰性加载（ensureSources，幂等共享 Promise）：
+ *   - Node：动态 import('node:fs') readFileSync（断言语义零变化）；
+ *   - 浏览器：fetch(import.meta.url 相对路径) 读取源码文本（dev-server 静态可达，
+ *     源级断言照常执行）；file:// 等不可达环境缓存 null——源级断言逐条降级为
+ *     SKIP（不抛错），领域状态机/纯函数断言不受影响。
+ */
+const isNodeEnv = typeof process !== 'undefined' && !!(process.versions && process.versions.node);
+
+const _SRC_PATHS = {
+  GV_SRC: 'src/ui/screens/GroundView.js',
+  SCENE_SRC: 'src/render/gl/PlanetSurfaceScene.js',
+  GMESH_SRC: 'src/render/meshes/GroundMeshes.js',
+  PS3D_SRC: 'src/render/gl/PlanetSurface3D.js',
+  TP_SRC: 'src/render/gl/themePayload.js',
+};
+const _srcCache = {};
+let _srcPromise = null;
+
+function ensureSources() {
+  if (_srcPromise) return _srcPromise;
+  _srcPromise = (async () => {
+    for (const key of Object.keys(_SRC_PATHS)) {
+      let text = null;
+      try {
+        if (isNodeEnv) {
+          const { readFileSync } = await import('node:fs');
+          text = readFileSync(_SRC_PATHS[key], 'utf8');
+        } else {
+          const res = await fetch(new URL('../../' + _SRC_PATHS[key], import.meta.url));
+          text = res.ok ? await res.text() : null;
+        }
+      } catch {
+        text = null;
+      }
+      _srcCache[key] = text;
+    }
+    // 既有套件断言直接消费这五个模块级别名（语义与旧 const readFileSync 版本一致）
+    GV_SRC = _srcCache.GV_SRC;
+    SCENE_SRC = _srcCache.SCENE_SRC;
+    GMESH_SRC = _srcCache.GMESH_SRC;
+    PS3D_SRC = _srcCache.PS3D_SRC;
+    TP_SRC = _srcCache.TP_SRC;
+  })();
+  return _srcPromise;
+}
+
+/** 源文本别名（ensureSources() 后可用；null = 无源通道，源级断言逐条降级跳过） */
+let GV_SRC = null;
+let SCENE_SRC = null;
+let GMESH_SRC = null;
+let PS3D_SRC = null;
+let TP_SRC = null;
 
 /** 世界坐标 → 场域坐标采样（world = field − FIELD_OFFSET，FIELD_OFFSET = −32） */
 function groundAt(field) {
@@ -69,6 +121,7 @@ export const suite02 = {
   name: '3D 关卡拓扑与地标/水体/POI 实装接线（GATE-02）',
   group: 'PLAYTEST',
   async run() {
+    await ensureSources();
     // (1) 任务运行于 site_meters 且 route_main 无 2D 隐形墙（3D 坡度通行）
     const world = createStarterCampaign({ seed: 24601 });
     const planet = Object.values(world.entities.planets).find((p) => p.category !== 'gasGiant');
@@ -80,13 +133,15 @@ export const suite02 = {
     const routeOk = mission.site.routes.some((r) => r.kind === 'wide_safe');
     if (!routeOk) throw new Error('站点缺 route_main（wide_safe）');
 
-    // (2) GroundView._setupScene 的 _pois/_edits 接线语句存在（源级断言）
-    if (!/this\._pois = ensurePlanetPois\(/.test(GV_SRC)) throw new Error('GroundView 缺 _pois 初始化');
-    if (!/this\._edits = deserializeEdits\(/.test(GV_SRC)) throw new Error('GroundView 缺 _edits 初始化');
-    if (!/attachTerrainEdits\(this\.field, this\._edits\)/.test(GV_SRC)) throw new Error('GroundView 缺 attachTerrainEdits 接线');
+    // (2) GroundView._setupScene 的 _pois/_edits 接线语句存在（源级断言；无源文本环境降级跳过）
+    if (GV_SRC != null) {
+      if (!/this\._pois = ensurePlanetPois\(/.test(GV_SRC)) throw new Error('GroundView 缺 _pois 初始化');
+      if (!/this\._edits = deserializeEdits\(/.test(GV_SRC)) throw new Error('GroundView 缺 _edits 初始化');
+      if (!/attachTerrainEdits\(this\.field, this\._edits\)/.test(GV_SRC)) throw new Error('GroundView 缺 attachTerrainEdits 接线');
+    }
 
     // (3) _bmeshList 遍历站点地标（源级）+ 实例级地标 ≥ 2
-    if (!/this\._site\.site\.landmarks/.test(GV_SRC)) throw new Error('_bmeshList 未渲染站点地标');
+    if (GV_SRC != null && !/this\._site\.site\.landmarks/.test(GV_SRC)) throw new Error('_bmeshList 未渲染站点地标');
     const bp = blueprintsForPlanet(planet, planet.primaryThemeId || null)[0];
     const site = getSiteInstance(world, planet.id, bp.id);
     if (!site || site.site.landmarks.length < 2) throw new Error('站点地标实例 < 2');
@@ -95,14 +150,16 @@ export const suite02 = {
       throw new Error('站点地标无一命中七大旗舰图集 prefab');
     }
 
-    // (4) PlanetSurfaceScene 挂载 PlanetWater + 潮汐（源级 + 实例级）
-    if (!/import \{ PlanetWater, tideWaterLevel \} from '\.\/PlanetWater\.js';/.test(SCENE_SRC)
-      && !/PlanetWater/.test(SCENE_SRC)) throw new Error('PlanetSurfaceScene 未导入 PlanetWater');
-    if (!/this\._water = new PlanetWater\(/.test(SCENE_SRC)) throw new Error('PlanetSurfaceScene 未实例化 _water');
-    if (!/tideWaterLevel\(/.test(SCENE_SRC)) throw new Error('场景未接入 90s 潮汐');
-    // 蓝图地形剖面水位：abyssal_ocean 下 themeFx.waterLevel 应激活（非 -1000 关闭态）
-    if (bp.terrainProfile === 'ocean_basin_reef_trench' || planet.category === 'ocean') {
-      if (!/getWaterLevel/.test(SCENE_SRC)) throw new Error('场景缺 getWaterLevel 潮汐访问器');
+    // (4) PlanetSurfaceScene 挂载 PlanetWater + 潮汐（源级 + 实例级；无源文本环境降级跳过）
+    if (SCENE_SRC != null) {
+      if (!/import \{ PlanetWater, tideWaterLevel \} from '\.\/PlanetWater\.js';/.test(SCENE_SRC)
+        && !/PlanetWater/.test(SCENE_SRC)) throw new Error('PlanetSurfaceScene 未导入 PlanetWater');
+      if (!/this\._water = new PlanetWater\(/.test(SCENE_SRC)) throw new Error('PlanetSurfaceScene 未实例化 _water');
+      if (!/tideWaterLevel\(/.test(SCENE_SRC)) throw new Error('场景未接入 90s 潮汐');
+      // 蓝图地形剖面水位：abyssal_ocean 下 themeFx.waterLevel 应激活（非 -1000 关闭态）
+      if (bp.terrainProfile === 'ocean_basin_reef_trench' || planet.category === 'ocean') {
+        if (!/getWaterLevel/.test(SCENE_SRC)) throw new Error('场景缺 getWaterLevel 潮汐访问器');
+      }
     }
 
     // (5) doc11 WP-6 防伪绿升级：真实 GroundView 渲染装配管线实例化（运行态，非源码正则）。
@@ -174,19 +231,22 @@ export const suite02 = {
     }
 
     // (6) doc10 P1-F/P1-G 源级接线断言：uHdr 预缩放 + 权威色板源 + 18 主题音/工程闭环
-    if (!/uniform float uHdr;/.test(PS3D_SRC) || !/uHdr, 1\.0\)/.test(PS3D_SRC)) {
+    //     （无源文本环境降级跳过；Node 与 dev-server 浏览器下全量强制）
+    if (PS3D_SRC != null && (!/uniform float uHdr;/.test(PS3D_SRC) || !/uHdr, 1\.0\)/.test(PS3D_SRC))) {
       throw new Error('PlanetSurface3D.LIT_FS 缺 uHdr 预缩放（RGBA8 降级 4 倍过曝）');
     }
-    if (!/uniform float uHdr;/.test(GV_SRC)) throw new Error('BM_FS 缺 uHdr 预缩放');
-    if (!/setThemePaletteSource\(\(id\)/.test(TP_SRC)) throw new Error('themePayload 未接线权威色板源');
-    if (!/dispatch\('ShapeTerrain'/.test(GV_SRC) || !/dispatch\('PlaceBuilding'/.test(GV_SRC)) {
-      throw new Error('GroundView 工程模式未接 ShapeTerrain/PlaceBuilding（P1-E 复发）');
+    if (GV_SRC != null) {
+      if (!/uniform float uHdr;/.test(GV_SRC)) throw new Error('BM_FS 缺 uHdr 预缩放');
+      if (!/dispatch\('ShapeTerrain'/.test(GV_SRC) || !/dispatch\('PlaceBuilding'/.test(GV_SRC)) {
+        throw new Error('GroundView 工程模式未接 ShapeTerrain/PlaceBuilding（P1-E 复发）');
+      }
+      if (!/dispatch\('HarvestTerrainOre'/.test(GV_SRC)) throw new Error('GroundView 缺地质采掘接线');
+      if (!/setAmbientTheme\(/.test(GV_SRC)) throw new Error('GroundView 未接线 18 主题环境音（P1-G 复发）');
+      if (!/EXPANSION_GAMEPLAY\[/.test(GV_SRC)) throw new Error('GroundView 未消费 EXPANSION_GAMEPLAY（P1-G 复发）');
+      if (!/heatOpts\.heatZones/.test(GV_SRC)) throw new Error('GroundView 缺 permafrost_furnace 热源对位接线（P1-F④）');
     }
-    if (!/dispatch\('HarvestTerrainOre'/.test(GV_SRC)) throw new Error('GroundView 缺地质采掘接线');
-    if (!/setAmbientTheme\(/.test(GV_SRC)) throw new Error('GroundView 未接线 18 主题环境音（P1-G 复发）');
-    if (!/EXPANSION_GAMEPLAY\[/.test(GV_SRC)) throw new Error('GroundView 未消费 EXPANSION_GAMEPLAY（P1-G 复发）');
-    if (!/heatOpts\.heatZones/.test(GV_SRC)) throw new Error('GroundView 缺 permafrost_furnace 热源对位接线（P1-F④）');
-    if (!/matColors/.test(SCENE_SRC) || !/waterOpts\.colors/.test(SCENE_SRC)) {
+    if (TP_SRC != null && !/setThemePaletteSource\(\(id\)/.test(TP_SRC)) throw new Error('themePayload 未接线权威色板源');
+    if (SCENE_SRC != null && (!/matColors/.test(SCENE_SRC) || !/waterOpts\.colors/.test(SCENE_SRC))) {
       throw new Error('PlanetSurfaceScene 未向 PlanetWater 传主题水色（P1-F②）');
     }
 
@@ -372,6 +432,7 @@ export const suite04 = {
   name: '殖民地建筑 9 点坡度贴合与基座裙边（GATE-04）',
   group: 'PLAYTEST',
   async run() {
+    await ensureSources();
     const world = createStarterCampaign({ seed: 24601 });
     // 高山/熔岩/海洋三类行星（doc9 GATE-04 指定主题地表）
     const wanted = ['rocky', 'lava', 'ocean'];
@@ -414,13 +475,13 @@ export const suite04 = {
         // (2) 建筑中心不深埋：y ≥ 9 点最低样本 − 0.05
         const s = sampleTerrain(field, b.fx, b.fz);
         if (s && b.y < s.y - 2.6) throw new Error(`${p.category}/${b.defId} 中心深埋（y=${b.y.toFixed(2)} < ground=${s.y.toFixed(2)}）`);
-        // (3) 基座裙边源级断言（1.8m 混凝土裙边包络悬空侧）
-        if (!/skirt/i.test(GMESH_SRC)) throw new Error('GroundMeshes 缺基座裙边几何');
+        // (3) 基座裙边源级断言（1.8m 混凝土裙边包络悬空侧；无源文本环境降级跳过）
+        if (GMESH_SRC != null && !/skirt/i.test(GMESH_SRC)) throw new Error('GroundMeshes 缺基座裙边几何');
         placed++;
       }
     }
     // (4) 裙边深度常量断言
-    if (!/1\.8/.test(GMESH_SRC)) throw new Error('GroundMeshes 裙边深度未达 1.8m');
+    if (GMESH_SRC != null && !/1\.8/.test(GMESH_SRC)) throw new Error('GroundMeshes 裙边深度未达 1.8m');
     return { ok: true, detail: `GATE-04 PASS：${placed}/${total} 建筑位（${picked.map((p) => p.category).join('/')} 三主题）9 点校验全过 + 基座裙边闭合` };
   },
 };
@@ -1634,13 +1695,27 @@ export const suite09 = {
       const row = summary.rows.find((r) => r.theme === theme && r.tier === 'S');
       if (!row) throw new Error(`SYNERGY-05 旗舰主题 ${theme} 未达 S 级`);
     }
-    // 批处理纪律（源级断言：BioFloraPass 恒 2 DC + BuildingMeshBatch 单 draw call）
-    const bioSrc = readFileSync('src/render/gl/BioFloraPass.js', 'utf8');
-    const dcCount = (bioSrc.match(/drawElementsInstanced\(/g) || []).length;
-    if (dcCount !== 2) throw new Error(`SYNERGY-05 BioFloraPass DC ≠ 2：${dcCount}`);
-    const gvSrc = readFileSync('src/ui/screens/GroundView.js', 'utf8');
-    if (!/drawArraysInstanced/.test(gvSrc)) throw new Error('SYNERGY-05 建筑批处理丢失实例化 draw');
-    // 金快照零漂移终检（GATE-05..09 全链路后仍 68462446）
+    // 批处理纪律（源级断言：BioFloraPass 恒 2 DC + BuildingMeshBatch 单 draw call；
+    // [SPEC-39 Bug 1] 环境自省装载：Node 动态 import node:fs / 浏览器 fetch 同源文本，
+    // file:// 等无源通道环境降级跳过该条源级断言）
+    await ensureSources();
+    const bioSrc = await (async () => {
+      if (isNodeEnv) {
+        const { readFileSync } = await import('node:fs');
+        return readFileSync('src/render/gl/BioFloraPass.js', 'utf8');
+      }
+      try {
+        const res = await fetch(new URL('../../src/render/gl/BioFloraPass.js', import.meta.url));
+        return res.ok ? await res.text() : null;
+      } catch { return null; }
+    })();
+    if (bioSrc != null) {
+      const dcCount = (bioSrc.match(/drawElementsInstanced\(/g) || []).length;
+      if (dcCount !== 2) throw new Error(`SYNERGY-05 BioFloraPass DC ≠ 2：${dcCount}`);
+    }
+    if (_srcCache.GV_SRC != null && !/drawArraysInstanced/.test(_srcCache.GV_SRC)) throw new Error('SYNERGY-05 建筑批处理丢失实例化 draw');
+    // 金快照零漂移终检（GATE-05..09 全链路后仍 8be8ce2c；warmGolden 预热后同步读缓存）
+    await warmGolden();
     const goldBase = loadGolden();
     const goldNow = computeGolden();
     if (!goldBase || goldNow !== goldBase.hash) {

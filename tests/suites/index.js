@@ -39,9 +39,31 @@ import { suite as save04 } from './save-migration.suite.js';
 import { suite100 as terrain10, suiteMount as terrain08 } from './planetary-terrain-theme.suite.js';
 import { suite as playtest01 } from './ground-playtest-physics.suite.js';
 import { suite02 as playtest02, suite03 as playtest03, suite04 as playtest04, suite05 as playtest05, suite06 as playtest06, suite07 as playtest07, suite08 as playtest08, suite09 as playtest09 } from './playtest-gates.suite.js';
+import { suite as agentLoop, suiteTrace as agentTrace } from './gameplay-agent-loop.suite.js';
+import { suiteStorm as fuzzStability, suiteReplay as fuzzReplay } from './fuzz-stability.suite.js';
+import { suiteSoak as soakInspection, suiteLeak as soakLeak, suiteSweep as sweep1000 } from './soak-inspection.suite.js';
+import { suite as e2eCampaignMilestones, suiteChronicle as e2eChronicle } from './e2e-campaign-milestones.suite.js';
+// doc35 GATE-10..14：超长线内容五套验收门禁（SPEC-PLAN-035 §4）
+import { suite as precursorDagLore } from './precursor-dag-lore.suite.js';
+import { suite as combatTacticalV2 } from './combat-tactical-v2.suite.js';
+import { suite as greyEconomySmuggle } from './grey-economy-smuggle.suite.js';
+import { suite as megastructureElevator } from './megastructure-elevator.suite.js';
+import { suite as endgameCrisisAscension } from './endgame-crisis-ascension.suite.js';
+// SPEC-39 Phase S4 / SPEC-40 第二维：Gate 15 地表深度六门禁（SURF-01..05；SURF-06 归 CDP）
+import { suite01 as surf01, suite02 as surf02, suite03 as surf03, suite04 as surf04, suite05 as surf05 } from './playtest-gate15-surface.suite.js';
 
 export function collectSuites() {
   return [
+    precursorDagLore,
+    combatTacticalV2,
+    greyEconomySmuggle,
+    megastructureElevator,
+    endgameCrisisAscension,
+    surf01,
+    surf02,
+    surf03,
+    surf04,
+    surf05,
     coreRng,
     coreSerialization,
     coreMath,
@@ -89,5 +111,15 @@ export function collectSuites() {
     playtest07,
     playtest08,
     playtest09,
+    // —— doc24 全生命周期扩展卷（docs 25-28 顺序施工套件，随各卷竣工逐卷挂载）——
+    agentLoop,
+    agentTrace,
+    fuzzStability,
+    fuzzReplay,
+    soakInspection,
+    soakLeak,
+    sweep1000,
+    e2eCampaignMilestones,
+    e2eChronicle,
   ].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }

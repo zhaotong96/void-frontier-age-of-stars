@@ -14,6 +14,8 @@ import { createEntity, getEntity } from '../entities/registry.js';
 import { getMod } from '../factions/modifiers.js';
 import { getRelation } from '../diplomacy/war.js';
 import { checkAndProgressObjectives } from '../events/objectives.js';
+// doc35 WP-P0-1：异象 DAG 调查（惰性挂载；AI 从不下达 InvestigateAnomaly → 金快照零漂移）
+import { tickDagAnomaly, attachDagIfTemplate, setResolveAnomalyHook } from './precursorDag.js';
 
 /** 分层阈值（扫描点） */
 export const LEVEL_THRESHOLDS = [0, 14, 36, 72, 120];
@@ -89,8 +91,10 @@ export function revealSurveyLevel(world, sys, factionId, newLevel) {
   const fleetId = findScanningFleet(world, factionId, sys.id);
 
   // 扫描揭示他国主权 → 首次接触流程推进（EXP-03）
+  // （F-06 修复：必须传 ownerFactionId——原实现传入系统对象，getRelation 会以
+  //  "[object Object]" 字符串化键位制造幽灵关系记录，污染外交状态面）
   if (sys.ownerFactionId && sys.ownerFactionId !== factionId && newLevel >= 2) {
-    observeForeignSystem(world, factionId, sys);
+    observeForeignSystem(world, factionId, sys.ownerFactionId);
   }
   // 邻近感知：调查星系的邻接星系若为他国领土，侦测到边境信号
   if (newLevel >= 2) {
@@ -183,6 +187,12 @@ export function tickAnomalyInvestigation(world) {
     }
     const power = scanPower(world, fleet, fleet.factionId) * 0.6;
     ano.progress += Math.max(1, power);
+    // doc35 WP-P0-1：DAG 调查模式（ano.dag 仅由 InvestigateAnomaly 玩家命令挂载）
+    if (ano.dag) {
+      const dagRes = tickDagAnomaly(world, ano, fleet);
+      if (dagRes === 'resolved') resolveAnomaly(world, ano, fleet.factionId);
+      continue;
+    }
     const goal = 60 + ano.difficulty * 18;
     if (ano.progress >= goal) {
       resolveAnomaly(world, ano, fleet.factionId);
@@ -231,3 +241,6 @@ export function observeForeignSystem(world, factionId, otherFactionId, viaSystem
     emit(world, 'FirstContact', { a: factionId, b: otherFactionId, systemId: viaSystemId }, 'diplomacy');
   }
 }
+
+// doc35 WP-P0-1：DAG 受挫「激进强拆/封存」经旧结算通道收束（避免循环导入，模块初始化时挂钩）
+setResolveAnomalyHook(resolveAnomaly);

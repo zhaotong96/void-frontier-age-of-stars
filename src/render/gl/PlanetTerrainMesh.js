@@ -585,7 +585,7 @@ export class PlanetTerrainMesh {
     if (ent.vboW) gl.deleteBuffer(ent.vboW);
     if (ent.vboMor) gl.deleteBuffer(ent.vboMor);
     if (ent.ibo) gl.deleteBuffer(ent.ibo);
-    if (ent.vao) gl.deleteVertexArray(ent.vao);
+    if (ent.vao) this.glc.destroyVAO(ent.vao); // F-09：连带装配期 inner buffer
     this._entries.delete(key);
   }
 

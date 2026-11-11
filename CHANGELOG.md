@@ -8,6 +8,100 @@
 
 ## [Unreleased]
 
+### Added（2026-11-11 SPEC-39 行星地表深度游戏性 Phase S1~S4）
+
+- **地表深度领域层（surfaceEvents.js）**：紧凑差分状态容器 planet.surfaceDelta
+  （sos 5 元组 / extraction 5 元组 / heat 4 元组 / deployables ≤8×6 元组 /
+  slatesMask / floraScannedMask / geoWonderScanned / deepSolvedMask / deepPaidMask，
+  极端满载 ≤1.0KB）；SOS 测向模型 S=exp(−d/180)·(0.20+0.80·cosθ^7)·(1−0.70η)
+  （γ=7 收严满足 SURF-03「>45° 定向增益衰减 ≥90%」红线）；三分支信标处置；
+  50/30/20 勘探度闭环 + 星际联盟大奖幂等；1~5 星警戒热度微分方程
+  （阈值 [0,150,320,520,720,900]‰，+18 采掘/+180 钻机/+4.5s 噪音/+260 强解，
+  λ_base 8.5/s 脱战衰减、诱饵 λ 25/s）与确定性增援编制（★5=1,200HP 重装要塞）；
+  4 类野战部署物（探地雷达/充能桩 12m 庇护圈/哨兵塔/诱饵弹 −220‰+18m 仇恨改写）；
+  深核采掘（+180‰、600s、+4.5/s 噪音）。新命令 InteractPoiStage/TriggerSosBeacon/
+  DeployFieldTool/StartDeepCoreExtraction；深度 POI 三步微副本状态机
+  （严格按序 + ALREADY_HARVESTED 幂等 + slatesMask 位读锁 + 终局道德抉择卡经
+  world.narrative.pendingChoices 非侵入模态回写希望/不满）。
+- **种子扩展（planetSeeds.js）**：SALT_SOS/SALT_SLATE/SALT_HEAT_WAVE 三支 mix32
+  子流（sosSeed/slateSeed(poiId)/heatWaveSeed(star,waveIdx)），主 world.rng 零消费。
+- **深度 POI 拓扑层（planetPOI.js）**：3~8 座/行星（三环同心 0-75/80-155/160-242m，
+  黄金角 2.39996 螺旋 128 候选 + 环带网格兜底，坡度 ≤18°/间距 ≥36m，残骸 8~15° 埋入
+  语义位）；既有八类 planet.pois 层逐字节不动（金快照 8be8ce2c 零漂移）。
+- **内容库**：surfaceNarratives.js（12 POI 蓝图 + 8 组 24 则三幕反转日志 +
+  3 张地表道德抉择卡）；lexicon.js（先驱者 32 词根四域字典 +
+  translateAncientText 动态破译纯函数）；eventNames.js（事件类型权威中文字典）。
+- **渲染图集（landmarkMeshes.js + GroundView）**：12 POI + 4 部署物低模预制
+  （全部 1.8m skirt，单网格 ≤ 蓝图预算，最坏 8+8=3,184 ≤ 4,736 Tris）；
+  BuildingMeshBatch 384→512 槽位（仍单 DrawCall）；9 点均值承台算子
+  （内平 4.5m/外过渡 9.0m）注入 siteModifier 链；深度 POI 真实网格渲染 +
+  部署物实例 + SOS 脉冲信标。
+- **地表 HUD/交互（GroundView）**：三模态战术面罩（Tab 轮切生态光谱/电磁测向/
+  地质穿透；EM 模式信噪比读数 + SOS 方位箭头 + S_k 调制脉冲音）；
+  2D 终端微解谜（4 位方向键序列，slateSeed 确定性，成功推进 POI 工序）；
+  警戒热度 ★0..5 面板与五档刻度；部署快捷栏 7/8/9/0 + X 深核采掘；
+  充能桩 12m 力场（环境免伤第四重庇护 + 护盾 +6/s 回充）；逐帧热度微分步
+  stepSurfaceThreatAndDeployables 集成（升星波次 toast）。
+- **测试资产**：tests/suites/playtest-gate15-surface.suite.js（SURF-01..05 五门禁，
+  套件总数 61→66）；金快照 8be8ce2c 双口径零漂移。
+
+### Fixed（2026-11-11 SPEC-39 六项 UI / 浏览器缺陷）
+
+- **Bug 1（Critical）**：`tests/suites/playtest-gates.suite.js` 头部静态
+  `import 'node:fs'` + 模块顶层 readFileSync 使浏览器诊断视图（#/diagnostics
+  运行全部测试）瞬间崩溃（Failed to resolve module specifier 'node:fs'）——
+  改环境自省惰性装载 ensureSources()（Node 动态 import / 浏览器 fetch 同源，
+  file:// 降级逐条 SKIP）；连带 `tests/tools/update-golden.mjs` 浏览器安全化
+  （warmGolden() 异步装载 + loadGolden() 同步读缓存，CLI 不变）。
+- **Bug 2（High）**：固定底栏（.vf-bottombar 占视口底 8..40px）遮挡滚动容器
+  尾部操作按钮——`.vf-view-body` 统一 padding-bottom: 84px（栏体 + ≥20px
+  视觉安全区）；实机三视图触底净距 63~117px、命中测试全通。
+- **Bug 3（Medium）**：地表左上标题卡与战术目镜读数同位穿插——目镜激活时标题
+  整体隐匿（从严执行「或隐匿」分支），读数卡迁至 (24,72) 安全栅格；像素差分
+  取证（标题条带 alpha 201→61，目镜卡区 222）。
+- **Bug 4（Medium）**：GovernmentView 移除「政策系统将在后续版本开放/尚未实现」
+  陈旧占位横幅，新增真实生效法令概览栏（激活法令总数/日维护费/希望不满净修正
+  + 逐聚落明细）。
+- **Bug 5（Low）**：原始代码键名泄漏四处根除 + 权威字典兜底——BottomBar
+  （建造队列 defId→nameZh；alertText/shortEventText 未知类型回退 eventTypeZh）；
+  DesignerView（HULL_CATEGORY_ZH 补 capital 等；船体锁按钮 techReq→中文名）；
+  ResearchView（STAT_ZH 补 stormResist/stormResistAcid）；modifiers.js findTech
+  改模块级 TECHNOLOGIES 索引（修复 explain 面板泄漏原始 techId）；六视图
+  innerText 正则复扫 0 泄漏。
+- **Bug 6（Low）**：战役创建表单 4 控件补 id+name，label 显式 for 关联
+  （100% 严格一致）。
+
+
+### Fixed（2026-11-08 全生命周期测试工程 docs 25-28 实证修复）
+
+- **金快照重基线 68462446 → 8be8ce2c**：docs 25-28 测试工程实证修复的六项
+  世界演化可见缺陷使演化终态合法改变（非规则漂移）——F-10a 舰队 shipIds 去重
+  （开局舰队成员表重复项消除）、F-06 扫描首次接触改传 ownerFactionId（消除
+  "[object Object]" 幽灵关系键）、F-11 叙事事件 ALL_AI 外交效果真实生效、
+  F-04/F-14 实体查询原型污染守卫（消除垃圾关系/工业容器）。重基线经
+  `npm run golden:update` 生成（seed 24601 × 4320 ticks），REG-01/GATE-09
+  双口径验证通过。
+- **F-03（P0）**：HourlySystems 缺失 BUILDINGS/stepPlanetIndustry/NODE_IDX/
+  stepCatapult/settleOrbitalBuffer/tickPlanetaryThreatIndex 五符号导入——
+  doc19 行星工业小时步整段死代码，任何行星激活工业后整点必崩。
+- **F-05（P0）**：HourlySystems 离子炮齐射缺失 hostileFleetsInSystemOf/
+  announceIonSalvo 导入——fort 激活行星遇敌整点必崩。
+- **F-12（P0）**：工业电网无正极性并网电源节点 → 弹射井蓄能恒 0、天地物流
+  环结构死锁；太阳能阵列并网（wireRadiusM 24）+ 电网 builder 计入 powerGen。
+- **F-04/F-14（P1）**：getRelation 惰性创建前置双方存在性守卫 + 实体注册表
+  原型污染守卫（'__proto__' 实体 id 查询返回 Object.prototype → 全局原型
+  被写入 ind/threat 容器，后续世界每 tick 工业步进 + 金快照漂移）。
+- **F-06（P1）**：扫描首次接触 observeForeignSystem 误传系统对象（幽灵
+  "[object Object]" 关系键）→ 改传 ownerFactionId。
+- **F-07（P1）**：8 处绕过 FLOW 记账管道的直改余额（殖民地税上缴/困境裁决/
+  轨道支援/舰队补给/弹射市场销售）→ 全部改道 credit/debit，ECON-01 守恒
+  等式恢复。
+- **F-09（P1）**：真机 GL 无 VAO→buffer 级联删除——地表视图每次进出泄漏
+  2 buffer（实测 100 次切换 Δ=200）；GLCore 增设 _vaoOwned 装配期所有权
+  账本 + destroyVAO，四个渲染器逐场景销毁改道；修复后 100 次切换 Δ=0。
+- **F-10a（P1）**：createFleet 舰队成员表重复项（同舰双战斗单元，annihilate
+  终局永不达成）→ 入列守卫；战斗主体停局问题（F-10 主体）建档移交施工轨。
+
 ### Added
 
 - **v1.0 苍穹要塞（docs 22 WP-1..WP-6）**：支柱五合龙。**轨道五大支援呼叫**

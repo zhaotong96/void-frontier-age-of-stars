@@ -54,7 +54,11 @@ export function createFleet(world, opts) {
       fuel: spec.fuel,
       factionMods: factionShipMods(world, opts.factionId), // TD3：文明战斗特质汇入 computeShipStats
     });
-    fleet.shipIds.push(ship.id);
+    // F-10a 修复：createShip 内已按「舰船↔舰队双向一致性」守卫入列
+    // （ship.js:191-194），此处再无条件 push 造成 fleet.shipIds 重复项
+    // （实测 AI 舰队 ["shp_595","shp_595","shp_597","shp_597"]）——重复
+    // shipId 使战斗配对产生同舰双单元，annihilate 终局条件无法达成。
+    if (!fleet.shipIds.includes(ship.id)) fleet.shipIds.push(ship.id);
   }
   emit(world, 'FleetFormed', { fleetId: fleet.id, factionId: fleet.factionId, ships: fleet.shipIds.length }, 'fleet');
   return fleet;
