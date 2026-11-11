@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark" />
+  <title>状态机模糊风暴 — 浏览器实机混沌压力监控（doc26 SPEC-TEST-026）</title>
+  <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+  <link rel="stylesheet" href="./styles.css" />
+  <style>
+    #fuzz-hud {
+      position: fixed; top: 12px; right: 12px; width: 440px; max-height: 92vh; overflow: auto;
+      z-index: 9999; background: rgba(10, 8, 20, 0.9); border: 1px solid rgba(255, 120, 80, 0.4);
+      border-radius: 10px; padding: 12px 14px; color: #ffd9c9; backdrop-filter: blur(6px);
+      font: 12px/1.55 "Cascadia Code", Consolas, monospace;
+      box-shadow: 0 0 24px rgba(255, 90, 40, 0.25);
+    }
+    #fuzz-hud h1 { font-size: 14px; margin: 0 0 6px; color: #ffb08a; letter-spacing: 1px; }
+    #fuzz-hud .row { display: flex; justify-content: space-between; margin: 2px 0; }
+    #fuzz-hud .k { color: #c98a6f; }
+    #fuzz-hud .badge { margin-top: 10px; padding: 10px; text-align: center; border-radius: 8px; font-size: 15px; font-weight: 700; letter-spacing: 2px; }
+    #fuzz-hud .badge.green { background: rgba(30, 160, 90, 0.25); border: 1px solid #46e08a; color: #7dffb0; }
+    #fuzz-hud .badge.red { background: rgba(160, 30, 30, 0.25); border: 1px solid #ff5d5d; color: #ff9c9c; }
+    #fuzz-hud .log { max-height: 200px; overflow: auto; color: #9a8f9d; margin-top: 8px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="boot" class="boot-screen">
+      <div class="boot-title">VOID FRONTIER</div>
+      <div class="boot-sub">Fuzz 风暴 · 初始化…</div>
+      <div class="boot-status" id="boot-status">加载核心模块</div>
+    </div>
+  </div>
+  <div id="fuzz-hud">
+    <h1>STATE MACHINE FUZZ STORM</h1>
+    <div class="row"><span class="k">SURF 步</span><span id="f-surf">0</span></div>
+    <div class="row"><span class="k">命令 ok/blocked</span><span id="f-cmd">0/0</span></div>
+    <div class="row"><span class="k">.vf-view 堆叠违规</span><span id="f-dom">0</span></div>
+    <div class="row"><span class="k">window 监听器 Δ</span><span id="f-lst">0</span></div>
+    <div class="row"><span class="k">未捕获异常</span><span id="f-err">0</span></div>
+    <div class="row"><span class="k">NaN/Inf 污染</span><span id="f-nan">0</span></div>
+    <div class="badge" id="f-badge">运行中…</div>
+    <div class="log" id="f-log"></div>
+  </div>
+
+  <script type="module">
+    import { App } from '../../src/app/App.js';
+    import { registerAll as registerLocalization } from '../../src/content/localization/index.js';
+    import { executeCommand } from '../../src/core/commandBus.js';
+    import { advanceTicks } from '../../src/simulation/WorldSimulation.js';
+    import { scanWorldPurity } from '../fuzz/StateMachineFuzzer.js';
+    import { CommandMutator, mutateRoute } from '../fuzz/CommandMutator.js';
+    import { seedFromNumber, pick, intRange, chance } from '../../src/core/rng.js';
+
+    const $ = (id) => document.getElementById(id);
+    const log = (s) => {
+      const el = $('f-log');
+      el.textContent = (s + '\n' + el.textContent).split('\n').slice(0, 120).join('\n');
+    };
+
+    // —— window 监听器引用计数探针（doc26 §2.1 UI-LEAK 同源口径） ——
+    const lst = { added: 0, removed: 0 };
+    const origAdd = window.addEventListener.bind(window);
+    const origRem = window.removeEventListener.bind(window);
+    window.addEventListener = function (t, fn, o) { lst.added++; return origAdd(t, fn, o); };
+    window.removeEventListener = function (t, fn, o) { lst.removed++; return origRem(t, fn, o); };
+
+    // —— 未捕获异常哨兵 ——
+    const errors = [];
+    window.addEventListener('error', (ev) => errors.push(String(ev.error || ev.message)));
+    window.addEventListener('unhandledrejection', (ev) => errors.push(String(ev.reason)));
+
+    let domViolations = 0;
+
+    async function main() {
+      registerLocalization();
+      const app = new App(document.getElementById('app'));
+      await app.boot();
+      await app.startNewGame({ seed: 24601 });
+      app.setSpeed(1); // 风暴期间战略时钟保持运行（真实竞争态）
+      window.focus();
+
+      const world = app.world;
+      const mutator = new CommandMutator(20261108);
+      const state = seedFromNumber(20261108);
+      const types = (await import('../../src/core/commandBus.js')).commandList();
+      // 监听器基线：App 启动 + 探针自装的合法一次性注册不计入冲浪增量
+      // （doc26 §2.1 门禁口径 = 1,000 次切换后的增量 ≤ 2）
+      const lstBaseline = lst.added - lst.removed;
+
+      // 真实实体 id 池（合法面路由/命令参数）
+      const realIds = {
+        system: Object.keys(world.entities.systems)[0],
+        colony: Object.keys(world.entities.colonies)[0] || 'col_none',
+        fleet: Object.keys(world.entities.fleets)[0] || 'flt_none',
+        planet: Object.keys(world.entities.planets)[0],
+      };
+      const routeFor = (r) => {
+        const p = { system: realIds.system, colony: realIds.colony, fleet: realIds.fleet, ground: realIds.planet, combat: 'bat_none' }[r.screen];
+        return r.param ? `#/${r.screen}/${p ?? r.param}` : `#/${r.screen}`;
+      };
+
+      const SURF = ['menu', 'galaxy', 'system', 'colony', 'fleet', 'designer', 'combat', 'research',
+        'market', 'diplomacy', 'government', 'ground', 'events', 'chronicle', 'settings', 'diagnostics'];
+
+      const SURF_STEPS = 600;
+      const t0 = performance.now();
+      let cmdOk = 0, cmdBlocked = 0, nanHits = 0;
+
+      for (let step = 0; step < SURF_STEPS; step++) {
+        // 1) 16 屏随机冲浪（合法 + 半合法 + 未知路由，16ms~40ms 间隔扰动）
+        const useMutant = chance(state, 0.25);
+        const target = useMutant ? mutateRoute(state) : routeFor({ screen: pick(state, SURF), param: 'x' });
+        try {
+          location.hash = target;
+        } catch (e) {
+          errors.push(`route ${target}: ${e.message}`);
+        }
+        // 未完成动作打断：冲浪中插随机命令与时间加速（Tween 第 3 帧跳出语义）
+        for (let k = 0; k < 2; k++) {
+          const cmd = mutator.mutateCommand(types, world.playerFactionId, world);
+          try {
+            const r = executeCommand(world, cmd);
+            if (r && r.ok) cmdOk++; else cmdBlocked++;
+          } catch (e) {
+            errors.push(`cmd ${cmd.type}: ${e.message}`);
+          }
+        }
+        if (chance(state, 0.1)) advanceTicks(world, intRange(state, 1, 12));
+
+        // 2) DOM 视图堆叠禁令 + 路由落位
+        await new Promise((r) => requestAnimationFrame(r));
+        const nViews = document.querySelectorAll('.vf-view').length;
+        if (nViews > 1) domViolations++;
+
+        // 3) 状态纯洁度抽查（每 25 步）
+        if (step % 25 === 24) {
+          const purity = scanWorldPurity(world);
+          nanHits += purity.nanInf.length;
+          if (purity.nanInf.length > 0) errors.push(`SANITY: ${purity.nanInf.slice(0, 2).join('; ')}`);
+          $('f-surf').textContent = String(step + 1);
+          $('f-cmd').textContent = `${cmdOk}/${cmdBlocked}`;
+          $('f-dom').textContent = String(domViolations);
+          $('f-lst').textContent = `${lst.added - lst.removed}`;
+          $('f-err').textContent = String(errors.length);
+          $('f-nan').textContent = String(nanHits);
+        }
+        await new Promise((r) => setTimeout(r, intRange(state, 16, 40)));
+      }
+
+      // —— 终局判定（doc26 §5） ——
+      const purity = scanWorldPurity(world);
+      const lstDelta = lst.added - lst.removed;
+      const surfLstDelta = lstDelta - lstBaseline;
+      const ok = errors.length === 0 && domViolations === 0 && purity.nanInf.length === 0 && surfLstDelta <= 2;
+      $('f-surf').textContent = String(SURF_STEPS);
+      $('f-cmd').textContent = `${cmdOk}/${cmdBlocked}`;
+      $('f-dom').textContent = String(domViolations);
+      $('f-lst').textContent = String(lstDelta);
+      $('f-err').textContent = String(errors.length);
+      $('f-nan').textContent = String(purity.nanInf.length);
+      const badge = $('f-badge');
+      const secs = ((performance.now() - t0) / 1000).toFixed(1);
+      if (ok) {
+        badge.className = 'badge green';
+        badge.textContent = `✔ 混沌风暴全绿 · ${SURF_STEPS} 冲浪 + ${cmdOk + cmdBlocked} 命令 · ${secs}s`;
+      } else {
+        badge.className = 'badge red';
+        badge.textContent = `✘ 风暴判负：errors=${errors.length} dom=${domViolations} nan=${purity.nanInf.length} Δlst=${surfLstDelta}`;
+      }
+      log(`终局: 监听器 +${lst.added}/-${lst.removed} · 纯洁度扫描 ${purity.nodes} 节点 · cyclic=${purity.cyclic}`);
+      window.__fuzzReport = {
+        ok, surfSteps: SURF_STEPS, cmdOk, cmdBlocked, domViolations,
+        listenerDelta: surfLstDelta, errors: errors.slice(0, 10),
+        nanInf: purity.nanInf.slice(0, 10), scanNodes: purity.nodes, seconds: Number(secs),
+      };
+    }
+
+    main();
+  </script>
+</body>
+</html>

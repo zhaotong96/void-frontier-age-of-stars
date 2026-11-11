@@ -497,3 +497,436 @@ export function buildLandmarkMesh(prefabId) {
   if (!builder) throw new Error(`[landmarkMeshes] 未知地标预制 id: ${prefabId}`);
   return builder();
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// SPEC-39 Phase S2：12 座深度 POI 预制 + 4 类野战部署物网格
+//
+// 契约（doc38 §几何预算 / SPEC-39 §切片二）：
+//  - 单网格三角形数 ≤ 对应 surfaceNarratives.SURFACE_POI_BLUEPRINTS.tris 预算
+//    （384/312/248/276/412/396/368/340/356/296/428/324；部署物 96~180）；
+//  - 所有地表建筑底部自带向下延伸 1.8m 的 skirt 裙边（混凝土/玄武岩包络悬空侧）；
+//  - 残骸类（cat=wreck）自带 8°~15° 埋入倾角语义（倾角由拓扑层 tiltDeg 在实例
+//    rotY 之外经 scale/rotX 表达——本图集提供 tiltPrefab 语义常量，实例化时应用）；
+//  - 全部显式坐标/颜色常量 + 确定性数学（无随机），米制、基座中心原点、y=0 贴地。
+// ════════════════════════════════════════════════════════════════════════
+
+/** POI/部署物配色扩展（与 LC 同域 sRGB 0..1） */
+const PC = {
+  hullGrey: [0.42, 0.46, 0.50],      // 舰体灰
+  hullDark: [0.24, 0.27, 0.31],      // 烧蚀黑
+  scorch: [0.14, 0.12, 0.11],        // 焦痕
+  orangeMark: [0.92, 0.48, 0.16],    // 应急橙涂装
+  tealGlass: [0.30, 0.78, 0.78],     // 青玻璃
+  crateTan: [0.66, 0.56, 0.38],      // 货箱黄褐
+  cryoWhite: [0.88, 0.94, 0.98],     // 低温白
+  cryoFrost: [0.62, 0.82, 0.92],     // 霜蓝
+  bioGreen: [0.36, 0.72, 0.34],      // 生化绿
+  contagion: [0.72, 0.86, 0.28],     // 孢子黄绿
+  domeGlass: [0.52, 0.80, 0.66],     // 温室玻璃
+  leafVivid: [0.30, 0.66, 0.42],     // 过境藤蔓
+  rigIron: [0.30, 0.32, 0.35],       // 钻机铁灰
+  rigAmber: [1.05, 0.66, 0.22],      // 钻机琥珀（过亮供辉光）
+  bunkerGreen: [0.34, 0.40, 0.34],   // 掩体军绿
+  radarWhite: [0.82, 0.86, 0.88],    // 天线白
+  monolith: [0.16, 0.17, 0.22],      // 先驱巨石玄黑
+  monoGlow: [0.55, 0.95, 0.88],      // 先驱青绿辉光（过亮）
+  prismCyan: [0.45, 0.92, 1.05],     // 棱镜青（过亮）
+  zeroViolet: [0.70, 0.55, 1.05],    // 零点能紫（过亮）
+  vaultBronze: [0.55, 0.42, 0.24],   // 密室青铜
+  turretGun: [0.20, 0.22, 0.24],     // 哨兵塔炮体
+  decoyRed: [1.0, 0.30, 0.24],       // 诱饵警示红（过亮）
+  padConcrete: [0.36, 0.36, 0.37],   // 承台混凝土
+};
+
+/**
+ * 1.8m 裙边（全 POI/部署物共用；box 12 tri）。
+ * halfW/halfD 为主体半宽深（裙边微外扩 0.08m 包络坡地悬空侧），y ∈ [-1.8, 0]。
+ */
+function poiSkirt(m, halfW, halfD, col = PC.padConcrete) {
+  m.beginPart('skirt');
+  m.box(0, -0.9, 0, halfW + 0.08, 0.9, halfD + 0.08, col);
+  return m;
+}
+
+/** —— POI-01 开拓者先遣护卫舰残骸（预算 384；俯仰埋入由实例 tiltDeg 应用） —— */
+function buildPoiWreckPioneerFrigate() {
+  const m = new LandmarkMeshBuilder();
+  poiSkirt(m, 7.0, 2.6, PC.scorch);
+  m.beginPart('hull');
+  m.box(0, 1.0, 0, 6.5, 1.0, 1.8, PC.hullGrey);              // 主舱段
+  m.box(-5.2, 1.5, 0, 1.6, 0.7, 1.1, PC.hullDark);           // 尽毁艏段
+  m.beginPart('bridge');
+  m.box(2.4, 2.5, 0, 1.5, 0.8, 1.2, PC.hullDark);            // 舰桥
+  m.box(2.4, 3.4, 0, 0.7, 0.18, 0.7, PC.tealGlass);          // 观察窗带
+  m.beginPart('engines');
+  m.frustumY(-6.3, 0.4, 0.9, 0.95, 0.55, 1.6, 8, PC.hullDark);  // 左引擎
+  m.frustumY(-6.3, 0.4, -0.9, 0.95, 0.55, 1.6, 8, PC.hullDark); // 右引擎
+  m.discY(-6.3, 2.0, 0.9, 0.55, 8, PC.orangeMark);           // 喷口残焰涂装
+  m.discY(-6.3, 2.0, -0.9, 0.55, 8, PC.scorch);
+  m.beginPart('wings');
+  m.slab([0.5, 1.2, 1.8], [-2.2, 1.5, 4.6], [0, 0, 1], 2.2, 0.24, PC.hullGrey);  // 左翼
+  m.slab([0.5, 1.2, -1.8], [-2.2, 1.5, -4.6], [0, 0, 1], 2.2, 0.24, PC.hullGrey); // 右翼
+  m.beginPart('trench');
+  m.box(3.4, 0.28, 2.4, 2.6, 0.28, 0.9, PC.scorch);          // 撞击犁沟（-1.2m 语义由承台/地形凹陷承担）
+  m.box(5.2, 0.22, 0.6, 1.6, 0.22, 0.7, PC.scorch);
+  m.beginPart('arrays');
+  m.box(-1.2, 2.2, 2.6, 1.5, 0.06, 0.8, PC.tealGlass);       // 散热板阵
+  m.box(-3.0, 2.0, 2.6, 1.2, 0.06, 0.7, PC.tealGlass);
+  m.box(-1.2, 2.2, -2.6, 1.5, 0.06, 0.8, PC.tealGlass);
+  m.box(-3.0, 2.0, -2.6, 1.2, 0.06, 0.7, PC.tealGlass);
+  m.beginPart('debris');
+  m.box(7.6, 0.4, -2.2, 0.9, 0.4, 0.7, PC.hullGrey);
+  m.box(6.8, 0.3, 3.0, 0.7, 0.3, 0.6, PC.hullDark);
+  m.box(-7.4, 0.35, 2.8, 0.8, 0.35, 0.6, PC.hullGrey);
+  m.box(1.4, 0.28, -4.8, 0.6, 0.28, 0.5, PC.hullDark);
+  return m.build();
+}
+
+/** —— POI-02 海盗掠袭侦察艇残骸（预算 312） —— */
+function buildPoiWreckPirateCorvette() {
+  const m = new LandmarkMeshBuilder();
+  poiSkirt(m, 4.6, 2.0, PC.scorch);
+  m.beginPart('hull');
+  m.box(0, 0.9, 0, 4.4, 0.8, 1.4, PC.hullDark);              // 掠袭艇低矮主舱
+  m.box(3.8, 1.4, 0, 1.0, 0.5, 1.0, PC.hullGrey);            // 破损艦桥罩
+  m.beginPart('fins');
+  m.slab([-1.0, 1.0, 1.2], [-3.4, 3.0, 2.4], [0, 0, 1], 1.6, 0.2, PC.orangeMark); // 掠袭鳍×2
+  m.slab([-1.0, 1.0, -1.2], [-3.4, 3.0, -2.4], [0, 0, 1], 1.6, 0.2, PC.orangeMark);
+  m.beginPart('hold');
+  m.box(-3.0, 0.7, 0, 1.4, 0.7, 1.0, PC.hullGrey);           // 走私货舱（密码锁位）
+  m.box(-3.0, 1.5, 0, 0.5, 0.12, 0.5, PC.decoyRed);          // 诡雷指示灯
+  m.beginPart('cannon');
+  m.box(4.2, 0.8, 1.1, 1.4, 0.14, 0.14, PC.turretGun);       // 掠袭机炮×2
+  m.box(4.2, 0.8, -1.1, 1.4, 0.14, 0.14, PC.turretGun);
+  m.beginPart('debris');
+  m.box(-6.0, 0.3, 1.8, 0.8, 0.3, 0.6, PC.hullDark);
+  m.box(6.2, 0.26, -1.6, 0.7, 0.26, 0.5, PC.hullGrey);
+  m.box(0.4, 0.24, 3.4, 0.6, 0.24, 0.5, PC.orangeMark);
+  m.box(-1.8, 0.22, -3.6, 0.5, 0.22, 0.45, PC.hullDark);
+  return m.build();
+}
+
+/** —— POI-03 无人轨道货柜散落群（预算 248） —— */
+function buildPoiWreckCargoPodCluster() {
+  const m = new LandmarkMeshBuilder();
+  poiSkirt(m, 4.2, 3.6, PC.padConcrete);
+  m.beginPart('pods');
+  m.frustumY(0, 0, 0, 1.5, 1.35, 3.0, 6, PC.crateTan);       // 1 号货柜
+  m.frustumY(2.9, 0, 1.6, 1.3, 1.2, 2.6, 6, PC.hullGrey);    // 2 号货柜（覆土位）
+  m.frustumY(-2.6, 0, -1.8, 1.2, 1.1, 2.4, 6, PC.crateTan);  // 3 号货柜
+  m.beginPart('rings');
+  m.frustumY(0, 2.1, 0, 1.55, 1.55, 0.28, 6, PC.orangeMark, false); // 加固环带
+  m.frustumY(2.9, 1.9, 1.6, 1.35, 1.35, 0.24, 6, PC.orangeMark, false);
+  m.beginPart('crates');
+  m.box(1.4, 0.35, -2.4, 0.55, 0.35, 0.45, PC.crateTan);     // 散落箱
+  m.box(-1.8, 0.3, 2.6, 0.5, 0.3, 0.4, PC.hullGrey);
+  m.box(3.8, 0.28, -0.8, 0.45, 0.28, 0.38, PC.crateTan);
+  m.box(-4.0, 0.26, 0.6, 0.42, 0.26, 0.36, PC.hullGrey);
+  return m.build();
+}
+
+/** —— POI-04 深空低温休眠救生艇（预算 276） —— */
+function buildPoiWreckCryoLifeboat() {
+  const m = new LandmarkMeshBuilder();
+  poiSkirt(m, 3.4, 2.2, PC.cryoFrost);
+  m.beginPart('capsule');
+  m.frustumY(0, 0.2, 0, 1.6, 1.3, 3.4, 8, PC.cryoWhite);     // 低温主舱
+  m.domeY(0, 3.6, 0, 1.3, 6, PC.cryoFrost);                  // 圆钝头部
+  m.beginPart('pods');
+  m.box(-2.0, 1.2, 0, 0.7, 0.9, 0.7, PC.cryoWhite);          // 单人休眠外挂舱
+  m.box(2.0, 1.2, 0, 0.7, 0.9, 0.7, PC.cryoWhite);
+  m.box(-2.0, 2.2, 0, 0.5, 0.12, 0.5, PC.tealGlass);         // 体征观察窗
+  m.beginPart('radiator');
+  m.box(0, 2.0, 1.6, 2.2, 0.05, 0.7, PC.cryoFrost);          // 辐射翼板
+  m.box(0, 2.0, -1.6, 2.2, 0.05, 0.7, PC.cryoFrost);
+  m.beginPart('status');
+  m.box(0, 4.0, 0, 0.16, 0.5, 0.16, PC.bioGreen);            // 生命体征灯柱
+  m.box(0.9, 0.3, 2.4, 0.5, 0.3, 0.4, PC.cryoWhite);         // 坠落散件
+  return m.build();
+}
+
+/** —— POI-05 受灾废弃异星生化实验室（预算 412） —— */
+function buildPoiOutpostXenobioLab() {
+  const m = new LandmarkMeshBuilder();
+  poiSkirt(m, 5.2, 3.8);
+  m.beginPart('main');
+  m.box(0, 1.5, 0, 4.8, 1.5, 3.4, PC.hullGrey);              // 主实验室舱
+  m.box(0, 3.1, 0, 4.6, 0.14, 3.2, PC.hullDark);             // 顶板
+  m.beginPart('filter');
+  m.frustumY(-3.4, 3.2, 0, 0.7, 0.5, 3.2, 6, PC.rigIron);    // 抽风过滤塔
+  m.frustumY(-3.4, 6.4, 0, 0.5, 0.35, 0.9, 6, PC.bioGreen);
+  m.beginPart('greenhouse');
+  m.domeY(2.6, 3.2, 0, 1.9, 6, PC.domeGlass);                // 破裂培养穹顶
+  m.beginPart('tanks');
+  m.frustumY(3.8, 0, 2.4, 0.6, 0.5, 2.0, 6, PC.tealGlass);   // 培养罐×2
+  m.frustumY(3.8, 0, -2.4, 0.6, 0.5, 2.0, 6, PC.tealGlass);
+  m.beginPart('vents');
+  m.box(0, 2.0, 3.4, 1.6, 0.4, 0.4, PC.rigIron);             // 管桥
+  m.box(-2.0, 2.2, 2.6, 0.4, 0.3, 0.9, PC.rigIron);
+  m.beginPart('spill');
+  m.box(1.0, 0.15, 4.4, 1.8, 0.15, 1.0, PC.contagion);       // 孢子溢滩（荧光）
+  m.box(-1.6, 0.12, 4.8, 1.0, 0.12, 0.7, PC.contagion);
+  m.box(-6.4, 0.3, -2.6, 0.7, 0.3, 0.6, PC.hullDark);        // 撤离残件
+  return m.build();
+}
+
+/** —— POI-06 失控共生水培温室站（预算 396） —— */
+function buildPoiOutpostHydroponicDome() {
+  const m = new LandmarkMeshBuilder();
+  poiSkirt(m, 5.6, 5.6);
+  m.beginPart('dome');
+  m.domeY(0, 0.3, 0, 5.0, 8, PC.domeGlass);                  // 主温室穹顶
+  m.beginPart('frame');
+  m.frustumY(0, 0, 0, 5.15, 5.15, 0.35, 8, PC.rigIron, false); // 基座环梁
+  m.beginPart('racks');
+  m.box(-2.2, 1.0, 0, 1.0, 0.7, 2.2, PC.rigIron);            // 立体种植架×2
+  m.box(2.2, 1.0, 0, 1.0, 0.7, 2.2, PC.rigIron);
+  m.box(-2.2, 1.8, 0, 0.9, 0.1, 2.0, PC.leafVivid);          // 过境藤蔓层
+  m.box(2.2, 1.8, 0, 0.9, 0.1, 2.0, PC.leafVivid);
+  m.beginPart('core');
+  m.frustumY(0, 0.3, 0, 0.8, 0.5, 3.6, 6, PC.rigIron);       // 中央母株塔
+  m.domeY(0, 4.1, 0, 0.75, 5, PC.leafVivid);                 // 母株荧光冠
+  m.beginPart('vine');
+  m.slab([-4.2, 2.4, 1.2], [-5.6, 0.4, 2.6], [0, 1, 0], 0.4, 0.3, PC.leafVivid); // 破口藤蔓×2
+  m.slab([3.6, 3.0, -2.0], [5.4, 0.5, -3.4], [0, 1, 0], 0.45, 0.32, PC.leafVivid);
+  return m.build();
+}
+
+/** —— POI-07 自动化深井同位素采矿站（预算 368） —— */
+function buildPoiOutpostDeepcoreRig() {
+  const m = new LandmarkMeshBuilder();
+  poiSkirt(m, 4.4, 4.4);
+  m.beginPart('deck');
+  m.box(0, 0.5, 0, 3.8, 0.5, 3.8, PC.rigIron);               // 作业平台
+  m.beginPart('derrick');
+  m.box(-1.6, 3.0, -1.6, 0.16, 2.5, 0.16, PC.rigIron);       // 井架四足
+  m.box(-1.6, 3.0, 1.6, 0.16, 2.5, 0.16, PC.rigIron);
+  m.box(1.6, 3.0, -1.6, 0.16, 2.5, 0.16, PC.rigIron);
+  m.box(1.6, 3.0, 1.6, 0.16, 2.5, 0.16, PC.rigIron);
+  m.box(0, 5.6, 0, 1.8, 0.14, 1.8, PC.rigIron);              // 顶部横梁
+  m.beginPart('drill');
+  m.frustumY(0, 1.0, 0, 0.55, 0.4, 4.6, 6, PC.rigAmber);     // 主钻杆（琥珀辉光）
+  m.beginPart('tanks');
+  m.frustumY(-3.2, 0, 0, 0.9, 0.75, 2.2, 6, PC.rigIron);     // 同位素罐×2
+  m.frustumY(-3.2, 2.2, 0, 0.75, 0.5, 0.8, 6, PC.rigAmber);
+  m.box(3.2, 0.8, 0, 0.8, 0.8, 0.8, PC.rigIron);             // 配电舱
+  m.beginPart('boom');
+  m.slab([0, 5.6, 0], [4.6, 3.4, 0], [0, 0, 1], 0.5, 0.35, PC.rigIron); // 悬臂
+  m.box(5.0, 3.2, 0, 0.5, 0.4, 0.5, PC.rigAmber);
+  return m.build();
+}
+
+/** —— POI-08 深空加密监听与雷达掩体（预算 340） —— */
+function buildPoiOutpostCommsBunker() {
+  const m = new LandmarkMeshBuilder();
+  poiSkirt(m, 4.6, 3.6);
+  m.beginPart('bunker');
+  m.box(0, 0.9, 0, 4.0, 0.9, 3.0, PC.bunkerGreen);           // 掩体主部
+  m.box(0, 1.9, 0, 3.6, 0.16, 2.6, PC.hullDark);             // 顶板
+  m.box(3.0, 1.3, 0, 0.9, 0.4, 0.9, PC.bunkerGreen);         // 门斗
+  m.beginPart('antenna');
+  m.frustumY(-1.2, 2.0, 0, 0.22, 0.16, 4.6, 6, PC.rigIron);  // 主桅
+  m.pyramid(-1.2, 6.6, 0, 1.6, 0.7, PC.radarWhite);          // 碟形天线（锥代）
+  m.box(-1.2, 5.2, 0, 0.9, 0.08, 0.08, PC.radarWhite);       // 横杆
+  m.beginPart('dish2');
+  m.pyramid(1.8, 2.1, -1.6, 1.1, 0.5, PC.radarWhite);        // 副天线
+  m.frustumY(1.8, 2.0, -1.6, 0.14, 0.1, 2.1, 6, PC.rigIron);
+  m.beginPart('power');
+  m.box(2.4, 0.6, 2.2, 1.0, 0.6, 0.7, PC.rigIron);           // 燃料电池舱
+  m.box(2.4, 1.35, 2.2, 0.4, 0.12, 0.3, PC.bioGreen);        // 状态灯
+  return m.build();
+}
+
+/** —— POI-09 先驱者弦环共鸣巨石阵（预算 356） —— */
+function buildPoiXenoRingMonolith() {
+  const m = new LandmarkMeshBuilder();
+  poiSkirt(m, 6.4, 6.4, PC.monolith);
+  m.beginPart('ring');
+  // 八段弦环（八角排布；每段 slab 12 tri）
+  for (let k = 0; k < 8; k++) {
+    const a0 = (k / 8) * Math.PI * 2;
+    const a1 = ((k + 1) / 8) * Math.PI * 2;
+    const r = 5.2;
+    m.slab(
+      [Math.cos(a0) * r, 2.6, Math.sin(a0) * r],
+      [Math.cos(a1) * r, 2.6, Math.sin(a1) * r],
+      [0, 1, 0], 0.9, 0.9, PC.monolith,
+    );
+  }
+  m.beginPart('pylons');
+  m.frustumY(0, 0, 0, 1.4, 0.9, 5.2, 6, PC.monolith);        // 主碑
+  m.frustumY(0, 5.2, 0, 0.9, 0.02, 1.0, 6, PC.monoGlow);     // 主碑顶晶
+  m.frustumY(6.4, 0, 0, 0.55, 0.4, 2.2, 4, PC.monolith);     // 方言副碑×3
+  m.frustumY(-3.2, 0, 5.5, 0.55, 0.4, 2.0, 4, PC.monolith);
+  m.frustumY(-3.2, 0, -5.5, 0.55, 0.4, 2.0, 4, PC.monolith);
+  m.beginPart('glyphs');
+  m.box(0, 3.0, 1.45, 0.7, 0.9, 0.06, PC.monoGlow);          // 主碑语素刻带
+  m.box(6.4, 1.2, 0.42, 0.3, 0.5, 0.05, PC.monoGlow);        // 副碑刻痕
+  return m.build();
+}
+
+/** —— POI-10 反重力零点能导流柱（预算 296） —— */
+function buildPoiXenoAntigravPylon() {
+  const m = new LandmarkMeshBuilder();
+  poiSkirt(m, 3.4, 3.4, PC.monolith);
+  m.beginPart('column');
+  m.frustumY(0, 0.6, 0, 1.15, 0.8, 5.6, 6, PC.monolith);     // 悬空主柱（底部 0.6m 反重力间隙）
+  m.frustumY(0, 6.2, 0, 0.8, 0.05, 1.2, 6, PC.zeroViolet);   // 零点能晶尖
+  m.beginPart('anchors');
+  for (let k = 0; k < 3; k++) {
+    const a = (k / 3) * Math.PI * 2 + 0.5;
+    const px = Math.cos(a) * 2.6;
+    const pz = Math.sin(a) * 2.6;
+    m.frustumY(px, 0, pz, 0.34, 0.26, 1.4, 4, PC.monolith);  // 锚链桩×3
+    m.slab([px, 1.4, pz], [Math.cos(a) * 1.15, 2.6, Math.sin(a) * 1.15], [0, 1, 0], 0.12, 0.12, PC.zeroViolet); // 磁通锚链
+  }
+  m.beginPart('ring');
+  m.frustumY(0, 2.6, 0, 1.5, 1.5, 0.22, 8, PC.zeroViolet, false); // 谐振环
+  return m.build();
+}
+
+/** —— POI-11 远古先驱者地下封印密室（预算 428） —— */
+function buildPoiXenoSubterraneanVault() {
+  const m = new LandmarkMeshBuilder();
+  poiSkirt(m, 5.4, 5.4, PC.monolith);
+  m.beginPart('mastab');
+  m.box(0, 0.7, 0, 4.6, 0.7, 4.6, PC.monolith);              // 半地下封印台
+  m.box(0, 1.5, 0, 3.6, 0.85, 3.6, PC.vaultBronze);          // 圣物柜环廊
+  m.beginPart('door');
+  m.box(0, 2.6, 3.7, 1.4, 1.1, 0.5, PC.monolith);            // 符号逻辑门
+  m.box(-0.5, 2.7, 3.98, 0.16, 0.16, 0.06, PC.monoGlow);     // 符号锁孔×3
+  m.box(0.0, 2.7, 3.98, 0.16, 0.16, 0.06, PC.monoGlow);
+  m.box(0.5, 2.7, 3.98, 0.16, 0.16, 0.06, PC.monoGlow);
+  m.beginPart('obelisks');
+  m.frustumY(-3.4, 0.7, -3.4, 0.5, 0.35, 3.4, 4, PC.monolith); // 封印方尖碑×4
+  m.frustumY(3.4, 0.7, -3.4, 0.5, 0.35, 3.4, 4, PC.monolith);
+  m.frustumY(-3.4, 0.7, 3.4, 0.5, 0.35, 3.0, 4, PC.monolith);
+  m.frustumY(3.4, 0.7, 3.4, 0.5, 0.35, 3.0, 4, PC.monolith);
+  m.beginPart('vault');
+  m.domeY(0, 2.35, 0, 3.4, 7, PC.monolith);                  // 穹顶封印
+  m.box(0, 4.3, 0, 0.3, 0.55, 0.3, PC.monoGlow);             // 顶核晶
+  return m.build();
+}
+
+/** —— POI-12 棱镜光学谐振矩阵遗址（预算 324） —— */
+function buildPoiXenoHarmonicPrism() {
+  const m = new LandmarkMeshBuilder();
+  poiSkirt(m, 5.8, 5.8, PC.monolith);
+  m.beginPart('tower');
+  m.frustumY(0, 0, 0, 1.05, 0.7, 6.4, 6, PC.monolith);       // 主晶塔
+  m.frustumY(0, 6.4, 0, 0.7, 0.02, 1.4, 6, PC.prismCyan);    // 聚焦顶
+  m.beginPart('prisms');
+  // 三座可旋转棱镜基座（KeyE 旋转语义由实例动画承担）
+  const ang = [0.3, 0.3 + (Math.PI * 2) / 3, 0.3 + (Math.PI * 4) / 3];
+  for (let k = 0; k < 3; k++) {
+    const px = Math.cos(ang[k]) * 4.4;
+    const pz = Math.sin(ang[k]) * 4.4;
+    m.frustumY(px, 0, pz, 0.8, 0.6, 1.0, 6, PC.monolith);    // 基座
+    m.pyramid(px, 1.0, pz, 1.5, 2.2, PC.prismCyan);          // 棱镜晶体
+  }
+  m.beginPart('bench');
+  m.box(0, 0.25, 0, 4.9, 0.25, 4.9, PC.padConcrete);         // 光路基准台
+  m.box(2.2, 0.55, 0, 0.1, 0.3, 0.1, PC.prismCyan);          // 光路中继点
+  m.box(-2.2, 0.55, 0, 0.1, 0.3, 0.1, PC.prismCyan);
+  return m.build();
+}
+
+// —— 4 类野战部署物（96~180 tri；含 1.8m 裙边） ————————————————————————
+
+/** dep_gpr_radar 便携式探地雷达（预算 128） */
+function buildDepGprRadar() {
+  const m = new LandmarkMeshBuilder();
+  poiSkirt(m, 0.9, 0.9, PC.padConcrete);
+  m.beginPart('tripod');
+  m.slab([0, 0.6, 0], [0.7, 0, 0.5], [0, 1, 0], 0.09, 0.09, PC.turretGun);
+  m.slab([0, 0.6, 0], [-0.7, 0, 0.5], [0, 1, 0], 0.09, 0.09, PC.turretGun);
+  m.slab([0, 0.6, 0], [0, 0, -0.8], [0, 1, 0], 0.09, 0.09, PC.turretGun);
+  m.beginPart('box');
+  m.box(0, 0.8, 0, 0.42, 0.26, 0.3, PC.turretGun);           // 主机
+  m.box(0, 1.12, 0, 0.12, 0.08, 0.12, PC.bioGreen);          // 状态灯
+  m.beginPart('dish');
+  m.pyramid(0, 1.35, 0, 1.0, 0.42, PC.radarWhite);           // 低频天线阵
+  return m.build();
+}
+
+/** dep_thermal_pylon 临时充能桩（预算 96） */
+function buildDepThermalPylon() {
+  const m = new LandmarkMeshBuilder();
+  poiSkirt(m, 0.7, 0.7, PC.padConcrete);
+  m.beginPart('body');
+  m.frustumY(0, 0, 0, 0.34, 0.26, 2.3, 6, PC.rigIron);       // 桩体
+  m.frustumY(0, 2.3, 0, 0.26, 0.02, 0.5, 6, PC.rigAmber);    // 顶端热核
+  m.beginPart('ring');
+  m.frustumY(0, 1.5, 0, 0.55, 0.55, 0.16, 6, PC.rigAmber, false); // 12m 力场发射环
+  return m.build();
+}
+
+/** dep_sentry_turret 便携式防御哨兵机枪塔（预算 180） */
+function buildDepSentryTurret() {
+  const m = new LandmarkMeshBuilder();
+  poiSkirt(m, 1.0, 1.0, PC.padConcrete);
+  m.beginPart('base');
+  m.box(0, 0.18, 0, 0.8, 0.18, 0.8, PC.turretGun);           // 底座
+  m.beginPart('mount');
+  m.frustumY(0, 0.36, 0, 0.34, 0.28, 0.6, 6, PC.turretGun);  // 回转座
+  m.box(0, 1.1, 0, 0.5, 0.24, 0.44, PC.turretGun);           // 炮匣
+  m.beginPart('guns');
+  m.box(0.16, 1.1, 0.55, 0.05, 0.05, 0.55, PC.hullGrey);     // 双联机枪管
+  m.box(-0.16, 1.1, 0.55, 0.05, 0.05, 0.55, PC.hullGrey);
+  m.box(0, 1.42, 0, 0.1, 0.1, 0.1, PC.decoyRed);             // 索敌头
+  m.beginPart('ammo');
+  m.box(-0.6, 0.5, 0, 0.24, 0.3, 0.3, PC.crateTan);          // 弹箱
+  return m.build();
+}
+
+/** dep_decoy_emitter 全频段信号诱饵弹（预算 110） */
+function buildDepDecoyEmitter() {
+  const m = new LandmarkMeshBuilder();
+  poiSkirt(m, 0.55, 0.55, PC.padConcrete);
+  m.beginPart('tube');
+  m.frustumY(0, 0.1, 0, 0.3, 0.26, 1.1, 8, PC.hullGrey);     // 弹体
+  m.frustumY(0, 1.2, 0, 0.26, 0.02, 0.4, 8, PC.decoyRed);    // 全频段发射头
+  m.beginPart('fins');
+  for (let k = 0; k < 3; k++) {
+    const a = (k / 3) * Math.PI * 2;
+    m.slab(
+      [0, 0.45, 0],
+      [Math.cos(a) * 0.55, 0.18, Math.sin(a) * 0.55],
+      [0, 1, 0], 0.16, 0.05, PC.decoyRed,
+    ); // 展开尾翼×3
+  }
+  return m.build();
+}
+
+// —— 注册（GroundView 的 BUILD_CATEGORY_IDS 经 LANDMARK_PREFAB_IDS 展开自动收编） ——
+const SURFACE_POI_MESH_IDS = [
+  'poi_wreck_pioneer_frigate', 'poi_wreck_pirate_corvette', 'poi_wreck_cargo_pod_cluster',
+  'poi_wreck_cryo_lifeboat', 'poi_outpost_xenobio_lab', 'poi_outpost_hydroponic_dome',
+  'poi_outpost_deepcore_rig', 'poi_outpost_comms_bunker', 'poi_xeno_ring_monolith',
+  'poi_xeno_antigrav_pylon', 'poi_xeno_subterranean_vault', 'poi_xeno_harmonic_prism',
+];
+const SURFACE_DEPLOYABLE_MESH_IDS = ['dep_gpr_radar', 'dep_thermal_pylon', 'dep_sentry_turret', 'dep_decoy_emitter'];
+const _SURFACE_BUILDERS = {
+  poi_wreck_pioneer_frigate: buildPoiWreckPioneerFrigate,
+  poi_wreck_pirate_corvette: buildPoiWreckPirateCorvette,
+  poi_wreck_cargo_pod_cluster: buildPoiWreckCargoPodCluster,
+  poi_wreck_cryo_lifeboat: buildPoiWreckCryoLifeboat,
+  poi_outpost_xenobio_lab: buildPoiOutpostXenobioLab,
+  poi_outpost_hydroponic_dome: buildPoiOutpostHydroponicDome,
+  poi_outpost_deepcore_rig: buildPoiOutpostDeepcoreRig,
+  poi_outpost_comms_bunker: buildPoiOutpostCommsBunker,
+  poi_xeno_ring_monolith: buildPoiXenoRingMonolith,
+  poi_xeno_antigrav_pylon: buildPoiXenoAntigravPylon,
+  poi_xeno_subterranean_vault: buildPoiXenoSubterraneanVault,
+  poi_xeno_harmonic_prism: buildPoiXenoHarmonicPrism,
+  dep_gpr_radar: buildDepGprRadar,
+  dep_thermal_pylon: buildDepThermalPylon,
+  dep_sentry_turret: buildDepSentryTurret,
+  dep_decoy_emitter: buildDepDecoyEmitter,
+};
+for (const id of [...SURFACE_POI_MESH_IDS, ...SURFACE_DEPLOYABLE_MESH_IDS]) {
+  registerLandmarkBuilder(id, _SURFACE_BUILDERS[id]);
+}
+
+/** SPEC-39 S2 图集 id 清单（GroundView BUILD_CATEGORY_IDS 追加段与门禁消费） */
+export const SURFACE_ATLAS_IDS = Object.freeze([...SURFACE_POI_MESH_IDS, ...SURFACE_DEPLOYABLE_MESH_IDS]);

@@ -21,6 +21,7 @@
  */
 
 import { emit, chronicle } from '../../core/eventBus.js';
+import { credit, debit, FLOW } from '../economy/ledger.js';
 import { clamp } from '../../core/math.js';
 import { derivePlanetSeedsExtended } from '../ground/planetSeeds.js';
 
@@ -227,9 +228,13 @@ export function tickColonySociety(world, planet, colony) {
   }
   if (staffingFloor > 0 && colony) {
     colony.staffingEta = Math.max(colony.staffingEta || 0, staffingFloor);
-    // 机偶维护费（conductor 账本扣减）
+    // 机偶维护费（走统一复式记账 ledger.debit，规范 FLOW.CONSUME；F-07 闭合：
+    // 严禁绕过流水直改 balances，否则复式记账与 world.economy.ledgers 流水完整性被破坏）
     const led = world.economy.ledgers[fid];
-    if (led) led.balances.conductor = Math.max(0, (led.balances.conductor || 0) - 2);
+    const upkeep = Math.min(2, led?.balances?.conductor || 0);
+    if (upkeep > 0) {
+      debit(world, fid, 'conductor', upkeep, 'automataUpkeep', planet.id, FLOW.CONSUME);
+    }
   }
 
   // 2) 总督特质
@@ -375,12 +380,13 @@ export function resolveColonyDilemma(world, planet, colony, choiceId) {
   if (!choice) return { ok: false, reason: 'BadChoice' };
   const fid = world.playerFactionId;
   const led = fid ? world.economy.ledgers[fid] : null;
+  // F-07 守恒修复：走 FLOW 记账管道（credit/debit），严禁绕过 daily 流水直改余额
   if (choice.costCredits && led) {
     if ((led.balances.credits || 0) < choice.costCredits) return { ok: false, reason: 'NO_FUNDS' };
-    led.balances.credits -= choice.costCredits;
+    debit(world, fid, 'credits', choice.costCredits, 'dilemmaChoice', null, FLOW.CONSUME);
   }
-  if (choice.credits && led) led.balances.credits = (led.balances.credits || 0) + choice.credits;
-  if (choice.researchData && led) led.balances.researchData = (led.balances.researchData || 0) + choice.researchData;
+  if (choice.credits && led) credit(world, fid, 'credits', choice.credits, 'dilemmaReward', null, FLOW.LOOT);
+  if (choice.researchData && led) credit(world, fid, 'researchData', choice.researchData, 'dilemmaReward', null, FLOW.LOOT);
   soc.hope = clamp(soc.hope + (choice.hope || 0), 0, 100);
   soc.discontent = clamp(soc.discontent + (choice.discontent || 0), 0, 100);
   // 长期记忆：historySeed 埋下后续回响（≤20 有界；doc16 §4.21）

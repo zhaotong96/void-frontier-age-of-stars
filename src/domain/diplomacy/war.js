@@ -183,6 +183,12 @@ export function getRelation(world, a, b) {
   const key = relationKey(a, b);
   let rel = world.relations.diplomacy[key];
   if (!rel) {
+    // 幂等防御（fuzz 硬化 F-04）：惰性创建仅允许真实存在的双方——悬空阵营/垃圾 id
+    // 一律抛错，由命令总线 VALIDATE_ERROR 受控拦截（validate 阶段绝不触碰状态）。
+    // 已存在记录（含阵营被吞并后的历史关系）的读取不受影响。
+    if (!world.entities.factions[a] || !world.entities.factions[b]) {
+      throw new Error(`关系派系不存在: ${String(a)} / ${String(b)}`);
+    }
     rel = {
       key,
       parties: [a, b].sort(),

@@ -29,6 +29,15 @@ const SALT_FAUNA = 0x7f4a7c15;
 const SALT_RUIN = 0x6c8e9cf5;
 const SALT_WEATHER = 0xb5297a4d;
 const SALT_DILEMMA = 0x1b56c4e9;
+// —— WP-P0/P1/P2（doc35 超长线）：长线内容子流盐值（doc34 §7.2 契约，互不碰撞） ——
+export const SALT_PRECURSOR = 0x3c6ef372;
+export const SALT_DAG_ROLL = 0xa54ff53a;
+export const SALT_BLACK_MARKET = 0x510e527f;
+export const SALT_CRISIS_HUB = 0x9b05688c;
+// —— Phase S1（SPEC-39）：地表深度内容子流盐值（doc38 §实现切片契约，互不碰撞） ——
+export const SALT_SOS = 0x50550501;
+export const SALT_SLATE = 0x2f1b3d47;
+export const SALT_HEAT_WAVE = 0x71a9c3e5;
 
 /**
  * splitmix32 终态雪崩混淆器（WP-1：消除线性异或相关性，扩展子流专用）。
@@ -142,6 +151,31 @@ export function derivePlanetSeedsExtended(world, planetId) {
     /** 支柱四：聚落总督抉择事件子流（按战略 tick） */
     dilemmaSeed(tick) {
       return mix32(base ^ Math.imul((tick >>> 0) + 1, SALT_DILEMMA));
+    },
+    // —— Phase S1（SPEC-39 / doc38）：地表深度内容三支派生子流 ——————————
+    /**
+     * SOS 求救信标子流（spec38 §事件链一：75% 非气态行星生成信标；
+     * 角度 = ((sosSeed>>>8)%3600)/3600*2π，半径 = 145 + ((sosSeed>>>20)%85) m，
+     * 分支 = (sosSeed>>>4)%3）。
+     */
+    sosSeed() {
+      return mix32(base ^ SALT_SOS);
+    },
+    /**
+     * 叙事数据板日志子流（8 组 × 3 则 = slatesMask bit 0..23；
+     * slateSeed(poiId) 独立派生：增删日志/POI 不影响其他子流）。
+     */
+    slateSeed(poiId) {
+      return mix32(base ^ hash32(`slate:${String(poiId)}`) ^ SALT_SLATE);
+    },
+    /**
+     * 1~5 星警戒热度增援波次编制子流（star 1..5, waveIdx 0..；
+     * 同 (star, waveIdx) 逐位一致，零 world.rng 消费）。
+     */
+    heatWaveSeed(star, waveIdx) {
+      const s = (Number.isFinite(star) ? star >>> 0 : 0) + 1;
+      const w = (Number.isFinite(waveIdx) ? waveIdx >>> 0 : 0) + 1;
+      return mix32(base ^ Math.imul(s, 0x9e3779b1) ^ Math.imul(w, SALT_HEAT_WAVE));
     },
   };
 }

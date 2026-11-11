@@ -12,6 +12,10 @@ import { BAL } from '../../content/constants.js';
 import { layerResist } from '../../content/weapons.js';
 import { applyDamage, destroyShip } from '../ships/ship.js';
 import { emit } from '../../core/eventBus.js';
+// doc35 WP-P0-2：战术 v2（world.combatV2 门控；金快照零漂移）
+import {
+  subsystemModifiers, stepFlux, applyHitV2, tryLayeredInterception, FLUX_HEAT_GAIN,
+} from './subsystemsAndEw.js';
 
 const ARENA = { w: 1000, h: 320 };
 
@@ -31,8 +35,8 @@ unitBehaviors.push(function movementBehavior(world, battle, dt) {
   for (const u of battle.units) {
     if (u.destroyed) continue;
     const ship = world.entities.ships[u.shipId];
-    if (!ship) {
-      u.destroyed = true;
+    if (!ship || ship.status !== 'active') {
+      u.destroyed = true; // F-10：僵尸单元（活体舰船非 active）立即出清，防索敌死锁
       continue;
     }
     const stats = ship.stats;
@@ -43,12 +47,17 @@ unitBehaviors.push(function movementBehavior(world, battle, dt) {
     if (u.order === 'retreat') {
       desiredX = u.side === 'a' ? -80 : ARENA.w + 80;
       desiredY = u.y;
-      // 蓄能完成后撤离
-      u.retreatCharge += dt;
-      if (u.retreatCharge >= BAL.combat.retreatChargeSeconds) {
-        u.destroyed = true; // 从战斗移除（舰船本体保留）
-        u.evacuated = true;
-        continue;
+      // 蓄能完成后撤离（doc35 v2：跃迁核 ≤200‰ 瘫痪 → 蓄能冻结无法撤离）
+      const v2mods = world.combatV2 === true ? subsystemModifiers(ship) : null;
+      if (v2mods && v2mods.retreatFrozen) {
+        u.retreatCharge = 0;
+      } else {
+        u.retreatCharge += dt;
+        if (u.retreatCharge >= BAL.combat.retreatChargeSeconds) {
+          u.destroyed = true; // 从战斗移除（舰船本体保留）
+          u.evacuated = true;
+          continue;
+        }
       }
     } else if (target) {
       const d = dist(u.x, u.y, target.x, target.y);
@@ -67,16 +76,23 @@ unitBehaviors.push(function movementBehavior(world, battle, dt) {
         desiredY = target.y + Math.sin(ang) * bestRange;
       }
     } else {
-      // 无目标：向最近的存活敌人方向移动（防双方站桩死锁）
-      const foe = battle.units
-        .filter((o) => !o.destroyed && o.side !== u.side)
-        .sort((a, b) => dist(u.x, u.y, a.x, a.y) - dist(u.x, u.y, b.x, b.y))[0];
-      if (foe) {
-        desiredX = foe.x;
-        desiredY = foe.y;
-      } else {
-        desiredX = u.side === 'a' ? 300 : ARENA.w - 300;
+      const hasWeapons = (ship.weapons && ship.weapons.length > 0) || (ship.stats?.weapons && ship.stats.weapons.length > 0);
+      if (!hasWeapons) {
+        // F-10：无武器船只向本方侧后退规避，不贴脸对撞
+        desiredX = u.side === 'a' ? -60 : ARENA.w + 60;
         desiredY = clamp(u.y, 60, ARENA.h - 60);
+      } else {
+        // 有武器但暂无目标：向最近敌人推进（防双方站桩死锁）
+        const foe = battle.units
+          .filter((o) => !o.destroyed && o.side !== u.side)
+          .sort((a, b) => dist(u.x, u.y, a.x, a.y) - dist(u.x, u.y, b.x, b.y))[0];
+        if (foe) {
+          desiredX = foe.x;
+          desiredY = foe.y;
+        } else {
+          desiredX = u.side === 'a' ? 300 : ARENA.w - 300;
+          desiredY = clamp(u.y, 60, ARENA.h - 60);
+        }
       }
     }
 
@@ -84,12 +100,25 @@ unitBehaviors.push(function movementBehavior(world, battle, dt) {
     const dx = desiredX - u.x;
     const dy = desiredY - u.y;
     const dl = Math.hypot(dx, dy) || 1;
-    const accel = (stats.acceleration || 8) * (u.isBig ? 0.6 : 1);
+    // doc35 WP-P0-2：分部动态惩罚（推进阵列受损降机动）+ 被伏击前 10s 转向减半
+    let speedMult = 1;
+    let turnMult = 1;
+    if (world.combatV2 === true) {
+      const v2mods = subsystemModifiers(ship);
+      speedMult = v2mods.speedMult;
+      turnMult = v2mods.turnMult;
+      if (u.ambushedS > 0) {
+        turnMult *= 0.5;
+        u.ambushedS = Math.max(0, u.ambushedS - dt);
+      }
+      if (u.stealthAmbushS > 0) u.stealthAmbushS = Math.max(0, u.stealthAmbushS - dt);
+    }
+    const accel = (stats.acceleration || 8) * (u.isBig ? 0.6 : 1) * speedMult;
     u.vx += (dx / dl) * accel * dt;
     u.vy += (dy / dl) * accel * dt;
 
     // 限速 + 阻尼
-    const maxV = stats.maxSpeed || 60;
+    const maxV = (stats.maxSpeed || 60) * speedMult;
     const vl = Math.hypot(u.vx, u.vy);
     if (vl > maxV) {
       u.vx = (u.vx / vl) * maxV;
@@ -105,7 +134,7 @@ unitBehaviors.push(function movementBehavior(world, battle, dt) {
       const want = Math.atan2(u.vy, u.vx);
       const cur = u.heading ?? 0;
       const d = angleDelta(cur, want);
-      const turn = (stats.turnRate || 1) * 1.4 * dt;
+      const turn = (stats.turnRate || 1) * 1.4 * dt * turnMult;
       u.heading = normalizeAngle(cur + clamp(d, -turn, turn));
     }
   }
@@ -116,7 +145,10 @@ unitBehaviors.push(function targetingBehavior(world, battle, dt) {
   for (const u of battle.units) {
     if (u.destroyed) continue;
     const ship = world.entities.ships[u.shipId];
-    if (!ship || !ship.stats.weapons?.length) continue;
+    if (!ship || ship.status !== 'active' || !ship.stats?.weapons?.length) {
+      if (!ship || ship.status !== 'active') u.destroyed = true; // F-10：僵尸单元出清
+      continue;
+    }
     // 换目标节流：每 2 战斗秒重估一次
     u._targetEval = (u._targetEval ?? 0) + dt;
     if (u.targetShipId && u._targetEval < 2) continue;
@@ -132,7 +164,10 @@ unitBehaviors.push(function targetingBehavior(world, battle, dt) {
       // 目标捕获放宽：射程外也按距离衰减计入（否则开局间距 > 捕获半径 → 永久无目标死锁）
       const reach = d > range * 1.3 ? -d * 0.02 : 20;
       const eship = world.entities.ships[e.shipId];
-      if (!eship) continue;
+      if (!eship || eship.status !== 'active') {
+        e.destroyed = true; // F-10：敌方僵尸单元同样出清，防索敌/歼灭判定悬挂
+        continue;
+      }
       const threat = (eship.stats.weapons?.length || 0) * 10 + (eship.hullId === 'hull_supply' ? -20 : 0);
       const score = threat - d * 0.05 + (e.isBig ? 8 : 0) + (eship.hp.structure < eship.stats.structure * 0.4 ? 12 : 0) + reach;
       if (score > bestScore) {
@@ -149,12 +184,29 @@ unitBehaviors.push(function firingBehavior(world, battle, dt) {
   for (const u of battle.units) {
     if (u.destroyed) continue;
     const ship = world.entities.ships[u.shipId];
-    if (!ship) continue;
+    if (!ship || ship.status !== 'active') {
+      u.destroyed = true; // F-10：僵尸单元出清
+      continue;
+    }
+    // doc35 WP-P0-2：热幅能推进 + 主动排热指令（world.combatV2 门控）
+    let v2mods = null;
+    if (world.combatV2 === true) {
+      if (u.order === 'vent' && (u.ventingTimer ?? 0) <= 0) {
+        u.ventingTimer = 3.0; // 主动排热 3s（护盾关闭、2.5× 散热）
+        u.order = 'engage';
+      }
+      stepFlux(world, battle, u, ship, dt);
+      v2mods = subsystemModifiers(ship);
+      if (u.overloadTimer > 0) continue;               // 过载瘫痪：全武器停火
+      if (v2mods.powerNetDown) continue;               // 反应堆重度受损：断电哑火
+    }
     const target = u.targetShipId ? battle.units.find((o) => o.shipId === u.targetShipId && !o.destroyed) : null;
     const weapons = ship.stats.weapons || [];
     for (let wi = 0; wi < weapons.length; wi++) {
       const w = weapons[wi];
+      if (v2mods && v2mods.turretOffline(wi)) continue; // 炮塔群重度受损：偶数槽位离线
       const cdKey = `w${wi}`;
+      const cycleMult = v2mods ? v2mods.cycleMult : 1.0;
       u.cooldowns[cdKey] = Math.max(0, (u.cooldowns[cdKey] ?? 0) - dt);
       if (u.cooldowns[cdKey] > 0) continue;
       if (!target) continue;
@@ -169,7 +221,9 @@ unitBehaviors.push(function firingBehavior(world, battle, dt) {
         ship.cargo[w.ammo.resId] = have - w.ammo.perShot;
       }
 
-      u.cooldowns[cdKey] = w.cycleSeconds;
+      u.cooldowns[cdKey] = w.cycleSeconds * cycleMult;
+      // doc35 WP-P0-2：开火产生软热量（weapon.heat 激活，doc34 §3.2.2）
+      if (v2mods) u.softHeat = (u.softHeat || 0) + (w.heat || 0) * FLUX_HEAT_GAIN;
       const angle = Math.atan2(target.y - u.y, target.x - u.x);
       const mult = factionDamageMult(world, ship.factionId);
       if (w.kind === 'missile') {
@@ -186,6 +240,8 @@ unitBehaviors.push(function firingBehavior(world, battle, dt) {
           targetShipId: target.shipId,
           life: w.range / w.projectileSpeed + 2,
           tracking: w.tracking,
+          // doc35 WP-P0-2：弹体实体血量（重型鱼雷 38 / 普通导弹 12；三层近防可拦截）
+          hp: (w.damage || 0) >= 50 ? 38 : 12,
         });
       } else {
         // 直接弹道：命中判定 → 伤害
@@ -248,7 +304,13 @@ projectileBehaviors.push(function missileStep(world, battle, dt) {
     p.life -= dt;
 
     // 近防拦截（COMBAT-05：唯一生命周期）
-    if (!p.intercepted && tryIntercept(world, battle, p, target, dt)) {
+    if (!p.intercepted && world.combatV2 === true) {
+      // doc35 WP-P0-2：三层拦截网（外圈中队 350m / 中圈高追踪 180m / 内圈近防 100m）
+      if (tryLayeredInterception(world, battle, p, target, dt)) {
+        battle.events.push({ t: battle.time, type: 'intercept', side: target.side });
+        continue;
+      }
+    } else if (!p.intercepted && tryIntercept(world, battle, p, target, dt)) {
       continue; // 拦截：销毁
     }
     if (dist(p.x, p.y, target.x, target.y) < 14) {
@@ -288,6 +350,19 @@ function tryIntercept(world, battle, missile, target, dt) {
 function applyHit(world, battle, attacker, target, baseDamage, damageType) {
   const tShip = world.entities.ships[target.shipId];
   if (!tShip || tShip.status === 'destroyed') return;
+  // doc35 WP-P0-2：v2 伤害管线（方向性穿甲 + 分部损伤 + 热幅能；world.combatV2 门控）
+  if (world.combatV2 === true) {
+    const v2res = applyHitV2(world, battle, attacker, target, baseDamage, damageType, null);
+    if (v2res.destroyed) {
+      destroyShip(world, tShip, 'combat');
+      target.destroyed = true;
+      battle.losses[attacker?.side === 'a' ? 'b' : 'a'] = (battle.losses[attacker?.side === 'a' ? 'b' : 'a'] || 0) + 1;
+      battle.events.push({ t: battle.time, type: 'destroyed', side: target.side, shipId: target.shipId });
+      emit(world, 'ShipDestroyed', { shipId: tShip.id, battleId: battle.id }, 'combat');
+    }
+    battle._dirty = true;
+    return;
+  }
   let dmg = baseDamage;
   const layers = ['shield', 'armor', 'structure'];
   const side = attacker?.side || 'a';

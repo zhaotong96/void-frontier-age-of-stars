@@ -1,0 +1,2954 @@
+[
+  {
+    "file": "audit/DOC_AUDIT_REPORT.md",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "C:\\PUBLIC\\stella",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "audit/DOC_AUDIT_REPORT.md",
+    "category": "P3 AI 会话会话 ID",
+    "original": "sess_c793fb90",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "digest/doc5-digest.md",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "C:\\PUBLIC\\stella",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/36.log",
+    "category": "P2 本地用户目录路径",
+    "original": "C:\\Users\\zcode\\",
+    "redacted": "C:\\Users\\[REDACTED]\\"
+  },
+  {
+    "file": "reports/36.log",
+    "category": "P2 硬件型号/设备 ID/虚拟驱动",
+    "original": "i7-4720HQ",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/36.log",
+    "category": "P2 硬件型号/设备 ID/虚拟驱动",
+    "original": "OrayIddDriver",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/36.log",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "C:\\PUBLIC\\stella",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/report-full-lifecycle-qa.md",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "C:\\PUBLIC\\stella",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/report-rework2.md",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "C:\\PUBLIC\\stella",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/report-spec31-final-gate.md",
+    "category": "P2 硬件型号/设备 ID/虚拟驱动",
+    "original": "Hasee CP65S",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/report-spec31-final-gate.md",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "C:\\PUBLIC\\stella",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/report-spec39-full-regression-final.md",
+    "category": "P3 系统进程与 PID",
+    "original": "ffmpeg_51.exe (PID 41780)",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/report-spec39-full-regression-final.md",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "C:\\PUBLIC\\tools\\nodejs",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/report.md",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "C:\\PUBLIC\\stella",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/spec31-gate4-cdp-run2.log",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "C:/PUBLIC/stella",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/spec31-gate4-cdp-run3.log",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "C:/PUBLIC/stella",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/spec31-gate4-cdp-run4.log",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "C:/PUBLIC/stella",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/spec31-gate4-cdp-run5.log",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "C:/PUBLIC/stella",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/spec31-gate4-cdp-run6.log",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "C:/PUBLIC/stella",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/spec31-gate4-cdp-run7.log",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "C:/PUBLIC/stella",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/spec31-gate4-cdp-run8.log",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "C:/PUBLIC/stella",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/spec31-gate4-cdp-run9.log",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "C:\\PUBLIC\\stella",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/spec31-gate4-cdp.log",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "C:/PUBLIC/stella",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/spec35-gate4-cdp.log",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "C:\\PUBLIC\\stella",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/spec39-cdp-final.log",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "C:/PUBLIC/stella",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/spec39-cdp-headless-final.log",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "C:/PUBLIC/stella",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/spec39-cdp-headless-run3.log",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "C:/PUBLIC/stella",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/spec39-cdp-quietgate.log",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "C:/PUBLIC/stella",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/spec39-cdp-run1.log",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "C:/PUBLIC/stella",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/spec39-cdp-run2.log",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "C:/PUBLIC/stella",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/void-frontier-qa-lifecycle.md",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "C:\\PUBLIC\\stella",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "reports/void-frontier-qa-lifecycle.md",
+    "category": "P3 AI 会话会话 ID",
+    "original": "sess_c793fb90",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=11IYHlCBttMr",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=11IYHlCBttMr_lkLWfhF09xftYY32LTvd",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=153y6yDU8jUuZq4w1",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=153y6yDU8jUuZq4w1_lMqhckpJWsgfWH7",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1uR43nsFXEsoIlxpigHB6P0FLh5H-WAEs",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1uR43nsFXEsoIlxpigHB6P0FLh5H-WAEs",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1CkTUZnhlI3hgIw4WKNAkNzPye4oPZtHL",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1CkTUZnhlI3hgIw4WKNAkNzPye4oPZtHL",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1HtXqBxWF4owukx-8qrWB97GQDdWNbmgx",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1HtXqBxWF4owukx-8qrWB97GQDdWNbmgx",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1uo6eUnsjiq",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1uo6eUnsjiq_-w-PmUo2zXOee_vpbVr3A",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1mXC1DeontHOyonQv4Q84q",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1mXC1DeontHOyonQv4Q84q_DNVUKHXsUb",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=11kHC75nDCnhn81TFmZw229KB4YVIwxXV",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=11kHC75nDCnhn81TFmZw229KB4YVIwxXV",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1vmbxkHZDX27XeMsSVKOLCI0ibwdx95Xt",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1vmbxkHZDX27XeMsSVKOLCI0ibwdx95Xt",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1rXpnfD",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1rXpnfD_X_YA9eyTI6DyrDHLMfX_BQ07Ej-RiRNaUgmE",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1m68W3JRtOH7IHVZpPRJYpV3c5cna0mR6",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1m68W3JRtOH7IHVZpPRJYpV3c5cna0mR6",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1sAcum-KplIccc8wWu2al",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1sAcum-KplIccc8wWu2al_j959gdyClL6",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1TNE9Q5povpPRvlC76pI6s6a40-sivluz",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1TNE9Q5povpPRvlC76pI6s6a40-sivluz",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1Ko",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1Ko_tuDjsd-fJcKS83tWdfvg4jQpgxJNL",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=18t-tRS8gTfu-l8QYEE61XA40UsvcBf0V",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=18t-tRS8gTfu-l8QYEE61XA40UsvcBf0V",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1ou53Q6wjLm90EwKcHKvyRyTQEclxT2P5",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1ou53Q6wjLm90EwKcHKvyRyTQEclxT2P5",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1Leu7eNBR8HJqkiLt7gpLa3sLcLr0ZxOu",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1Leu7eNBR8HJqkiLt7gpLa3sLcLr0ZxOu",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1ulBLLBlHPw1GwvFtdJgPSaWfa0fTF7J1",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1ulBLLBlHPw1GwvFtdJgPSaWfa0fTF7J1",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=12wl-3jQH8kVG0m29WV6TH9p-NuMWgXnf",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=12wl-3jQH8kVG0m29WV6TH9p-NuMWgXnf",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1ORjqC",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1ORjqC_fy4lHnUmnhRWXT1dFc4jN3Nu0j",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1RXpIoxLH0RbwyrL6gv70jioorIeOUC7P",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1RXpIoxLH0RbwyrL6gv70jioorIeOUC7P",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1TrVBQkUda0SfPa",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1TrVBQkUda0SfPa_DhuClS5mQ9u5Y3tuean8bOpGJ4xE",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1PjpUVIzcbXtG7hjsCBI9EtQsXCsPggnbXy6TuBTD-Tw",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1PjpUVIzcbXtG7hjsCBI9EtQsXCsPggnbXy6TuBTD-Tw",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1uWBVy23DFPeYlemfPx4oqTIh0yZRQWVp",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1uWBVy23DFPeYlemfPx4oqTIh0yZRQWVp",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1M2mJijoe817YegL6",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1M2mJijoe817YegL6_OS7Ue75Zl9FM5L9",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1l1DUWCbPy",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1l1DUWCbPy_xdjmtFcUECImQq1Dm6vuLB",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1t2O2MvyK4ybyU9GTHyogaO-elp825ENb",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1t2O2MvyK4ybyU9GTHyogaO-elp825ENb",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1ETUqW7E7",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1ETUqW7E7_n_SOww1j0JELczPSeyOyCpZ",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1TFkJZFtuQtKiIbCPOcRNzj7J4jney70V",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/17_《无垠边疆》超长线演化架构方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1TFkJZFtuQtKiIbCPOcRNzj7J4jney70V",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/23_无垠边疆全生命周期大规模完全测试方案任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/23_无垠边疆全生命周期大规模完全测试方案任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/23_无垠边疆全生命周期大规模完全测试方案任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/23_无垠边疆全生命周期大规模完全测试方案任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1hj6Z",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1hj6Z_X3kArlPUmgHJBvPrEDUlk0_eLhb",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=151-KYvMcBFiGhsNjGdPXwQq62rqcHlEF",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=151-KYvMcBFiGhsNjGdPXwQq62rqcHlEF",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=10Ul47Va4ZpD5c5FAtgd-4RSM5S5o5Z",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=10Ul47Va4ZpD5c5FAtgd-4RSM5S5o5Z_d",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1jbmj0XrnMXWZbEJURxKTSnCH40RwnGy7",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1jbmj0XrnMXWZbEJURxKTSnCH40RwnGy7",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1-FaOQ5y",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1-FaOQ5y_v53lctw4ozTDuqMyIv34Pknj",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1sEkEW0fy41ugCvsS4vP5JEq2mT",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1sEkEW0fy41ugCvsS4vP5JEq2mT_zc7hM",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=109I7OKZRDvMA",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=109I7OKZRDvMA_vh0gJzrjbslew-wbz0E",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1pzaArCm5fVl",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1pzaArCm5fVl_IGSjxwT4ITHxKJ8-IOtT",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1xu",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1xu_IgMuejHfaAocs3v9n3wsi4aQrz-Mm",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=18bau1jCYxNk8f8EyQ4Vg9aNDFb3seuwq",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=18bau1jCYxNk8f8EyQ4Vg9aNDFb3seuwq",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1FYfXIupXjh77cH5m5HQsa7dWCUNsF8zo",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1FYfXIupXjh77cH5m5HQsa7dWCUNsF8zo",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1DjF6sQkVqIDqw0mNtCW6z7ivpRm7qU6C",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1DjF6sQkVqIDqw0mNtCW6z7ivpRm7qU6C",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1vz2yKEuOTEygN11tMPbMq0vLMChVc0zf",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1vz2yKEuOTEygN11tMPbMq0vLMChVc0zf",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=19IdoytlOM8r4wijY7rIRj13dCB2E0W0s",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=19IdoytlOM8r4wijY7rIRj13dCB2E0W0s",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1qsKBUbbaYZRv6DTzJOJnSO8sR60HXFOZ",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1qsKBUbbaYZRv6DTzJOJnSO8sR60HXFOZ",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1WK5bxAXCXifxaCoIVFUrFvG45HYweE0V",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1WK5bxAXCXifxaCoIVFUrFvG45HYweE0V",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1tgLOiIU0XtSFUEB7A3znccwKbrT9b5qZ",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1tgLOiIU0XtSFUEB7A3znccwKbrT9b5qZ",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1Z-KCOqJR-hd4Qe54PUyiBAUQpP8SOQ0w",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1Z-KCOqJR-hd4Qe54PUyiBAUQpP8SOQ0w",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1-4PP",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1-4PP_jeZq04Xq6IK9dM60ShXsGTs7Kuq",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1SynGIvyUme1vD4X6wqtvr95X5-WuMenK",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1SynGIvyUme1vD4X6wqtvr95X5-WuMenK",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=11gF9TkmUZEEwydGJX4-N27J7SLbNtUpz",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=11gF9TkmUZEEwydGJX4-N27J7SLbNtUpz",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1qQ6H4QOX5yomEvlAGqAcEdCMIBWXzbLw",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1qQ6H4QOX5yomEvlAGqAcEdCMIBWXzbLw",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1OeH4hfxieAU3NlBXJFCYaeozbAGz0cGM",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1OeH4hfxieAU3NlBXJFCYaeozbAGz0cGM",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1MTd95zl5Jz258G0p2JNxyLdsz0NRSfFQ",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1MTd95zl5Jz258G0p2JNxyLdsz0NRSfFQ",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1girv8P6qSkWmqu2o0SnXwPfHOsu2DYcC",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1girv8P6qSkWmqu2o0SnXwPfHOsu2DYcC",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1JG5XVUVSJFxOo-AGI8-2aR8QehMRD4WB",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1JG5XVUVSJFxOo-AGI8-2aR8QehMRD4WB",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=17c-ALiINFS4PVFN9BmZ2IVwF8-MvFFh8",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=17c-ALiINFS4PVFN9BmZ2IVwF8-MvFFh8",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1WJFalpuB19T83FZhBaIb52WcbKGsJeUa0fA2fpQ",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1WJFalpuB19T83FZhBaIb52WcbKGsJeUa0fA2fpQ_2Cs",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1SzAYu0aIgEttoVP",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1SzAYu0aIgEttoVP_WZViuRMmbUtrQW1z",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1w8YBC",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1w8YBC_wgVB2Wqo5GrChD3Wr19oUWcxGQ",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1ykHybNrTT85",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1ykHybNrTT85_gnjpT28ds_Pio3qVz_ha",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1tvyD2b7IiHfY7kudGkEQedHSbaqqUKvq",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1tvyD2b7IiHfY7kudGkEQedHSbaqqUKvq",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1CaKzwi5D07ncdIeGN9kmJtAOhdwf9hMp",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1CaKzwi5D07ncdIeGN9kmJtAOhdwf9hMp",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1rGaWbSrxVF58uy3x9EpKzoAPhGVpuR2W",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1rGaWbSrxVF58uy3x9EpKzoAPhGVpuR2W",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1y",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1y_zXlNspofCca3Olgl43_K7-4ULUkMuX",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1Duqr1voULSJtGnMK4BwY8I3kLrKngHyk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1Duqr1voULSJtGnMK4BwY8I3kLrKngHyk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1kEsRZp5iPLwSXM-6dahi5ZMCWN3SE8bJ",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1kEsRZp5iPLwSXM-6dahi5ZMCWN3SE8bJ",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1TrVBQkUda0SfPa",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1TrVBQkUda0SfPa_DhuClS5mQ9u5Y3tuean8bOpGJ4xE",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1gzX379R4HOnn4yeIO2IwxzLBeZcSJ1Ik",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1gzX379R4HOnn4yeIO2IwxzLBeZcSJ1Ik",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=105PnrB9pI68O4zli2wMEra",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=105PnrB9pI68O4zli2wMEra_pTpP4a8wf",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=19YXz8x4WLFffl",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=19YXz8x4WLFffl_t5UgMN3jcZ3FeCtstj",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1QKYkpZ8OmQw-1mmjQiGD2g9TbDHfW",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1QKYkpZ8OmQw-1mmjQiGD2g9TbDHfW_RQ",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1yLERKX9jDCz8WY3B2-K-4wa639f-JvR5",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1yLERKX9jDCz8WY3B2-K-4wa639f-JvR5",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1pOgUhURi82M-nSicy",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1pOgUhURi82M-nSicy_mtqVAt82qC1uUO",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1_Aa8NojoaDyZjjHygXtjIb5VcDTwWdf2",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1c90-f4qmw0WljbxzZRQfV0WQQ-jfasUx",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1c90-f4qmw0WljbxzZRQfV0WQQ-jfasUx",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1YWKcFcRmAwJVwUJDe1sH4",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1YWKcFcRmAwJVwUJDe1sH4_Aj1WxfuZTw",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1JR7fCTFGtrP-",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1JR7fCTFGtrP-_fTVxU5UL5zQXlkCjQJk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1WokK7eyrMlxEh39fgkfd0TDE4mpv-d3W",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1WokK7eyrMlxEh39fgkfd0TDE4mpv-d3W",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1rXpnfD",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1rXpnfD_X_YA9eyTI6DyrDHLMfX_BQ07Ej-RiRNaUgmE",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1pTC5zbH6IoDUT75B2-w0-27Nm9B0cOkj",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1pTC5zbH6IoDUT75B2-w0-27Nm9B0cOkj",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=14UsAMpS59aeIddHFeR5B9g2t3DdGVvfb",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=14UsAMpS59aeIddHFeR5B9g2t3DdGVvfb",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1oiWhjUrp22Umkai9lavaEdcP4u4i7npu",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1oiWhjUrp22Umkai9lavaEdcP4u4i7npu",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1PMdjrAYN3AAkrCbCotapO-Dz5UMFdyMf",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1PMdjrAYN3AAkrCbCotapO-Dz5UMFdyMf",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1Fmc6SjPx4n3VqiASnF0DeKTp2q95cYJ5",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1Fmc6SjPx4n3VqiASnF0DeKTp2q95cYJ5",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=14ILz3N2mmwpBfYWRY4Gs16PGE6QarrQc",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=14ILz3N2mmwpBfYWRY4Gs16PGE6QarrQc",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1hqfSWy1ORJ",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1hqfSWy1ORJ_aOsVnTtJ7yD_vtEL7zJ2e",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1hGoQfaZKsbIowhVN1L",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/24_《无垠边疆》全生命周期测试体系方案.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1hGoQfaZKsbIowhVN1L_Ieow9mACo9844",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/25_无垠边疆玩法自治Agent五阶段闭环测试施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/25_无垠边疆玩法自治Agent五阶段闭环测试施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/26_无垠边疆核心状态机模糊测试与异常Dump施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/26_无垠边疆核心状态机模糊测试与异常Dump施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/27_无垠边疆自动化长程浸泡推演与全银河巡检施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/27_无垠边疆自动化长程浸泡推演与全银河巡检施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/27_无垠边疆自动化长程浸泡推演与全银河巡检施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/27_无垠边疆自动化长程浸泡推演与全银河巡检施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/28_无垠边疆端到端战役里程碑自动化验收测试施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/28_无垠边疆端到端战役里程碑自动化验收测试施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/28_无垠边疆端到端战役里程碑自动化验收测试施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/28_无垠边疆端到端战役里程碑自动化验收测试施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/28_无垠边疆端到端战役里程碑自动化验收测试施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/28_无垠边疆端到端战役里程碑自动化验收测试施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///C:/Users/zt/",
+    "redacted": "file:///C:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md",
+    "category": "P2 AI 会话 UUID 目录",
+    "original": ".gemini/antigravity/brain/ac49e885-99a6-43dc-a68a-6149a0699e59",
+    "redacted": ".gemini/antigravity/brain/[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 搜索包装链接",
+    "original": "https://www.google.com/search?q=https://drive.google.com/drive/folders/1n4v-ixyBQrFXE-p4H7wsV2FUiy_sfHE6",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1X6k2Qa2M_6x-tRtOM557bcK0jQCOFG0j/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1SLI5UezALw1ZBYtHiNdIJ5oD_ETUKUsu/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1op3rlo6EcNgOXQWGejUhqoP5zd1T7jJo/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1wKSPbBv_8QnOfD6RRbX4---An6jX0Jll/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1i4xiQs0OIdFFA1jiUhiii_U738XojBav/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1tEnSrb_ahx4p-biV2N1j3azKCxUiKjS2/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/163a9n4PbM7sDy5VnJFn8Jf8nCE_jnsnN/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1Cmbtq7j0LRw0eI6Ct6OA2r4YpafkJ8ce/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1kYUVcj0zuRSwgwSfo28TDUwrx8-AaFNk/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1RctpLWFBc8_GPOAsbhLEuhg289k3NH3x/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1-ue4muDkBo7kV2FfBS6zTx8Jxd4MenRw/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1uC4zz_DFTQSvpSY6CcCF0X2_abBEryMN/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/19tYU1i5gYYZAgNY2awRIpPxJ8VrwR4PF/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/17JC_Hg0mcLnyL2j2E8wd21TlI33FLh5e/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1wAaG66r4NdtxO8ReSObGN5XFx79Ko2U4/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1ZUeD5w8ritJfsvzCOOfGfsHlnLj7nNX-/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1Cmbtq7j0LRw0eI6Ct6OA2r4YpafkJ8ce/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1_N40X4jorblyonKl5JKjTVsDTqXb_WGA/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/17jIo3GNYkmhkJR3FYeSRvAt54HF_OD4L/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1WfcBkmCIpwvlvDiaFq_nvbPIMc4V1st7/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1I4Mu74ETZyvIVZMajrQ1worLVfAQ2dRz/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1kAe-aJbppvolmEGTBRpMegRhF_bsF53A/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1x4zsOSEfNJsehotgiDJ2B_ZdqTgqmDgX/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1nvePA2xocPkBlT4uV3foGUSRhZRBBn8H/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1p-dtpBtLHBbkfJddex5P7t8d8gL6MjWw/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1Ygxml87EiUMgffHzhQrNZuHQgZgygjOi/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1bP8_vCELQBS45SCaD3gDr7oAVj1H3ekn/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/17jIo3GNYkmhkJR3FYeSRvAt54HF_OD4L/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1WfcBkmCIpwvlvDiaFq_nvbPIMc4V1st7/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1gPvTevb9AoIjxe4DnzJJTTOU3nzzZcHP/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1WfcBkmCIpwvlvDiaFq_nvbPIMc4V1st7/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1WfcBkmCIpwvlvDiaFq_nvbPIMc4V1st7/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1gBH1dsQ8uqRf4eaqFqWCjrorjDq7jMIo/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1LYyRw-2JovZTeNZoSzK4NkgsNXIxU4W_/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1I4Mu74ETZyvIVZMajrQ1worLVfAQ2dRz/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1I4Mu74ETZyvIVZMajrQ1worLVfAQ2dRz/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/13t6R4Pw7rC5MRwXRDfzBgzTWtHtkPJm7/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1ePtGJMoHmE_yRM7dsq81E-4HPBk7396e/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1l9hIaJcTZbdv9E8LU4bH38Zcpy0Bn_vG/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1FZwh8SB4BmKaRMKhujKfPU5xke2OlMNY/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1kAe-aJbppvolmEGTBRpMegRhF_bsF53A/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1rgeXHcQJD4nU0kqhsmS_1nzrY6gaUdv_/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1l9hIaJcTZbdv9E8LU4bH38Zcpy0Bn_vG/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1x4zsOSEfNJsehotgiDJ2B_ZdqTgqmDgX/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1v2lTDf5sJlJ3piD-i_RJTXyzpSWmqLoq/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1nvePA2xocPkBlT4uV3foGUSRhZRBBn8H/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1NLWpDLwoJ-TM8NibqMo7waVhUxGnPI3q/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1szYp4Y-jcGugS-VTqVpGmnrBZwgGGx-A/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1O4BlF24ZDnJjIRZ-vrfKzx95UUdzT1vB/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/17JC_Hg0mcLnyL2j2E8wd21TlI33FLh5e/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1wAaG66r4NdtxO8ReSObGN5XFx79Ko2U4/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1ZUeD5w8ritJfsvzCOOfGfsHlnLj7nNX-/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1p-dtpBtLHBbkfJddex5P7t8d8gL6MjWw/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1H1aAl7szehOGosoWjaTPLsAIbZIooEC_/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1Ygxml87EiUMgffHzhQrNZuHQgZgygjOi/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1-00ZI1_00vl-FQfn0RxTQKqIp3p_pGIr/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1hWIS4Io1TSu4ecCoj4IH1jPPn38bcchY/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1GN3hk6-yHNLigKP7BdtEo9EEMG0JHn4C/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1A8oHxLNWAxyRjMhZbYVp54MdFYOHKUv_/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1Ygxml87EiUMgffHzhQrNZuHQgZgygjOi/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1-ue4muDkBo7kV2FfBS6zTx8Jxd4MenRw/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1-00ZI1_00vl-FQfn0RxTQKqIp3p_pGIr/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1hWIS4Io1TSu4ecCoj4IH1jPPn38bcchY/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1bP8_vCELQBS45SCaD3gDr7oAVj1H3ekn/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1wjeuQRgVIlSOCS5xHOg5VqWujGFDNy01/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1FahJdiySQT6iUEKyD2aLf9Wdz6AwKMYK/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/13sSN2OHmoM70wZO0sYD61xQeXu4WYDlK/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1MkyQIw3YP8EyGiNTMjklp0sHs5EqZrzc/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1SvJht_k4AzbX0qaaktXozB2gPclfabtl/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/18cAh2Ov9puzeS7G7HN-MnoPt7XtletwV/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1KhwudgTki8DTJqUJEM5aDlK1DWfYU-Z_/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1RZbKF2QgtH_jIzq84GVRYBmZuidGukzH/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1O4BlF24ZDnJjIRZ-vrfKzx95UUdzT1vB/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1iZNTU9GTtAuB5kONIJ9XDxLiwns5pFjk/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/16Y06aSdkF0nDLidSNGwo5hC6tERQ0XvJ/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/16Y06aSdkF0nDLidSNGwo5hC6tERQ0XvJ/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1g0R0yhhFJpAS1-vG9W4PaE5t8LYs5KO5/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1SaRazIAPPWH6tfrcIrIPKfYCy7Lh8FCm/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/13sR80bBGr9nWt2u3qeanJpEg05LmrMH7/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1rG8A3wIv_jAwrrtvOghRr24AD9qm4hBG/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1jT0055qC39XI-Pn1LlwUKCVv3GX_NOTe/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/19tYU1i5gYYZAgNY2awRIpPxJ8VrwR4PF/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1Uws_SNgtpqvgPkSohdSsHWQNFoYKIMQR/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1A7A5Pe_0oisAw8LxBLnznLCmnj7IpstI/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1TxoZVSWH2Q7JYBai86mwr0UvwM2Tj_ys/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/19tYU1i5gYYZAgNY2awRIpPxJ8VrwR4PF/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1Z5DR8OQyzRnluTyQU2_YQ1x2-Eu1fxnO/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1LleNfN4BOXOYYFyob4vCO5Zm0WBN_PGG/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/17JC_Hg0mcLnyL2j2E8wd21TlI33FLh5e/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1wAaG66r4NdtxO8ReSObGN5XFx79Ko2U4/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1nDdGfWxpZRBygb40-cwEmNqaVNj_6QeC/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1bhxdUe5YPKaTPz-BTtzk9NaCI4kyEX0y/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1ZA8k0m6WBwqQRXL-P651yC5AyyOfj9Wg/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1OwZllnQ2-vSSfCMQ5Hj729Sire-9tmO0/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1pLoMMszAh4NO32TkUs6Ytft2gZmwcXws/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1-ue4muDkBo7kV2FfBS6zTx8Jxd4MenRw/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1RMW-vUoLXVcheToeepaG8SwbWGCHCS2f/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1lb9RvpMCraA0OjDSXDZKTXp85DOxZict/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1RMW-vUoLXVcheToeepaG8SwbWGCHCS2f/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1lb9RvpMCraA0OjDSXDZKTXp85DOxZict/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1RMW-vUoLXVcheToeepaG8SwbWGCHCS2f/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1I2FVkz6WMhzqqQuXTeIN40v-TBnxOhCb/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1bhxdUe5YPKaTPz-BTtzk9NaCI4kyEX0y/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1I2FVkz6WMhzqqQuXTeIN40v-TBnxOhCb/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/16Y06aSdkF0nDLidSNGwo5hC6tERQ0XvJ/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1I2FVkz6WMhzqqQuXTeIN40v-TBnxOhCb/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/19tYU1i5gYYZAgNY2awRIpPxJ8VrwR4PF/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/17JC_Hg0mcLnyL2j2E8wd21TlI33FLh5e/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1wAaG66r4NdtxO8ReSObGN5XFx79Ko2U4/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1EY_U9GsKvZyVSnnyJbDMNP2wbiFM-8Ft/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/16Y06aSdkF0nDLidSNGwo5hC6tERQ0XvJ/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1JccTyC4-pSX1BvokkMRtJ8jYJHXNT7dR/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1oKTl5GUzpdd0zsoLiWrRhA3-rzIFL1xD/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1JccTyC4-pSX1BvokkMRtJ8jYJHXNT7dR/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/16Y06aSdkF0nDLidSNGwo5hC6tERQ0XvJ/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1rG8A3wIv_jAwrrtvOghRr24AD9qm4hBG/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1A7A5Pe_0oisAw8LxBLnznLCmnj7IpstI/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1oKTl5GUzpdd0zsoLiWrRhA3-rzIFL1xD/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1RMW-vUoLXVcheToeepaG8SwbWGCHCS2f/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1I2FVkz6WMhzqqQuXTeIN40v-TBnxOhCb/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/19tYU1i5gYYZAgNY2awRIpPxJ8VrwR4PF/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/17JC_Hg0mcLnyL2j2E8wd21TlI33FLh5e/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1wAaG66r4NdtxO8ReSObGN5XFx79Ko2U4/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/file/d/1EY_U9GsKvZyVSnnyJbDMNP2wbiFM-8Ft/view?usp=drivesdk",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/30_全生命周期测试体系工程领域专家终审验收报告.md",
+    "category": "P3 开发机与工作区绝对路径",
+    "original": "D:/work/void-frontier",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/31_无垠边疆全生命周期终审收口与全量回归验证施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/31_无垠边疆全生命周期终审收口与全量回归验证施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/31_无垠边疆全生命周期终审收口与全量回归验证施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/31_无垠边疆全生命周期终审收口与全量回归验证施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/31_无垠边疆全生命周期终审收口与全量回归验证施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/31_无垠边疆全生命周期终审收口与全量回归验证施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/31_无垠边疆全生命周期终审收口与全量回归验证施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/31_无垠边疆全生命周期终审收口与全量回归验证施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/31_无垠边疆全生命周期终审收口与全量回归验证施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/31_无垠边疆全生命周期终审收口与全量回归验证施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/31_无垠边疆全生命周期终审收口与全量回归验证施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/31_无垠边疆全生命周期终审收口与全量回归验证施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/31_无垠边疆全生命周期终审收口与全量回归验证施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/31_无垠边疆全生命周期终审收口与全量回归验证施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/31_无垠边疆全生命周期终审收口与全量回归验证施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/31_无垠边疆全生命周期终审收口与全量回归验证施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/31_无垠边疆全生命周期终审收口与全量回归验证施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=10dqym5vXzyXXVpd3H0tVKAzQghyX4bQ1",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=10dqym5vXzyXXVpd3H0tVKAzQghyX4bQ1",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1qpUp1rjiE7bDlY70xEke0FNSgOYz9le7",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1qpUp1rjiE7bDlY70xEke0FNSgOYz9le7",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1NZzWkyQ2F9em8NPSJUN6l8cYLq3buADD",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1NZzWkyQ2F9em8NPSJUN6l8cYLq3buADD",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1RctpLWFBc8",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1RctpLWFBc8_GPOAsbhLEuhg289k3NH3x",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1hLYFCrw0QAY9GfKrzpLVTkz-mFyBkc9g",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1hLYFCrw0QAY9GfKrzpLVTkz-mFyBkc9g",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1TrVBQkUda0SfPa",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1TrVBQkUda0SfPa_DhuClS5mQ9u5Y3tuean8bOpGJ4xE",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1PIe9zEuYwG63MmcMf5hbzp2QooCofkKg",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1PIe9zEuYwG63MmcMf5hbzp2QooCofkKg_pOMlG0j0LI",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1hMZ85FxrxriWr0B06jhWnIrtk7CJimRI",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1hMZ85FxrxriWr0B06jhWnIrtk7CJimRI",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1X6k2Qa2M",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1X6k2Qa2M_6x-tRtOM557bcK0jQCOFG0j",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1W9Dg2mn98YvB7OMIbklUZniifU9OvzPe",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1W9Dg2mn98YvB7OMIbklUZniifU9OvzPe",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1Nk-yTd1Av3fAgQ70sn-1mnC4RO",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1Nk-yTd1Av3fAgQ70sn-1mnC4RO_scdJn",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1Lm6TIxXERDRVGtj45pBdfpT0NNCQqJqm",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1Lm6TIxXERDRVGtj45pBdfpT0NNCQqJqm",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=13wTub1MZJHCa7ktVAWud5eDgkxyY0Ln7",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=13wTub1MZJHCa7ktVAWud5eDgkxyY0Ln7",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1tEnSrb",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1tEnSrb_ahx4p-biV2N1j3azKCxUiKjS2",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=19jWvOYfXjHWY-4DMp4MyBn7Pdyp5m1m",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=19jWvOYfXjHWY-4DMp4MyBn7Pdyp5m1m_",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1rgQ3xASFzB-2CBWBV9EkDYOjqRUcq32L",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1rgQ3xASFzB-2CBWBV9EkDYOjqRUcq32L",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1jBMiDZ5f8AACOD22qQHTRrasZSTsYrsd",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1jBMiDZ5f8AACOD22qQHTRrasZSTsYrsd",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1eiJyTbrw7YvvICvmNQny",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1eiJyTbrw7YvvICvmNQny_JFQ7A-iBJDP",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=163a9n4PbM7sDy5VnJFn8Jf8nCE",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=163a9n4PbM7sDy5VnJFn8Jf8nCE_jnsnN",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1AqNFxceYgKlswaHGLe",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1AqNFxceYgKlswaHGLe_QnsMCVAOiakHJ",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=18yQCCVA9AAfiEPPKez6wc49fmvLwWK1E",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=18yQCCVA9AAfiEPPKez6wc49fmvLwWK1E",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1cqvUfcvaxR",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1cqvUfcvaxR_zzhphMQqGT_squo_JSeCj",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/34_无垠边疆长线内容与机制创新领域专家调研报告_微观与数学模型体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1hLYFCrw0QAY9GfKrzpLVTkz-mFyBkc9g",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/34_无垠边疆长线内容与机制创新领域专家调研报告_微观与数学模型体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1hLYFCrw0QAY9GfKrzpLVTkz-mFyBkc9g",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/34_无垠边疆长线内容与机制创新领域专家调研报告_微观与数学模型体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1qpUp1rjiE7bDlY70xEke0FNSgOYz9le7",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/34_无垠边疆长线内容与机制创新领域专家调研报告_微观与数学模型体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1qpUp1rjiE7bDlY70xEke0FNSgOYz9le7",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/34_无垠边疆长线内容与机制创新领域专家调研报告_微观与数学模型体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1RctpLWFBc8",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/34_无垠边疆长线内容与机制创新领域专家调研报告_微观与数学模型体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1RctpLWFBc8_GPOAsbhLEuhg289k3NH3x",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/34_无垠边疆长线内容与机制创新领域专家调研报告_微观与数学模型体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1X6k2Qa2M",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/34_无垠边疆长线内容与机制创新领域专家调研报告_微观与数学模型体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1X6k2Qa2M_6x-tRtOM557bcK0jQCOFG0j",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/34_无垠边疆长线内容与机制创新领域专家调研报告_微观与数学模型体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=10dqym5vXzyXXVpd3H0tVKAzQghyX4bQ1",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/34_无垠边疆长线内容与机制创新领域专家调研报告_微观与数学模型体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=10dqym5vXzyXXVpd3H0tVKAzQghyX4bQ1",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/34_无垠边疆长线内容与机制创新领域专家调研报告_微观与数学模型体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1hMZ85FxrxriWr0B06jhWnIrtk7CJimRI",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/34_无垠边疆长线内容与机制创新领域专家调研报告_微观与数学模型体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1hMZ85FxrxriWr0B06jhWnIrtk7CJimRI",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/34_无垠边疆长线内容与机制创新领域专家调研报告_微观与数学模型体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1eiJyTbrw7YvvICvmNQny",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/34_无垠边疆长线内容与机制创新领域专家调研报告_微观与数学模型体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1eiJyTbrw7YvvICvmNQny_JFQ7A-iBJDP",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/34_无垠边疆长线内容与机制创新领域专家调研报告_微观与数学模型体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1W9Dg2mn98YvB7OMIbklUZniifU9OvzPe",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/34_无垠边疆长线内容与机制创新领域专家调研报告_微观与数学模型体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1W9Dg2mn98YvB7OMIbklUZniifU9OvzPe",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/34_无垠边疆长线内容与机制创新领域专家调研报告_微观与数学模型体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1NZzWkyQ2F9em8NPSJUN6l8cYLq3buADD",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/34_无垠边疆长线内容与机制创新领域专家调研报告_微观与数学模型体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1NZzWkyQ2F9em8NPSJUN6l8cYLq3buADD",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/34_无垠边疆长线内容与机制创新领域专家调研报告_微观与数学模型体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1Lm6TIxXERDRVGtj45pBdfpT0NNCQqJqm",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/34_无垠边疆长线内容与机制创新领域专家调研报告_微观与数学模型体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1Lm6TIxXERDRVGtj45pBdfpT0NNCQqJqm",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/34_无垠边疆长线内容与机制创新领域专家调研报告_微观与数学模型体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https\\://drive.google.com/open?id=1x6woRps8fyaJZ",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/34_无垠边疆长线内容与机制创新领域专家调研报告_微观与数学模型体系.md",
+    "category": "P1 Google Drive 文件/目录 ID 链接",
+    "original": "https://drive.google.com/open?id=1x6woRps8fyaJZ_mjFgWCLYsURCG2FoAo",
+    "redacted": "[REDACTED]"
+  },
+  {
+    "file": "specs/35_无垠边疆超长线内容与机制创新综合施工计划.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/35_无垠边疆超长线内容与机制创新综合施工计划.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/35_无垠边疆超长线内容与机制创新综合施工计划.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/36_全流程回归测试与验收报告撰写规范.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/36_全流程回归测试与验收报告撰写规范.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/36_全流程回归测试与验收报告撰写规范.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/37_行星地表深度游戏性与剧情叙事领域专家协查任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/37_行星地表深度游戏性与剧情叙事领域专家协查任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/37_行星地表深度游戏性与剧情叙事领域专家协查任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/37_行星地表深度游戏性与剧情叙事领域专家协查任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/39_行星地表深度游戏性实施与UI浏览器缺陷综合施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/39_行星地表深度游戏性实施与UI浏览器缺陷综合施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/39_行星地表深度游戏性实施与UI浏览器缺陷综合施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/39_行星地表深度游戏性实施与UI浏览器缺陷综合施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/39_行星地表深度游戏性实施与UI浏览器缺陷综合施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/39_行星地表深度游戏性实施与UI浏览器缺陷综合施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/39_行星地表深度游戏性实施与UI浏览器缺陷综合施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/39_行星地表深度游戏性实施与UI浏览器缺陷综合施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/39_行星地表深度游戏性实施与UI浏览器缺陷综合施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/39_行星地表深度游戏性实施与UI浏览器缺陷综合施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/39_行星地表深度游戏性实施与UI浏览器缺陷综合施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/39_行星地表深度游戏性实施与UI浏览器缺陷综合施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/39_行星地表深度游戏性实施与UI浏览器缺陷综合施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/39_行星地表深度游戏性实施与UI浏览器缺陷综合施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/39_行星地表深度游戏性实施与UI浏览器缺陷综合施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/39_行星地表深度游戏性实施与UI浏览器缺陷综合施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/39_行星地表深度游戏性实施与UI浏览器缺陷综合施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/39_行星地表深度游戏性实施与UI浏览器缺陷综合施工方案.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/40_行星地表深度机制与全流程全量回归测试规范.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/40_行星地表深度机制与全流程全量回归测试规范.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/41_次世代宏伟太空歌剧与多系统交织演化领域专家任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/41_次世代宏伟太空歌剧与多系统交织演化领域专家任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/41_次世代宏伟太空歌剧与多系统交织演化领域专家任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/41_次世代宏伟太空歌剧与多系统交织演化领域专家任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  },
+  {
+    "file": "specs/41_次世代宏伟太空歌剧与多系统交织演化领域专家任务委托书.md",
+    "category": "P2 本地用户路径 (file:/// 协议)",
+    "original": "file:///c:/Users/zt/",
+    "redacted": "file:///c:/Users/[REDACTED]/"
+  }
+]

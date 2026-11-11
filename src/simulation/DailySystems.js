@@ -14,6 +14,8 @@ import { closeDailyLedgers, applyDecay } from '../domain/economy/ledger.js';
 import { updateMarketPrices } from '../domain/economy/market.js';
 import { dailyColonyCommerce, restockMarkets } from '../domain/economy/colonyTrade.js';
 import { resourceDef, allResourceIds } from '../content/resources.js';
+import { decayBlackMarketSuspicion } from '../domain/economy/blackMarket.js';
+import { resetElevatorDaily } from '../domain/strategic/megastructures.js';
 import { emit } from '../core/eventBus.js';
 import { chronicle } from '../core/eventBus.js';
 import { getMod } from '../domain/factions/modifiers.js';
@@ -141,3 +143,9 @@ function factionPower(world, fid) {
   }
   return p + Object.keys(world.entities.colonies).length; // 殖民也算国力分量
 }
+
+// doc35 WP-P1-1/P1-2：黑市嫌疑度自然衰减（仅遍历已生成黑市）+ 电梯日吞吐重置（惰性零开销）
+registerDaily('grey-economy', (world) => {
+  decayBlackMarketSuspicion(world);
+  resetElevatorDaily(world);
+});

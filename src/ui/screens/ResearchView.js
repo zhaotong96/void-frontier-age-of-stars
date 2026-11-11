@@ -80,6 +80,9 @@ const STAT_ZH = {
   diplomacyTrustGain: '外交信任',
   warExhaustionResistance: '战争疲惫抗性',
   terraformSpeed: '环境改造速度',
+  // [SPEC-39 Bug 5] 地表气象抗性补录（content/technologies.js 全量 stat 审计零缺漏）
+  stormResist: '风暴抗性',
+  stormResistAcid: '酸雨风暴抗性',
 };
 
 /** 单条效果格式化：mult → ×1.08；add → +0.03 / -0.02 */

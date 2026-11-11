@@ -70,26 +70,34 @@ export const MenuView = {
     const panelBox = el('div', { class: 'vf-menu-panel' });
 
     // 新战役
+    // [SPEC-39 Bug 6] 表单无障碍补全：全部控件显式 id + name，label 经 for=
+    // 严格关联（id 与 for 100% 一致），消除浏览器 Form 关联警告。
     const p1 = panel({ title: L('ui.newGameTitle'), open: true });
     const form = el('div', { class: 'vf-col' });
-    const nameInput = el('input', { type: 'text', value: '边疆回声', 'aria-label': L('ui.campaignName') });
-    const seedInput = el('input', { type: 'text', value: '24601', 'aria-label': L('ui.seed') });
-    const diffSelect = el('select', { 'aria-label': L('ui.difficulty') });
+    const nameInput = el('input', {
+      type: 'text', value: '边疆回声', id: 'campaign-name-input', name: 'campaignName',
+      'aria-label': L('ui.campaignName'),
+    });
+    const seedInput = el('input', {
+      type: 'text', value: '24601', id: 'campaign-seed-input', name: 'campaignSeed',
+      'aria-label': L('ui.seed'),
+    });
+    const diffSelect = el('select', { id: 'campaign-difficulty-select', name: 'difficulty', 'aria-label': L('ui.difficulty') });
     for (const [v, k] of [['story', 'ui.difficulty.story'], ['standard', 'ui.difficulty.standard'], ['hard', 'ui.difficulty.hard'], ['sandbox', 'ui.difficulty.sandbox']]) {
       const opt = el('option', { value: v, text: L(k) });
       if (v === 'standard') opt.selected = true;
       diffSelect.appendChild(opt);
     }
-    const sizeSelect = el('select', { 'aria-label': '星系规模' });
+    const sizeSelect = el('select', { id: 'campaign-galaxy-size-select', name: 'galaxySize', 'aria-label': '星系规模' });
     for (const [v, label] of [['story', '紧凑（64 星系）'], ['standard', '标准（96 星系）'], ['large', '大型（160 星系）']]) {
       const opt = el('option', { value: v, text: label });
       if (v === 'standard') opt.selected = true;
       sizeSelect.appendChild(opt);
     }
-    form.appendChild(labelWrap(L('ui.campaignName'), nameInput));
-    form.appendChild(labelWrap(L('ui.seed'), seedInput));
-    form.appendChild(labelWrap(L('ui.difficulty'), diffSelect));
-    form.appendChild(labelWrap('星系规模', sizeSelect));
+    form.appendChild(labelWrap(L('ui.campaignName'), nameInput, 'campaign-name-input'));
+    form.appendChild(labelWrap(L('ui.seed'), seedInput, 'campaign-seed-input'));
+    form.appendChild(labelWrap(L('ui.difficulty'), diffSelect, 'campaign-difficulty-select'));
+    form.appendChild(labelWrap('星系规模', sizeSelect, 'campaign-galaxy-size-select'));
     const startBtn = el('button', {
       class: 'vf-btn primary mt-2',
       text: `${L('ui.start')} ▸`,
@@ -226,8 +234,12 @@ export const MenuView = {
   },
 };
 
-function labelWrap(label, control) {
-  const wrap = el('label', { class: 'vf-col' });
+/**
+ * 表单字段包装（[SPEC-39 Bug 6]）：label 显式 for= 关联控件 id；
+ * htmlForId 缺省时退化为包裹式关联（label 内嵌控件）。
+ */
+function labelWrap(label, control, htmlForId) {
+  const wrap = el('label', { class: 'vf-col', ...(htmlForId ? { for: htmlForId } : {}) });
   wrap.appendChild(el('span', { class: 'vf-dim vf-small', text: label }));
   wrap.appendChild(control);
   return wrap;

@@ -15,6 +15,7 @@ import { getRelation } from '../diplomacy/war.js';
 import { EVENT_DEFS, objectiveAnchorFor } from '../../content/events.js';
 import { createWorldObjective } from './objectives.js';
 import { DIFFICULTY } from '../../content/constants.js';
+import { resolveSurfaceDilemma } from '../ground/surfaceEvents.js';
 
 /** 每日检查（DailySystems 注册）：条件 + 权重抽取 */
 export function dailyEventCheck(world) {
@@ -121,8 +122,17 @@ export function applyEffects(world, effects, ctx = {}) {
         break;
       }
       case 'relation': {
-        const rel = getRelation(world, fx.a || pid, fx.b);
-        rel[fx.key] = Math.max(-100, Math.min(100, (rel[fx.key] || 0) + fx.delta));
+        // F-11 修复：'ALL_AI' 为广播伪目标（34 项叙事事件的外交效果此前经
+        // getRelation 写入 "[object]/ALL_AI" 幽灵关系键——效果从未真实生效）。
+        // 现展开为全部 AI 文明逐派系应用（getRelation 双方存在性守卫保持）。
+        const a = fx.a || pid;
+        const targets = fx.b === 'ALL_AI'
+          ? Object.keys(world.entities.factions).filter((f) => f !== a)
+          : [fx.b];
+        for (const b of targets) {
+          const rel = getRelation(world, a, b);
+          rel[fx.key] = Math.max(-100, Math.min(100, (rel[fx.key] || 0) + fx.delta));
+        }
         break;
       }
       case 'flag':
@@ -155,6 +165,15 @@ export function resolveChoice(world, eventId, choiceId) {
   const idx = world.narrative.pendingChoices.findIndex((p) => p.eventId === eventId);
   if (idx < 0) return { ok: false, reason: '事件不存在或已结算' };
   const pending = world.narrative.pendingChoices[idx];
+  // [SPEC-39] 地表道德抉择卡分支：域侧回写路由（资源/希望不满/招募/热度冲 spike）
+  if (pending.surface) {
+    const res = resolveSurfaceDilemma(world, pending, choiceId);
+    if (res.ok) {
+      world.narrative.pendingChoices.splice(idx, 1);
+      world.narrative.flags[`choice:${eventId}`] = choiceId;
+    }
+    return res;
+  }
   const def = EVENT_DEFS.find((e) => e.id === eventId);
   if (!def) return { ok: false, reason: '未知事件定义' };
   const choice = def.choices?.find((c) => c.id === choiceId);

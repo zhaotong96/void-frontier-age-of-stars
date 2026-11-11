@@ -67,6 +67,9 @@ export class GLContext {
     this.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
     // 资源清册：rbos 为 createFloatTarget({depth:true}) 的 DEPTH_COMPONENT24 渲染缓冲
     this._tracked = { programs: [], buffers: [], vaos: [], textures: [], fbos: [], rbos: [] };
+    // VAO → 装配期内创建的 inner buffer 集合（F-09：真机 GL 无 VAO→buffer 级联
+    // 删除；mock 的级联语义已证伪——逐场景销毁必须显式释放 inner buffer）
+    this._vaoOwned = new Map();
     this.errorCount = 0;
     void opts; // 预留：后续如需按 opts 差异化初始化在此扩展
     // 调试模式（window.__GL_THROW_ON_ERROR）：包装全部 gl 方法（原型链完整
@@ -167,15 +170,45 @@ export class GLContext {
     return buf;
   }
 
-  /** 创建 VAO 并在 setup(gl) 回调内完成属性装配（登记清册） */
+  /** 创建 VAO 并在 setup(gl) 回调内完成属性装配（登记清册）。
+   *  F-09：装配回调内经 raw gl.createBuffer 创建的 inner buffer 记入
+   *  _vaoOwned[vao]，销毁必须走 destroyVAO(vao)（真机无级联删除）。 */
   createVAO(setup) {
     const gl = this.gl;
     const vao = gl.createVertexArray();
     gl.bindVertexArray(vao);
-    setup(gl);
+    const owned = new Set();
+    const orig = gl.createBuffer;
+    gl.createBuffer = function (...a) { const b = orig.apply(gl, a); if (b) owned.add(b); return b; };
+    try {
+      setup(gl);
+    } finally {
+      gl.createBuffer = orig;
+    }
     gl.bindVertexArray(null);
     this._tracked.vaos.push(vao);
+    this._vaoOwned.set(vao, owned);
     return vao;
+  }
+
+  /** 销毁 VAO 及其装配期 inner buffer（真机 GL 无 VAO→buffer 级联删除，F-09） */
+  destroyVAO(vao) {
+    const gl = this.gl;
+    if (!gl || !vao) return;
+    const owned = this._vaoOwned.get(vao);
+    if (owned) {
+      for (const b of owned) {
+        gl.deleteBuffer(b);
+        const arr = this._tracked.buffers;
+        const i = arr.indexOf(b);
+        if (i >= 0) arr.splice(i, 1);
+      }
+      this._vaoOwned.delete(vao);
+    }
+    gl.deleteVertexArray(vao);
+    const va = this._tracked.vaos;
+    const j = va.indexOf(vao);
+    if (j >= 0) va.splice(j, 1);
   }
 
   /**
@@ -304,6 +337,7 @@ export class GLContext {
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
     this._tracked.buffers.push(buf);
     this._tracked.vaos.push(vao);
+    this._vaoOwned.set(vao, new Set([buf]));
     return vao;
   }
 
@@ -348,6 +382,7 @@ export class GLContext {
    */
   resetTracking() {
     this._tracked = { programs: [], buffers: [], vaos: [], textures: [], fbos: [], rbos: [] };
+    this._vaoOwned.clear();
     this.errorCount = 0;
     // 调试钩子：window.__GL_TRACE 时包装全部 gl 方法，记录最后 N 次调用（含参数摘要）
     if (typeof window !== 'undefined' && window.__GL_TRACE) {

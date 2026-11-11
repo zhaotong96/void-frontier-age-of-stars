@@ -6,6 +6,7 @@
  */
 
 import { DIFFICULTY } from '../../content/constants.js';
+import { TECHNOLOGIES } from '../../content/technologies.js';
 import { FACTION_TRAITS } from '../../content/factions.js';
 
 /** 文明特质（文明 id → { stat: value 或 {mode,value} }） */
@@ -91,8 +92,14 @@ export function explainMod(world, factionId, stat) {
   return parts;
 }
 
+// 科技定义索引（content 权威表；模块级惰性缓存——不写 world 字段，
+// [SPEC-39 Bug 5] 修复 explainMod 面板泄漏原始 techId（world._techIndex 从未填充恒 null））
+let _techIdx = null;
 function findTech(world, techId) {
-  // 科技定义在 content 模块；通过世界缓存查找
-  world._techIndex ||= null;
-  return world._techIndex?.[techId] || null;
+  void world;
+  if (!_techIdx) {
+    _techIdx = {};
+    for (const t of TECHNOLOGIES) _techIdx[t.id] = t;
+  }
+  return _techIdx[techId] || null;
 }

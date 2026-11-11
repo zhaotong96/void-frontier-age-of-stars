@@ -4,13 +4,15 @@
  * 并在 CHANGELOG 记录（任务书 10.1 L4）。
  */
 
-import { computeGolden, loadGolden, GOLDEN_CONFIG } from '../tools/update-golden.mjs';
+import { computeGolden, loadGolden, warmGolden, GOLDEN_CONFIG } from '../tools/update-golden.mjs';
 
 export const suite = {
   id: 'REG-01',
   name: '固定种子金快照回归',
   group: 'regression',
   async run() {
+    // [SPEC-39 Bug 1] 基线经 warmGolden 惰性装载（Node fs / 浏览器 fetch，同旧语义）
+    await warmGolden();
     const base = loadGolden();
     if (!base) {
       // 首跑：生成基线而不是失败（先有基线再谈回归）

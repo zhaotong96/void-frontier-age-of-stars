@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark" />
+  <title>长程浸泡推演遥测仪表盘 — 浏览器实机（doc27 SPEC-TEST-027）</title>
+  <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+  <link rel="stylesheet" href="./styles.css" />
+  <style>
+    #soak-hud {
+      position: fixed; top: 12px; right: 12px; width: 440px; max-height: 92vh; overflow: auto;
+      z-index: 9999; background: rgba(4, 16, 18, 0.9); border: 1px solid rgba(60, 230, 190, 0.4);
+      border-radius: 10px; padding: 12px 14px; color: #c9ffef; backdrop-filter: blur(6px);
+      font: 12px/1.55 "Cascadia Code", Consolas, monospace;
+      box-shadow: 0 0 24px rgba(0, 220, 170, 0.22);
+    }
+    #soak-hud h1 { font-size: 14px; margin: 0 0 6px; color: #7dffc9; letter-spacing: 1px; }
+    #soak-hud .row { display: flex; justify-content: space-between; margin: 2px 0; }
+    #soak-hud .k { color: #6faf9d; }
+    #soak-hud canvas.chart { width: 100%; height: 90px; background: rgba(0, 30, 26, 0.5); border-radius: 6px; margin: 4px 0; }
+    #soak-hud .badge { margin-top: 10px; padding: 10px; text-align: center; border-radius: 8px; font-size: 15px; font-weight: 700; letter-spacing: 2px; }
+    #soak-hud .badge.green { background: rgba(30, 160, 90, 0.25); border: 1px solid #46e08a; color: #7dffb0; }
+    #soak-hud .badge.red { background: rgba(160, 30, 30, 0.25); border: 1px solid #ff5d5d; color: #ff9c9c; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="boot" class="boot-screen">
+      <div class="boot-title">VOID FRONTIER</div>
+      <div class="boot-sub">Soak 遥测 · 初始化…</div>
+      <div class="boot-status" id="boot-status">加载核心模块</div>
+    </div>
+  </div>
+  <div id="soak-hud">
+    <h1>GALAXY SOAK TELEMETRY</h1>
+    <div class="row"><span class="k">浸泡日</span><span id="s-day">0 / 400</span></div>
+    <div class="row"><span class="k">推进速率 (ms/日)</span><span id="s-ms">--</span></div>
+    <div class="row"><span class="k">JS Heap (MB)</span><span id="s-heap">--</span></div>
+    <div class="row"><span class="k">玩家信用点</span><span id="s-cr">--</span></div>
+    <canvas class="chart" id="s-chart" width="410" height="90"></canvas>
+    <div class="row"><span class="k">场景切换泄漏审计（真实 GL）</span><span id="s-leak">待运行</span></div>
+    <div class="badge" id="s-badge">运行中…</div>
+  </div>
+
+  <script type="module">
+    // 与生产 main.js 同源启动链 + 真实 GL 泄漏审计（doc27 §3：钩住真实
+    // gl.createBuffer/deleteBuffer 引用计数 + performance.memory 堆斜率）
+    import { App } from '../../src/app/App.js';
+    import { registerAll as registerLocalization } from '../../src/content/localization/index.js';
+    import { advanceTicks } from '../../src/simulation/WorldSimulation.js';
+    import { balance } from '../../src/domain/economy/ledger.js';
+    import { CanvasManager } from '../../src/render/CanvasManager.js';
+    import { PlanetSurfaceScene } from '../../src/render/gl/PlanetSurfaceScene.js';
+    import { buildTerrainField } from '../../src/domain/ground/terrainField.js';
+
+    const $ = (id) => document.getElementById(id);
+
+    async function main() {
+      window.__soakRunnerErrors = [];
+      window.addEventListener('error', (ev) => window.__soakRunnerErrors.push(String(ev.error || ev.message)));
+      window.addEventListener('unhandledrejection', (ev) => window.__soakRunnerErrors.push(String(ev.reason)));
+
+      registerLocalization();
+      const app = new App(document.getElementById('app'));
+      await app.boot();
+      await app.startNewGame({ seed: 24601 });
+      app.setSpeed(0); // 战略时钟冻结：浸泡推进完全由本仪表盘的显式时间步驱动
+      window.focus();
+
+      const world = app.world;
+      const DAYS = 400;
+      const chart = $('s-chart').getContext('2d');
+      const heapSeries = [];
+      const daySeries = [];
+      let lastT = performance.now();
+      let msPerDayEMA = 0;
+
+      // —— 浸泡推进：每帧推进 6 日（保持渲染循环活着以观测真实堆/句柄） ——
+      await new Promise((resolve) => {
+        let day = 0;
+        const step = () => {
+          const t0 = performance.now();
+          advanceTicks(world, 24 * 6);
+          const dt = performance.now() - t0;
+          day += 6;
+          const msPerDay = dt / 6;
+          msPerDayEMA = msPerDayEMA * 0.85 + msPerDay * 0.15;
+          $('s-day').textContent = `${day} / ${DAYS}`;
+          $('s-ms').textContent = msPerDayEMA.toFixed(2);
+          $('s-cr').textContent = String(Math.round(balance(world, world.playerFactionId, 'credits')));
+          const mem = performance.memory;
+          if (mem && Number.isFinite(mem.usedJSHeapSize)) {
+            const mb = mem.usedJSHeapSize / 1048576;
+            heapSeries.push(mb);
+            daySeries.push(day);
+            $('s-heap').textContent = mb.toFixed(1);
+            // 折线图（堆斜率目视化：doc27 §3.2 趋势图要求）
+            chart.clearRect(0, 0, 410, 90);
+            chart.strokeStyle = '#3ce6be';
+            chart.beginPath();
+            const max = Math.max(...heapSeries);
+            const min = Math.min(...heapSeries);
+            const span = Math.max(1, max - min);
+            heapSeries.forEach((v, i) => {
+              const x = (i / Math.max(1, heapSeries.length - 1)) * 408 + 1;
+              const y = 86 - ((v - min) / span) * 80;
+              i === 0 ? chart.moveTo(x, y) : chart.lineTo(x, y);
+            });
+            chart.stroke();
+          }
+          if (day >= DAYS) resolve();
+          else requestAnimationFrame(step);
+        };
+        requestAnimationFrame(step);
+      });
+
+      // —— 真实 GL 泄漏审计：100 次 PlanetSurfaceScene mount/draw/destroy ——
+      const c = document.createElement('canvas');
+      c.width = 320; c.height = 240;
+      const cm = new CanvasManager().attach(c);
+      let glHook = null;
+      if (cm.hasGL && cm.glc) {
+        const gl = cm.glc.gl;
+        const counters = { created: 0, deleted: 0 };
+        const live = new Map(); // id → { stack }
+        let seq = 0;
+        const oc = gl.createBuffer.bind(gl);
+        const od = gl.deleteBuffer.bind(gl);
+        gl.createBuffer = (...a) => {
+          counters.created++;
+          const b = oc(...a);
+          if (b) live.set(b, { stack: (new Error().stack || '').split('\n').slice(2, 5).join(' | ') });
+          return b;
+        };
+        gl.deleteBuffer = (...a) => {
+          counters.deleted++;
+          if (a[0]) live.delete(a[0]);
+          return od(...a);
+        };
+        gl.__soakLive = live;
+        glHook = counters;
+      }
+      let leakResult = '无 GL 上下文（跳过）';
+      if (cm.hasGL && cm.glc) {
+        const field = buildTerrainField({ seed: 24601 }, 'soak_runner_leak_probe', {});
+        const camera = { target: [0, 6, 0], yaw: 0.8, pitch: 0.5, dist: 120 };
+        let failed = null;
+        for (let i = 0; i < 100 && !failed; i++) {
+          try {
+            const scene = new PlanetSurfaceScene(cm, { tier: 1 });
+            scene.mount(field, { theme: { sky: { skyMode: 0 }, weather: { kind: 'clear', density: 0 } } });
+            scene.draw(cm.glc.gl, 320, 240, { camera, time: i * 0.016, actors: { boxes: [], chars: [], decals: [] } });
+            scene.destroy();
+          } catch (e) { failed = `cycle ${i}: ${e.message}`; }
+        }
+        const delta = glHook ? glHook.created - glHook.deleted : 0;
+        // 泄漏句柄创建堆栈（诊断用）
+        const stacks = {};
+        for (const { stack } of (cm.glc.gl.__soakLive || new Map()).values()) {
+          const key = stack.split(' | ')[0];
+          stacks[key] = (stacks[key] || 0) + 1;
+        }
+        window.__soakLeakStacks = stacks;
+        leakResult = failed ? `✘ ${failed}` : (delta === 0 ? `✔ 100 次切换 buffer created==deleted==${glHook.created}（Δ=0）` : `✘ Δ=${delta}`);
+      }
+      $('s-leak').textContent = leakResult;
+
+      // —— 终判 ——
+      const errs = window.__soakRunnerErrors;
+      const heapSlope = heapSeries.length > 10
+        ? (heapSeries[heapSeries.length - 1] - heapSeries[Math.floor(heapSeries.length / 2)]) / Math.max(1, heapSeries.length - Math.floor(heapSeries.length / 2))
+        : 0;
+      const ok = errs.length === 0 && !leakResult.startsWith('✘') && heapSlope < 0.5;
+      const badge = $('s-badge');
+      if (ok) {
+        badge.className = 'badge green';
+        badge.textContent = `✔ 长程浸泡遥测全绿 · ${DAYS} 日 · 堆斜率 ${heapSlope.toFixed(3)}MB/采样 · ${msPerDayEMA.toFixed(2)}ms/日`;
+      } else {
+        badge.className = 'badge red';
+        badge.textContent = `✘ 判负：errors=${errs.length} leak=${leakResult.slice(0, 30)} slope=${heapSlope.toFixed(3)}`;
+      }
+      window.__soakReport = {
+        ok, days: DAYS, msPerDay: Number(msPerDayEMA.toFixed(2)),
+        heapStartMB: heapSeries[0] || null, heapEndMB: heapSeries[heapSeries.length - 1] || null,
+        heapSlopePerSample: Number(heapSlope.toFixed(4)),
+        leakResult, errors: errs.slice(0, 6),
+      };
+    }
+
+    main();
+  </script>
+</body>
+</html>

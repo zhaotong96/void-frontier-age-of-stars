@@ -13,6 +13,7 @@
  */
 
 import { clamp } from '../../core/math.js';
+import { debit, FLOW } from '../economy/ledger.js';
 import { emit, chronicle } from '../../core/eventBus.js';
 import { applyDamage } from '../ships/ship.js';
 
@@ -90,7 +91,7 @@ export function callOrbitalSupport(world, planet, kind, targetWx, targetWz) {
   if (spec.cost && led) {
     for (const [res, qty] of Object.entries(spec.cost)) {
       if ((led.balances[res] || 0) < qty) return { ok: false, reason: `${res} 不足` };
-      led.balances[res] -= qty;
+      debit(world, fid, res, qty, 'orbitalSupport', planet.id, FLOW.CONSUME);
     }
   }
   fort.supportCd[kind] = now;

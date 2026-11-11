@@ -1,7 +1,7 @@
 # VOID FRONTIER: AGE OF STARS — 视觉美学返工报告
 
 **返工依据**：`rework.md`（静态化部署修复与 WebGL 2.0 全 3D 光感美学重构）
-**仓库**：`C:\PUBLIC\stella\void-frontier`
+**仓库**：`[REDACTED]\void-frontier`
 **基线承诺**：金快照 `a7492dc9`（后因平衡调优 + 政策系统 + 人物系统更新为最新确定性哈希）、23+ 自动化套件 46/46 全绿 —— **本次返工后仍 46/46 全绿**（领域层与模拟内核零改动）。
 
 ---

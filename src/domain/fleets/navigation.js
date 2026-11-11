@@ -7,12 +7,14 @@
  */
 
 import { BAL } from '../../content/constants.js';
+import { debit, FLOW } from '../economy/ledger.js';
 import { dist } from '../../core/math.js';
 import { emit } from '../../core/eventBus.js';
 import { getEntity } from '../entities/registry.js';
 import { shortestPath } from '../../core/spatial.js';
 import { observeForeignSystem } from '../exploration/scan.js';
 import { checkAndProgressObjectives } from '../events/objectives.js';
+import { gatewayLinkHours, citadelSnareBlocks } from '../strategic/megastructures.js';
 
 /** 计算一段航路的小时数 */
 export function laneHours(world, fleet, fromSystem, toSystem) {
@@ -34,18 +36,38 @@ export function fleetSpeed(fleet, world) {
   return Number.isFinite(min) ? min : 1.0;
 }
 
+
+/** doc35 安全包装：星门网络/天堑判定（惰性；异常静默回退 null） */
+function gatewayLinkHoursSafe(world, fromSystemId, toSystemId, factionId) {
+  try { return gatewayLinkHours(world, fromSystemId, toSystemId, factionId); } catch { return null; }
+}
+function citadelSnareBlocksSafe(world, systemId, factionId) {
+  try { return systemId ? citadelSnareBlocks(world, systemId, factionId) : null; } catch { return null; }
+}
+
 /**
  * 开始一次转移（由 IssueFleetMoveOrder 命令调用）。
  * route = { path, cost }（spatial.shortestPath 产物）
  */
 export function beginTransit(world, fleet, route, fuelAvailable) {
   const S = world.entities.systems;
+  // doc35 WP-P2-1：拉格朗日天堑 S3+ 跃迁阻断——敌对要塞星系内严禁向非来路星系跃迁
+  const snare = world.economy?._gatewayIndex !== false ? citadelSnareBlocksSafe(world, fleet.systemId, fleet.factionId) : null;
+  if (snare) {
+    const cameFrom = fleet.lastSystemId || route.path[0];
+    const firstTo = route.path[1];
+    if (firstTo && firstTo !== cameFrom) {
+      return { ok: false, code: 'FTL_SNARE', reason: '拉格朗日天堑引力阻断：未摧毁要塞前仅可沿来路星系跃迁' };
+    }
+  }
   const legs = [];
   let fuelNeed = 0;
   for (let i = 0; i < route.path.length - 1; i++) {
     const a = S[route.path[i]];
     const b = S[route.path[i + 1]];
-    const h = laneHours(world, fleet, a, b);
+    // doc35 WP-P2-1：弦星门 S4 网络直连 → 跨星域 1 小时瞬时边
+    const gw = gatewayLinkHoursSafe(world, route.path[i], b.id, fleet.factionId);
+    const h = gw != null ? gw : laneHours(world, fleet, a, b);
     legs.push({ to: b.id, eta: h });
     fuelNeed += h * BAL.navigation.fuelPerLaneHour;
   }
@@ -93,6 +115,12 @@ export function advanceFleets(world) {
       if (t.legIndex >= t.legs.length) {
         // 全程抵达
         fleet.transit = null;
+        // doc35：天堑「来路星系」口径——仅当银河存在 S3+ 拉格朗日天堑时才落盘
+        // （金快照 4320 tick 窗口无巨构 → 舰队实体字节零漂移）
+        if (world.entities.stations && Object.values(world.entities.stations).some((st) =>
+          st.kind === 'megastructure' && st.mega && st.mega.defId === 'mega_lagrange_citadel' && st.mega.stage >= 3)) {
+          fleet.lastSystemId = arriveId;
+        }
         fleet.systemId = arriveId;
         fleet.status = 'idle';
         fleet.orders = null;
@@ -166,7 +194,7 @@ export function refuelFleet(world, fleet, sys) {
           ship.fuel = Math.round(((ship.fuel ?? 0) + take) * 100) / 100;
           budget -= take;
           market.stock.hydrogen = Math.max(0, (market.stock.hydrogen || 0) - take);
-          if (led) led.balances.credits = Math.max(0, led.balances.credits - Math.round(take * price));
+          if (led) debit(world, fleet.factionId, 'credits', Math.round(take * price), 'fleetRefuel', fleet.systemId, FLOW.CONSUME);
         }
       }
     }

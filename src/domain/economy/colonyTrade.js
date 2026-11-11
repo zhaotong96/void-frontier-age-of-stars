@@ -7,6 +7,7 @@
  */
 
 import { ensureMarket, marketUnitPrice } from './market.js';
+import { credit, FLOW } from './ledger.js';
 import { tradeableResourceIds, resourceDef } from '../../content/resources.js';
 import { BAL } from '../../content/constants.js';
 import { emit } from '../../core/eventBus.js';
@@ -94,11 +95,8 @@ export function dailyColonyCommerce(world) {
         colony.stockpile.credits -= tax;
         const led = world.economy.ledgers[colony.factionId];
         if (led) {
-          led.balances.credits = (led.balances.credits ?? 0) + tax;
-          world.economy.transactions.push({
-            tick: world.tick, factionId: colony.factionId, resId: 'credits',
-            flow: 'tax', delta: tax, reason: `colonyTax:${colony.id}`, sourceId: colony.id,
-          });
+          // F-07 守恒修复：税收走 FLOW.TAX 记账管道（daily 流水 + transactions 同源）
+          credit(world, colony.factionId, 'credits', tax, `colonyTax:${colony.id}`, colony.id, FLOW.TAX);
           if (world.economy.transactions.length > 400) {
             world.economy.transactions.splice(0, world.economy.transactions.length - 400);
           }

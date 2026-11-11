@@ -427,8 +427,9 @@ export class PlanetAtmosphere {
     this._destroyed = true;
     const gl = this.gl;
     if (!gl) return;
-    if (this._skyVao) gl.deleteVertexArray(this._skyVao);
-    if (this._wxVao) gl.deleteVertexArray(this._wxVao);
+    // F-09：装配期 inner buffer 必须随 VAO 一并显式释放（真机无级联删除）
+    if (this._skyVao) this.glc.destroyVAO(this._skyVao);
+    if (this._wxVao) this.glc.destroyVAO(this._wxVao);
     if (this.progSky) gl.deleteProgram(this.progSky);
     if (this.progWeather) gl.deleteProgram(this.progWeather);
     this._skyVao = null;

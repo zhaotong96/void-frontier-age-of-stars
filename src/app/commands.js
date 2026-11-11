@@ -28,6 +28,10 @@ import { RNG } from '../core/rng.js';
 import { emit } from '../core/eventBus.js';
 import { advanceSpeciesDiscovery, collectSpecimenSample, ensurePlanetEco } from '../domain/ground/xenobiology.js';
 import {
+  ensureSurfaceDelta, triggerSosBeaconOutcome, placeFieldDeployable,
+  startDeepCoreExtraction, interactPoiStage,
+} from '../domain/ground/surfaceEvents.js';
+import {
   ensurePlanetRuin, tryCompleteExcavation, inscribeDialectPylon,
   rotateResonatorTower, reportGuardianDefeated, extractMonolithCore,
 } from '../domain/ground/monolithRuins.js';
@@ -35,6 +39,8 @@ import {
   ensurePlanetInd, rebuildPowerGrids, createBeltTuple, NODE_IDX, NODE_STATE, BELT_IDX,
 } from '../domain/industry/planetaryLogistics.js';
 import { feedCatapult, resIdToIdx } from '../domain/industry/catapult.js';
+import { attachDagIfTemplate } from '../domain/exploration/precursorDag.js';
+import './commandsLongline.js'; // doc35：超长线 16 命令注册（ResolveAnomalyDagBranch 等）
 import { breakLeviathanPart, reportLeviathanDefeated } from '../domain/ground/planetaryThreat.js';
 import {
   ensurePlanetSoc, deriveColonyAgents, resolveColonyDilemma, reportRebellionSuppressed,
@@ -87,6 +93,9 @@ registerCommand('InvestigateAnomaly', {
   execute(ctx, cmd) {
     const ano = getEntity(ctx.world, 'anomalies', cmd.params.anomalyId);
     const fleet = getEntity(ctx.world, 'fleets', cmd.params.fleetId);
+    // doc35 WP-P0-1：玩家调查默认升级为 DAG 异象树（attachDagIfTemplate 无模板时原样返回；
+    // AI 从不下达本命令 → 金快照 8be8ce2c 零漂移）
+    attachDagIfTemplate(ctx.world, ano);
     ano.state = 'analyzing';
     fleet.orders = { kind: 'investigate', anomalyId: ano.id, stage: 'underway' };
   },
@@ -114,7 +123,7 @@ registerCommand('SetFleetStance', {
   validate(ctx, cmd) {
     const { fleet, err } = ownFleet(ctx.world, cmd);
     if (err) return { ok: false, code: 'NO_TARGET', reason: err };
-    if (!['hold', 'patrol', 'aggressive', 'escort'].includes(cmd.params.stance)) {
+    if (!['hold', 'patrol', 'aggressive', 'escort', 'silent_ambush'].includes(cmd.params.stance)) {
       return { ok: false, code: 'BAD_PARAM', reason: '未知姿态' };
     }
     return { ok: true };
@@ -1105,6 +1114,72 @@ registerCommand('FirePlanetaryIonBattery', {
   },
 });
 
+// —— SPEC-39 Phase S1：行星地表深度交互四命令 ————————————————————————————
+
+registerCommand('InteractPoiStage', {
+  desc: '深度 POI 三步微副本推进：bit0 切割/清障 → bit1 通电/解密 → bit2 领奖/读日志（SPEC-39）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    if (cmd.params.poiId == null) return { ok: false, code: 'NO_POI', reason: '缺少 poiId' };
+    return { ok: true, planet };
+  },
+  execute(ctx, cmd) {
+    const res = interactPoiStage(ctx.world, cmd.params.planetId || cmd.targetId, cmd.params.poiId, cmd.params.field || null);
+    if (!res.ok) throw new Error(res.reason || res.code || 'InteractPoiStage 失败');
+    return res;
+  },
+});
+
+registerCommand('TriggerSosBeacon', {
+  desc: 'SOS 求救信标处置（≤6m 触发）：幸存者救援 / 黑匣子绝笔 / 海盗伏击三分支（SPEC-39）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    return { ok: true, planet };
+  },
+  execute(ctx, cmd) {
+    const res = triggerSosBeaconOutcome(ctx.world, cmd.params.planetId || cmd.targetId, cmd.actorId);
+    if (!res.ok) throw new Error(res.reason || res.code || 'TriggerSosBeacon 失败');
+    return res;
+  },
+});
+
+registerCommand('DeployFieldTool', {
+  desc: '野战部署物放置：探地雷达 / 充能桩 / 哨兵塔 / 诱饵弹（场上 ≤8、冷却与资源校验，SPEC-39）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    if (!cmd.params.kindId) return { ok: false, code: 'BAD_KIND', reason: '缺少 kindId' };
+    if (!Number.isFinite(cmd.params.x) || !Number.isFinite(cmd.params.z)) {
+      return { ok: false, code: 'BAD_POS', reason: '坐标非法' };
+    }
+    return { ok: true, planet };
+  },
+  execute(ctx, cmd) {
+    const res = placeFieldDeployable(ctx.world, cmd.params.planetId || cmd.targetId, cmd.params.kindId, cmd.params.x, cmd.params.z);
+    if (!res.ok) throw new Error(res.reason || res.code || 'DeployFieldTool 失败');
+    return res;
+  },
+});
+
+registerCommand('StartDeepCoreExtraction', {
+  desc: '深核矿脉采掘：启动瞬间 +180‰ 热度，600s 钻探期 +4.5/s 噪音引增援，完成入账同位素罐（SPEC-39）',
+  validate(ctx, cmd) {
+    const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
+    if (!planet) return { ok: false, code: 'NO_TARGET', reason: '行星不存在' };
+    if (!Number.isFinite(cmd.params.x) || !Number.isFinite(cmd.params.z)) {
+      return { ok: false, code: 'BAD_POS', reason: '坐标非法' };
+    }
+    return { ok: true, planet };
+  },
+  execute(ctx, cmd) {
+    const res = startDeepCoreExtraction(ctx.world, cmd.params.planetId || cmd.targetId, cmd.params.x, cmd.params.z);
+    if (!res.ok) throw new Error(res.reason || res.code || 'StartDeepCoreExtraction 失败');
+    return res;
+  },
+});
+
 // —— 外交战争终局（doc5 TD2 / DIP-02：和谈与占领吞并） ——————————————————
 
 // —— WP-2/WP-3（doc18 v0.2）：异星生态科考与五阶段遗迹命令 ————————————————
@@ -1174,7 +1249,6 @@ registerCommand('AdvanceMonolithStage', {
     return res;
   },
 });
-
 // —— 外交战争终局（doc5 TD2 / DIP-02：和谈与占领吞并） ——————————————————
 
 registerCommand('ProposePeace', {

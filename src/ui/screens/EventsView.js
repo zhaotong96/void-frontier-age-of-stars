@@ -21,11 +21,14 @@ import { toast } from '../components/toast.js';
 import { L } from '../../core/i18n.js';
 import { dateStr } from '../../core/clock.js';
 import { isSpatialEvent, OBJECTIVE_KIND_ZH } from '../../content/events.js';
+import { eventTypeZh } from '../../content/eventNames.js';
 
 /**
  * 事件/告警类型中文映射（键 = eventBus emit 的 type；未知类型回退原文）。
  * 覆盖 SnapshotBuilder.buildAlerts 的告警集合与近期日志中出现的全部类型。
  */
+/** 兼容别名：本地未收录类型统一走 content/eventNames.js 权威字典（SPEC-39 Bug 5） */
+const EVENT_TYPE_ZH_FALLBACK = (t) => eventTypeZh(t);
 const EVENT_TYPE_ZH = {
   BattleStarted: '战斗开始', BattleEnded: '战斗结束', ShipDestroyed: '舰船损失',
   WarDeclared: '宣战', TreatySigned: '条约缔结', TreatyBreached: '条约违约',
@@ -312,7 +315,7 @@ export const EventsView = {
           style: { display: 'inline-block', width: '8px', height: '8px', borderRadius: '4px', background: PRIORITY_COLOR[level], flexShrink: '0' },
           'aria-hidden': 'true',
         }),
-        el('span', { class: 'vf-tag', text: EVENT_TYPE_ZH[a.type] || a.type || '事件' }),
+        el('span', { class: 'vf-tag', text: EVENT_TYPE_ZH[a.type] || EVENT_TYPE_ZH_FALLBACK(a.type) }),
         el('span', { class: 'vf-small vf-grow', text: this._alertText(a) }),
         el('span', { class: 'vf-faint vf-small', text: dateStr(a.tick) }),
       ]);
@@ -357,7 +360,7 @@ export const EventsView = {
       case 'AnomalyDetected': return `${sysName(pay.systemId)} 发现异常现象`;
       case 'FirstContact': return `与 ${facName(pay.factionId || pay.targetId)} 完成首次接触`;
       case 'TechCompleted': return `科技完成：${pay.techId || '未知'}`;
-      default: return EVENT_TYPE_ZH[a.type] || a.type || '事件';
+      default: return EVENT_TYPE_ZH[a.type] || EVENT_TYPE_ZH_FALLBACK(a.type);
     }
   },
 
@@ -403,7 +406,7 @@ export const EventsView = {
     for (const e of feed.slice(0, 50)) {
       p.appendChild(el('div', { class: 'vf-row', style: { borderBottom: '1px solid rgba(29,42,58,0.3)', padding: '2px 0' } }, [
         el('span', { class: 'vf-faint vf-small', text: dateStr(e.tick) }),
-        el('span', { class: 'vf-tag', text: EVENT_TYPE_ZH[e.type] || e.type || '事件' }),
+        el('span', { class: 'vf-tag', text: EVENT_TYPE_ZH[e.type] || EVENT_TYPE_ZH_FALLBACK(e.type) }),
         el('span', { class: 'vf-dim vf-small vf-grow', style: { textAlign: 'right' }, text: e.category || '' }),
       ]));
     }

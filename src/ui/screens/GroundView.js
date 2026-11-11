@@ -48,13 +48,17 @@ import { PlanetSurfaceScene } from '../../render/gl/PlanetSurfaceScene.js';
 import { buildThemePayload, EXPANSION_GAMEPLAY } from '../../render/gl/themePayload.js';
 import { mat4, mat4Perspective, mat4LookAt, mat4Multiply } from '../../render/gl/Mat4.js';
 import { buildBuildingMesh, buildUnitBox } from '../../render/meshes/GroundMeshes.js';
-import { buildLandmarkMesh, LANDMARK_PREFAB_IDS } from '../../render/meshes/landmarkMeshes.js';
+import { buildLandmarkMesh, LANDMARK_PREFAB_IDS, SURFACE_ATLAS_IDS } from '../../render/meshes/landmarkMeshes.js';
 import {
   createSurfaceWorld, digVoxel, placeVoxel, getVoxel, ddaRaycast, getSurfaceHeight,
   SURFACE_SIZE, SURFACE_MAT,
 } from '../../domain/ground/SurfaceSandbox.js';
 import { buildTerrainField, TERRAIN_FLAGS } from '../../domain/ground/terrainField.js';
-import { ensurePlanetPois, unexploredPoiCount } from '../../domain/ground/planetPOI.js';
+import { ensurePlanetPois, unexploredPoiCount, resolveDeepPois } from '../../domain/ground/planetPOI.js';
+import {
+  ensureSurfaceDelta, makePoiPadModifier, stepSurfaceThreatAndDeployables,
+  pylonShelterAt, evaluateSosSignalscope, sosSourceOf,
+} from '../../domain/ground/surfaceEvents.js';
 import { createTerrainEdits, applyEdit, attachTerrainEdits, deserializeEdits, rebuildDirtyChunks, planColonyLayout } from '../../domain/ground/terrainEdits.js';
 import { sampleTerrain, raycastTerrain } from '../../domain/ground/surfaceQueries.js';
 import { createGroundMission, stepMission, getMissionView, MISSION_UNIT_SCALE } from '../../domain/ground/GroundMission.js';
@@ -291,6 +295,8 @@ const BUILD_CATEGORY_IDS = [
   ...LANDMARK_PREFAB_IDS,
   // doc19 WP-5：工业槽位追加（18..20；0..17 索引稳定不动）
   'pylon', 'splitter', 'catapult',
+  // SPEC-39 Phase S2：12 座深度 POI 预制 + 4 类野战部署物（S1 既有索引全部稳定不动）
+  ...SURFACE_ATLAS_IDS,
 ];
 const MESH_OF_CATEGORY = (cat) => {
   const i = BUILD_CATEGORY_IDS.indexOf(String(cat || 'default'));
@@ -468,7 +474,7 @@ class BuildingMeshBatch {
   constructor(glc) {
     this.glc = glc;
     this.gl = glc.gl;
-    this.cap = 384;                       // doc19 WP-5：扩容（建筑 + 目标物 + 拾取物 + 地标 + 选择框 + 工业节点）
+    this.cap = 512;                       // doc19 WP-5 扩容 384 → SPEC-39 S2 再扩容 512（建筑 + 目标物 + 拾取物 + 地标 + 选择框 + 工业节点 + 12 POI + 4 部署物）
     this._count = 0;
 
     // —— 网格图集（逐顶点 aMesh）：九大类 + 兜底 + 选择框 + 七大旗舰地标 ——
@@ -996,6 +1002,10 @@ export const GroundView = {
     this._digDents = new Map();                   // 采掘凹陷（列键 → 次数），siteModifier 消费
     this._placedVoxels = new Map();               // 已放置结构体素（列键 → {x,y,z}，占位盒渲染）
     this._springDist = -1;                        // 场域弹簧臂臂长（首帧吸附）
+    // —— SPEC-39 S1/S2：地表差分状态 + 深度 POI 拓扑（坡度 ≤18° 落位）+ 9 点承台算子 ——
+    ensureSurfaceDelta(w, planet);
+    this._deepPois = resolveDeepPois(w, planet, this.field);
+    this._poiPadFn = makePoiPadModifier(this.field, this._deepPois.map((dp) => ({ x: dp.x, z: dp.z })));
     const baseSiteMod = this._site ? this._site.siteModifier : null;
     this.field.siteModifier = (fx, fz, base) => {
       let siteDy = 0;
@@ -1009,9 +1019,12 @@ export const GroundView = {
         }
       }
       const dent = this._fieldSiteModifier(fx, fz, eff);
-      // 总 dy = 站点 SDF dy + 采掘凹陷 dy（terrainField 仅应用单层 mod.dy）
+      // [SPEC-39 S2] 深度 POI 承台：内平 4.5m / 外过渡 9.0m（9 点均值高程）
+      const padDy = this._poiPadFn ? this._poiPadFn(fx, fz, Number.isFinite(eff.y) ? eff.y : 0) : null;
+      const padDyN = padDy != null && Number.isFinite(padDy) ? padDy : 0;
+      // 总 dy = 站点 SDF dy + POI 承台 dy + 采掘凹陷 dy（terrainField 仅应用单层 mod.dy）
       const dentDy = dent && Number.isFinite(dent.dy) ? dent.dy : 0;
-      const total = siteDy + dentDy;
+      const total = siteDy + padDyN + dentDy;
       // WP-0（doc18 v0.1.1）：语义旗完整透传（flags/clearFlags/weights/biomeId）——
       // 此前仅回 {dy} 会令 rebuildDirtyChunks 增量重建区块时丢失坪面路面材质与
       // clearFlags 安全豁免位（P0-D 坪面清险被渲染场域静默回退）
@@ -1053,6 +1066,14 @@ export const GroundView = {
     this._visorLockT = 0;
     this._visorTarget = -1;
     this._visorObserved = false;
+    // —— SPEC-39 S3：三模态面罩 / 终端微解谜 / 部署物快捷栏 / EM 脉冲音状态 ——
+    this._visorMode = 0;            // 0 生态光谱 / 1 电磁测向 / 2 地质穿透（Tab 轮切）
+    this._visorPulseT = 0;          // EM 模式音频脉冲计时（S_k 调制间隔）
+    this._terminalPuzzle = null;    // { poiId, poiIdx, stage, seq[4], input, fails, failT, coolT }
+    this._deployNoteT = -1e9;       // 部署物结果提示锚
+    this._deployNote = '';
+    this._deepCoreT = -1e9;         // 深核采掘提示锚
+    this._pylonShield = 0;          // 充能桩护盾存量（0..100，HUD 展示）
     this._pendingMastery = [];       // 采样后基因逆向延时队列 [{speciesIdx, t}]
     this._warden = null;             // 阶段 4 机偶守卫（视图侧遭遇战，域侧仅存战果位）
     // doc20：气象锋面状态 + Tier 4 利维坦遭遇战（视图侧 3600HP，域侧仅存战果位）
@@ -1339,6 +1360,20 @@ export const GroundView = {
       return;
     }
     const code = e.code;
+    // [SPEC-39 S3] 终端微解谜开启时：方向键/WASD 为解谜输入（最高优先级）
+    if (this._terminalPuzzle && this._terminalPuzzle.seq) {
+      const PUZ = { ArrowUp: 0, ArrowRight: 1, ArrowDown: 2, ArrowLeft: 3, KeyW: 0, KeyD: 1, KeyS: 2, KeyA: 3 };
+      if (code in PUZ) {
+        e.preventDefault();
+        this._terminalInput(PUZ[code]);
+        return;
+      }
+      if (code === 'Escape') {
+        e.preventDefault();
+        this._terminalPuzzle = null;
+        return;
+      }
+    }
     if (MOVE_CODES.has(code)) {
       this.keys[code] = true;
       e.preventDefault();
@@ -1400,8 +1435,41 @@ export const GroundView = {
         break;
       case 'Tab':
         e.preventDefault();
-        this._oneShot.switchUnit = true;
+        // [SPEC-39 S3] 面罩开启时 Tab = 三模态轮切（生态→电磁→地质）；关闭时仍为单位切换
+        if (this._visorOn) {
+          this._visorMode = (this._visorMode + 1) % 3;
+        } else {
+          this._oneShot.switchUnit = true;
+        }
         break;
+      case 'Digit7':
+      case 'Digit8':
+      case 'Digit9':
+      case 'Digit0': {
+        // [SPEC-39 S3] 野战部署物快捷栏（7=探地雷达 8=充能桩 9=哨兵塔 0=诱饵弹）
+        if (this.mode === 'free' && this.planet) {
+          const KINDS = ['dep_gpr_radar', 'dep_thermal_pylon', 'dep_sentry_turret', 'dep_decoy_emitter'];
+          const kindId = KINDS[({ Digit7: 0, Digit8: 1, Digit9: 2, Digit0: 3 })[code]];
+          const res = this.app.dispatch('DeployFieldTool', {
+            planetId: this.planet.id, kindId, x: this.char3d.x, z: this.char3d.z,
+          });
+          this._deployNote = res && res.ok ? `已部署 ${kindId}` : `部署失败：${(res && res.reason) || '未知'}`;
+          this._deployNoteT = this._clock;
+        }
+        break;
+      }
+      case 'KeyX': {
+        // [SPEC-39 S3] 深核矿脉采掘：脚下启动钻机（+180‰ 热度 / 600s / +4.5s 噪音）
+        if (this.mode === 'free' && this.planet) {
+          const res = this.app.dispatch('StartDeepCoreExtraction', {
+            planetId: this.planet.id, x: this.char3d.x, z: this.char3d.z,
+          });
+          this._deepCoreT = this._clock;
+          this._deployNote = res && res.ok ? '深核钻机已启动（噪音将引来增援）' : `钻机启动失败：${(res && res.reason) || '未知'}`;
+          this._deployNoteT = this._clock;
+        }
+        break;
+      }
       case 'Escape':
         if (this.mode === 'free') this._ascend();
         break;
@@ -2082,8 +2150,166 @@ export const GroundView = {
   },
 
   /**
+   * [SPEC-39 S3] 深度 POI 交互入口（E 键；≤8m）。
+   * stage<2 → 打开 2D 终端微解谜（4 位方向键序列，slateSeed 确定性）；
+   * stage==2 待领奖 → 直接 dispatch InteractPoiStage 终步（领奖 + 日志 + 抉择卡）。
+   * @returns {boolean} 是否消费了本次交互
+   */
+  _tryDeepPoiInteract() {
+    if (!this._deepPois || !this.planet) return false;
+    let best = null;
+    let bestD = Infinity;
+    for (const dp of this._deepPois) {
+      const wx = dp.x - FIELD_OFFSET;
+      const wz = dp.z - FIELD_OFFSET;
+      const d = Math.hypot(wx - this.char3d.x, wz - this.char3d.z);
+      if (d < 8.0 && d < bestD) {
+        bestD = d;
+        best = dp;
+      }
+    }
+    if (!best) return false;
+    if (best.rewardPaid) {
+      toast(`据点已完成全部工序：${best.blueprint.nameZh}`, { kind: 'info' });
+      return true;
+    }
+    if (best.stage >= 2) {
+      const res = this.app.dispatch('InteractPoiStage', { planetId: this.planet.id, poiId: best.id });
+      if (res && res.ok) {
+        toast(`据点领奖完成：${best.blueprint.nameZh}（详见编年史）`, { kind: 'ok' });
+        if (res.dilemmaId) toast('全息抉择卡已就绪——按 N 打开裁决', { kind: 'info' });
+      } else {
+        toast(`领奖失败：${(res && res.reason) || '未知'}`, { kind: 'error' });
+      }
+      return true;
+    }
+    // 打开终端解谜（4 位方向键序列；序列取自 slateSeed 确定性派生）
+    const seeds = derivePlanetSeedsExtended(this.app.world, this.planet.id);
+    const ts = seeds.slateSeed(`term:${this.planet.id}:${best.idx}`);
+    const seq = [0, 1, 2, 3].map((i) => (ts >>> (i * 2)) & 0b11); // 0上 1右 2下 3左
+    this._terminalPuzzle = {
+      poiId: best.id, poiIdx: best.idx, stage: best.stage,
+      nameZh: best.blueprint.stages[best.stage].nameZh,
+      seq, input: 0, fails: 0, failT: -1e9, coolT: -1e9,
+    };
+    return true;
+  },
+
+  /** 终端解谜按键输入（0上 1右 2下 3左；错序重置并记失败） */
+  _terminalInput(dir) {
+    const pz = this._terminalPuzzle;
+    if (!pz) return;
+    const now = this._clock;
+    if (now - pz.coolT < 2.5) return;             // 冷却
+    if (pz.seq[pz.input] === dir) {
+      pz.input++;
+      if (this.app.audio) this.app.audio.blip('ok');
+      if (pz.input >= pz.seq.length) {
+        // 解密成功：推进 POI 工序并触发视觉辉光
+        const res = this.app.dispatch('InteractPoiStage', { planetId: this.planet.id, poiId: pz.poiId });
+        if (res && res.ok) {
+          toast(`解密成功：${pz.nameZh}${res.stage >= 2 ? '（据点领奖完成）' : ''}`, { kind: 'ok' });
+          if (res.dilemmaId) toast('全息抉择卡已就绪——按 N 打开裁决', { kind: 'info' });
+        } else {
+          toast(`解密已确认但工序推进失败：${(res && res.reason) || '未知'}`, { kind: 'error' });
+        }
+        this._terminalPuzzle = null;
+      }
+    } else {
+      pz.input = 0;
+      pz.fails++;
+      pz.failT = now;
+      if (pz.fails >= 3) {
+        pz.fails = 0;
+        pz.coolT = now; // 连错 3 次：2.5s 安全锁
+        if (this.app.audio) this.app.audio.blip('deny');
+      }
+    }
+  },
+
+  /**
+   * [SPEC-39 S3] 热度微分步推进（自由模式逐帧）：
+   * 钻探噪音/脱战衰减/诱饵 lambda/部署物 ttl/升星波次挂起；敌表供诱饵 overrideTarget 改写。
+   */
+  _tickSurfaceThreat(dt) {
+    const planet = this.planet;
+    if (!planet || !planet.surfaceDelta || this.mode !== 'free') return;
+    // 敌表：当前视野内四足兽群 / 守卫 / 利维坦（供诱饵 18m overrideTarget 改写）
+    const hostiles = [];
+    let nearHostileM = Infinity;
+    const c = this.char3d;
+    for (const ag of this._faunaAgents || []) {
+      const d = Math.hypot(ag.ax - c.x, ag.az - c.z);
+      if (d < nearHostileM) nearHostileM = d;
+      hostiles.push({ x: ag.ax, z: ag.az, hp: 1, ref: ag });
+    }
+    if (this._warden && this._warden.hp > 0) {
+      const d = Math.hypot(this._warden.wx - c.x, this._warden.wz - c.z);
+      if (d < nearHostileM) nearHostileM = d;
+      hostiles.push({ x: this._warden.wx, z: this._warden.wz, hp: this._warden.hp, ref: this._warden });
+    }
+    if (this._leviathan && !this._leviathan.dead) {
+      const d = Math.hypot(this._leviathan.wx - c.x, this._leviathan.wz - c.z);
+      if (d < nearHostileM) nearHostileM = d;
+      hostiles.push({ x: this._leviathan.wx, z: this._leviathan.wz, hp: 1, ref: this._leviathan });
+    }
+    const st = stepSurfaceThreatAndDeployables(this.app.world, planet, dt, {
+      nearHostileM,
+      drillNoiseActive: false, // 钻机噪音由 extraction 元组在域侧判定
+      hostiles,
+    });
+    // 诱饵仇恨改写回写视图实体（fauna/warden 消费 overrideTarget 语义）
+    for (const h of hostiles) {
+      if (h.ref && h.overrideTarget) h.ref.overrideTarget = h.overrideTarget;
+    }
+    this._lastSurfaceThreat = st;
+    // 升星波次告警 toast（渲染层提示；实际敌军由既有 warden/兽群遭遇系统承载）
+    if (st.spawns && st.spawns.length) {
+      const wv = st.spawns[st.spawns.length - 1];
+      toast(wv.bastion ? '★5 警戒：重装步行要塞已空投！' : `警戒升星 ★${wv.star}：增援小队抵达`, { kind: 'warn' });
+    }
+    // 充能桩 12m 力场：护盾回充（极寒/酸雹扣血在 _tickStormDamage 免除）
+    const shelter = pylonShelterAt(planet, c.x, c.z);
+    this._pylonShelter = shelter;
+    if (shelter.shielded) {
+      // [SPEC-39 SURF-04] 力场圈内护盾持续回充（+6/s，capped；环境扣血已在 _tickStormDamage 免除）
+      c.shield = Math.min(c.shieldMax || 100, (c.shield || 0) + shelter.shieldRegenPerSec * dt);
+      this._pylonShield = c.shield;
+    } else {
+      this._pylonShield = Math.max(0, (this._pylonShield || 0) - 2.0 * dt);
+    }
+  },
+
+  /** [SPEC-39 S3] EM 测向音频脉冲（S_k 调制间隔 1.5s→0.12s） */
+  _tickVisorAudioPulse(dt) {
+    if (!this._visorOn || this._visorMode !== 1 || !this.planet) return;
+    const src = sosSourceOf(this.planet);
+    if (!src || src.state >= 2) return;
+    const c = this.char3d;
+    const dx = src.x - c.x;
+    const dz = src.z - c.z;
+    const dist = Math.hypot(dx, dz);
+    const srcAng = Math.atan2(dz, dx);
+    const { rawSignal } = evaluateSosSignalscope(dist, this.cam.yaw, srcAng, this._stormEtaOf());
+    this._visorPulseT += dt;
+    const interval = 1.5 - 1.38 * rawSignal;
+    if (this._visorPulseT >= interval) {
+      this._visorPulseT = 0;
+      if (this.app.audio) this.app.audio.blip(rawSignal > 0.6 ? 'ok' : 'deny');
+    }
+  },
+
+  /** 电离干扰系数（EM 模型 η_storm；等离子磁暴峰值 0.70） */
+  _stormEtaOf() {
+    const st = this._stormState;
+    if (!st || st.kind.id !== 'em_plasma_superstorm') return 0;
+    return 0.70 * Math.min(1, (st.intensityPermille || 0) / 1000);
+  },
+
+  /**
    * doc20 WP-2：风暴环境扣盾（三重庇护判定：FOUNDATION 屋檐 3.5m / 热源穹顶 /
    * 外骨骼抗性模块）。酸雹 4.5 HP/s；暴露判定用 stormDepthAt（CPU 与 GLSL 同源）。
+   * [SPEC-39 S3] 充能桩 12m 力场为第四重庇护：圈内环境扣血为 0 且护盾持续回充。
    */
   _tickStormDamage(dt) {
     const st = this._stormState;
@@ -2091,6 +2317,11 @@ export const GroundView = {
     const c2 = this.char3d;
     const depth = stormDepthAt(this.planet.threat.storm, c2.x, c2.z);
     if (depth <= 0.45) return; // 锋外/边缘豁免
+    // [SPEC-39 SURF-04] 充能桩力场圈：环境扣血 0 + 护盾回充
+    if (this._pylonShelter && this._pylonShelter.shielded) {
+      c2.flash = Math.max(c2.flash || 0, 0.1);
+      return;
+    }
     const exoMods = this._exoModSet();
     const foundations = (this.planet.groundBuildings || []).map((gb) => ({ x: gb.x, z: gb.z, flags: 0x2 }));
     const heatZones = (this._themePayload && Array.isArray(this._themePayload.terrain && this._themePayload.terrain.heatZones))
@@ -2322,9 +2553,15 @@ export const GroundView = {
     this._updateAim(dt);
     if (this._oneShot.interact) {
       this._oneShot.interact = false;
-      // doc18 WP-2/3：生态采样/遗迹交互优先（未消费回退 POI 采样）
-      if (!this._tryEcoInteract()) this._tryHarvestPoi();
+      // [SPEC-39 S3] 深度 POI 终端微解谜优先（≤8m 打开 / 终步直接领奖）
+      if (!this._tryDeepPoiInteract()) {
+        // doc18 WP-2/3：生态采样/遗迹交互优先（未消费回退 POI 采样）
+        if (!this._tryEcoInteract()) this._tryHarvestPoi();
+      }
     }
+    // [SPEC-39 S3] 1~5 星警戒热度微分步 + 部署物生命周期 + 诱饵仇恨改写
+    this._tickSurfaceThreat(dt);
+    this._tickVisorAudioPulse(dt);
     this._updateVisor(dt);
     this._updateWarden(dt);
     // doc20 WP-1：五阶段气象状态机推进 + uStormFront 下发 + 酸蚀扣盾 + 利维坦同步
@@ -3466,6 +3703,62 @@ export const GroundView = {
         });
       }
     }
+    // —— SPEC-39 S2：深度 POI 真实低模网格（三步状态驱动视觉；承台整平后贴地） ——
+    if (this._deepPois) {
+      for (const dp of this._deepPois) {
+        const wx = dp.x - FIELD_OFFSET;
+        const wz = dp.z - FIELD_OFFSET;
+        const gy = this._groundAt(wx, wz);
+        if (!Number.isFinite(gy)) continue;
+        const meshId = LANDMARK_MESH_OF(dp.blueprintId);
+        if (meshId < 0) continue;
+        const paid = dp.rewardPaid;
+        list.push({
+          x: wx, y: gy, z: wz,
+          rotY: (dp.idx * 2.39996) % (Math.PI * 2),   // 黄金角确定性朝向
+          scale: paid ? 0.96 : 1.0,
+          meshId,
+          emit: paid ? 0.05 : dp.stage >= 2 ? 0.9 : dp.stage >= 1 ? 0.45 : 0.12,
+        });
+        // 未解锁时保留全息信标（寻路 affordance；解锁后熄灭）
+        if (!paid && dp.stage === 0) {
+          list.push({
+            x: wx, y: gy + 3.4 + Math.sin(this._clock * 2.2) * 0.14, z: wz,
+            rotY: this._clock * 0.6, scale: 0.5, meshId: MESH_OF_CATEGORY('selector'),
+            emit: 1.1,
+          });
+        }
+      }
+    }
+    // —— SPEC-39 S3：野战部署物实例（6 元组 [id,kindIdx,x_dm,z_dm,hp,ttlSec_d10]） ——
+    const sdDep = this.planet && this.planet.surfaceDelta;
+    if (sdDep && Array.isArray(sdDep.deployables)) {
+      const DEP_MESH = ['dep_gpr_radar', 'dep_thermal_pylon', 'dep_sentry_turret', 'dep_decoy_emitter'];
+      for (const dep of sdDep.deployables) {
+        if (dep[5] <= 0) continue;
+        const meshId = LANDMARK_MESH_OF(DEP_MESH[dep[1]] || '');
+        if (meshId < 0) continue;
+        const wx = dep[2] / 10 - FIELD_OFFSET;
+        const wz = dep[3] / 10 - FIELD_OFFSET;
+        const gy = this._groundAt(wx, wz);
+        if (!Number.isFinite(gy)) continue;
+        list.push({ x: wx, y: gy, z: wz, rotY: 0, scale: 1.0, meshId, emit: dep[1] === 3 ? 1.3 : 0.5 });
+      }
+      // SOS 信标可见脉冲（TRACKING 且 80m 内）
+      const sosSrc = sosSourceOf(this.planet);
+      if (sosSrc && sosSrc.state === 1) {
+        const wx = sosSrc.x - FIELD_OFFSET;
+        const wz = sosSrc.z - FIELD_OFFSET;
+        const gy = this._groundAt(wx, wz);
+        const d = Math.hypot(wx - this.char3d.x, wz - this.char3d.z);
+        if (Number.isFinite(gy) && d < 80) {
+          list.push({
+            x: wx, y: gy + 1.2 + Math.sin(this._clock * 3.0) * 0.2, z: wz,
+            rotY: this._clock, scale: 0.42, meshId: MESH_OF_CATEGORY('selector'), emit: 1.5,
+          });
+        }
+      }
+    }
     // 未勘探 POI 全息信标（doc5 P1-04）+ 已采样「已发掘基座残骸」（doc9 P2-2）：
     // rewardPaid 后不隐藏 —— 蜕变为低矮暗灰基座（scale 0.55, emit 0.05）。
     if (this._pois) {
@@ -3748,18 +4041,23 @@ export const GroundView = {
   /** 自由模式 HUD：标题/台账 + 三色条 + 采掘统计 + 返回提示（下移避开顶栏） */
   _drawHudFree(ctx, W, H) {
     const c = this.char3d;
-    ctx.fillStyle = 'rgba(8,14,22,0.72)';
-    ctx.fillRect(12, 62, 250, 54);
-    ctx.strokeStyle = 'rgba(140,170,200,0.3)';
-    ctx.strokeRect(12.5, 62.5, 249, 53);
-    ctx.fillStyle = '#e8f2fb';
-    ctx.font = 'bold 13px "Segoe UI", system-ui, sans-serif';
-    ctx.fillText(`自由探索 · ${this.planet ? this.planet.name : ''}`, 22, 82);
-    ctx.fillStyle = '#9fb6c9';
-    ctx.font = '11px "Segoe UI", system-ui, sans-serif';
-    // WP-4：工程刷子状态（F 键循环）随建造模式明示
-    const brushZh = this._shapeBrushOp === 'smooth' ? '平滑' : this._shapeBrushOp === 'lower' ? '采掘' : '压平';
-    ctx.fillText(`采掘/建造模式：${this._buildMode ? `开（${brushZh}刷）` : '关'} · F 切换工程刷 · Esc 升空返回`, 22, 100);
+    // [SPEC-39 Bug 3] 战术目镜激活时常驻标题栏整体隐匿（doc40 TC-FIX-03：opacity ≤0.2
+    // 或隐匿，二选一从严执行「隐匿」），左上角 (24,72) 安全栅格让位给目镜状态读数，
+    // 根除标题与面罩数据文字穿插/像素重叠。
+    if (!this._visorOn) {
+      ctx.fillStyle = 'rgba(8,14,22,0.72)';
+      ctx.fillRect(12, 62, 250, 54);
+      ctx.strokeStyle = 'rgba(140,170,200,0.3)';
+      ctx.strokeRect(12.5, 62.5, 249, 53);
+      ctx.fillStyle = '#e8f2fb';
+      ctx.font = 'bold 13px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText(`自由探索 · ${this.planet ? this.planet.name : ''}`, 22, 82);
+      ctx.fillStyle = '#9fb6c9';
+      ctx.font = '11px "Segoe UI", system-ui, sans-serif';
+      // WP-4：工程刷子状态（F 键循环）随建造模式明示
+      const brushZh = this._shapeBrushOp === 'smooth' ? '平滑' : this._shapeBrushOp === 'lower' ? '采掘' : '压平';
+      ctx.fillText(`采掘/建造模式：${this._buildMode ? `开（${brushZh}刷）` : '关'} · F 切换工程刷 · Esc 升空返回`, 22, 100);
+    }
     // —— WP-0.3（doc18 v0.1.1）：工程模式建筑型号面板（[ / ] / B 循环，右上顶部区）——
     if (this._buildMode && this._availableBuildDefs && this._availableBuildDefs.length) {
       const defs = this._availableBuildDefs;
@@ -3790,7 +4088,8 @@ export const GroundView = {
       ctx.fillText(`造价 ${costTxt} · ${depTxt}`, px + 10, 94);
     }
 
-    // —— doc18 WP-4：科考分析面罩 HUD（V 键；青色测距六边形阵列 + 声谱波形 + 目标档案） ——
+    // —— doc18 WP-4：科考分析面罩 HUD（V 键；青色测距六边形阵列 + 声谱波形 + 目标档案）
+    //     [SPEC-39 Bug 3] 状态读数卡下移至安全栅格 (24,72)，不再与常驻标题同位穿插 ——
     if (this._visorOn) {
       const hx = W / 2;
       const hy = H / 2;
@@ -3814,26 +4113,65 @@ export const GroundView = {
         if (x === 0) ctx.moveTo(hx - 60 + x, yv); else ctx.lineTo(hx - 60 + x, yv);
       }
       ctx.stroke();
-      // 目标档案卡
+      // 目标档案卡（左上角安全栅格 top:72px left:24px；[SPEC-39 S3] 三模态读数）
+      const MODES = ['生态光谱', '电磁测向', '地质穿透'];
       const tgt2 = this._visorTarget >= 0 ? this._faunaAgents.find((ag) => ag.speciesIdx === this._visorTarget) : null;
       const totalSp = getPlanetSpeciesCount(this.planet || {});
       const progress = this.planet ? ecoSurveyProgress(this.planet) : 1;
       ctx.fillStyle = 'rgba(6,26,30,0.78)';
-      ctx.fillRect(12, 62, 250, 40);
+      ctx.fillRect(24, 72, 250, 54);
       ctx.strokeStyle = 'rgba(93,235,223,0.5)';
-      ctx.strokeRect(12.5, 62.5, 249.5, 39.5);
+      ctx.strokeRect(24.5, 72.5, 249.5, 53.5);
       ctx.fillStyle = '#5debdf';
       ctx.font = 'bold 12px "Segoe UI", system-ui, sans-serif';
-      ctx.fillText(`分析面罩 · 图鉴 ${Math.round(progress * 100)}%（${totalSp} 种）· V 关闭`, 22, 78);
+      ctx.fillText(`分析面罩 · ${MODES[this._visorMode] || '?'} · Tab 轮切 · V 关闭`, 34, 88);
       ctx.fillStyle = '#9fb6c9';
       ctx.font = '11px "Segoe UI", system-ui, sans-serif';
-      if (tgt2) {
-        const stage = getSpeciesStage(this.planet, tgt2.speciesIdx);
-        const stageZh = ['未发现', '目击', '识别', '掌握'][stage] || '?';
-        const lockPct = Math.min(100, Math.round(this._visorLockT / 3.0 * 100));
-        ctx.fillText(`锁定：${tgt2.name}［${stageZh}］· 距离 ${Math.round(Math.hypot(tgt2.ax - this.char3d.x, tgt2.az - this.char3d.z))}m · ${lockPct}%`, 22, 94);
+      if (this._visorMode === 1) {
+        // 电磁测向：信噪比 / 杂波电平实时读数（SOS 源存在时）
+        const src = this.planet ? sosSourceOf(this.planet) : null;
+        if (src && src.state < 2) {
+          const dx = src.x - c.x;
+          const dz = src.z - c.z;
+          const dist = Math.hypot(dx, dz);
+          const { rawSignal, noiseLevel } = evaluateSosSignalscope(dist, this.cam.yaw, Math.atan2(dz, dx), this._stormEtaOf());
+          ctx.fillText(`信噪比 S_k ${(rawSignal * 100).toFixed(0)}% · 杂波 ${(noiseLevel * 100).toFixed(0)}% · 距离 ${Math.round(dist)}m`, 34, 104);
+          // 方位箭头（屏幕中心指向信标）
+          const relAng = Math.atan2(dz, dx) - this.cam.yaw;
+          const ax = W / 2 + Math.cos(relAng) * 120;
+          const ay = H / 2 + Math.sin(relAng) * 78;
+          ctx.strokeStyle = 'rgba(93,235,223,0.9)';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(W / 2, H / 2);
+          ctx.lineTo(ax, ay);
+          ctx.stroke();
+          ctx.fillStyle = '#5debdf';
+          ctx.fillText('SOS', ax + 6, ay - 4);
+          ctx.lineWidth = 1;
+        } else {
+          ctx.fillText(src ? '信标已处置' : '本行星无 SOS 信标 · 图鉴 ' + Math.round(progress * 100) + '%', 34, 104);
+        }
+        ctx.fillText(`声谱锁定 ${Math.round(this._visorPulseT * 10) / 10}s 脉冲窗`, 34, 118);
+      } else if (this._visorMode === 2) {
+        // 地质穿透：部署探地雷达后揭示 85m 内矿脉/隐藏据点
+        const gprOn = this.planet && this.planet.surfaceDelta
+          && this.planet.surfaceDelta.deployables.some((d) => d[1] === 0 && d[5] > 0);
+        const near = this._deepPois
+          ? this._deepPois.map((dp) => Math.hypot(dp.x - FIELD_OFFSET - c.x, dp.z - FIELD_OFFSET - c.z)).sort((a, b) => a - b)[0]
+          : Infinity;
+        ctx.fillText(gprOn ? '探地雷达在线：85m 地质透视激活' : '地质穿透（部署探地雷达 [7] 后揭示矿脉）', 34, 104);
+        ctx.fillText(`最近据点 ${Number.isFinite(near) ? Math.round(near) + 'm' : '—'} · 图鉴 ${Math.round(progress * 100)}%（${totalSp} 种）`, 34, 118);
       } else {
-        ctx.fillText('视野内无生命信号：靠近荧光生物群落扫描', 22, 94);
+        if (tgt2) {
+          const stage = getSpeciesStage(this.planet, tgt2.speciesIdx);
+          const stageZh = ['未发现', '目击', '识别', '掌握'][stage] || '?';
+          const lockPct = Math.min(100, Math.round(this._visorLockT / 3.0 * 100));
+          ctx.fillText(`锁定：${tgt2.name}［${stageZh}］· 距离 ${Math.round(Math.hypot(tgt2.ax - this.char3d.x, tgt2.az - this.char3d.z))}m · ${lockPct}%`, 34, 104);
+        } else {
+          ctx.fillText('视野内无生命信号：靠近荧光生物群落扫描', 34, 104);
+        }
+        ctx.fillText(`图鉴 ${Math.round(progress * 100)}%（${totalSp} 种）`, 34, 118);
       }
     }
 
@@ -3966,6 +4304,143 @@ export const GroundView = {
     hudBar(ctx, bx, by, 210, 10, c.stamina / c.staminaMax, '#e0c85a', '耐力', `${Math.round(c.stamina)}/${c.staminaMax}`);
     by += 24;
     hudBar(ctx, bx, by, 210, 8, c.fuel / 100, '#b08ae0', '喷气燃料', `${Math.round(c.fuel)}%`);
+    // [SPEC-39 S3] 警戒热度星级 / 部署快捷栏 / 终端解谜 / 深核状态
+    this._drawSurfaceOpsHud(ctx, W, H);
+  },
+
+
+  /** [SPEC-39 S3] 地表作战 HUD：警戒热度星级 + 部署快捷栏 + 终端微解谜浮层 + 深核倒计时 */
+  _drawSurfaceOpsHud(ctx, W, H) {
+    const planet = this.planet;
+    if (!planet || !planet.surfaceDelta) return;
+    const sd = planet.surfaceDelta;
+
+    // —— 1) 警戒热度面板（左上第二列；星级行 + 热度千分比条） ——
+    const heat = sd.heat[0];
+    const star = sd.heat[1];
+    const hx = 12;
+    const hy = 124;
+    ctx.fillStyle = star >= 4 ? 'rgba(60,12,12,0.78)' : 'rgba(8,14,22,0.72)';
+    ctx.fillRect(hx, hy, 250, 40);
+    ctx.strokeStyle = star >= 1 ? 'rgba(230,120,70,0.6)' : 'rgba(140,170,200,0.3)';
+    ctx.strokeRect(hx + 0.5, hy + 0.5, 249, 39);
+    ctx.fillStyle = star >= 4 ? '#f2a08a' : '#e8f2fb';
+    ctx.font = 'bold 12px "Segoe UI", system-ui, sans-serif';
+    ctx.fillText(`${'★'.repeat(star)}${'☆'.repeat(5 - star)} 警戒热度 ${Math.round(heat)}‰`, hx + 10, hy + 17);
+    ctx.fillStyle = 'rgba(255,255,255,0.12)';
+    ctx.fillRect(hx + 10, hy + 25, 226, 8);
+    ctx.fillStyle = star >= 4 ? '#e85f5f' : star >= 2 ? '#e8b04f' : '#4fd8e8';
+    ctx.fillRect(hx + 10, hy + 25, 226 * (heat / 1000), 8);
+    // 跃迁刻度线（150/320/520/720/900）
+    ctx.fillStyle = 'rgba(240,240,240,0.45)';
+    for (const th of [150, 320, 520, 720, 900]) {
+      ctx.fillRect(hx + 10 + 226 * (th / 1000), hy + 24, 1, 10);
+    }
+
+    // —— 2) 部署快捷栏（底部中央：7 雷达 / 8 充能桩 / 9 哨兵塔 / 0 诱饵） ——
+    const KINDS = [
+      { key: '7', id: 'dep_gpr_radar', name: '探地雷达' },
+      { key: '8', id: 'dep_thermal_pylon', name: '充能桩' },
+      { key: '9', id: 'dep_sentry_turret', name: '哨兵塔' },
+      { key: '0', id: 'dep_decoy_emitter', name: '诱饵弹' },
+    ];
+    const SLOT = 44;
+    const qx0 = Math.round(W / 2 - (KINDS.length * (SLOT + 6)) / 2);
+    const qy = H - 96;
+    for (let i = 0; i < KINDS.length; i++) {
+      const kx = qx0 + i * (SLOT + 6);
+      ctx.fillStyle = 'rgba(10,16,26,0.78)';
+      ctx.fillRect(kx, qy, SLOT, SLOT);
+      ctx.strokeStyle = 'rgba(93,235,223,0.4)';
+      ctx.strokeRect(kx + 0.5, qy + 0.5, SLOT - 1, SLOT - 1);
+      ctx.fillStyle = '#cfe3f5';
+      ctx.font = 'bold 11px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText(KINDS[i].key, kx + 5, qy + 14);
+      ctx.font = '9px "Segoe UI", system-ui, sans-serif';
+      ctx.fillStyle = '#8fa8bd';
+      ctx.fillText(KINDS[i].name, kx + 5, qy + SLOT - 6);
+    }
+    ctx.fillStyle = '#6c7f92';
+    ctx.font = '9px "Segoe UI", system-ui, sans-serif';
+    ctx.fillText(`部署物 ${sd.deployables.length}/8 · X 深核采掘`, qx0, qy - 4);
+
+    // —— 3) 深核采掘倒计时（活动时） ——
+    if (sd.extraction[0] === 1 && sd.extraction[3] > 0) {
+      const remainS = sd.extraction[3] / 10;
+      ctx.fillStyle = 'rgba(50,30,8,0.8)';
+      ctx.fillRect(W / 2 - 110, 92, 220, 22);
+      ctx.strokeStyle = 'rgba(230,180,90,0.6)';
+      ctx.strokeRect(W / 2 - 109.5, 92.5, 219, 21);
+      ctx.fillStyle = '#f2c890';
+      ctx.font = 'bold 11px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText(`深核钻机作业中 · 剩余 ${Math.ceil(remainS)}s · 噪音引增援`, W / 2 - 100, 107);
+    }
+
+    // —— 4) 部署/采掘结果提示（3s） ——
+    if (this._clock - (this._deployNoteT || -1e9) < 3.0 && this._deployNote) {
+      ctx.fillStyle = 'rgba(8,14,22,0.8)';
+      ctx.fillRect(W / 2 - 140, 62, 280, 22);
+      ctx.strokeStyle = 'rgba(93,235,223,0.5)';
+      ctx.strokeRect(W / 2 - 139.5, 62.5, 279, 21);
+      ctx.fillStyle = '#5debdf';
+      ctx.font = 'bold 11px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText(this._deployNote, W / 2 - 130, 77);
+    }
+
+    // —— 5) 充能桩力场指示 ——
+    if (this._pylonShelter && this._pylonShelter.shielded) {
+      ctx.fillStyle = 'rgba(30,50,20,0.8)';
+      ctx.fillRect(W / 2 - 90, H - 130, 180, 20);
+      ctx.strokeStyle = 'rgba(160,235,120,0.6)';
+      ctx.strokeRect(W / 2 - 89.5, H - 129.5, 179, 19);
+      ctx.fillStyle = '#a0eb78';
+      ctx.font = 'bold 10px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText('充能桩力场 · 环境免疫 · 护盾回充中', W / 2 - 82, H - 116);
+    }
+
+    // —— 6) 2D 终端微解谜浮层（4 位方向键序列） ——
+    const pz = this._terminalPuzzle;
+    if (pz) {
+      const cw = 320;
+      const ch = 118;
+      const cx0 = Math.round(W / 2 - cw / 2);
+      const cy0 = Math.round(H / 2 - ch / 2 - 60);
+      ctx.fillStyle = 'rgba(4,16,20,0.9)';
+      ctx.fillRect(cx0, cy0, cw, ch);
+      ctx.strokeStyle = 'rgba(93,235,223,0.7)';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(cx0 + 0.5, cy0 + 0.5, cw - 1, ch - 1);
+      ctx.lineWidth = 1;
+      ctx.fillStyle = '#5debdf';
+      ctx.font = 'bold 12px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText(`终端微解谜 · ${pz.nameZh}`, cx0 + 12, cy0 + 22);
+      ctx.fillStyle = '#8fa8bd';
+      ctx.font = '10px "Segoe UI", system-ui, sans-serif';
+      ctx.fillText('方向键 / WASD 依次输入（Esc 取消）', cx0 + 12, cy0 + 38);
+      const ARROW = ['▲', '▶', '▼', '◀'];
+      for (let i = 0; i < pz.seq.length; i++) {
+        const sx = cx0 + cw / 2 - (pz.seq.length * 44) / 2 + i * 44;
+        const done = i < pz.input;
+        ctx.fillStyle = done ? 'rgba(93,235,223,0.25)' : 'rgba(255,255,255,0.06)';
+        ctx.fillRect(sx, cy0 + 50, 36, 36);
+        ctx.strokeStyle = done ? '#5debdf' : 'rgba(140,170,200,0.4)';
+        ctx.strokeRect(sx + 0.5, cy0 + 50.5, 35, 35);
+        ctx.fillStyle = done ? '#5debdf' : '#cfe3f5';
+        ctx.font = 'bold 18px "Segoe UI", system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(ARROW[pz.seq[i]], sx + 18, cy0 + 74);
+        ctx.textAlign = 'left';
+      }
+      if (this._clock - pz.failT < 0.5) {
+        ctx.fillStyle = 'rgba(232,95,95,0.85)';
+        ctx.font = 'bold 11px "Segoe UI", system-ui, sans-serif';
+        ctx.fillText('序列错误 · 已重置', cx0 + 12, cy0 + ch - 8);
+      } else if (this._clock - pz.coolT < 2.5) {
+        ctx.fillStyle = 'rgba(232,176,79,0.9)';
+        ctx.font = 'bold 11px "Segoe UI", system-ui, sans-serif';
+        ctx.fillText('安全锁 2.5s …', cx0 + 12, cy0 + ch - 8);
+      }
+    }
   },
 
   /** 底部中央 6 槽技能栏（可用高亮 + 冷却遮罩 + 数字标注 + 名称） */
