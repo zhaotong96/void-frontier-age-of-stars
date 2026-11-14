@@ -7,6 +7,7 @@
  */
 
 import { registerHourly } from './TickPipeline.js';
+import { registerSpaceOperaPhases } from './SpaceOperaWiring.js';
 import { BUILDINGS } from '../content/buildings.js';
 import { BAL } from '../content/constants.js';
 import { stepBattles } from '../domain/combat/BattleSimulation.js';
@@ -28,6 +29,14 @@ import { stepSpaceElevator } from '../domain/strategic/megastructures.js';
 import { stepTradeRoutes } from '../domain/economy/tradeRoutes.js';
 import { tickPlanetaryThreatIndex } from '../domain/ground/planetaryThreat.js';
 import { firePlanetaryIonBatteries, hostileFleetsInSystemOf, announceIonSalvo } from '../domain/strategic/orbitalSynergy.js';
+// SPEC-PLAN-050 Task 50.2（M4 工位 B）：双轨经济桥逆向修正注入（GAP-02 消除落点）
+import { TICKS_PER_MONTH } from '../core/clock.js';
+import {
+  syncColonyToSpaceOpera,
+  getSpaceOperaModifiers,
+  applyBeholderPsychicConversion,
+} from '../domain/planets/spaceOperaColonyBridge.js';
+import { pay } from '../domain/economy/ledger.js';
 
 registerHourly('orders', (world) => {
   // AI 命令超时与目标清理（防无限重试 —— RISK-06）
@@ -92,12 +101,40 @@ registerHourly('exploration', (world) => {
 });
 
 registerHourly('production', (world) => {
+  // —— SPEC-PLAN-050 Task 50.2：帝国级太空歌剧修正一次结算（违约 → 船坞/建费倍率）——
+  const soEmpireMods = world.spaceOperaState ? getSpaceOperaModifiers(null, world) : null;
+  const soBuildCostMult = soEmpireMods ? soEmpireMods.buildingCostMultiplier : 1;
+  const soShipyardMult = soEmpireMods ? soEmpireMods.shipyardMultiplier : 1;
+  // —— SPEC-PLAN-050 Task 50.2：The Beholder 灵能矿工转化帝国账本月度落账 ——
+  //    月界（tick % 720 === 0）恰好一次；金快照世界（无 spaceOperaState）零开销直返。
+  if (world.spaceOperaState && world.tick > 0 && world.tick % TICKS_PER_MONTH === 0) {
+    applyBeholderPsychicConversion(world);
+  }
   for (const id of Object.keys(world.entities.colonies).sort()) {
     const colony = world.entities.colonies[id];
+    // —— S4 国家违约建造费 +25% 附加费（tickColonyConstruction 的 pay(def.cost) 在
+    //    colony.js:317 原子扣款；非侵入式附加费在此预扣 25% 差额，一次性旗标防重扣）——
+    if (soBuildCostMult !== 1) applySpaceOperaBuildSurcharge(world, colony, soBuildCostMult);
+    // —— 正向同步 + S3/S4 产能倍率注入 ——
+    //    tickColonyProduction（colony.js:277）经 b.efficiencyMult 消费产能倍率：
+    //    eff = clamp(pf × hab × efficiencyMult × factionMod, 0.1, 2.0) —— productionMultiplier
+    //    经该通道等比缩放周期推进速率（= 产出/小时等比缩放，非侵入权威消费点）。
+    if (world.spaceOperaState) {
+      syncColonyToSpaceOpera(colony, world);
+      const pm = getSpaceOperaModifiers(colony, world).productionMultiplier;
+      for (const b of colony.buildings) {
+        if (b.state === 'construction' || b.state === 'suspended') continue;
+        if (pm === 1) {
+          if (b.efficiencyMult !== undefined) delete b.efficiencyMult;
+        } else {
+          b.efficiencyMult = pm;
+        }
+      }
+    }
     tickColonyProduction(world, colony);
     tickColonyConstruction(world, colony);
   }
-  tickShipyards(world);
+  tickShipyards(world, soShipyardMult);
   // —— doc19 v0.4 WP-4：行星局部工业 + 货运弹射井 + 近地中转站三级分发 ——
   //   仅遍历已激活工业星（planet.ind），零 planet.ind 星球为 0 开销（金快照零漂移）
   for (const pid of Object.keys(world.entities.planets).sort()) {
@@ -136,12 +173,15 @@ registerHourly('production', (world) => {
 });
 
 registerHourly('research', (world) => {
+  // —— SPEC-PLAN-050 Task 50.2：S1 考古对策 + S4 违约帝国科研倍率（empire-level）——
+  const soResearchMult = world.spaceOperaState
+    ? getSpaceOperaModifiers(null, world).researchMultiplier : 1;
   // 每文明科研点：基础 + 实验室加成
   for (const fid of Object.keys(world.research).sort()) {
     const labCount = countBuildings(world, fid, 'science');
     const base = 1 + labCount * 1.5;
     const mult = getMod(world, fid, 'researchOutput', 'mult') || 1;
-    tickResearch(world, fid, base * mult);
+    tickResearch(world, fid, base * mult * soResearchMult);
   }
 });
 
@@ -176,14 +216,17 @@ registerAI();
 
 // ——
 
-/** 船坞队列推进（建造完成 → 生成舰船） */
-function tickShipyards(world) {
+/** 船坞队列推进（建造完成 → 生成舰船）；
+ *  SPEC-PLAN-050 Task 50.2：工时推进乘以 mods.shipyardMultiplier（S4 违约 ×0.75），
+ *  倍率为 1 时与既有逐 tick −1 口径逐位一致（金快照零漂移）。 */
+function tickShipyards(world, shipyardMult = 1) {
+  const drain = Number.isFinite(shipyardMult) && shipyardMult > 0 ? shipyardMult : 1;
   for (const sid of Object.keys(world.entities.stations).sort()) {
     const station = world.entities.stations[sid];
     const q = station.buildQueue;
     if (!q || q.length === 0) continue;
     const job = q[0];
-    job.remainingHours -= 1;
+    job.remainingHours -= drain;
     if (job.remainingHours <= 0) {
       const bp = world.entities.blueprints[job.blueprintId];
       if (bp) {
@@ -203,6 +246,27 @@ function tickShipyards(world) {
   }
 }
 
+/**
+ * SPEC-PLAN-050 Task 50.2：S4 国家违约建筑费 +25% 非侵入式附加费。
+ * tickColonyConstruction（colony.js:317）以 def.cost 原子扣款且该文件不在工位 B
+ * 独占清单 —— 附加费在队列头等待/缺料态时预扣 25% 差额（整数化）；
+ * job.soSurchargePaid 一次性旗标防等待期逐 tick 重扣；支付失败（账本不足）保持等待。
+ */
+function applySpaceOperaBuildSurcharge(world, colony, buildingCostMult) {
+  if (!colony || !world.spaceOperaState) return;
+  const q = colony.constructionQueue;
+  const job = q && q[0];
+  if (!job) return;
+  if (job.state !== 'waiting' && job.state !== 'missing-material') return;
+  if (job.soSurchargePaid === true) return;
+  const def = buildingDef(job.defId);
+  if (!def || !(def.cost > 0)) return;
+  const extra = Math.round(def.cost * (buildingCostMult - 1));
+  if (extra > 0 && pay(world, colony.factionId, extra, `build:soSurcharge:${def.id}`, colony.id)) {
+    job.soSurchargePaid = true;
+  }
+}
+
 function countBuildings(world, factionId, category) {
   let n = 0;
   for (const cid of Object.keys(world.entities.colonies)) {
@@ -219,3 +283,7 @@ function countBuildings(world, factionId, category) {
 registerHourly('trade-routes', (world) => {
   stepTradeRoutes(world);
 });
+
+// 太空歌剧三级时钟阶段注册（显式调用置于本文件全部 registerHourly 之后 → space-opera 每 tick 最后执行；
+// 静态打包产物中顶层 await 为语法错误、动态 import 相对说明符不可达，统一静态接线）
+registerSpaceOperaPhases();

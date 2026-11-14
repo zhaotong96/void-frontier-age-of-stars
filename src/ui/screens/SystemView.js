@@ -599,6 +599,8 @@ export const SystemView = {
       yaw: this._yaw, // 用户拖拽旋转增量（渲染器俯仰固定，仅水平环绕）
     });
     this._drawGhostOverlay(cm.ctx, cm.width, cm.height);
+    // SPEC-PLAN-052 Task 52.1：本星系信标脉冲 + 自主舰队轨迹叠加层（未激活太空歌剧零绘制）
+    drawSystemSpaceOperaOverlay(this, cm.ctx, cm.width, cm.height);
   },
 
   /**
@@ -697,6 +699,11 @@ export const SystemView = {
 
     // 4) 异常列表
     box.appendChild(this._anomalyPanel(d));
+
+    // 5) SPEC-PLAN-052 Task 52.1：子空间信标流响应卡片 + 自主舰队过境清单
+    //    （本星系无信标且无舰队过境 → buildSystemSpaceOperaPanel 返回 null，零注入）
+    const soPanel = buildSystemSpaceOperaPanel(this);
+    if (soPanel) box.appendChild(soPanel);
   },
 
   /**
@@ -900,3 +907,171 @@ export const SystemView = {
     });
   },
 };
+
+/* ==================== SPEC-PLAN-052 Task 52.1：星系内信标脉冲、自主舰队与响应卡片（M4 工位 D） ==================== */
+
+import { spaceOperaView } from '../../simulation/ViewModels.js';
+import { showModal } from '../components/modal.js';
+
+/**
+ * 星系视图信标/舰队叠加层（doc52 §Task 52.1；SystemView._drawFrame 帧末调用）：
+ *  - 本星系活跃信标（systemId === 当前星系）：恒星中心呼吸脉冲光环 + 频段标签；
+ *  - 本星系起讫的自主生态舰队：恒星环带菱形图标 + 航程进度弧。
+ * 世界未激活太空歌剧 → 零绘制。恒星光点取 renderer._pickList 行星屏幕坐标几何中心兜底。
+ */
+export function drawSystemSpaceOperaOverlay(view, ctx, w, h) {
+  const world = view.app && view.app.world;
+  const d = view._data;
+  if (!world || !world.spaceOperaState || !d || !d.system) return;
+  const so = spaceOperaView(world);
+  if (!so) return;
+  const sid = d.system.id;
+  const pickList = (view._renderer && view._renderer._pickList) || [];
+  let starX = w / 2;
+  let starY = h / 2;
+  if (pickList.length > 0) {
+    starX = pickList.reduce((s, e) => s + (Number.isFinite(e.x) ? e.x : 0), 0) / pickList.length;
+    starY = pickList.reduce((s, e) => s + (Number.isFinite(e.y) ? e.y : 0), 0) / pickList.length;
+  }
+  const t = performance.now() / 1000;
+
+  ctx.save();
+  // —— 本星系信标呼吸脉冲 ——
+  const local = (so.beaconsList || []).filter((b) => b.systemId === sid);
+  for (const b of local) {
+    const breath = 10 + 8 * (0.5 + 0.5 * Math.sin(t * 2.4 + (b.id % 7)));
+    ctx.strokeStyle = b.color || '#71839a';
+    ctx.globalAlpha = 0.9;
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    ctx.arc(starX, starY, breath, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 0.22;
+    ctx.fillStyle = b.color || '#71839a';
+    ctx.beginPath();
+    ctx.arc(starX, starY, breath * 0.6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = 'rgba(216,230,240,0.92)';
+    ctx.font = '10px "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('◈ ' + (b.frequencyName || '') + '（右侧信标卡片可响应）', starX, starY - breath - 6);
+  }
+  // —— 本星系起讫自主舰队：环带菱形图标 + 进度弧 ——
+  const fleets = (so.autonomousFleetsList || []).filter((f) => f.origin === d.system.name
+    || f.destination === d.system.name);
+  for (let i = 0; i < fleets.length; i++) {
+    const f = fleets[i];
+    const angle = t * 0.4 + i * (Math.PI * 2 / Math.max(1, fleets.length));
+    const r = Math.min(w, h) * 0.32;
+    const fx = starX + Math.cos(angle) * r;
+    const fy = starY + Math.sin(angle) * r * 0.5;
+    ctx.fillStyle = '#ffd700';
+    ctx.beginPath();
+    ctx.moveTo(fx, fy - 6);
+    ctx.lineTo(fx + 6, fy);
+    ctx.lineTo(fx, fy + 6);
+    ctx.lineTo(fx - 6, fy);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#ffd700';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.arc(fx, fy, 10, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (f.progress || 0));
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(216,230,240,0.9)';
+    ctx.font = '9px "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(f.typeZh + '（' + Math.round((f.progress || 0) * 100) + '% → ' + f.destination + '）', fx, fy + 16);
+  }
+  ctx.restore();
+}
+
+/**
+ * 星系档案舱太空歌剧卡片（dossier 尾部追加）：
+ * 本星系活跃信标列表（标题/频段/窗口/响应选项按钮 → RespondSubspaceBeacon）与
+ * 自主舰队过境清单。无信标且无舰队 → null（零 DOM 注入）。
+ */
+export function buildSystemSpaceOperaPanel(view) {
+  const world = view.app && view.app.world;
+  const d = view._data;
+  if (!world || !world.spaceOperaState || !d || !d.system) return null;
+  const so = spaceOperaView(world);
+  if (!so) return null;
+  const sid = d.system.id;
+  const beacons = (so.beaconsList || []).filter((b) => b.systemId === sid);
+  const fleets = (so.autonomousFleetsList || []).filter((f) => f.origin === d.system.name
+    || f.destination === d.system.name);
+  if (beacons.length === 0 && fleets.length === 0) return null;
+
+  const p = panel({ title: '子空间信标流与自主舰队（' + beacons.length + ' 信标 / ' + fleets.length + ' 舰队）', open: true, dense: true, id: 'sys:so:beacons' });
+  for (const b of beacons) {
+    const card = el('div', { class: 'vf-col', style: { borderBottom: '1px solid rgba(29,42,58,0.4)', padding: '4px 0' } });
+    card.appendChild(el('div', { class: 'vf-row' }, [
+      el('span', { class: 'vf-tag accent', text: '◈ ' + (b.frequencyName || '') }),
+      el('span', { class: 'vf-faint vf-small', text: (Number.isFinite(b.expiresTick) && world ? '窗口余 ' + Math.max(0, b.expiresTick - world.tick) + ' ticks' : '') }),
+    ]));
+    card.appendChild(el('div', { class: 'vf-dim vf-small', style: { whiteSpace: 'pre-wrap' }, text: b.text || '' }));
+    const row = el('div', { class: 'vf-row', style: { flexWrap: 'wrap', gap: '4px' } });
+    for (const opt of b.options || []) {
+      row.appendChild(el('button', {
+        class: 'vf-btn small primary',
+        text: opt.label || opt.id,
+        title: 'RespondSubspaceBeacon → ' + opt.id + (opt.effectHint ? '（' + opt.effectHint + '）' : ''),
+        on: {
+          click: () => {
+            view.app.dispatch('RespondSubspaceBeacon', { beaconId: b.id, responseOptionId: opt.id });
+            view._refreshDossier && view._refreshDossier();
+          },
+        },
+      }));
+    }
+    card.appendChild(row);
+    p.appendChild(card);
+  }
+  for (const f of fleets) {
+    p.appendChild(el('div', { class: 'vf-row', style: { borderBottom: '1px solid rgba(29,42,58,0.3)', padding: '3px 0' } }, [
+      el('span', { class: 'vf-tag', text: f.typeZh }),
+      el('span', { class: 'vf-faint vf-small vf-grow', text: f.origin + ' → ' + f.destination + '（航程 ' + Math.round((f.progress || 0) * 100) + '%）' }),
+      el('span', { class: 'vf-faint vf-small', text: f.cargo && f.cargo.resourceId ? ('货舱 ' + f.cargo.resourceId + ' ×' + f.cargo.qty) : '空舱' }),
+    ]));
+  }
+  return p;
+}
+
+/** 星系视图信标弹窗（点击信标卡片标题弹出全量交互弹窗） */
+export function openSystemBeaconModal(view, beacon) {
+  const app = view.app;
+  const w = app.world;
+  const body = document.createElement('div');
+  body.className = 'vf-col';
+  body.style.cssText = 'gap:6px;min-width:320px;';
+  const head = document.createElement('div');
+  head.className = 'vf-row';
+  head.innerHTML = '<span class="vf-tag accent">' + (beacon.frequencyName || '') + '</span>'
+    + '<span class="vf-faint vf-small">' + (beacon.systemName || '') + '</span>';
+  body.appendChild(head);
+  const textEl = document.createElement('div');
+  textEl.className = 'vf-small';
+  textEl.style.cssText = 'white-space:pre-wrap;color:#d8e6f0;background:rgba(15,23,42,0.55);padding:8px;border-radius:6px;border:1px solid rgba(79,216,232,0.35);';
+  textEl.textContent = beacon.text || '';
+  body.appendChild(textEl);
+  const expires = Number.isFinite(beacon.expiresTick) && w ? Math.max(0, beacon.expiresTick - (w.tick || 0)) : null;
+  if (expires != null) {
+    const meta = document.createElement('div');
+    meta.className = 'vf-faint vf-small';
+    meta.textContent = '信号窗口剩余 ' + expires + ' ticks（' + Math.ceil(expires / 24) + ' 游戏日）';
+    body.appendChild(meta);
+  }
+  for (const opt of beacon.options || []) {
+    const btn = document.createElement('button');
+    btn.className = 'vf-btn small primary';
+    btn.textContent = opt.label || opt.id;
+    btn.addEventListener('click', () => {
+      app.dispatch('RespondSubspaceBeacon', { beaconId: beacon.id, responseOptionId: opt.id });
+      if (modalHandle && typeof modalHandle.close === 'function') modalHandle.close();
+    });
+    body.appendChild(btn);
+  }
+  const modalHandle = showModal({ title: '◈ 子空间信标 · ' + (beacon.title || '未解调信号'), body, wide: false });
+}

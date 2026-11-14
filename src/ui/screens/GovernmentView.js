@@ -95,6 +95,10 @@ export const GovernmentView = {
     body.appendChild(this._policyPanel(g));
     body.appendChild(this._policiesPanel());
     body.appendChild(this._crewPanel());
+    // SPEC-PLAN-051 Task 51.2（M4 工位 C）：星海群像英雄名录（天命 / Beholder / 城邦导师）；
+    // world.spaceOperaState 未激活时整节不渲染（零侵入）
+    const soPanel = renderSpaceOperaGovernmentPanel(this);
+    if (soPanel) body.appendChild(soPanel);
   },
 
   /**
@@ -359,4 +363,162 @@ function crewApi() {
 import { policiesView } from '../../domain/politics/policy.js';
 function policyApi() {
   return { policiesView };
+}
+
+/* ==================== SPEC-PLAN-051 Task 51.2：星海群像英雄面板（M4 工位 C） ==================== */
+
+import { el as elSO } from '../components/dom.js';
+import { panel as panelSO } from '../components/panels.js';
+import { DESTINY_TRAITS, TRAUMA_TRAITS, leaderCapStats } from '../../domain/characters/galacticParagons.js';
+
+/** 实体 id → 数字后缀（commandSchemas 整数 ID 契约；'chr_7' → 7） */
+function numIdSO(id) {
+  const m = /(\d+)$/.exec(String(id == null ? '' : id));
+  return m ? parseInt(m[1], 10) : 0;
+}
+
+/** 领袖职业中文 */
+const PROFESSION_ZH = { commander: '舰队统帅', official: '政务官员', scientist: '科学顾问' };
+
+/** 创伤特质徽标（TRAUMA_TRAITS 键 → 中文短标） */
+const TRAUMA_ZH = {
+  substance_abuse: '酗酒/药瘾',
+  melancholic: '忧郁成疾',
+  political_dismissal: '罢黜怀恨',
+  maimed: '重伤残躯',
+  paranoid: '多疑成性',
+  disgraced: '声名蒙尘',
+};
+
+/**
+ * 星海群像英雄（Galactic Paragons）面板（doc51 §Task 51.2 逐条契约）：
+ *  1. 领袖群像名录：职业 / 等级 XP / 忠诚度（<30 标红叛变风险）/ 创伤特质徽标 /
+ *     领袖上限软惩罚红字（N > C：维护费 ×(N/C)、XP 收益 ×0.85^(N−C)）；
+ *  2. Lv 8 天命特质三选一弹窗按钮 → AssignParagonDestinyTrait；
+ *  3. 传奇领袖 The Beholder 双形态切换开关 → ToggleBeholderMode；
+ *  4. 中立星际城邦导师雇佣卡 → HireEnclaveMentor。
+ * world.spaceOperaState 未激活 → 返回 null（零侵入）。
+ */
+export function renderSpaceOperaGovernmentPanel(view) {
+  const app = view._app || view.app;
+  const w = app.world;
+  if (!w || !w.spaceOperaState) return null;
+
+  const wrap = elSO('div', { class: 'vf-col' });
+
+  /* —— 1. 领袖群像名录 —— */
+  const p = panelSO({ title: '星海群像英雄（Galactic Paragons）', open: true, dense: true });
+  const characters = (w.entities && w.entities.characters) || {};
+  const roster = Object.keys(characters).sort()
+    .map((k) => characters[k])
+    .filter((ch) => ch && ch.paragon && ch.health !== 'dead');
+  if (roster.length === 0) {
+    p.appendChild(elSO('div', { class: 'vf-faint vf-small', text: '暂无在编群像领袖（战役开局后由群像引擎逐步扩充）。' }));
+  }
+  for (const ch of roster) {
+    const pg = ch.paragon;
+    const row = elSO('div', { class: 'vf-col', style: { borderBottom: '1px solid rgba(29,42,58,0.4)', padding: '4px 0' } });
+    const lvl = Number.isFinite(ch.level) ? ch.level : 1;
+    const xp = Number.isFinite(ch.xp) ? ch.xp : 0;
+    const loyal = Number.isFinite(ch.loyalty) ? ch.loyalty : 100;
+    const head = elSO('div', { class: 'vf-row' }, [
+      elSO('span', { class: 'vf-grow', text: `${ch.name || ch.id}` }),
+      elSO('span', { class: 'vf-tag accent', text: PROFESSION_ZH[pg.profession] || pg.profession || '—' }),
+      pg.legendary || pg.paragonId ? elSO('span', { class: 'vf-tag warn', text: '传奇' }) : null,
+      elSO('span', { class: loyal < 30 ? 'vf-tag danger' : 'vf-tag', text: `忠诚 ${Math.round(loyal)}` }),
+    ]);
+    row.appendChild(head);
+    row.appendChild(elSO('div', { class: 'vf-faint vf-small', text: `Lv ${lvl} · XP ${Math.round(xp)}/${lvl * 100}` }));
+    if (loyal < 30) {
+      row.appendChild(elSO('div', { class: 'vf-warn vf-small', text: '叛变风险警告：忠诚度低于 30，每月检定可能触发政变。' }));
+    }
+    // 创伤特质徽标
+    const trauma = Array.isArray(pg.trauma) ? pg.trauma : [];
+    const traumaTags = trauma
+      .map((t) => (t && TRAUMA_ZH[t.id || t]) || (t && t.id) || t)
+      .filter(Boolean);
+    if (traumaTags.length > 0) {
+      row.appendChild(elSO('div', { class: 'vf-warn vf-small', text: `创伤特质：${traumaTags.join('、')}` }));
+    }
+    // 领袖上限软惩罚红字
+    const capStats = leaderCapStats(w, pg.profession);
+    if (capStats.employed > capStats.cap) {
+      row.appendChild(elSO('div', { class: 'vf-warn vf-small', text: `超编惩罚：${PROFESSION_ZH[pg.profession] || pg.profession} 在编 ${capStats.employed}/上限 ${capStats.cap} —— 维护费 ×${capStats.upkeepMultiplier.toFixed(2)}，XP 收益 ×${capStats.xpGainMultiplier.toFixed(4)}（0.85^(N−C)）。` }));
+    }
+    // 天命特质（Lv8 且未固化 → 金色闪烁按钮展开三项确定性候选，点击直接固化）
+    if (lvl >= 8 && !pg.destinyTrait) {
+      const offers = Array.isArray(pg.destinyOffer) ? pg.destinyOffer : [];
+      const destinyBox = elSO('div', { class: 'vf-col', style: { marginTop: '4px' } });
+      destinyBox.appendChild(elSO('div', { class: 'vf-warn vf-small', text: '✦ 天命在望（Destiny Awaits）—— 三选一固化：' }));
+      for (const offerId of offers) {
+        const dtr = DESTINY_TRAITS[offerId] || {};
+        destinyBox.appendChild(elSO('button', {
+          class: 'vf-btn small primary',
+          style: { marginTop: '2px' },
+          text: `${dtr.nameZh || offerId}（${offerId}）`,
+          title: `AssignParagonDestinyTrait → ${offerId}${dtr.descZh ? '：' + dtr.descZh : ''}`,
+          on: {
+            click: () => {
+              app.dispatch('AssignParagonDestinyTrait', { leaderId: numIdSO(ch.id), destinyTraitId: offerId });
+              view._rebuild();
+            },
+          },
+        }));
+      }
+      row.appendChild(destinyBox);
+    } else if (pg.destinyTrait) {    } else if (pg.destinyTrait) {
+      row.appendChild(elSO('div', { class: 'vf-faint vf-small', text: `天命已固化：${(DESTINY_TRAITS[pg.destinyTrait] && DESTINY_TRAITS[pg.destinyTrait].nameZh) || pg.destinyTrait}` }));
+    }
+    // The Beholder 双形态切换
+    if (pg.paragonId === 'THE_BEHOLDER') {
+      const modeZh = pg.mode === 'MURMURING_MONOLITH' ? '低语方尖碑总督（灵能产出 +25% · 矿工转化）' : '战舰旗舰统帅（武器伤害 +20% · 闪避 +15%）';
+      const other = pg.mode === 'MURMURING_MONOLITH' ? 'WARSHIP_COMMANDER' : 'MURMURING_MONOLITH';
+      row.appendChild(elSO('div', { class: 'vf-row' }, [
+        elSO('span', { class: 'vf-grow vf-faint vf-small', text: `当前形态：${modeZh}` }),
+        elSO('button', {
+          class: 'vf-btn small',
+          text: '切换形态',
+          title: `ToggleBeholderMode → ${other}`,
+          on: {
+            click: () => {
+              app.dispatch('ToggleBeholderMode', {
+                paragonId: numIdSO(ch.id),
+                mode: other,
+                planetId: pg.governedPlanetId != null ? numIdSO(pg.governedPlanetId) : undefined,
+              });
+              view._rebuild();
+            },
+          },
+        }),
+      ]));
+    }
+    p.appendChild(row);
+  }
+  wrap.appendChild(p);
+
+  /* —— 2. 中立星际城邦导师雇佣卡 —— */
+  const pMentor = panelSO({ title: '中立星际城邦导师（Enclave Mentor）', open: true, dense: true });
+  pMentor.appendChild(elSO('div', { class: 'vf-faint vf-small', text: '策展人（Curators）Lv5 导师：capExempt 不占领袖容量；攻击城邦将使导师愤然离职。' }));
+  const mentors = roster.filter((ch) => ch.paragon && ch.paragon.enclaveMentor);
+  if (mentors.length > 0) {
+    for (const m of mentors) {
+      pMentor.appendChild(elSO('div', { class: 'vf-row' }, [
+        elSO('span', { class: 'vf-grow vf-small', text: `在任导师：${m.name || m.id}` }),
+        elSO('span', { class: 'vf-tag ok', text: '雇佣中' }),
+      ]));
+    }
+  }
+  pMentor.appendChild(elSO('button', {
+    class: 'vf-btn small primary',
+    text: '雇佣策展人导师（10 年）',
+    title: 'HireEnclaveMentor：雇佣 Curators Lv5 导师（capExempt）',
+    on: {
+      click: () => {
+        app.dispatch('HireEnclaveMentor', { enclaveType: 'curators', durationYears: 10 });
+        view._rebuild();
+      },
+    },
+  }));
+  wrap.appendChild(pMentor);
+  return wrap;
 }

@@ -1,48 +1,35 @@
-| 序号 | Px | 相对路径 | 行号 | 简短描述 |
-|---:|---|---|---|---|
-| 1 | P1 | docs/specs/17_《无垠边疆》超长线演化架构方案.md | 577–581, 583–587, 591–594, 596–599, 602–607, 610–614 | 29 条真实 Google Drive 文件 ID 链接，其共享权限未能验证 |
-| 2 | P1 | docs/specs/24_《无垠边疆》全生命周期测试体系方案.md | 848–905 | 58 条真实 Google Drive 文件 ID 链接，其共享权限未能验证 |
-| 3 | P1 | docs/specs/30_全生命周期测试体系工程领域专家终审验收报告.md | 1, 7–9, 13–18, 26–28, 36–39, 47–48, 50–52, 62, 64–65, 75, 77, 87–96, 100, 104–106, 109, 113–116, 119, 126, 128–130, 133–136, 144, 183, 195 | 58 条真实 Drive 文件或文件夹 ID 链接；第 1 行还含有被 Google 搜索包装的共享文件夹链接 |
-| 4 | P1 | docs/specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md | 492–500, 502, 520–521, 547–548, 552, 562, 578, 589, 608–611 | 22 条真实 Google Drive 文件 ID 链接，其共享权限未能验证 |
-| 5 | P1 | docs/specs/34_无垠边疆长线内容与机制创新领域专家调研报告_微观与数学模型体系.md | 482–488, 493–494, 507, 524 | 11 条真实 Google Drive 文件 ID 链接，其共享权限未能验证 |
-| 6 | P2 | docs/specs/23_无垠边疆全生命周期大规模完全测试方案任务委托书.md | 7–9 | 本机绝对路径泄露了 OS 用户名 `zt` 与用户目录结构 |
-| 7 | P2 | docs/specs/25_无垠边疆玩法自治Agent五阶段闭环测试施工方案.md | 5, 20 | 本机绝对路径泄露了 OS 用户名 `zt` 与用户目录结构 |
-| 8 | P2 | docs/specs/26_无垠边疆核心状态机模糊测试与异常Dump施工方案.md | 5, 60 | 本机绝对路径泄露了 OS 用户名 `zt` 与用户目录结构 |
-| 9 | P2 | docs/specs/27_无垠边疆自动化长程浸泡推演与全银河巡检施工方案.md | 5, 58, 61, 93 | 本机绝对路径泄露了 OS 用户名 `zt` 与用户目录结构 |
-| 10 | P2 | docs/specs/28_无垠边疆端到端战役里程碑自动化验收测试施工方案.md | 5, 58, 73, 85, 94–95 | 本机绝对路径泄露了 OS 用户名 `zt` 与用户目录结构 |
-| 11 | P2 | docs/specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md | 6, 8, 10–15, 21, 25, 59–63, 70 | 本机绝对路径泄露 `zt`、`My Drive` 云盘目录及 `.gemini` AI 会话 UUID |
-| 12 | P2 | docs/specs/31_无垠边疆全生命周期终审收口与全量回归验证施工方案.md | 6–8, 46, 48, 53, 86, 103, 164, 167, 183–185, 189, 197, 225, 245 | 本机绝对路径泄露了 OS 用户名 `zt` 与用户目录结构 |
-| 13 | P2 | docs/specs/35_无垠边疆超长线内容与机制创新综合施工计划.md | 7–9 | 本机绝对路径泄露了 OS 用户名 `zt` 与用户目录结构 |
-| 14 | P2 | docs/specs/36_全流程回归测试与验收报告撰写规范.md | 9–11 | 本机绝对路径泄露了 OS 用户名 `zt` 与用户目录结构 |
-| 15 | P2 | docs/specs/37_行星地表深度游戏性与剧情叙事领域专家协查任务委托书.md | 8–9, 153 | 本机绝对路径泄露了 OS 用户名 `zt` 与用户目录结构 |
-| 16 | P2 | docs/specs/39_行星地表深度游戏性实施与UI浏览器缺陷综合施工方案.md | 9–11, 17, 109, 112, 118, 122, 125, 134, 167, 169, 173–178 | 本机绝对路径泄露了 OS 用户名 `zt` 与用户目录结构 |
-| 17 | P2 | docs/specs/40_行星地表深度机制与全流程全量回归测试规范.md | 9–10 | 本机绝对路径泄露了 OS 用户名 `zt` 与用户目录结构 |
-| 18 | P2 | docs/reports/36.log | 260 | 临时脚本路径泄露了 OS 用户名 `zcode` 与 AppData 目录结构 |
-| 19 | P2 | docs/reports/report-spec39-full-regression-final.md | 146 | `qwinsta` 输出暴露 RDP 多用户会话、账户名 `administrator`/`dsh` 及 7 个断开会话 |
-| 20 | P2 | docs/reports/report-spec31-final-gate.md | 74, 77, 89 | 暴露本机型号 Hasee CP65S、GTX 970M 与 HD 4600 双 GPU 及设备 ID 0x13D8；同类信息在多份 CDP 日志中复现 |
-| 21 | P2 | docs/reports/36.log | 16 | 暴露 CPU i7-4720HQ、OrayIddDriver 虚拟显示驱动、GPU 注册表项与 Chrome 配置目录 |
-| 22 | P2 | docs/reports/report-spec39-full-regression-final.md | 16–19, 96, 134 | 暴露 OS 精确版本 Windows 10.0.19044、Chrome 157.0.8103.40、GTX 970M/Vulkan、视口 1280×720 与 DPR 1.25 |
-| 23 | P3 | docs/specs/23_无垠边疆全生命周期大规模完全测试方案任务委托书.md | 16, 137 | 将项目负责人真机绑定为 RTX 5060 Laptop GPU |
-| 24 | P3 | docs/specs/24_《无垠边疆》全生命周期测试体系方案.md | 3, 82, 85, 240, 250, 529, 547, 844 | 多处声明项目负责人使用 RTX 5060 Laptop GPU 真机 |
-| 25 | P3 | docs/specs/29_无垠边疆全生命周期测试工程领域专家验收任务委托书.md | 25, 49, 81 | 验收环境绑定 NVIDIA RTX 5060 物理显卡 |
-| 26 | P3 | docs/specs/30_全生命周期测试体系工程领域专家终审验收报告.md | 18, 71, 76 | 记录 RTX 5060 及完整 ANGLE 渲染器字符串 |
-| 27 | P3 | docs/specs/33_无垠边疆长线内容与机制创新领域专家调研报告_宏观与世界观体系.md | 7 | 基线声明 RTX 5060 真机 60 FPS |
-| 28 | P3 | docs/specs/34_无垠边疆长线内容与机制创新领域专家调研报告_微观与数学模型体系.md | 6 | 基线声明 RTX 5060 真机门禁 |
-| 29 | P3 | docs/specs/31_无垠边疆全生命周期终审收口与全量回归验证施工方案.md | 17, 34, 291, 329 | 多处复述 RTX 5060 真机全场景巡检门禁 |
-| 30 | P3 | docs/specs/35_无垠边疆超长线内容与机制创新综合施工计划.md | 10 | 基线声明 RTX 5060 真机 60 FPS |
-| 31 | P3 | docs/specs/37_行星地表深度游戏性与剧情叙事领域专家协查任务委托书.md | 15, 139 | 声明 RTX 5060 实机性能基线 |
-| 32 | P3 | docs/specs/38_行星地表深度游戏性与剧情叙事领域专家调研报告.md | 1 | 报告开头复述 RTX 5060 实机 60 FPS |
-| 33 | P3 | docs/specs/7_无垠边疆行星美学与施工方案.md | 5, 12 | 外部 Google Drive 工作区路径残留 `Google Drive\work\void-frontier-age-of-stars` |
-| 34 | P3 | docs/specs/30_全生命周期测试体系工程领域专家终审验收报告.md | 39 | 外部开发机仓库路径残留 `D:/work/void-frontier` |
-| 35 | P3 | docs/reports/36.log | 46, 129, 178, 228, 261 | 报告正文与修改记录暴露本机工作区绝对路径 `C:\PUBLIC\stella` |
-| 36 | P3 | docs/reports/void-frontier-qa-lifecycle.md | 11 | 正文暴露本机工作区绝对路径 `C:\PUBLIC\stella` |
-| 37 | P3 | docs/reports/report-spec39-full-regression-final.md | 17 | 暴露本机 Node.js 安装路径 `C:\PUBLIC\tools\nodejs` |
-| 38 | P3 | docs/reports/void-frontier-qa-lifecycle.md | 6–8 | AI 记忆导出 frontmatter 暴露 `originSessionId: sess_c793fb90...` 与内部记忆节点类型 |
-| 39 | P3 | docs/audit/DOC_AUDIT_REPORT.md | 133, 134, 137, 397 | 审计报告二次引用 AI 会话 ID `sess_c793fb90`、GPU 型号及 Google Drive 路径 |
-| 40 | P3 | docs/specs/16_超长线行星游戏性深化与世界演化总体方案.md | 64, 77, 104, 1563 | 链接暴露 GitHub 个人账号 `zhaotong96` |
-| 41 | P3 | docs/specs/4_VOID FRONTIER：专家诊断与长线演进调研报告.md | 61 | 仓库地址暴露 GitHub 个人账号 `zhaotong96` |
-| 42 | P3 | docs/specs/6_VOID_FRONTIER_游戏审美主题与行星GamePlay最高指导规范.md | 246–249 | 提交链接暴露 GitHub 个人账号 `zhaotong96` 与提交哈希 |
-| 43 | P3 | docs/specs/16_超长线行星游戏性深化与世界演化总体方案.md | 64, 77, 104, 503, 1563, 1962 | 6 行共 12 处 URL 携带 `utm_source=chatgpt.com`，暴露 AI 会话来源 |
-| 44 | P3 | docs/specs/16_超长线行星游戏性深化与世界演化总体方案.md | 232, 234, 236, 414, 416, 418, 495, 497, 499, 672, 674, 676, 943, 945, 947, 1076, 1078, 1080, 1194, 1196, 1198, 1993, 1999, 2005, 2011, 2017 | 26 条 `images.openai.com/static-rsc-4/...` 签名式图片 URL，暴露 AI 生成资产来源 |
-| 45 | P3 | docs/specs/24_《无垠边疆》全生命周期测试体系方案.md | 83, 539, 557, 655–657 | 硬编码本地 CDP/dev-server 调试地址 `127.0.0.1:9222` 与 `8090` |
-| 46 | P3 | docs/reports/report-spec39-full-regression-final.md | 145, 175 | 暴露系统进程 `ffmpeg_51.exe` PID 41780、Session 0 与启动时间 |
+**最终回归测试：213 轮全绿，DRIFT 为 0。** 进行最终验证核对与清理：
+
+# SPEC-PLAN-048 阶段四（M4）竣工汇报
+
+**验收结论：PASS** —— 47~52 号文档任务全部完成，71 套件 × 3 轮 = **PASS 213 / FAIL 0 / DRIFT 0**，金快照 `8be8ce2c` 零漂移。正式验收报告已落盘：[report-space-opera-m4-live-bridge.md](C:/PUBLIC/stella/docs/reports/report-space-opera-m4-live-bridge.md)（含逐门禁 file:line 台账），终审回归原始日志 [report-m4-full-regression.log](C:/PUBLIC/stella/docs/reports/report-m4-full-regression.log)。
+
+## 一、文档对账（47 为验收输入，48 为总纲，49-52 为执行卷）
+
+47 号是 M3 终审验收报告（无施工任务，其 5 项 GAP 断言即本阶段工作来源）；48 总纲已完整研读并逐条对账；49/50/51/52 全部任务与门禁完成。
+
+## 二、五项断层消除（48 总纲 §1.1）
+
+| GAP | 消除落点（file:line） | 门禁 |
+| :-- | :-- | :-- |
+| **GAP-01** 开局惰性死锁 | 激活器 `worldMigration.js:64-146`；接线 `App.js:261`（仅 startNewGame 触达，REG-01 无参不挂载） | CHK-M4-01/CHK-49-01/02 |
+| **GAP-02** 双轨经济裂脑 | 新建 `spaceOperaColonyBridge.js:82/150/252/323/398`（正向镜像+Tile落位+反向+修正+Beholder）；注入 `HourlySystems.js:106-190` | CHK-M4-03/CHK-50-01..05 |
+| **GAP-03** 视图零交互 | FleetView.js:495 / GovernmentView.js:402 / DiplomacyView.js:404 / ColonyView.js:856 / EventsView.js:468 / GalaxyView.js:389,475,509 / SystemView.js:922,995 / GroundView.js:4562 + ViewModels.js:718-719,84,150,412,315 | CHK-51-01..05/CHK-52-01..05 |
+| **GAP-04** 时钟接线缺口 | `SpaceOperaWiring.js:62-120` 唯一注册点（4H 严格序+`space-opera` 恒末位；3M monthly→jacobian→drama；setClockHooks 8 钩子）；三处模块 import 副作用拆除 | CHK-49-04 |
+| **GAP-05** 门禁与卫生 | 新建 `m4-space-opera-live-bridge-ui.suite.js:65`（5 Block，28 命令类型端到端）；m3 套件补 import (:58)；84 个 fuzz dumps 清除 + `.gitignore:13`；doc45 特征值勘误 (:69-84) | CHK-52-04..08/CHK-49-05 |
+
+## 三、关键实测数字（逐项防伪绿）
+
+- **激活器**：456/456 行星 compactState+256 Tile 非全零+8D envVector；30/30 领袖群像档案；第 0 帧 `countActiveNarrative === 15`；幂等同引用。
+- **精确值断言（=== 逐位）**：S3 稳定度 80→`1.18`、20→`0.70`；S4 违约 `0.75/0.75/0.75/1.25`；S1 考古 `0.95/0.90/0.85`；CHOAM +5 精确；D-Mod 修复精确扣 500 合金、S-Mod 精确扣 1 奇异物质。
+- **命令端到端**：28 条命令类型 100% 派发（31 次调用），逐条 `ok:true` 且世界态严格改变。
+- **真浏览器实测**（IAB）：星图 ≥15 四频段呼吸脉冲环 → 点击金环弹出《星海日报》信标弹窗 → 派发 `RespondSubspaceBeacon` → 信标移出流 + 弹窗自动关闭；殖民地“行星灵魂·量子游离天体”头栏 + 恰 256 格热力图 + 三层垂直建造卡；事件/舰队/政府/外交四屏歌剧面板全渲染（DOM probe 全 true，截图存证）。
+- **打包**：188 模块 2800KB，`node --check` 退出码 0。
+
+## 四、总纲回验与冲突裁决（一律以 48 为准）
+
+回验中发现并修正的实现偏差：信标响应后弹窗不关闭 → `GalaxyView.js`/`SystemView.js` modalHandle.close() 修复并复验。三处文档契约笔误按 48 语义裁决并记录于报告：① doc49 的 `from './HourlySystems.js'` 实为 TickPipeline 注册表；② 'space-opera-jacobian' 注册 `stepSpaceOperaJacobian` 包装入口（直呼内核将破坏 doc45 收口契约）；③ monthlyHooks 按 48“全绑定”收录 8 条（doc49 列 6 条会致领袖 XP 停摆）。另有一处**模块图关键裁决**：`ensureSpaceOperaState` 下沉至零依赖叶子 `spaceOperaState.js`（situationEngine 改 import 叶子断环），否则激活器依赖链会在 situationEngine 求值挂起窗口 TDZ 爆破——全序已实测安全。
+
+## 五、竣工状态
+
+工作树含本阶段与 M1-M3 全部改动（未提交，遵从“未要求不提交”）；已知边界（EMPIRE_DEFAULT_PENALTIES 三项 M1 冻结常量、S6 破坏的镜像投影语义、fuzz 运行期 dump 再生）记录于报告 §七。memory 已更新（[void-frontier-m4-live-bridge.md](C:/Users/zcode/.zcode/cli/memories/projects/stella-8d02f86b679aba25/memory/void-frontier-m4-live-bridge.md)）。

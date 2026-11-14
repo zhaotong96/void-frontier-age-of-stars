@@ -14,6 +14,8 @@ import { getMod } from '../factions/modifiers.js';
 import { pay } from '../economy/ledger.js';
 import { colonyStock, creditColony, debitColony, credit, debit } from '../economy/ledger.js';
 import { checkAndProgressObjectives } from '../events/objectives.js';
+// 42 号总纲 §五.2：竣工群像 XP 接线（galacticParagons 不反读本模块，无环）
+import { grantBuildXp } from '../characters/galacticParagons.js';
 
 /** 原料类资源存于殖民地仓储；精炼品/战略资源存于阵营账本 */
 const RAW_RESOURCES = new Set([
@@ -330,6 +332,9 @@ export function tickColonyConstruction(world, colony) {
       if (b) b.state = 'active';
       colony.constructionQueue = q.slice(1);
       emit(world, 'BuildingCompleted', { colonyId: colony.id, defId: job.defId }, 'colony');
+      // —— 42 号总纲 §五.2 竣工 XP 实战可达整改：辖区总督群像入账（grantBuildXp 内
+      //    总督缺省零操作；此处守卫 spaceOperaState —— 金快照/默认流程零漂移）——
+      if (world && world.spaceOperaState) grantBuildXp(world, colony.planetId);
     }
   }
 }

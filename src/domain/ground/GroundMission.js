@@ -41,6 +41,8 @@ import { TERRAIN_FLAGS, buildTerrainField } from './terrainField.js';
 import { checkAndProgressObjectives } from '../events/objectives.js';
 import { sampleTerrain, raycastTerrain } from './surfaceQueries.js';
 import { getSiteInstance } from './missionSiteFactory.js';
+// 42 号总纲 §五.2：陆战群像 XP 结算接线（galacticParagons 不反读本模块，无环）
+import { grantGroundMissionParagonXp } from '../characters/galacticParagons.js';
 
 // ———— 常量 ————
 
@@ -1874,6 +1876,9 @@ export function finishMission(world, mission, outcome = 'success', reason = null
     outcome,
     results,
   }, 'combat');
+  // —— 42 号总纲 §五.2 陆战 XP 实战可达整改：小队群像入账 + 惨败创伤检定
+  //    （首行守卫 world.spaceOperaState —— 金快照/默认流程世界零读取零写入零漂移）——
+  grantGroundMissionParagonXp(world, mission);
   return results;
 }
 

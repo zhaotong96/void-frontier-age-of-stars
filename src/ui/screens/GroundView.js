@@ -667,6 +667,10 @@ export const GroundView = {
     head.appendChild(el('h2', { text: L('ui.ground') }));
     this.headInfo = el('span', { class: 'vf-dim vf-small', text: '' });
     head.appendChild(this.headInfo);
+    // SPEC-PLAN-052 Task 52.2（M4 工位 D）：行星灵魂徽标头栏芯片（16 原型 + 五纪元 +
+    // 8D envVector 首维 + 工业关注度警示灯；未激活太空歌剧/未触达行星恒为空文本）
+    this.headOperaChip = el('span', { class: 'vf-row', style: { gap: '6px' } });
+    head.appendChild(this.headOperaChip);
     head.appendChild(el('span', { class: 'vf-grow' }));
     this.headBtns = el('span');
     head.appendChild(this.headBtns);
@@ -728,6 +732,7 @@ export const GroundView = {
   /** 头部信息与按钮组 */
   _setHead(infoText, btnDefs) {
     if (this.headInfo) this.headInfo.textContent = infoText || '';
+    this._refreshOperaChip();
     if (!this.headBtns) return;
     this.headBtns.innerHTML = '';
     for (const b of btnDefs) {
@@ -4541,3 +4546,39 @@ export const GroundView = {
     this.mission = null;
   },
 };
+
+/* ==================== SPEC-PLAN-052 Task 52.2：行星地表灵魂徽标头栏芯片（M4 工位 D） ==================== */
+
+import { PLANETARY_ARCHETYPES } from '../../content/planetaryArchetypes.js';
+
+/** 五纪元徽章（与 ColonyView 同源口径） */
+const GROUND_EPOCH_ZH = ['蛮荒', '勘探', '工业', '觉醒', '遗产'];
+
+/**
+ * 行星灵魂徽标头栏芯片刷新（_setHead 每次调用触发；doc52 §Task 52.2 GroundView 行契约）：
+ * 当前行星的 16 原型徽标 + 五纪元徽记 + 工业关注度警示灯（0..6 翠绿 / ≥7 高危红色）。
+ * world.spaceOperaState 未激活或行星未挂载 compactState → 芯片清空（零侵入）。
+ */
+export function refreshGroundOperaChip(view) {
+  const chip = view.headOperaChip;
+  if (!chip) return;
+  chip.innerHTML = '';
+  const app = view.app;
+  const w = app && app.world;
+  if (!w || !w.spaceOperaState) return;
+  // 当前行星解析链（与 GroundView._returnToOrbit 同构）：路由目标 → 自由探索 → 任务行星
+  const planetId = view._targetPlanetId || view.freePlanetId
+    || (view.mission && view.mission.planetId) || null;
+  const planet = planetId != null && w.entities.planets ? w.entities.planets[planetId] : null;
+  const compact = planet && planet.compactState;
+  if (!compact) return;
+  const arch = PLANETARY_ARCHETYPES[compact.archetypeId & 0x0f] || null;
+  const attention = compact.colony ? (compact.colony.industrialAttention | 0) : 0;
+  const alert = attention >= 7;
+  chip.appendChild(el('span', { class: 'vf-tag accent', text: '#' + (compact.archetypeId & 0x0f) + ' ' + (arch ? arch.nameZh : '') }));
+  chip.appendChild(el('span', { class: 'vf-tag', text: '纪元 ' + compact.epochStage + ' · ' + (GROUND_EPOCH_ZH[compact.epochStage] || '—') }));
+  chip.appendChild(el('span', {
+    class: alert ? 'vf-tag danger vf-flash' : 'vf-tag ok',
+    text: alert ? '⚠ 关注度 ' + attention : '关注度 ' + attention,
+  }));
+}

@@ -282,6 +282,10 @@ export const ColonyView = {
     this._renderCol1(detail);
     this._renderCol2(detail);
     this._renderCol3(detail);
+    // SPEC-PLAN-052 Task 52.2（M4 工位 D）：行星灵魂 / 16×16 热力图 / 三层垂直建造 /
+    // 专项决策（colonyDetail.spaceOpera 投影缺失时 renderSpaceOperaColonyPanel 返回 null）
+    const soPanel = renderSpaceOperaColonyPanel(this, detail);
+    if (soPanel) this._col2.appendChild(soPanel);
     this._renderGovernancePanel(detail);
 
     this._bodyEl.scrollTop = savedTop;
@@ -802,3 +806,280 @@ export const ColonyView = {
     this._col3.appendChild(pLed);
   },
 };
+
+/* ==================== SPEC-PLAN-052 Task 52.2：行星灵魂 / 16×16 热力图 / 三层垂直建造（M4 工位 D） ==================== */
+
+import { unpackTile, URBAN_ZONE_TYPES } from '../../domain/planets/planetStateSchema.js';
+
+/** 16×16 覆盖层（Bits 12–15 之外的 overlayId Bits 22–25）配色（doc52 §Task 52.2 §2） */
+const OVERLAY_STYLE = [
+  null,                          // 0 无
+  ['#39c46a', '#e84fd8'],        // 1 共生菌丝网（墨绿/荧光粉）
+  ['#ff5722', '#ff9800'],        // 2 喷发熔岩流（熔融橙红）
+  ['#bfe8ff', '#7fd4ff'],        // 3 极寒冰封（苍白冰蓝）
+  ['#a06bff', '#4fd8e8'],        // 4 先驱者晶格（棱镜青紫）
+  ['#7a5cff', '#b0ff59'],        // 5 索林虫族菌毯
+  ['#8d9a7f', '#c9d4b8'],        // 6 工业毒雾
+  ['#5a4633', '#8a6d4d'],        // 7 地下坍塌坑洞
+];
+
+/** 五纪元徽章（doc52：Epoch 0 蛮荒 → 4 遗产） */
+const EPOCH_ZH = ['蛮荒', '勘探', '工业', '觉醒', '遗产'];
+
+/** envVector 8 维短标（doc44 位段表语义） */
+const ENV_DIMS = ['构造应力', '水文活性', '大气密度', '辐射本底', '热流扰动', '矿物饱和', '生物繁茂度', '工业扰动'];
+
+/** 轨道设施类型中文 */
+const FACILITY_ZH = { 0: '空置', 1: '轨道居住站', 2: '黑洞观测站' };
+
+/** 实体 id → 数字后缀（commandSchemas 整数 ID 契约） */
+function numIdCv(id) {
+  const m = /(\d+)$/.exec(String(id == null ? '' : id));
+  return m ? parseInt(m[1], 10) : 0;
+}
+
+/**
+ * 太空歌剧行星灵魂面板（doc52 §Task 52.2 逐条契约；colonyDetail.spaceOpera 投影消费）：
+ *  1. 行星灵魂头栏：16 原型中英文名 + 五纪元徽章 + 8D envVector 进度条条带 +
+ *     工业关注度警示灯（0..6 翠绿稳态；>=7 高危红色警报闪烁）；
+ *  2. 16×16 紧凑地表网格热力图（256 Tile 位掩码：地形/动态覆盖层/护盾/道路）；
+ *  3. 三层垂直空间操作卡：轨道层 ConstructOrbitalFacility / 城市功能区
+ *     ConfigureUrbanZone / 深层地壳 ExcavateSubterraneanLayer；
+ *  4. 专项决策按钮：TriggerTerraformingPhase / EnactColonyMartialLaw /
+ *     PurgeRadicalCell / LockQuantumPhasePlanet。
+ * colonyDetail.spaceOpera 投影为 null（未激活太空歌剧/未触达行星）→ 返回 null（零侵入）。
+ *
+ * @param {object} view - ColonyView 实例（消费 view.app / view._forceRefresh）
+ * @param {object} detail - colonyDetail 只读投影
+ * @returns {Element|null} 面板根元素
+ */
+export function renderSpaceOperaColonyPanel(view, detail) {
+  const app = view.app;
+  const w = app.world;
+  const so = detail && detail.spaceOpera;
+  if (!w || !so) return null;
+  const planetId = numIdCv(so.planetId || (detail.planet && detail.planet.id));
+  const planet = w.entities.planets[detail.planet && detail.planet.id];
+
+  const wrap = el('div', { class: 'vf-col', style: { minWidth: '0', gap: '10px' } });
+
+  /* —— 1. 行星灵魂头栏 —— */
+  const pSoul = panel({ title: '行星灵魂 · ' + (so.archetypeNameZh || '未知原型'), open: true, dense: true });
+  const attention = so.industrialAttention | 0;
+  const alert = attention >= 7;
+  pSoul.appendChild(el('div', { class: 'vf-row' }, [
+    el('span', { class: 'vf-tag accent', text: '#' + (so.archetypeId | 0) + ' ' + (so.archetypeNameZh || '') }),
+    el('span', { class: alert ? 'vf-tag danger vf-flash' : 'vf-tag ok', text: alert
+      ? '⚠ 工业关注度 ' + attention + '（激进支部已激活）'
+      : '工业关注度 ' + attention + '（0..6 稳态）' }),
+    el('span', { class: 'vf-tag', text: '纪元 ' + (so.epochStage | 0) + ' · ' + (EPOCH_ZH[so.epochStage | 0] || '—') }),
+  ]));
+  pSoul.appendChild(el('div', { class: 'vf-faint vf-small', text: alert
+    ? '高危警报：激进潜伏支部处于 ACTIVE —— 建议执行「清剿激进潜伏支部」。'
+    : '专属物理法则原型已生效；工业关注度满 7 将触发激进支部激活（红灯闪烁）。' }));
+  // 8D envVector 微型进度条条带
+  const envRow = el('div', { class: 'vf-row', style: { flexWrap: 'wrap', gap: '4px', marginTop: '4px' } });
+  for (let i = 0; i < so.envVector.length; i++) {
+    const v = Number(so.envVector[i]) || 0;
+    envRow.appendChild(el('div', { class: 'vf-col', style: { flex: '1', minWidth: '64px' } }, [
+      progressBarSO(v, 100, v >= 75 ? '#ff5722' : v >= 50 ? '#e8b04f' : '#4fd8e8'),
+      el('div', { class: 'vf-faint', style: { fontSize: '9px', textAlign: 'center' }, text: ENV_DIMS[i] + ' ' + v.toFixed(0) }),
+    ]));
+  }
+  pSoul.appendChild(envRow);
+  wrap.appendChild(pSoul);
+
+  /* —— 2. 16×16 紧凑地表网格热力图（256 Tile 位掩码） —— */
+  const pGrid = panel({ title: '16×16 地表网格热力图（256 Tile 位掩码）', open: true, dense: true });
+  pGrid.appendChild(buildHeatmap(so.tiles));
+  const legend = el('div', { class: 'vf-row', style: { flexWrap: 'wrap', gap: '6px', marginTop: '4px' } });
+  const LEGEND = [
+    ['#39c46a', '菌丝覆盖'], ['#ff5722', '熔岩相变'], ['#bfe8ff', '冰盖封冻'],
+    ['#a06bff', '晶格侵蚀'], ['#7a5cff', '虫毯'], ['#7fd4ff', '护盾力场'], ['#d9c27a', '交通干线'],
+  ];
+  for (const [color, label] of LEGEND) {
+    legend.appendChild(el('span', { class: 'vf-row', style: { gap: '3px' } }, [
+      el('span', { style: { display: 'inline-block', width: '8px', height: '8px', background: color, borderRadius: '2px' } }),
+      el('span', { class: 'vf-faint', style: { fontSize: '9px' }, text: label }),
+    ]));
+  }
+  pGrid.appendChild(legend);
+  wrap.appendChild(pGrid);
+
+  /* —— 3. 三层垂直空间操作卡 —— */
+  const pVert = panel({ title: '三层垂直空间建造（轨道 ⟷ 城市 ⟷ 深层地壳）', open: true, dense: true });
+  // Layer 1：轨道层
+  const facs = so.orbitalLayer && Array.isArray(so.orbitalLayer.facilities) ? so.orbitalLayer.facilities : [];
+  pVert.appendChild(el('div', { class: 'vf-dim vf-small', text: 'Layer 1 · 轨道层（设施 ' + facs.filter((f) => f > 0).length + '/' + facs.length + '）' }));
+  const orbitRow = el('div', { class: 'vf-row', style: { flexWrap: 'wrap', gap: '4px' } });
+  for (let slot = 0; slot < Math.min(facs.length, 8); slot++) {
+    orbitRow.appendChild(el('button', {
+      class: 'vf-btn small',
+      text: '槽 ' + slot + '：' + (FACILITY_ZH[facs[slot]] || '空置') + (facs[slot] > 0 ? '' : ' → 建居住站'),
+      disabled: facs[slot] > 0,
+      title: 'ConstructOrbitalFacility：在轨道槽 ' + slot + ' 建造轨道居住站（ORBITAL_HABITAT）',
+      on: {
+        click: () => {
+          app.dispatch('ConstructOrbitalFacility', { planetId, slotIndex: slot, facilityType: 1 });
+          view._forceRefresh();
+        },
+      },
+    }));
+  }
+  pVert.appendChild(orbitRow);
+  // Layer 2：城市功能区（2 个下拉选择器）
+  const zones = so.urbanZones && Array.isArray(so.urbanZones.zoneSlots) ? so.urbanZones.zoneSlots : [0, 0];
+  for (let zi = 0; zi < zones.length; zi++) {
+    const sel = el('select', { 'aria-label': '城市功能区槽位 ' + zi, style: { maxWidth: '220px' } });
+    for (const zt of [0, 1, 2, 3, 4]) {
+      const opt = el('option', { value: String(zt), text: (URBAN_ZONE_TYPES[zt] || '空置') + '（' + zt + '）' });
+      sel.appendChild(opt);
+    }
+    sel.value = String(zones[zi] | 0);
+    const row = el('div', { class: 'vf-row', style: { gap: '6px', marginTop: '4px' } }, [
+      el('span', { class: 'vf-dim vf-small', text: 'Layer 2 · 功能区槽 ' + zi }),
+      sel,
+      el('button', {
+        class: 'vf-btn small',
+        text: '配置',
+        title: 'ConfigureUrbanZone：写入功能区并重算岗位容量/舒适度/犯罪率',
+        on: {
+          click: () => {
+            app.dispatch('ConfigureUrbanZone', { planetId, zoneSlot: zi, zoneType: parseInt(sel.value, 10) });
+            view._forceRefresh();
+          },
+        },
+      }),
+    ]);
+    pVert.appendChild(row);
+  }
+  // Layer 3：深层地壳逐层掘进
+  const depth = so.subterraneanLayer ? so.subterraneanLayer.depthTier : 0;
+  pVert.appendChild(el('div', { class: 'vf-row', style: { gap: '6px', marginTop: '6px' } }, [
+    el('span', { class: 'vf-dim vf-small', text: 'Layer 3 · 深层地壳（当前 Tier ' + depth + '/3 · 采掘应力 ' + (so.subterraneanLayer ? Math.round(so.subterraneanLayer.excavationStress) : 0) + '）' }),
+    depth < 3 ? el('button', {
+      class: 'vf-btn small',
+      text: '掘进 Tier ' + (depth + 1),
+      title: 'ExcavateSubterraneanLayer：逐层掘进（envVector[0] +8 / envVector[7] +12 / 应力 +25）',
+      on: {
+        click: () => {
+          app.dispatch('ExcavateSubterraneanLayer', { planetId, depthTier: depth + 1 });
+          view._forceRefresh();
+        },
+      },
+    }) : el('span', { class: 'vf-tag ok', text: '已达 Tier 3（先驱者地宫层全解锁）' }),
+  ]));
+  wrap.appendChild(pVert);
+
+  /* —— 4. 专项决策按钮 —— */
+  const pAct = panel({ title: '行星专项决策', open: true, dense: true });
+  const actRow1 = el('div', { class: 'vf-row', style: { flexWrap: 'wrap', gap: '4px' } });
+  actRow1.appendChild(el('button', {
+    class: 'vf-btn small',
+    text: '气候重塑阶段跃迁（5000 能量）',
+    title: 'TriggerTerraformingPhase：envVector 向原始基线半程推进 + 纪元 +1',
+    on: {
+      click: () => {
+        app.dispatch('TriggerTerraformingPhase', { planetId, targetArchetype: so.archetypeId | 0 });
+        view._forceRefresh();
+      },
+    },
+  }));
+  actRow1.appendChild(el('button', {
+    class: 'vf-btn small',
+    text: '戒严镇压（CRACK_DOWN）',
+    title: 'EnactColonyMartialLaw：镇压或全面戒严（立即修正稳定度与幸福度）',
+    on: {
+      click: () => {
+        app.dispatch('EnactColonyMartialLaw', { planetId, crackDownLevel: 1 });
+        view._forceRefresh();
+      },
+    },
+  }));
+  actRow1.appendChild(el('button', {
+    class: 'vf-btn small danger',
+    text: '清剿激进潜伏支部',
+    disabled: !alert,
+    title: alert ? 'PurgeRadicalCell（军事路线：体系内舰队总战力 ≥ 50）' : '工业关注度未达 7，无活跃细胞可清剿',
+    on: {
+      click: () => {
+        app.dispatch('PurgeRadicalCell', { planetId, useMilitaryForce: true });
+        view._forceRefresh();
+      },
+    },
+  }));
+  // 量子相位锁定（仅量子游离天体 #2 可用）
+  const isQuantum = (so.archetypeId | 0) === 2;
+  actRow1.appendChild(el('button', {
+    class: 'vf-btn small',
+    text: '量子相位锁定',
+    disabled: !isQuantum,
+    title: isQuantum ? 'LockQuantumPhasePlanet：派遣科研舰锁定量子相位' : '仅量子游离天体（#2）可用',
+    on: {
+      click: () => {
+        const fleetId = resolveScienceFleetId(w, planet);
+        if (fleetId == null) return;
+        app.dispatch('LockQuantumPhasePlanet', { planetId, fleetId, engageLock: true });
+        view._forceRefresh();
+      },
+    },
+  }));
+  pAct.appendChild(actRow1);
+  wrap.appendChild(pAct);
+  return wrap;
+}
+
+/** 16×16 热力图 DOM 网格（unpackTile 位段解码：覆盖层/护盾/道路） */
+function buildHeatmap(tiles) {
+  const grid = el('div', {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(16, 1fr)',
+      gap: '1px',
+      maxWidth: '320px',
+      border: '1px solid rgba(113,131,154,0.4)',
+      borderRadius: '4px',
+      overflow: 'hidden',
+    },
+  });
+  for (let i = 0; i < 256; i++) {
+    const u = unpackTile((tiles && tiles[i]) >>> 0);
+    const ov = OVERLAY_STYLE[u.overlayId] || null;
+    const bg = ov ? ov[0] : 'rgba(113,131,154,0.15)';
+    const shield = (u.statusFlags & 0x04) !== 0; // STATUS_FLAG.SHIELDED
+    const road = (u.statusFlags & 0x08) !== 0; // STATUS_FLAG.ROAD_LINKED
+    const cell = el('div', {
+      title: 'Tile #' + i + ' · biome ' + u.biomeId + ' · elev ' + u.elevation
+        + ' · hazard ' + u.hazardLevel + ' · deposit ' + u.depositCode
+        + ' · building ' + u.buildingId + ' · overlay ' + u.overlayId,
+      style: {
+        aspectRatio: '1 / 1',
+        background: bg,
+        boxShadow: shield ? 'inset 0 0 0 1.5px #7fd4ff' : (road ? 'inset 0 0 0 1.5px #d9c27a' : 'none'),
+      },
+    });
+    grid.appendChild(cell);
+  }
+  return grid;
+}
+
+/** 轻量进度条（ColonyView 局部 envVector 条带） */
+function progressBarSO(value, max, color) {
+  const pct = Math.max(0, Math.min(100, (Number(value) || 0) / Math.max(1, Number(max) || 1) * 100));
+  const outer = el('div', { style: { height: '5px', background: 'rgba(113,131,154,0.25)', borderRadius: '3px', overflow: 'hidden' } });
+  outer.appendChild(el('div', { style: { height: '100%', width: pct + '%', background: color } }));
+  return outer;
+}
+
+/** 量子相位锁定用科研舰队解析（玩家派系、role science、驻防目标星系优先） */
+function resolveScienceFleetId(w, planet) {
+  const fleets = (w.entities && w.entities.fleets) || {};
+  let fallback = null;
+  for (const key of Object.keys(fleets).sort()) {
+    const f = fleets[key];
+    if (!f || f.factionId !== w.playerFactionId || f.role !== 'science') continue;
+    if (planet && f.systemId === planet.systemId) return numIdCv(f.id);
+    if (!fallback) fallback = f;
+  }
+  return fallback ? numIdCv(fallback.id) : null;
+}

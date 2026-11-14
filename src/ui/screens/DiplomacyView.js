@@ -159,6 +159,11 @@ export const DiplomacyView = {
       cards.appendChild(this._factionCard(f));
     }
     body.appendChild(cards);
+
+    // SPEC-PLAN-051 Task 51.3（M4 工位 C）：兰兹拉德大议会 / CHOAM / 宫殿间谍网 /
+    // 终局天灾面板 —— world.spaceOperaState 未激活时整节不渲染（零侵入）
+    const soPanel = renderSpaceOperaDiplomacyPanel(this);
+    if (soPanel) body.appendChild(soPanel);
   },
 
   // —— 战争面板 ——————————————————————————————————
@@ -359,3 +364,236 @@ export const DiplomacyView = {
     return row;
   },
 };
+
+/* ==================== SPEC-PLAN-051 Task 51.3：兰兹拉德 / CHOAM / 间谍网 / 终局天灾（M4 工位 C） ==================== */
+
+import { el as elSO } from '../components/dom.js';
+import { panel as panelSO } from '../components/panels.js';
+import { LANDSRAAD_BILL_KINDS, ENDGAME_CRISIS_KINDS } from '../../domain/diplomacy/galacticSenateAndCrisisArc.js';
+
+/** 法案种类中文 */
+const BILL_ZH = {
+  CHARTER_SANCTION: '贸易禁运制裁案（SANCTION）',
+  CHARTER_SUBSIDY: '工业补贴拨款案（SUBSIDY）',
+  CHARTER_MANDATE: '联合远征授权案（MANDATE）',
+};
+
+/** 终局天灾中文 */
+const CRISIS_ZH = {
+  PRETHORYN: '索林原虫感染（净化作战进行中）',
+  UNBIDDEN: '高维恶魔锚点（异维入侵进行中）',
+  CONTINGENCY: '肃正协议幽灵信号（机械叛乱进行中）',
+};
+
+/** 派系键 → 展示名（未知回退原文） */
+function factionLabel(w, fid) {
+  const f = w && w.entities && w.entities.factions ? w.entities.factions[fid] : null;
+  return (f && f.name) || String(fid);
+}
+
+/**
+ * 太空歌剧外交面板（doc51 §Task 51.3 逐条契约）：
+ *  1. 兰兹拉德大议会与 CHOAM 暗战面板：standing 选票权重条、活跃宪章法案、三类提案
+ *     按钮（ProposeLandsraadBill）、CHOAM 买入/抛售 5%（AdjustChoamShares）、
+ *     私掠委任状签署（SignCommission）、辛迪加地下分部（EstablishSyndicateBranch）；
+ *  2. 宫殿间谍网与特种暗杀面板：间谍翼升级（UpgradePalaceEspionage）、逐派系升层
+ *     （LayerUpSpyNetwork）、双面间谍（PlantDoubleAgent）、斩首刺杀（Assassinate）；
+ *  3. 三大终局天灾预警与作战态势卡 + 巨兽凯旋大游行（ManageLeviathanParade）。
+ * world.spaceOperaState 未激活 → 返回 null（零侵入）。
+ */
+export function renderSpaceOperaDiplomacyPanel(view) {
+  const app = view.app;
+  const w = app.world;
+  if (!w || !w.spaceOperaState) return null;
+  const so = w.spaceOperaState;
+  const landsraad = so.landsraad && typeof so.landsraad === 'object' ? so.landsraad : {};
+  const standing = Number.isFinite(landsraad.standing) ? landsraad.standing : 0;
+  const choam = Number.isFinite(landsraad.choamShares) ? landsraad.choamShares : 0;
+  const spy = so.palaceEspionage && typeof so.palaceEspionage === 'object' ? so.palaceEspionage : {};
+  const spyNets = spy.spyNetworks && typeof spy.spyNetworks === 'object' ? spy.spyNetworks : {};
+  const otherFactions = Object.keys((w.entities && w.entities.factions) || {})
+    .sort()
+    .filter((fid) => fid !== w.playerFactionId);
+
+  const wrap = elSO('div', { class: 'vf-col' });
+
+  /* —— 1. 兰兹拉德大议会与 CHOAM 暗战面板 —— */
+  const pLan = panelSO({ title: '兰兹拉德大议会与 CHOAM 暗战', open: true, dense: true });
+  pLan.appendChild(elSO('div', { class: 'vf-col', style: { margin: '2px 0 6px' } }, [
+    elSO('div', { class: 'vf-row' }, [
+      elSO('span', { class: 'vf-small', text: '议会地位声望（standing）' }),
+      elSO('span', { class: 'vf-mono vf-small', text: String(Math.round(standing)) + '/100' }),
+    ]),
+    progressBarSO(standing, 100, standing >= 10 ? 'ok' : 'warn'),
+  ]));
+  const activeBill = landsraad.activeBill && typeof landsraad.activeBill === 'object' ? landsraad.activeBill : null;
+  if (activeBill) {
+    pLan.appendChild(elSO('div', { class: 'vf-row' }, [
+      elSO('span', { class: 'vf-tag warn', text: '活跃议案 #' + activeBill.id + '：' + (BILL_ZH[activeBill.kind] || activeBill.kind) + '（月末表决）' }),
+    ]));
+  } else {
+    pLan.appendChild(elSO('div', { class: 'vf-faint vf-small', text: '当前无活跃宪章法案（standing ≥ 10 可提案，月末 standing 加权表决）。' }));
+  }
+  const billRow = elSO('div', { class: 'vf-row', style: { flexWrap: 'wrap', gap: '4px' } });
+  for (const kind of LANDSRAAD_BILL_KINDS) {
+    billRow.appendChild(elSO('button', {
+      class: 'vf-btn small',
+      text: '提案：' + ((BILL_ZH[kind] || kind).split('（')[0]),
+      disabled: standing < 10 || !!activeBill,
+      title: standing < 10 ? '兰兹拉德 standing 不足 10，无提案席位' : 'ProposeLandsraadBill（月末表决）',
+      on: { click: () => { app.dispatch('ProposeLandsraadBill', { kind }); view._rebuild(); } },
+    }));
+  }
+  pLan.appendChild(billRow);
+  pLan.appendChild(elSO('div', { class: 'vf-row', style: { marginTop: '6px' } }, [
+    elSO('span', { class: 'vf-grow vf-small', text: 'CHOAM 泛星系贸易垄断持股：' + Math.round(choam) + '%（≥30 贸易分红 ×1.15 / ≥50 禁运杠杆）' }),
+  ]));
+  const choamRow = elSO('div', { class: 'vf-row', style: { gap: '6px' } });
+  choamRow.appendChild(elSO('button', {
+    class: 'vf-btn small primary', text: '买入 5% 股份',
+    title: 'AdjustChoamShares +5（扣减信用点）',
+    on: { click: () => { app.dispatch('AdjustChoamShares', { delta: 5 }); view._rebuild(); } },
+  }));
+  choamRow.appendChild(elSO('button', {
+    class: 'vf-btn small', text: '抛售 5% 股份',
+    title: 'AdjustChoamShares −5（回收信用点）',
+    on: { click: () => { app.dispatch('AdjustChoamShares', { delta: -5 }); view._rebuild(); } },
+  }));
+  pLan.appendChild(choamRow);
+  const commRow = elSO('div', { class: 'vf-row', style: { flexWrap: 'wrap', gap: '4px', marginTop: '6px' } });
+  for (const fid of otherFactions.slice(0, 4)) {
+    commRow.appendChild(elSO('button', {
+      class: 'vf-btn small',
+      text: '签署私掠委任状：' + factionLabel(w, fid),
+      title: 'SignCommission（月饷按舰队规模领取 + 军用船体购买权）',
+      on: { click: () => { app.dispatch('SignCommission', { factionId: fid }); view._rebuild(); } },
+    }));
+  }
+  pLan.appendChild(commRow);
+  pLan.appendChild(elSO('button', {
+    class: 'vf-btn small',
+    text: '建立辛迪加地下分部（首个已殖民星）',
+    title: 'EstablishSyndicateBranch（Shady Contacts：解密/加密 +1）',
+    on: {
+      click: () => {
+        const target = firstColonizedPlanetId(w);
+        if (target == null) return;
+        app.dispatch('EstablishSyndicateBranch', { targetPlanetId: target, branchType: 'smuggling_den' });
+        view._rebuild();
+      },
+    },
+  }));
+  wrap.appendChild(pLan);
+
+  /* —— 2. 宫殿间谍网络与特种暗杀面板 —— */
+  const pSpy = panelSO({ title: '宫殿间谍网与特种行动', open: true, dense: true });
+  pSpy.appendChild(elSO('div', { class: 'vf-row' }, [
+    elSO('span', { class: 'vf-grow vf-small', text: spy.upgraded
+      ? '宫殿间谍翼：已升级（特工招募 ×1.5）'
+      : '宫殿间谍翼：未升级（8000 信用点）' }),
+    elSO('button', {
+      class: 'vf-btn small',
+      text: '升级宫殿间谍翼',
+      disabled: spy.upgraded === true,
+      title: 'UpgradePalaceEspionage（精确扣 8000 信用点）',
+      on: { click: () => { app.dispatch('UpgradePalaceEspionage', {}); view._rebuild(); } },
+    }),
+  ]));
+  for (const fid of otherFactions.slice(0, 4)) {
+    const net = spyNets[fid] && typeof spyNets[fid] === 'object' ? spyNets[fid] : { layers: 0, doubleAgent: false };
+    const row = elSO('div', { class: 'vf-row', style: { gap: '4px', borderTop: '1px solid rgba(29,42,58,0.35)', paddingTop: '4px' } });
+    row.appendChild(elSO('span', { class: 'vf-grow vf-small', text: factionLabel(w, fid)
+      + ' · 渗透深度 Tier ' + (net.layers || 0) + '/3'
+      + (net.doubleAgent === true ? ' · 双面间谍已植入' : '') }));
+    row.appendChild(elSO('button', {
+      class: 'vf-btn small', text: '深度渗透',
+      disabled: (net.layers || 0) >= 3,
+      title: 'LayerUpSpyNetwork（每层扣 10 情报点；≥2 层使目标派系表决弃权）',
+      on: { click: () => { app.dispatch('LayerUpSpyNetwork', { targetFactionId: fid }); view._rebuild(); } },
+    }));
+    row.appendChild(elSO('button', {
+      class: 'vf-btn small', text: '植入双面间谍',
+      disabled: (net.layers || 0) < 3 || net.doubleAgent === true,
+      title: 'PlantDoubleAgent（满 3 层前置；扣 20 情报点）',
+      on: { click: () => { app.dispatch('PlantDoubleAgent', { targetFactionId: fid }); view._rebuild(); } },
+    }));
+    row.appendChild(elSO('button', {
+      class: 'vf-btn small danger', text: '执行斩首刺杀',
+      disabled: !((net.layers || 0) >= 3 && net.doubleAgent === true),
+      title: 'Assassinate（渗透度 ≥ 80：满 3 层 + 双面间谍 → 目标派系首脑移除）',
+      on: { click: () => { app.dispatch('Assassinate', { targetFactionId: fid }); view._rebuild(); } },
+    }));
+    pSpy.appendChild(row);
+  }
+  wrap.appendChild(pSpy);
+
+  /* —— 3. 三大终局天灾预警与巨兽凯旋大游行 —— */
+  const ec = so.endgameCrisis && typeof so.endgameCrisis === 'object' ? so.endgameCrisis : {};
+  const activeKind = ec.active && typeof ec.active === 'object' ? ec.active.kind : null;
+  const pCrisis = panelSO({ title: '终局天灾态势与总动员', open: !!activeKind, dense: true });
+  if (activeKind) {
+    pCrisis.appendChild(elSO('div', { class: 'vf-warn', text: '⚠ 天灾进行中：' + (CRISIS_ZH[activeKind] || activeKind) }));
+    if (ec.ghostSignalActive === true) {
+      pCrisis.appendChild(elSO('div', { class: 'vf-warn vf-small', text: '肃正协议幽灵信号活跃 —— 全银河合成体单位叛乱风险。' }));
+    }
+  } else {
+    pCrisis.appendChild(elSO('div', { class: 'vf-faint vf-small', text: '三大终局天灾监测：'
+      + ENDGAME_CRISIS_KINDS.map((k) => CRISIS_ZH[k] || k).join(' / ')
+      + '。当前无天灾态势（最早第 120 月且殖民占比 ≥ 25% 后有机触发）。' }));
+  }
+  // 巨兽凯旋大游行（LEVIATHAN_PARADE 活跃局势）
+  const sitBag = so.situations && typeof so.situations === 'object' ? so.situations : {};
+  const parade = Object.keys(sitBag).sort()
+    .map((k) => sitBag[k])
+    .find((st) => st && st.resolvedTick == null && st.systemArcId === 'LEVIATHAN_PARADE');
+  if (parade) {
+    pCrisis.appendChild(elSO('div', { class: 'vf-row', style: { marginTop: '4px' } }, [
+      elSO('span', { class: 'vf-grow vf-small', text: '巨兽凯旋大游行进行中（局势 #' + parade.id
+        + ' · 进度 ' + Math.round(Number(parade.progress) || 0) + '）' }),
+    ]));
+    const paradeRow = elSO('div', { class: 'vf-row', style: { gap: '4px' } });
+    const PARADE_ACTIONS = [
+      ['ENCOURAGE', '鼓励游行（+6/月）'],
+      ['SUPPRESS', '压制游行（−4/月）'],
+      ['REORGANIZE', '重整路线（1000 凝聚力）'],
+    ];
+    for (const [action, label] of PARADE_ACTIONS) {
+      paradeRow.appendChild(elSO('button', {
+        class: 'vf-btn small',
+        text: label,
+        title: 'ManageLeviathanParade → ' + action,
+        on: { click: () => { app.dispatch('ManageLeviathanParade', { situationId: Number(parade.id), action }); view._rebuild(); } },
+      }));
+    }
+    pCrisis.appendChild(paradeRow);
+  }
+  wrap.appendChild(pCrisis);
+  return wrap;
+}
+
+/** 轻量进度条（DiplomacyView 局部；避免引入 charts 依赖） */
+function progressBarSO(value, max, tone) {
+  const pct = Math.max(0, Math.min(100, (Number(value) || 0) / Math.max(1, Number(max) || 1) * 100));
+  const color = tone === 'ok' ? '#5fd39a' : tone === 'warn' ? '#e8b04f' : '#71839a';
+  const outer = elSO('div', {
+    style: { height: '6px', background: 'rgba(113,131,154,0.25)', borderRadius: '3px', overflow: 'hidden' },
+  });
+  outer.appendChild(elSO('div', {
+    style: { height: '100%', width: pct + '%' },
+  }));
+  return outer;
+}
+
+/** 首个玩家已殖民行星 id（数字后缀口径；EstablishSyndicateBranch 缺省目标） */
+function firstColonizedPlanetId(w) {
+  const planets = (w.entities && w.entities.planets) || {};
+  for (const key of Object.keys(planets).sort()) {
+    const p = planets[key];
+    const compact = p && p.compactState;
+    if (compact && compact.colony && compact.colony.ownerFactionId === w.playerFactionId) {
+      const m = /(\d+)$/.exec(String(p.id == null ? '' : p.id));
+      return m ? parseInt(m[1], 10) : p.id;
+    }
+  }
+  return null;
+}

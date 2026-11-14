@@ -233,6 +233,8 @@ export const GalaxyView = {
     const click = (e) => {
       if (drag.moved) { drag.moved = false; return; } // 拖拽结束不触发选择
       const p = toLocal(e);
+      // SPEC-PLAN-052 Task 52.1：信标命中优先于星系拾取（命中 → 打开信标交互弹窗）
+      if (pickSpaceOperaBeacon(this, p.x, p.y)) return;
       const hit = renderer.pick(p.x, p.y);
       if (hit) this.app.select('system', hit);
       else this.app.select(null); // 空白处清除选择
@@ -285,6 +287,9 @@ export const GalaxyView = {
       marketSystemIds: this._marketIds,
     };
     renderer.render(cm.ctx, cm.width, cm.height, this._snap, this._layers, opts);
+    // SPEC-PLAN-052 Task 52.1：四频段信标呼吸脉冲 + 5 类自主生态舰队轨迹叠加层
+    //（世界未激活太空歌剧时 drawSpaceOperaOverlay 内部零绘制）
+    drawSpaceOperaOverlay(this, cm.ctx, cm.width, cm.height);
   },
 
   /**
@@ -364,4 +369,188 @@ export const GalaxyView = {
 import { Tutorial } from '../shell/Tutorial.js';
 function tutorialApi() {
   return { Tutorial };
+}
+
+/* ==================== SPEC-PLAN-052 Task 52.1：星图信标流脉冲与自主舰队轨迹（M4 工位 D） ==================== */
+
+import { showModal } from '../components/modal.js';
+import { spaceOperaView } from '../../simulation/ViewModels.js';
+
+/** 信标脉冲呼吸半径（canvas 逻辑像素；命中半径 = PULSE_MAX + 6） */
+const PULSE_MIN = 6;
+const PULSE_MAX = 14;
+
+/**
+ * 星图叠加层绘制：≥15 条四频段子空间信标呼吸脉冲光环 + 5 类自主生态舰队航线图标
+ * （doc52 §Task 52.1 §2：频段着色 #ff4444 / #ffd700 / #00e5ff / #e040fb；palette
+ * 映射到实际 FREQ_* 枚举见 ViewModels.BEACON_FREQ_ZH）。每帧由 _drawFrame 调用；
+ * 世界未激活太空歌剧 → 零绘制。坐标取 renderer._projCache（星系屏幕投影，GL/2D 通用）。
+ */
+export function drawSpaceOperaOverlay(view, ctx, w, h) {
+  const world = view.app && view.app.world;
+  if (!world || !world.spaceOperaState) return;
+  const renderer = view._renderer;
+  const proj = renderer && renderer._projCache;
+  if (!proj) return;
+  const so = spaceOperaView(world);
+  if (!so) return;
+  const t = performance.now() / 1000;
+
+  ctx.save();
+
+  // —— 1. 自主生态舰队航线图标（5 类；菱形图标 + 航线虚线）——
+  const FLEET_COLOR = {
+    TRADE_CONVOY: '#ffd700',
+    SMUGGLER_RUNNER: '#ff8a65',
+    PATROL_FLOTILLA: '#4fd8e8',
+    MARKET_EXPEDITION: '#a06bff',
+    BOUNTY_HUNTER: '#ff4444',
+  };
+  for (const f of so.autonomousFleetsList || []) {
+    if (!f.position) continue;
+    const sx = (f.position.x - renderer.view.x) * renderer.view.zoom + w / 2;
+    const sy = (f.position.y - renderer.view.y) * renderer.view.zoom + h / 2;
+    if (sx < -30 || sy < -30 || sx > w + 30 || sy > h + 30) continue;
+    const color = FLEET_COLOR[f.type] || '#71839a';
+    // 航线虚线（origin → 当前位置）
+    const oProj = proj.get(f.origin != null ? findSystemIdByName(view, f.origin) : null);
+    void oProj; // 航线端点由插值 position 覆盖（origin/destination 名称随 tooltip 展示）
+    ctx.fillStyle = color;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy - 5);
+    ctx.lineTo(sx + 5, sy);
+    ctx.lineTo(sx, sy + 5);
+    ctx.lineTo(sx - 5, sy);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(216,230,240,0.92)';
+    ctx.font = '9px "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(f.typeZh + ' → ' + f.destination, sx, sy + 12);
+  }
+
+  // —— 2. 四频段信标呼吸脉冲光环 ——
+  for (const b of so.beaconsList || []) {
+    if (!b.position) continue;
+    const entry = proj.get(b.systemId);
+    let sx;
+    let sy;
+    if (entry && Number.isFinite(entry.sx)) {
+      sx = entry.sx;
+      sy = entry.sy;
+    } else {
+      sx = (b.position.x - renderer.view.x) * renderer.view.zoom + w / 2;
+      sy = (b.position.y - renderer.view.y) * renderer.view.zoom + h / 2;
+    }
+    if (sx < -30 || sy < -30 || sx > w + 30 || sy > h + 30) continue;
+    const breath = PULSE_MIN + (PULSE_MAX - PULSE_MIN) * (0.5 + 0.5 * Math.sin(t * 2.4 + (b.id % 7)));
+    ctx.strokeStyle = b.color || '#71839a';
+    ctx.globalAlpha = 0.85;
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.arc(sx, sy, breath, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 0.25;
+    ctx.fillStyle = b.color || '#71839a';
+    ctx.beginPath();
+    ctx.arc(sx, sy, breath * 0.55, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    // 频段解调小字（首字）
+    ctx.fillStyle = 'rgba(216,230,240,0.85)';
+    ctx.font = '9px "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('◈' + (b.frequencyName || '').slice(0, 2), sx, sy - breath - 4);
+  }
+  ctx.restore();
+}
+
+/**
+ * 信标命中检测（星图点击路径最先调用；命中 → 打开信标交互弹窗并返回 true）。
+ * 命中半径 = PULSE_MAX + 6（呼吸上限外扩 6px 容差）。
+ */
+export function pickSpaceOperaBeacon(view, x, y) {
+  const world = view.app && view.app.world;
+  if (!world || !world.spaceOperaState) return false;
+  const renderer = view._renderer;
+  const cm = view._cm;
+  const proj = renderer && renderer._projCache;
+  if (!proj || !cm) return false;
+  const so = spaceOperaView(world);
+  if (!so) return false;
+  const hitR = PULSE_MAX + 6;
+  for (const b of so.beaconsList || []) {
+    if (!b.position) continue;
+    const entry = proj.get(b.systemId);
+    let sx;
+    let sy;
+    if (entry && Number.isFinite(entry.sx)) {
+      sx = entry.sx;
+      sy = entry.sy;
+    } else {
+      sx = (b.position.x - renderer.view.x) * renderer.view.zoom + cm.width / 2;
+      sy = (b.position.y - renderer.view.y) * renderer.view.zoom + cm.height / 2;
+    }
+    if (Math.hypot(x - sx, y - sy) <= hitR) {
+      openBeaconModal(view, b);
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 信标交互响应弹窗（doc52 §Task 52.1：半透明科幻信标弹窗 —— 标题 / 频段解调内容 /
+ * 交互选项按钮 → RespondSubspaceBeacon）。
+ */
+export function openBeaconModal(view, beacon) {
+  const app = view.app;
+  const w = app.world;
+  const body = document.createElement('div');
+  body.className = 'vf-col';
+  body.style.cssText = 'gap:6px;min-width:320px;';
+  const head = document.createElement('div');
+  head.className = 'vf-row';
+  head.innerHTML = '<span class="vf-tag accent">' + (beacon.frequencyName || '') + '</span>'
+    + '<span class="vf-faint vf-small">' + (beacon.systemName || '') + '</span>';
+  body.appendChild(head);
+  const textEl = document.createElement('div');
+  textEl.className = 'vf-small';
+  textEl.style.cssText = 'white-space:pre-wrap;color:#d8e6f0;background:rgba(15,23,42,0.55);padding:8px;border-radius:6px;border:1px solid rgba(79,216,232,0.35);';
+  textEl.textContent = beacon.text || '';
+  body.appendChild(textEl);
+  const expires = Number.isFinite(beacon.expiresTick) && w ? Math.max(0, beacon.expiresTick - (w.tick || 0)) : null;
+  if (expires != null) {
+    const meta = document.createElement('div');
+    meta.className = 'vf-faint vf-small';
+    meta.textContent = '信号窗口剩余 ' + expires + ' ticks（' + Math.ceil(expires / 24) + ' 游戏日）';
+    body.appendChild(meta);
+  }
+  for (const opt of beacon.options || []) {
+    const btn = document.createElement('button');
+    btn.className = 'vf-btn small primary';
+    btn.textContent = opt.label || opt.id;
+    btn.title = 'RespondSubspaceBeacon → ' + opt.id + (opt.effectHint ? '（' + opt.effectHint + '）' : '');
+    btn.addEventListener('click', () => {
+      app.dispatch('RespondSubspaceBeacon', { beaconId: beacon.id, responseOptionId: opt.id });
+      if (modalHandle && typeof modalHandle.close === 'function') modalHandle.close();
+      view._renderQuickBar && view._renderQuickBar();
+      view._forceRebuild && view._forceRebuild();
+    });
+    body.appendChild(btn);
+  }
+  const modalHandle = showModal({ title: '◈ 子空间信标 · ' + (beacon.title || '未解调信号'), body, wide: false });
+}
+
+/** 星系名 → systemId 反查（航线 origin 端投影回退；O(systems) 单帧少量调用） */
+function findSystemIdByName(view, name) {
+  const w = view.app && view.app.world;
+  const systems = (w && w.entities && w.entities.systems) || {};
+  for (const key of Object.keys(systems)) {
+    if (systems[key] && systems[key].name === name) return key;
+  }
+  return null;
 }
