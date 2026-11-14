@@ -4,7 +4,7 @@
 > **验收对象**：`SPEC-PLAN-043`（总控总纲）+ `SPEC-PLAN-044 / 045 / 046`（M1 / M2 / M3 三卷执行卷）对应全部交付面
 > **上游准绳**：`docs/specs/42_无垠边疆太空歌剧与系统交织调研.md`（总纲准绳，837KB）与 `docs/specs/41_…任务委托书.md`
 > **验收日期**：2026-11-13（本报告所有「实测」均为本次验收会话实跑记录）
-> **工程基线**：项目根 `C:\PUBLIC\stella`，纯 ESM，Node v22.20.0 便携版；金快照基线 `tests/regression/golden.json` hash=`8be8ce2c`（`tests/regression/golden.json:4`）
+> **工程基线**：项目根 `[REDACTED]`，纯 ESM，Node v22.20.0 便携版；金快照基线 `tests/regression/golden.json` hash=`8be8ce2c`（`tests/regression/golden.json:4`）
 > **纪律声明**：本报告不包含任何未经本会话实跑或实读证实的 PASS 声明；所有行号均打开文件逐一核对。
 
 ---
@@ -187,4 +187,4 @@ node tests/tools/build-static-bundle.mjs --rebuild    # 185 模块，2661 KB
 node --check dist/void-frontier.bundle.js             # exit=0
 ```
 
-（全部在 `C:\PUBLIC\stella`、Node v22.20.0 下执行。）
+（全部在 `[REDACTED]`、Node v22.20.0 下执行。）
