@@ -2,7 +2,7 @@
 
 # SPEC-PLAN-048 阶段四（M4）竣工汇报
 
-**验收结论：PASS** —— 47~52 号文档任务全部完成，71 套件 × 3 轮 = **PASS 213 / FAIL 0 / DRIFT 0**，金快照 `8be8ce2c` 零漂移。正式验收报告已落盘：[report-space-opera-m4-live-bridge.md](C:/PUBLIC/stella/docs/reports/report-space-opera-m4-live-bridge.md)（含逐门禁 file:line 台账），终审回归原始日志 [report-m4-full-regression.log](C:/PUBLIC/stella/docs/reports/report-m4-full-regression.log)。
+**验收结论：PASS** —— 47~52 号文档任务全部完成，71 套件 × 3 轮 = **PASS 213 / FAIL 0 / DRIFT 0**，金快照 `8be8ce2c` 零漂移。正式验收报告已落盘：[report-space-opera-m4-live-bridge.md]([REDACTED]/docs/reports/report-space-opera-m4-live-bridge.md)（含逐门禁 file:line 台账），终审回归原始日志 [report-m4-full-regression.log]([REDACTED]/docs/reports/report-m4-full-regression.log)。
 
 ## 一、文档对账（47 为验收输入，48 为总纲，49-52 为执行卷）
 
@@ -32,4 +32,4 @@
 
 ## 五、竣工状态
 
-工作树含本阶段与 M1-M3 全部改动（未提交，遵从“未要求不提交”）；已知边界（EMPIRE_DEFAULT_PENALTIES 三项 M1 冻结常量、S6 破坏的镜像投影语义、fuzz 运行期 dump 再生）记录于报告 §七。memory 已更新（[void-frontier-m4-live-bridge.md](C:/Users/zcode/.zcode/cli/memories/projects/stella-8d02f86b679aba25/memory/void-frontier-m4-live-bridge.md)）。
+工作树含本阶段与 M1-M3 全部改动（未提交，遵从“未要求不提交”）；已知边界（EMPIRE_DEFAULT_PENALTIES 三项 M1 冻结常量、S6 破坏的镜像投影语义、fuzz 运行期 dump 再生）记录于报告 §七。memory 已更新（[void-frontier-m4-live-bridge.md]([REDACTED])）。
