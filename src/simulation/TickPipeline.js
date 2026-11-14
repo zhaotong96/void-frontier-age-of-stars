@@ -56,3 +56,8 @@ export function runYearly(world) {
 export function phaseNames() {
   return hourlyPhases.map((p) => p.name);
 }
+
+/** 月度收口阶段名清单（注册序；SPEC-PLAN-049 CHK-49-04 月度序断言消费） */
+export function monthlyNames() {
+  return monthlyCloses.map((p) => p.name);
+}

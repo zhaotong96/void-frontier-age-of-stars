@@ -231,9 +231,16 @@ export function finishBattle(world, battle, winnerSide) {
     systemId: battle.systemId,
   });
 
+  // —— 42 号总纲 §五.2 太空战役 XP 实战可达整改：双侧舰队指挥官群像入账
+  //    （首行守卫 world.spaceOperaState —— 金快照/默认流程世界零读取零写入零漂移）——
+  grantSpaceBattleParagonXp(world, battle);
+
   delete world.battles.active[battle.id];
 }
 
 // 战术行为注册：安装函数在数组定义之后显式调用（避免循环导入 TDZ）
 import { installCombatBehaviors } from './tactics.js';
 installCombatBehaviors(unitBehaviors, projectileBehaviors);
+
+// 42 号总纲 §五.2：太空战役群像 XP 结算接线（galacticParagons 不反读本模块，无环）
+import { grantSpaceBattleParagonXp } from '../characters/galacticParagons.js';

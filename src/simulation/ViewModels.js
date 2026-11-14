@@ -18,6 +18,8 @@ import { HULLS } from '../content/hulls.js';
 import { MODULES } from '../content/modules.js';
 import { BUILDINGS } from '../content/buildings.js';
 import { BAL } from '../content/constants.js';
+// SPEC-PLAN-052 Task 52.1/52.2（M4 工位 D）：16 大天体原型名称投影（content 只读表，零环）
+import { PLANETARY_ARCHETYPES } from '../content/planetaryArchetypes.js';
 
 /** 殖民地详情 */
 export function colonyDetail(world, colonyId) {
@@ -77,6 +79,47 @@ export function colonyDetail(world, colonyId) {
     })),
     stock, ledger,
     foundedTick: c.foundedTick,
+    // SPEC-PLAN-052 Task 52.2（M4 工位 D）：行星灵魂头栏 / 16×16 热力图 / 三层垂直
+    // 建造卡消费的只读投影（compactState 缺失 → null，视图整节不渲染）
+    spaceOpera: colonySpaceOperaProjection(world, planet),
+  };
+}
+
+/**
+ * 殖民地详情的太空歌剧投影（doc48 §Task 4.3 ColonyView 行契约；doc52 §Task 52.2）：
+ * {archetypeId, archetypeNameZh, archetypeCode, epochStage, envVector[8], tiles[256],
+ *  orbitalLayer, urbanZones, subterraneanLayer, industrialAttention, radicalCellState}
+ */
+function colonySpaceOperaProjection(world, planet) {
+  const compact = planet && planet.compactState;
+  if (!compact) return null;
+  const arch = PLANETARY_ARCHETYPES[compact.archetypeId & 0x0f] || null;
+  const cell = compact.radicalCell && typeof compact.radicalCell === 'object' ? compact.radicalCell : null;
+  return {
+    archetypeId: compact.archetypeId & 0x0f,
+    archetypeNameZh: arch ? arch.nameZh : null,
+    archetypeCode: arch ? arch.code : null,
+    epochStage: Number.isFinite(compact.epochStage) ? compact.epochStage : 0,
+    envVector: Array.isArray(compact.envVector) ? compact.envVector.map((v) => (Number.isFinite(v) ? v : 0)) : [],
+    tiles: Array.isArray(compact.tiles) ? compact.tiles.map((t) => t >>> 0) : [],
+    orbitalLayer: compact.orbitalLayer ? {
+      majorOrbitals: compact.orbitalLayer.majorOrbitals || 0,
+      capitalLevel: compact.orbitalLayer.capitalLevel || 1,
+      hasBlackHoleObservatory: !!compact.orbitalLayer.hasBlackHoleObservatory,
+      facilities: Array.isArray(compact.orbitalLayer.facilities) ? compact.orbitalLayer.facilities.slice() : [],
+    } : null,
+    urbanZones: compact.urbanZones ? {
+      zoneSlots: Array.isArray(compact.urbanZones.zoneSlots) ? compact.urbanZones.zoneSlots.slice() : [0, 0],
+      industryMods: compact.urbanZones.industryMods && typeof compact.urbanZones.industryMods === 'object'
+        ? Object.keys(compact.urbanZones.industryMods).sort() : [],
+    } : null,
+    subterraneanLayer: compact.subterraneanLayer ? {
+      depthTier: compact.subterraneanLayer.depthTier || 0,
+      excavationStress: Number.isFinite(compact.subterraneanLayer.excavationStress) ? compact.subterraneanLayer.excavationStress : 0,
+      vaultUnlockedMask: compact.subterraneanLayer.vaultUnlockedMask || 0,
+    } : null,
+    industrialAttention: compact.colony ? (compact.colony.industrialAttention | 0) : 0,
+    radicalCellState: cell ? (cell.state || 'DORMANT') : 'DORMANT',
   };
 }
 
@@ -103,6 +146,53 @@ export function fleetDetail(world, fleetId) {
     } : null,
     ships: f.shipIds.map((sid) => shipSummary(world, sid)).filter(Boolean),
     commanderId: f.commanderId,
+    // SPEC-PLAN-051/052（M4 工位 C/D）：舰队学说 / 舰船伤痕 / 战役残骸只读投影
+    spaceOpera: fleetSpaceOperaProjection(world, f),
+  };
+}
+
+/**
+ * 舰队详情的太空歌剧投影（doc48 §Task 4.3 FleetView 行契约）：
+ * {patrolHQ:{planetId, planetName, level, doctrine}, ships:[{id, name, dMods, sMods}],
+ *  wreckSites:[{id, systemId, capitalLosses}]}
+ */
+function fleetSpaceOperaProjection(world, f) {
+  const so = world && world.spaceOperaState;
+  if (!so) return null;
+  // 巡逻司令部：舰队驻防星系行星优先，缺省全银河键序第一座 patrolHQ
+  let hqPlanet = null;
+  let fallbackHQ = null;
+  const planets = (world.entities && world.entities.planets) || {};
+  for (const key of Object.keys(planets).sort()) {
+    const p = planets[key];
+    if (!p || !p.patrolHQ) continue;
+    if (f.systemId != null && p.systemId === f.systemId) { hqPlanet = p; break; }
+    if (!fallbackHQ) fallbackHQ = p;
+  }
+  if (!hqPlanet) hqPlanet = fallbackHQ;
+  const ships = (world.entities && world.entities.ships) || {};
+  const shipRows = (f.shipIds || []).map((sid) => {
+    const s = ships[sid];
+    const scars = s && s.scars;
+    return {
+      id: s ? s.id : sid,
+      name: s ? s.name : String(sid),
+      dMods: scars && Array.isArray(scars.dMods) ? scars.dMods.slice() : [],
+      sMods: scars && Array.isArray(scars.sMods) ? scars.sMods.slice() : [],
+    };
+  }).filter((r) => r.dMods.length > 0 || r.sMods.length > 0);
+  const sites = Array.isArray(so.wreckSites) ? so.wreckSites : [];
+  return {
+    patrolHQ: hqPlanet && hqPlanet.patrolHQ ? {
+      planetId: hqPlanet.id,
+      planetName: hqPlanet.name || String(hqPlanet.id),
+      level: hqPlanet.patrolHQ.level || 1,
+      doctrine: { ...(hqPlanet.patrolHQ.doctrine || {}) },
+    } : null,
+    ships: shipRows,
+    wreckSites: sites
+      .filter((wk) => wk && wk.converted == null && (f.systemId == null || wk.systemId === f.systemId))
+      .map((wk) => ({ id: wk.id, systemId: wk.systemId, capitalLosses: wk.capitalLosses || 0 })),
   };
 }
 
@@ -222,7 +312,49 @@ export function diplomacyView(world, factionId) {
     });
   }
   const wars = sortedKeys(world.entities.wars).map((wid) => warSummary(world, wid));
-  return { factions: out, wars };
+  return { factions: out, wars, spaceOperaS7: diplomacyS7Projection(world) };
+}
+
+/**
+ * 外交视图太空歌剧 S7 投影（doc48 §Task 4.3 DiplomacyView 行契约；doc52 §Task 52.3）：
+ * {standing, choamShares, activeBill, lastBill, commissions[], palaceEspionage,
+ *  spyNetworks[], endgameCrisis, unityTreasury}（spaceOperaState 缺失 → null）。
+ */
+function diplomacyS7Projection(world) {
+  const so = world && world.spaceOperaState;
+  if (!so) return null;
+  const landsraad = so.landsraad && typeof so.landsraad === 'object' ? so.landsraad : {};
+  const spy = so.palaceEspionage && typeof so.palaceEspionage === 'object' ? so.palaceEspionage : {};
+  const nets = spy.spyNetworks && typeof spy.spyNetworks === 'object' ? spy.spyNetworks : {};
+  const commissions = so.commissions && typeof so.commissions === 'object'
+    ? Object.keys(so.commissions).sort().map((k) => ({ factionId: k, ...(so.commissions[k] && typeof so.commissions[k] === 'object' ? { signedTick: so.commissions[k].signedTick ?? null } : {}) }))
+    : [];
+  const ec = so.endgameCrisis && typeof so.endgameCrisis === 'object' ? so.endgameCrisis : {};
+  const facs = (world.entities && world.entities.factions) || {};
+  return {
+    standing: Number.isFinite(landsraad.standing) ? landsraad.standing : 0,
+    choamShares: Number.isFinite(landsraad.choamShares) ? landsraad.choamShares : 0,
+    activeBill: landsraad.activeBill && typeof landsraad.activeBill === 'object'
+      ? { id: landsraad.activeBill.id, kind: landsraad.activeBill.kind, proposedMonth: landsraad.activeBill.proposedMonth ?? null } : null,
+    lastBill: landsraad.lastBill && typeof landsraad.lastBill === 'object'
+      ? { id: landsraad.lastBill.id ?? null, kind: landsraad.lastBill.kind ?? null, passed: landsraad.lastBill.passed ?? null } : null,
+    commissions,
+    palaceEspionage: {
+      upgraded: spy.upgraded === true,
+      agentRecruitMult: Number.isFinite(spy.agentRecruitMult) ? spy.agentRecruitMult : 1.0,
+    },
+    spyNetworks: Object.keys(nets).sort().map((fid) => ({
+      factionId: fid,
+      factionName: (facs[fid] && facs[fid].name) || fid,
+      layers: nets[fid] && Number.isFinite(nets[fid].layers) ? nets[fid].layers : 0,
+      doubleAgent: !!(nets[fid] && nets[fid].doubleAgent === true),
+    })),
+    endgameCrisis: {
+      activeKind: ec.active && typeof ec.active === 'object' ? ec.active.kind || null : null,
+      ghostSignalActive: ec.ghostSignalActive === true,
+    },
+    unityTreasury: Number.isFinite(so.unityTreasury) ? so.unityTreasury : 0,
+  };
 }
 
 export function treatySummary(world, tid) {
@@ -276,7 +408,54 @@ export function governmentView(world, factionId) {
     systemCount: sortedKeys(world.entities.systems).filter((sid) => world.entities.systems[sid].ownerFactionId === factionId).length,
     policies: { ...(fac.policies || {}) },
     explainAdmin: explainMod(world, factionId, 'adminCapacity'),
+    // SPEC-PLAN-052（M4 工位 D）：星海群像英雄名录投影（doc48 §Task 4.3 GovernmentView 行契约）
+    paragons: paragonsProjection(world),
   };
+}
+
+/**
+ * 星海群像英雄只读投影（doc48 GovernmentView 行契约）：在编领袖（character.paragon
+ * 已挂载且存活）→ [{id, name, profession, level, xp, xpNext, loyalty, trauma[],
+ * destinyTrait, destinyOffer[], paragonId, mode, legendary, capExempt, capStats}]。
+ */
+function paragonsProjection(world) {
+  const characters = (world.entities && world.entities.characters) || {};
+  const out = [];
+  for (const key of Object.keys(characters).sort()) {
+    const ch = characters[key];
+    const pg = ch && ch.paragon;
+    if (!ch || !pg || ch.health === 'dead') continue;
+    const lvl = Number.isFinite(ch.level) ? ch.level : 1;
+    const xp = Number.isFinite(ch.xp) ? ch.xp : 0;
+    // 在编口径与 leaderCapStats 同源：职业内、非 capExempt、存活
+    const sameProf = Object.keys(characters).filter((k2) => {
+      const c2 = characters[k2];
+      return c2 && c2.paragon && c2.health !== 'dead'
+        && c2.paragon.profession === pg.profession && c2.paragon.capExempt !== true;
+    }).length;
+    const cap = (world.spaceOperaState && world.spaceOperaState.leaderCaps
+      && Number.isFinite(world.spaceOperaState.leaderCaps[pg.profession])
+      && world.spaceOperaState.leaderCaps[pg.profession] >= 1)
+      ? Math.trunc(world.spaceOperaState.leaderCaps[pg.profession]) : 4;
+    out.push({
+      id: ch.id,
+      name: ch.name || ch.id,
+      profession: pg.profession || null,
+      level: lvl,
+      xp: Math.round(xp),
+      xpNext: lvl * 100,
+      loyalty: Number.isFinite(ch.loyalty) ? ch.loyalty : 100,
+      trauma: (Array.isArray(pg.trauma) ? pg.trauma : []).map((t) => (t && (t.id || t)) || null),
+      destinyTrait: pg.destinyTrait || null,
+      destinyOffer: Array.isArray(pg.destinyOffer) ? pg.destinyOffer.slice() : [],
+      paragonId: pg.paragonId || null,
+      mode: pg.mode || 'WARSHIP_COMMANDER',
+      legendary: pg.legendary === true || !!pg.paragonId,
+      capExempt: pg.capExempt === true,
+      capStats: { employed: sameProf, cap, over: sameProf > cap },
+    });
+  }
+  return out;
 }
 
 // adminCapacity / governanceLoad 下沉到 domain/politics/policy.js（领域函数），
@@ -454,4 +633,178 @@ export function intelView(world, factionId, targetFactionId) {
     contactState: rel.contactState,
     atWar: !!rel.warId,
   };
+}
+
+/**
+ * 太空歌剧态势只读投影（SPEC-PLAN-046 M3 集成；Eng-D 纪律：本函数零领域写入，
+ * 全部数据自 world.spaceOperaState 只读派生，未挂载容器返回 null）。
+ *
+ * 结构契约（doc46 M3 集成交付面）：
+ *  - systemVector: 七维宏观状态向量快照（NaN 防御 → 0）；
+ *  - equilibriumGap: 七维 |S_i − S_eq,i| 偏离幅值（S_eq 与 jacobianCoupling.SYSTEM_EQUILIBRIUM
+ *    同源常量本地复制 —— 与 dramaDirector 同款裁决：避免本模块静态 import 翻转月度注册序；
+ *    M3 套件 CHK-M3-06 与 jacobian 权威常量逐位互证）；
+ *  - activeSituations: [{id, arc, progress, act, approach}]（活跃四幕局势，数值 ID 升序）；
+ *  - butterflyCausalLog: 三阶蝴蝶效应因果链尾 8 条（浅拷贝）；
+ *  - beacons: {total, nonEmpire, opportunity}（非帝国 = kind !== 'OFFICIAL'）；
+ *  - drama: {tension, adaptationFactor, adaptDays, climaxCount}；
+ *  - empireDefaulted: 主权违约进行中（untilTick > tick，shortageSituationArc 口径）；
+ *  - endgameCrisis: {active, ghostSignalActive}（S7 终局天灾态势；无 S7 容器 → active null）。
+ */
+const SPACE_OPERA_EQUILIBRIUM = Object.freeze([15.0, 15.0, 20.0, 15.0, 15.0, 10.0, 10.0]);
+
+export function spaceOperaView(world) {
+  const so = world && world.spaceOperaState;
+  if (!so) return null;
+  const safe = (v, fallback = 0) => (Number.isFinite(v) ? v : fallback);
+
+  const systemVector = Array.isArray(so.systemVector) && so.systemVector.length === 7
+    ? so.systemVector.map((v) => safe(Number(v)))
+    : SPACE_OPERA_EQUILIBRIUM.map(() => 0);
+  const equilibriumGap = SPACE_OPERA_EQUILIBRIUM.map(
+    (eq, i) => Math.abs(systemVector[i] - eq),
+  );
+
+  const sitBag = so.situations && typeof so.situations === 'object' ? so.situations : {};
+  const activeSituations = Object.keys(sitBag)
+    .sort((a, b) => (Number(a) || 0) - (Number(b) || 0))
+    .filter((id) => sitBag[id] && sitBag[id].resolvedTick == null)
+    .map((id) => {
+      const sit = sitBag[id];
+      return {
+        id: sit.id,
+        arc: sit.systemArcId,
+        progress: safe(Number(sit.progress)),
+        act: sit.actStage,
+        approach: sit.currentApproach || null,
+      };
+    });
+
+  const causalLog = Array.isArray(so.butterflyCausalLog) ? so.butterflyCausalLog.slice(-8) : [];
+
+  const beacons = Array.isArray(so.subspaceBeacons) ? so.subspaceBeacons : [];
+  const beaconsView = {
+    total: beacons.length,
+    nonEmpire: beacons.filter((b) => b && b.kind !== 'OFFICIAL').length,
+    opportunity: beacons.filter((b) => b && b.kind === 'OPPORTUNITY').length,
+  };
+
+  const dd = so.dramaDirector && typeof so.dramaDirector === 'object' ? so.dramaDirector : {};
+  const drama = {
+    tension: safe(Number(dd.tension)),
+    adaptationFactor: safe(Number(dd.adaptationFactor), 1),
+    adaptDays: safe(Number(dd.adaptDays)),
+    climaxCount: safe(Number(dd.climaxCount)),
+  };
+
+  const defaulted = so.empireDefaulted;
+  const tick = Number.isFinite(world.tick) ? world.tick : 0;
+  const empireDefaulted = !!(defaulted
+    && (Number.isFinite(defaulted.untilTick) ? tick < defaulted.untilTick : true));
+
+  const ec = so.endgameCrisis && typeof so.endgameCrisis === 'object' ? so.endgameCrisis : null;
+  const endgameCrisis = {
+    active: ec && ec.active && typeof ec.active === 'object' ? ec.active.kind || null : null,
+    ghostSignalActive: !!(ec && ec.ghostSignalActive === true),
+  };
+
+  return {
+    systemVector,
+    equilibriumGap,
+    activeSituations,
+    butterflyCausalLog: causalLog,
+    beacons: beaconsView,
+    // SPEC-PLAN-052 Task 52.1：信标流/自主舰队轻量只读列表（星图图层与弹窗消费）
+    beaconsList: spaceOperaBeaconsList(world, so),
+    autonomousFleetsList: spaceOperaAutonomousFleetsList(world, so),
+    drama,
+    empireDefaulted,
+    endgameCrisis,
+  };
+}
+
+/* ==================== SPEC-PLAN-052 Task 52.1：信标流 / 自主舰队只读投影 ==================== */
+
+/** 四大频段中文解调名 + 星图着色（doc52 §Task 52.1 四频段着色映射到实际 FREQ_* 枚举） */
+const BEACON_FREQ_ZH = Object.freeze({
+  FREQ_DISTRESSED_CIV: { nameZh: '民用求援频段', color: '#e040fb' },
+  FREQ_STAR_JOURNAL: { nameZh: '星海日报频段', color: '#ffd700' },
+  FREQ_SHADOW_CONTRACT: { nameZh: '黑市合约频段', color: '#ff4444' },
+  FREQ_PRECURSOR_ECHO: { nameZh: '先驱者低语频段', color: '#00e5ff' },
+  OPPORTUNITY_BEACON: { nameZh: '机遇信标频段', color: '#ffffff' },
+});
+
+/** 5 类自主生态舰队中文（doc48 §1.2 / doc52 §Task 52.1） */
+const AUTONOMOUS_FLEET_ZH = Object.freeze({
+  TRADE_CONVOY: '套利商队',
+  SMUGGLER_RUNNER: '走私船',
+  PATROL_FLOTILLA: '星区巡逻队',
+  MARKET_EXPEDITION: '市场远征军',
+  BOUNTY_HUNTER: '赏金猎人',
+});
+
+/**
+ * 活跃信标流轻量列表：[{id, kind, band, frequencyName, color, position:{x,y},
+ * systemId, systemName, title, text, options:[{id,label}], expiresTick}]
+ * （doc52 §Task 52.1 §1 投影契约；position 取信标挂载星系策略坐标）。
+ */
+function spaceOperaBeaconsList(world, so) {
+  const beacons = Array.isArray(so.subspaceBeacons) ? so.subspaceBeacons : [];
+  const systems = (world && world.entities && world.entities.systems) || {};
+  const out = [];
+  for (const b of beacons) {
+    if (!b || typeof b !== 'object') continue;
+    const sys = systems[b.systemId];
+    const meta = BEACON_FREQ_ZH[b.freqClass] || { nameZh: b.freqClass || '未知频段', color: '#71839a' };
+    const text = String(b.text || '');
+    const sep = text.indexOf('：');
+    out.push({
+      id: b.id,
+      kind: b.kind || 'NARRATIVE',
+      band: b.freqClass || null,
+      frequencyName: meta.nameZh,
+      color: meta.color,
+      position: sys && Number.isFinite(sys.x) ? { x: sys.x, y: sys.y } : null,
+      systemId: b.systemId || null,
+      systemName: (sys && sys.name) || String(b.systemId || '—'),
+      title: sep > 0 ? text.slice(0, sep) : text.slice(0, 24),
+      text,
+      options: Array.isArray(b.responseOptions)
+        ? b.responseOptions.filter((o) => o && o.id != null).map((o) => ({ id: o.id, label: o.label || o.id, effectHint: o.effectHint || null }))
+        : [],
+      expiresTick: Number.isFinite(b.expiresTick) ? b.expiresTick : null,
+    });
+  }
+  return out;
+}
+
+/**
+ * 自主生态舰队轻量列表：[{id, type, typeZh, origin, destination, progress(0..1),
+ * cargo, position:{x,y}}]（doc52 §Task 52.1 §1 投影契约；position 为航线插值坐标）。
+ */
+function spaceOperaAutonomousFleetsList(world, so) {
+  const fleets = Array.isArray(so.autonomousFleets) ? so.autonomousFleets : [];
+  const systems = (world && world.entities && world.entities.systems) || {};
+  const out = [];
+  for (const f of fleets) {
+    if (!f || typeof f !== 'object') continue;
+    const a = systems[f.originSystemId];
+    const b = systems[f.destSystemId];
+    const total = Number.isFinite(f.travelTicks) && f.travelTicks > 0 ? f.travelTicks : 1;
+    const prog = Math.max(0, Math.min(1, (Number.isFinite(f.transitProgress) ? f.transitProgress : 0) / total));
+    const pos = a && b && Number.isFinite(a.x) && Number.isFinite(b.x)
+      ? { x: a.x + (b.x - a.x) * prog, y: a.y + (b.y - a.y) * prog }
+      : null;
+    out.push({
+      id: f.id,
+      type: f.type || null,
+      typeZh: AUTONOMOUS_FLEET_ZH[f.type] || f.type || '未知舰队',
+      origin: (a && a.name) || String(f.originSystemId || '—'),
+      destination: (b && b.name) || String(f.destSystemId || '—'),
+      progress: prog,
+      cargo: f.cargo && typeof f.cargo === 'object' ? { resourceId: f.cargo.resourceId || null, qty: f.cargo.qty || 0 } : null,
+      position: pos,
+    });
+  }
+  return out;
 }

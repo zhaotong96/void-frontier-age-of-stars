@@ -98,15 +98,24 @@ export const EventsView = {
 
   // —— 内部实现 ——————————————————————————————————
 
-  /** 整体重建：待决事件 → 空间目标 → 告警 → 近期日志 */
+  /** 整体重建：待决事件 → 空间目标 → 太空歌剧局势中枢 → 告警 → 近期日志 */
   _rebuild() {
     const body = this._body;
     if (!body) return;
     clearEl(body);
     body.appendChild(this._pendingEventPanel());
     body.appendChild(this._objectivesPanel());
+    // SPEC-PLAN-052 Task 52.3（M4 工位 D）：四幕局势控制台 / 雅可比蝴蝶链 / 戏剧张力计
+    // （world.spaceOperaState 未激活时 appendSpaceOperaPanels 内部零渲染）
+    appendSpaceOperaPanels(this, body);
     body.appendChild(this._alertsPanel());
     body.appendChild(this._feedPanel());
+  },
+
+  /** 命令派发后的即时重建（太空歌剧对策切换反馈；250ms 节流外的强制路径） */
+  _forceRebuild() {
+    this._lastRefresh = 0;
+    this._rebuild();
   },
 
   // —— 1) 待决事件卡 ————————————————————————————
@@ -413,3 +422,189 @@ export const EventsView = {
     return p;
   },
 };
+
+/* ==================== SPEC-PLAN-052 Task 52.3：四幕局势控制台 / 蝴蝶链图谱 / 戏剧张力计（M4 工位 D） ==================== */
+
+import { progressBar as progressBarSOEv } from '../components/progress.js';
+import { spaceOperaView } from '../../simulation/ViewModels.js';
+import { TICKS_PER_MONTH } from '../../core/clock.js';
+
+/** 四幕序号中文（第一幕起 → 第二幕承 → 第三幕转 → 第四幕合） */
+const ACT_ZH = { 1: '第一幕 · 起', 2: '第二幕 · 承', 3: '第三幕 · 转', 4: '第四幕 · 合' };
+
+/** 弧线中文 */
+const ARC_ZH = {
+  S1: '考古共振', S2: '生态相变', S3: '殖民地社会', S4: '宏观经济断供',
+  S5: '舰队战备', S6: '黑市渗透', S7: '议会与天灾', GRAVITY_WELL: '引力井逼近',
+  LEVIATHAN_PARADE: '利维坦凯旋大游行', PLANETARY_REVOLT: '行星叛乱', GRAND_CLIMAX: '史诗高潮',
+};
+
+/** 对策中文（situationEngine 冷却契约内全部 approach 键） */
+const APPROACH_ZH = {
+  CAUTIOUS: '谨慎发掘', STREAMLINED: '流水线作业', OVERDRIVE: '过度驱动',
+  STATUS_QUO: '维持现状', CUT_INVESTMENTS: '削减投资',
+  CONSUME_WORLD: '竭泽而渔', TERRAFORM: '气候重塑', PARTNERSHIP: '生态共生',
+  USE_PROPAGANDA: '舆论宣传', SEEK_COMPROMISE: '寻求妥协', CRACK_DOWN: '执行镇压',
+  PURGE_SABOTEURS: '清除破坏者', ENCOURAGE: '鼓励', SUPPRESS: '压制', REORGANIZE: '重整',
+};
+
+/** 局势弧 → 合法对策表（situationEngine ARCS 冻结契约的静态只读映射；零引擎状态读取） */
+const ARC_APPROACHES = {
+  S1: ['CAUTIOUS', 'STREAMLINED', 'OVERDRIVE'],
+  S2: ['CONSUME_WORLD', 'TERRAFORM', 'PARTNERSHIP'],
+  S3: ['USE_PROPAGANDA', 'SEEK_COMPROMISE', 'CRACK_DOWN', 'PURGE_SABOTEURS'],
+  S4: ['STATUS_QUO', 'CUT_INVESTMENTS'],
+  LEVIATHAN_PARADE: ['ENCOURAGE', 'SUPPRESS', 'REORGANIZE'],
+};
+
+/**
+ * 太空歌剧局势中枢（doc52 §Task 52.3 逐条契约）：
+ *  1. 四幕局势控制台：幕次指示器 + 进度条（0~1000）+ 对策切换单选按钮组
+ *     （SetSituationApproach）+ S4 紧急债务重组专项按钮（EmergencyDebtRestructure）；
+ *  2. 7×7 雅可比偏离度柱状图（S1..S7 vs 平衡点）+ 最近 8 条三阶蝴蝶效应因果链；
+ *  3. 自适应戏剧导演遥测仪：宏观张力 T / 创伤适应系数 A / 宽限期倒计时 / 高潮次数。
+ * world.spaceOperaState 未激活 → 不渲染任何面板（零侵入）。
+ */
+export function appendSpaceOperaPanels(view, body) {
+  const w = view.app.world;
+  if (!w || !w.spaceOperaState) return;
+  const so = spaceOperaView(w);
+  if (!so) return;
+
+  /* —— 1. 四幕局势控制台 —— */
+  const sits = so.activeSituations || [];
+  const pSit = panel({ title: '四幕局势主控台（Situations · ' + sits.length + '）', open: sits.length > 0, dense: true });
+  if (sits.length === 0) {
+    pSit.appendChild(el('div', { class: 'vf-faint vf-small', text: '当前无活跃局势 —— 月度弧线钩子将按银河态势自动派生。' }));
+  }
+  for (const sit of sits) {
+    const card = el('div', { class: 'vf-col', style: { borderBottom: '1px solid rgba(29,42,58,0.4)', padding: '6px 0' } });
+    const prog = Math.max(0, Math.min(1000, Number(sit.progress) || 0));
+    card.appendChild(el('div', { class: 'vf-row' }, [
+      el('span', { class: 'vf-tag accent', text: ARC_ZH[sit.arc] || sit.arc }),
+      el('span', { class: 'vf-faint vf-small', text: '局势 #' + sit.id }),
+      el('span', { class: 'vf-tag', text: ACT_ZH[sit.act] || ('第 ' + sit.act + ' 幕') }),
+      el('span', { class: 'vf-mono vf-small', text: Math.round(prog) + '/1000' }),
+    ]));
+    card.appendChild(progressBarSOEv({
+      value: prog, max: 1000,
+      kind: prog >= 750 ? 'danger' : prog >= 500 ? 'warn' : 'accent',
+    }));
+    const meta = situationMeta(w, sit.id);
+    const approachIds = ARC_APPROACHES[sit.arc] || [];
+    if (approachIds.length > 0) {
+      const row = el('div', { class: 'vf-row', style: { flexWrap: 'wrap', gap: '4px', marginTop: '4px' } });
+      for (const ap of approachIds) {
+        row.appendChild(el('button', {
+          class: sit.approach === ap ? 'vf-btn small primary' : 'vf-btn small',
+          text: APPROACH_ZH[ap] || ap,
+          title: 'SetSituationApproach → ' + ap + '（切换冷却 720 ticks = 1 真实月）',
+          on: {
+            click: () => {
+              view.app.dispatch('SetSituationApproach', { situationId: Number(sit.id), approachId: ap });
+              view._forceRebuild && view._forceRebuild();
+            },
+          },
+        }));
+      }
+      card.appendChild(row);
+      card.appendChild(el('div', { class: 'vf-faint vf-small', text: '当前对策：' + (sit.approach || '未选择（月度进度按基础增速推进）') + ' · 切换冷却 720 ticks' }));
+    }
+    // S4 紧急债务重组专项按钮（doc52 §Task 52.3 §1）
+    if (sit.arc === 'S4') {
+      const resKey = (meta && meta.resourceKey) || 'alloy';
+      card.appendChild(el('div', { class: 'vf-row', style: { marginTop: '4px' } }, [
+        el('button', {
+          class: 'vf-btn small danger',
+          text: '紧急债务重组（Cut Investments：产出 −25% / 维护 −50%）',
+          title: 'EmergencyDebtRestructure → CUT_INVESTMENTS',
+          on: {
+            click: () => {
+              view.app.dispatch('EmergencyDebtRestructure', { empireId: 1, resourceId: resKey, cutInvestment: true });
+              view._forceRebuild && view._forceRebuild();
+            },
+          },
+        }),
+      ]));
+    }
+    pSit.appendChild(card);
+  }
+  body.appendChild(pSit);
+
+  /* —— 2. 7×7 雅可比偏离度柱状图 + 三阶蝴蝶效应因果链 —— */
+  const pJac = panel({ title: '7×7 雅可比状态与三阶蝴蝶效应因果链', open: true, dense: true });
+  const ARCS7 = ['S1 考古', 'S2 生态', 'S3 社会', 'S4 经济', 'S5 战备', 'S6 黑市', 'S7 议会'];
+  const bars = el('div', { style: { display: 'flex', alignItems: 'flex-end', gap: '6px', height: '72px', padding: '4px 0' } });
+  for (let i = 0; i < so.systemVector.length; i++) {
+    const gap = so.equilibriumGap[i] || 0;
+    const hPct = Math.max(4, Math.min(100, (gap / 50) * 100));
+    bars.appendChild(el('div', { style: { flex: '1', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', alignItems: 'center', height: '100%' } }, [
+      el('div', { style: { width: '70%', height: hPct + '%', background: gap >= 25 ? '#e85f5f' : gap >= 12 ? '#e8b04f' : '#4fd8e8', borderRadius: '2px 2px 0 0' } }),
+      el('div', { class: 'vf-faint', style: { fontSize: '9px' }, text: ARCS7[i] || ('S' + (i + 1)) }),
+      el('div', { class: 'vf-mono', style: { fontSize: '9px' }, text: 'Δ' + gap.toFixed(1) }),
+    ]));
+  }
+  pJac.appendChild(bars);
+  const log = so.butterflyCausalLog || [];
+  if (log.length === 0) {
+    pJac.appendChild(el('div', { class: 'vf-faint vf-small', text: '暂无三阶传导记录（|ΔS_k| ≥ 8.0 的冲击经 J / J² / J³ 主路径自动记链）。' }));
+  }
+  for (const entry of log) {
+    pJac.appendChild(el('div', { class: 'vf-row', style: { borderBottom: '1px solid rgba(29,42,58,0.3)', padding: '2px 0' } }, [
+      el('span', { class: 'vf-faint vf-small', text: causalChainText(entry) }),
+    ]));
+  }
+  body.appendChild(pJac);
+
+  /* —— 3. 自适应戏剧导演遥测仪 —— */
+  const dr = so.drama || { tension: 0, adaptationFactor: 1, adaptDays: 0, climaxCount: 0 };
+  const dd = w.spaceOperaState.dramaDirector || {};
+  const graceLeft = Number.isFinite(dd.recoveryGraceUntilTick) && dd.recoveryGraceUntilTick > w.tick
+    ? dd.recoveryGraceUntilTick - w.tick : 0;
+  const pDrama = panel({ title: '自适应戏剧导演遥测仪', open: true, dense: true });
+  pDrama.appendChild(progressBarSOEv({
+    value: dr.tension, max: 100,
+    label: '宏观戏剧张力 T（≥75 触发史诗高潮 GRAND_CLIMAX）',
+    detail: dr.tension.toFixed(1) + '/100',
+    kind: dr.tension >= 75 ? 'danger' : dr.tension >= 50 ? 'warn' : 'accent',
+  }));
+  pDrama.appendChild(progressBarSOEv({
+    value: ((dr.adaptationFactor - 0.75) / 0.6) * 100, max: 100,
+    label: '创伤适应系数 A（0.75 宽限锁 ⟷ 1.35 满适应）',
+    detail: 'A = ' + dr.adaptationFactor.toFixed(3),
+    kind: dr.adaptationFactor >= 1.2 ? 'warn' : 'accent',
+  }));
+  pDrama.appendChild(el('div', { class: 'vf-faint vf-small', style: { marginTop: '4px' }, text: '救赎宽限期倒计时：'
+    + (graceLeft > 0 ? Math.ceil(graceLeft / TICKS_PER_MONTH) + ' 个月（' + graceLeft + ' ticks）' : '无（宽限期外按公式恢复）')
+    + ' · 史诗高潮次数：' + dr.climaxCount
+    + ' · 创伤适应累积：' + Math.round(dr.adaptDays) + ' 天' }));
+  body.appendChild(pDrama);
+}
+
+/** 局势 meta 只读回读（world.spaceOperaState.situations；无该局势返回 null） */
+function situationMeta(world, situationId) {
+  const so = world.spaceOperaState;
+  const bag = so && so.situations && typeof so.situations === 'object' ? so.situations : {};
+  const sit = bag[String(situationId)];
+  return sit && sit.meta && typeof sit.meta === 'object' ? sit.meta : null;
+}
+
+/**
+ * 因果链条目 → 三阶传导文本（jacobianCoupling.recordButterflyRipple 记录契约：
+ * {tick, sourceSystem, delta, order1:{system,value}, order2, order3, path}）。
+ */
+function causalChainText(entry) {
+  if (!entry || typeof entry !== 'object') return '';
+  const fmt = (sysIdx, v, digits) => 'S' + (Number.isInteger(sysIdx) ? sysIdx + 1 : '?')
+    + '(' + (Number.isFinite(v) ? (v >= 0 ? '+' : '') + Number(v).toFixed(digits) : '?') + ')';
+  const parts = [];
+  if (entry.sourceSystem != null) {
+    parts.push(fmt(entry.sourceSystem, entry.delta, 1));
+  }
+  for (const k of ['order1', 'order2', 'order3']) {
+    const o = entry[k];
+    if (o && typeof o === 'object') parts.push(fmt(o.system, o.value, 2));
+  }
+  if (parts.length === 0) return '';
+  return parts.join(' -> ');
+}

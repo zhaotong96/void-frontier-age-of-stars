@@ -11,6 +11,8 @@ import { activateView, registerView } from './ViewRegistry.js';
 import { executeCommand, hasCommand } from '../core/commandBus.js';
 import { createStarterCampaign } from '../devtools/scenarioFactory.js';
 import './commands.js'; // 命令注册（核心必需，静态导入消除启动瀑布与 file:// 阻塞）
+// SPEC-PLAN-049 Task 49.2：新战役启动链接入活体战役激活器（金快照零漂移：仅真实开局路径触达）
+import { activateSpaceOperaCampaign } from '../domain/world/worldMigration.js';
 import { advanceOneTick } from '../simulation/WorldSimulation.js';
 import { SPEEDS, dateStr } from '../core/clock.js';
 import { buildSnapshot } from '../simulation/SnapshotBuilder.js';
@@ -249,6 +251,15 @@ export class App {
   /** 开启新战役（由 MenuView 调用） */
   async startNewGame(config) {
     const world = createStarterCampaign(config);
+    // SPEC-PLAN-049 Task 49.2 战役活体激活注入（GAP-01 消除）：
+    // 未显式禁用太空歌剧（enableSpaceOpera !== false）时自动合龙激活 —— 挂载
+    // spaceOperaState + 全星系 compactState/256-Tile + 群像档案 + 首帧 15 信标。
+    // 为什么不写进 createStarterCampaign 默认分支？REG-01（金快照 8be8ce2c）直接无参
+    // 调用 createStarterCampaign() 并对整个 world 计算哈希 —— 激活只在 App.startNewGame
+    // 开局链路发生，REG-01 的 world 结构一字不改（doc48 §Task 4.1 §2 裁决原文）。
+    if (!config || config.enableSpaceOpera !== false) {
+      activateSpaceOperaCampaign(world);
+    }
     this.world = world;
     this.selection = null;
     this.pendingEvent = null;

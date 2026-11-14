@@ -8,6 +8,7 @@
 import { dateStr } from '../core/clock.js';
 import { sortedKeys } from '../core/math.js';
 import { getRelation } from '../domain/diplomacy/war.js';
+import { spaceOperaView } from './ViewModels.js';
 
 /** 构建全局快照（App 以 ~4Hz 刷新） */
 export function buildSnapshot(world) {
@@ -36,6 +37,11 @@ export function buildSnapshot(world) {
     objectives: buildObjectivesView(world),
     victory: world.victory,
   };
+  // —— SPEC-PLAN-046 M3：太空歌剧态势只读投影（容器存在才挂，保持零漂移：
+  //    金快照世界无 spaceOperaState → 快照结构逐位不变）——
+  if (world.spaceOperaState) {
+    snap.spaceOpera = spaceOperaView(world);
+  }
   return snap;
 }
 

@@ -8,3 +8,6 @@ Thumbs.db
 /dev-saves/
 # 测试临时输出
 /tmp/
+
+# SPEC-PLAN-048 Task 4.4 / doc52 Task 52.5：模糊测试崩溃转储（临时工件不入库）
+tests/fuzz/dumps/*.json

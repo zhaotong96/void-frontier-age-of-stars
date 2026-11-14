@@ -41,7 +41,9 @@ import {
 import { feedCatapult, resIdToIdx } from '../domain/industry/catapult.js';
 import { attachDagIfTemplate } from '../domain/exploration/precursorDag.js';
 import './commandsLongline.js'; // doc35：超长线 16 命令注册（ResolveAnomalyDagBranch 等）
+import './commandsSpaceOpera.js'; // doc43：太空歌剧 18 命令注册（Phase 0 契约壳，handler 由阶段编排层注入）
 import { breakLeviathanPart, reportLeviathanDefeated } from '../domain/ground/planetaryThreat.js';
+import { traumaCheck, ensureParagonProfile } from '../domain/characters/galacticParagons.js'; // 42 号 §五.2：总督政治免职创伤检定接线
 import {
   ensurePlanetSoc, deriveColonyAgents, resolveColonyDilemma, reportRebellionSuppressed,
   COLONY_EDICTS,
@@ -994,7 +996,19 @@ registerCommand('AppointOverseer', {
   execute(ctx, cmd) {
     const planet = getEntity(ctx.world, 'planets', cmd.params.planetId || cmd.targetId);
     ensurePlanetSoc(planet);
+    const prevOverseerId = planet.soc.overseerId || null;
     planet.soc.overseerId = cmd.params.characterId;
+    // —— 42 号总纲 §五.2 创伤检定实战可达整改：驻星总督遭政治免职（换任）→
+    //    旧总督 traumaCheck('political_dismissal') 确定性检定（先以 world 固化
+    //    paragon.worldSeed 种子，与 grant* 结算路径同源）。守卫 spaceOperaState：
+    //    金快照/默认流程世界零读取零写入零漂移。 ——
+    if (prevOverseerId && prevOverseerId !== planet.soc.overseerId && ctx.world.spaceOperaState) {
+      const dismissed = ctx.world.entities.characters[prevOverseerId];
+      if (dismissed) {
+        ensureParagonProfile(dismissed, ctx.world);
+        traumaCheck(dismissed, 'political_dismissal', ctx.world.tick);
+      }
+    }
     emit(ctx.world, 'OverseerAppointed', { planetId: planet.id, overseerId: planet.soc.overseerId }, 'ground');
   },
 });

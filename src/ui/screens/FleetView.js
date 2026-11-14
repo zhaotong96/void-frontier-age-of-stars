@@ -18,6 +18,9 @@ import { el, clearEl } from '../components/dom.js';
 import { dataTable, panel, kvList, statBar, progressBar } from '../components/index.js';
 import { L } from '../../core/i18n.js';
 import { fleetDetail, shipSummary } from '../../simulation/ViewModels.js';
+// SPEC-PLAN-051 Task 51.1（M4 工位 C）：太空歌剧舰队交互（学说滑块 / D-Mod 修复 /
+// S-Mod 焊死 / 战役残骸栖息地）—— 命令派发契约以 commandSchemas 冻结面为准
+import { DMOD_CATALOG, SMOD_CATALOG, DMOD_DISCOUNT_PER } from '../../domain/fleets/fleetDoctrineAndScars.js';
 
 /** 快照刷新节流间隔 */
 const REFRESH_MS = 250;
@@ -199,6 +202,9 @@ export const FleetView = {
     this._bodyEl.appendChild(this._grid);
     this._renderShips(detail);
     this._renderCommands(detail, snap);
+    // SPEC-PLAN-051 Task 51.1：太空歌剧舰队面板（学说/D-Mod/S-Mod/残骸；未激活太空歌剧不渲染）
+    const soPanel = renderSpaceOperaFleetPanel(this, detail);
+    if (soPanel) this._colCmd.appendChild(soPanel);
 
     this._bodyEl.scrollTop = savedTop;
     this._bodyEl.scrollLeft = savedLeft;
@@ -456,3 +462,207 @@ export const FleetView = {
     return p;
   },
 };
+
+/* ==================== SPEC-PLAN-051 Task 51.1：太空歌剧舰队交互面板（M4 工位 C） ==================== */
+
+/** 实体 id → 数字后缀（commandSchemas 整数 ID 契约；'shp_12' → 12） */
+function numId(id) {
+  const m = /(\d+)$/.exec(String(id == null ? '' : id));
+  return m ? parseInt(m[1], 10) : 0;
+}
+
+/** D-Mod id → 中文标签（DMOD_CATALOG 无 nameZh，按语义标定） */
+const DMOD_ZH = {
+  dmg_armor_belt: '装甲带暗伤',
+  dmg_reactor_conduit: '反应堆导管暗伤',
+  dmg_fire_control: '火控系统暗伤',
+  dmg_engine_housing: '引擎舱暗伤',
+  dmg_weapon_rig: '武备支架暗伤',
+};
+
+/**
+ * 太空歌剧舰队面板（doc51 §Task 51.1 逐条契约）：
+ *  1. 巡逻司令部与学说滑块卡（3 × <input type=range 0..100> + 应用按钮 → ConfigureFleetDoctrine）；
+ *  2. 舰船伤痕（D-Mods，−20%×N 维护折扣提示）与修复按钮（500 合金 → RestoreShipDMod）+
+ *     S-Mod 焊死按钮（1 奇异物质 → InstallShipSMod）；
+ *  3. 战役残骸栖息地卡（改造/拆解 → SalvageBattleWreckHabitat）。
+ * world.spaceOperaState 未激活 → 返回 null（整卡不渲染，零侵入）。
+ *
+ * @param {object} view - FleetView 实例（消费 view.app / view._forceRefresh）
+ * @param {object} detail - fleetDetail(world, fleetId) 只读投影
+ * @returns {Element|null} 面板根元素
+ */
+export function renderSpaceOperaFleetPanel(view, detail) {
+  const app = view.app;
+  const w = app.world;
+  if (!w || !w.spaceOperaState) return null;
+  if (!detail) return null;
+
+  const wrap = el('div', { class: 'vf-col', style: { minWidth: '0', gap: '10px' } });
+
+  /* —— 1. 巡逻司令部与学说滑块卡 —— */
+  const hqPlanet = resolvePatrolHQPlanet(w, detail.systemId);
+  const pHQ = panel({ title: '太空歌剧 · 巡逻司令部学说', open: true, dense: true });
+  if (hqPlanet && hqPlanet.patrolHQ) {
+    const hq = hqPlanet.patrolHQ;
+    pHQ.appendChild(kvList([
+      ['驻防行星', hqPlanet.name || String(hqPlanet.id)],
+      ['司令部等级', `Lv ${hq.level || 1}`],
+    ]));
+    const d = hq.doctrine || { shipSizeWeight: 0.5, qualityWeight: 0.5, officerAggression: 0.5 };
+    const mkSlider = (label, key, hint) => {
+      const row = el('div', { class: 'vf-col', style: { margin: '4px 0' } });
+      const lab = el('div', { class: 'vf-row' }, [
+        el('span', { class: 'vf-small', text: label }),
+        el('span', { class: 'vf-mono vf-small', text: String(Math.round((d[key] ?? 0.5) * 100)) }),
+      ]);
+      const input = el('input', { type: 'range', min: '0', max: '100', step: '1', 'aria-label': label });
+      input.value = String(Math.round((d[key] ?? 0.5) * 100));
+      input.addEventListener('input', () => {
+        lab.children[1].textContent = input.value;
+      });
+      row.append(lab, input);
+      row._input = input;
+      row.title = hint;
+      return row;
+    };
+    const sSize = mkSlider('舰船尺寸偏好（护卫海 ⟷ 泰坦旗舰）', 'shipSizeWeight', 'doctrine.shipSizeWeight 0..100');
+    const sQual = mkSlider('装配质量（廉价量产 ⟷ 尖端精装）', 'qualityWeight', 'doctrine.qualityWeight 0..100');
+    const sReck = mkSlider('军官鲁莽度（保守拉扯 ⟷ 决死冲锋）', 'officerAggression', 'doctrine.officerAggression 0..100');
+    pHQ.append(sSize, sQual, sReck);
+    pHQ.appendChild(el('button', {
+      class: 'vf-btn small primary',
+      text: '应用学说',
+      title: 'ConfigureFleetDoctrine：三滑块落账并重算星区巡逻编队模板',
+      on: {
+        click: () => {
+          app.dispatch('ConfigureFleetDoctrine', {
+            empireId: 1,
+            planetId: numId(hqPlanet.id),
+            doctrineSize: parseInt(sSize._input.value, 10),
+            qualityWeight: parseInt(sQual._input.value, 10),
+            officerAggression: parseInt(sReck._input.value, 10),
+          });
+          view._forceRefresh();
+        },
+      },
+    }));
+  } else {
+    pHQ.appendChild(el('div', { class: 'vf-faint vf-small', text: '当前星系无巡逻司令部（在行星地表升级军事基地后开放学说调节）。' }));
+  }
+  wrap.appendChild(pHQ);
+
+  /* —— 2. 战舰伤痕（D-Mods）与传奇改装（S-Mods）卡 —— */
+  const pScar = panel({ title: '太空歌剧 · 战舰伤痕与传奇改装', open: true, dense: true });
+  let scarRows = 0;
+  for (const s of detail.ships || []) {
+    const ship = w.entities.ships[s.id];
+    if (!ship) continue;
+    const scars = ship.scars;
+    if (!scars || (!Array.isArray(scars.dMods) && !Array.isArray(scars.sMods))) continue;
+    const dMods = Array.isArray(scars.dMods) ? scars.dMods : [];
+    const sMods = Array.isArray(scars.sMods) ? scars.sMods : [];
+    if (dMods.length === 0 && sMods.length === 0) continue;
+    scarRows++;
+    const row = el('div', { class: 'vf-col', style: { borderBottom: '1px solid rgba(29,42,58,0.4)', padding: '4px 0' } });
+    row.appendChild(el('div', { class: 'vf-row' }, [
+      el('span', { class: 'vf-grow vf-small', text: `${s.name}（${s.hullName}）` }),
+      dMods.length > 0
+        ? el('span', { class: 'vf-tag ok', text: `维护费 −${Math.round(DMOD_DISCOUNT_PER * 100)}% × ${dMods.length}` })
+        : null,
+    ]));
+    for (const dm of dMods) {
+      const r = el('div', { class: 'vf-row', style: { gap: '6px' } });
+      r.appendChild(el('span', { class: 'vf-grow vf-faint vf-small', text: DMOD_ZH[dm] || dm }));
+      r.appendChild(el('button', {
+        class: 'vf-btn small',
+        text: '修复战损（500 合金）',
+        title: 'RestoreShipDMod：消除该暗伤并恢复部署补给成本',
+        on: {
+          click: () => {
+            app.dispatch('RestoreShipDMod', { shipId: numId(ship.id), dModId: dm });
+            view._forceRefresh();
+          },
+        },
+      }));
+      row.appendChild(r);
+    }
+    if (sMods.length > 0) {
+      row.appendChild(el('div', { class: 'vf-faint vf-small', text: `已焊死 S-Mod：${sMods.map((m) => (SMOD_CATALOG[m] && SMOD_CATALOG[m].nameZh) || m).join('、')}（不可卸载）` }));
+    }
+    // S-Mod 焊死入口（从目录逐条生成；已装/已焊死的禁用）
+    const smodRow = el('div', { class: 'vf-row', style: { flexWrap: 'wrap', gap: '4px' } });
+    for (const mid of Object.keys(SMOD_CATALOG).sort()) {
+      if (sMods.includes(mid)) continue;
+      smodRow.appendChild(el('button', {
+        class: 'vf-btn small',
+        text: `焊死 ${SMOD_CATALOG[mid].nameZh}`,
+        title: 'InstallShipSMod：消耗 1 奇异物质永久焊死传奇改装（不可卸载）',
+        on: {
+          click: () => {
+            app.dispatch('InstallShipSMod', { shipId: numId(ship.id), moduleId: mid });
+            view._forceRefresh();
+          },
+        },
+      }));
+    }
+    if (smodRow.childElementCount > 0) row.appendChild(smodRow);
+    pScar.appendChild(row);
+  }
+  if (scarRows === 0) {
+    pScar.appendChild(el('div', { class: 'vf-faint vf-small', text: '舰队没有带伤痕/传奇改装的舰船（战损后在此修复或焊死）。' }));
+  }
+  wrap.appendChild(pScar);
+
+  /* —— 3. 战役残骸栖息地卡 —— */
+  const sites = Array.isArray(w.spaceOperaState.wreckSites) ? w.spaceOperaState.wreckSites : [];
+  const localWrecks = detail.systemId
+    ? sites.filter((wk) => wk && wk.systemId === detail.systemId && wk.converted == null)
+    : [];
+  const pWreck = panel({ title: '太空歌剧 · 战役残骸栖息地', open: localWrecks.length > 0, dense: true });
+  if (localWrecks.length === 0) {
+    pWreck.appendChild(el('div', { class: 'vf-faint vf-small', text: '本星系没有待处置的战役残骸（重大战役主力舰沉没后生成）。' }));
+  }
+  for (const wk of localWrecks) {
+    const row = el('div', { class: 'vf-row', style: { gap: '6px' } });
+    row.appendChild(el('span', { class: 'vf-grow vf-small', text: `残骸 #${wk.id}（主力舰损失 ×${wk.capitalLosses || 0}）` }));
+    row.appendChild(el('button', {
+      class: 'vf-btn small',
+      text: '改造为残骸空间站',
+      title: 'SalvageBattleWreckHabitat：改造为永久残骸栖息地（每月 +20 凝聚力）',
+      on: {
+        click: () => {
+          app.dispatch('SalvageBattleWreckHabitat', { wreckEntityId: numId(wk.id), convertToHabitat: true });
+          view._forceRefresh();
+        },
+      },
+    }));
+    row.appendChild(el('button', {
+      class: 'vf-btn small',
+      text: '拆解回收',
+      title: 'SalvageBattleWreckHabitat：拆解回收合金与信用点',
+      on: {
+        click: () => {
+          app.dispatch('SalvageBattleWreckHabitat', { wreckEntityId: numId(wk.id), convertToHabitat: false });
+          view._forceRefresh();
+        },
+      },
+    }));
+    pWreck.appendChild(row);
+  }
+  wrap.appendChild(pWreck);
+  return wrap;
+}
+
+/** 舰队驻防星系 → 巡逻司令部行星解析（本系优先，缺省全银河键序第一座 patrolHQ） */
+function resolvePatrolHQPlanet(world, systemId) {
+  const planets = (world.entities && world.entities.planets) || {};
+  let fallback = null;
+  for (const key of Object.keys(planets).sort()) {
+    const p = planets[key];
+    if (!p || !p.patrolHQ) continue;
+    if (systemId != null && p.systemId === systemId) return p;
+    if (!fallback) fallback = p;
+  }
+  return fallback;
+}

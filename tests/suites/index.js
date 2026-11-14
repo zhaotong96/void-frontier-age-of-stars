@@ -51,6 +51,16 @@ import { suite as megastructureElevator } from './megastructure-elevator.suite.j
 import { suite as endgameCrisisAscension } from './endgame-crisis-ascension.suite.js';
 // SPEC-39 Phase S4 / SPEC-40 第二维：Gate 15 地表深度六门禁（SURF-01..05；SURF-06 归 CDP）
 import { suite01 as surf01, suite02 as surf02, suite03 as surf03, suite04 as surf04, suite05 as surf05 } from './playtest-gate15-surface.suite.js';
+// doc43 GATE-15-P0：太空歌剧 Phase 0 基建契约门禁（SPACE-OPERA-00）
+import { suite as spaceOperaFoundation } from './space-opera-foundation-contract.suite.js';
+// doc44 GATE-15-M1：太空歌剧 M1 局势弧线引擎与紧凑行星底座门禁（SPACE-OPERA-M1）
+import { suite as spaceOperaM1 } from './m1-situation-planet-core.suite.js';
+// doc45 GATE-16-M2：太空歌剧 M2 雅可比耦合/稀疏前沿CA/16天体原型门禁（SPACE-OPERA-M2）
+import { suite as spaceOperaM2 } from './m2-jacobian-archetypes-ca.suite.js';
+// doc46 GATE-17-M3：太空歌剧 M3 反孤独生态/S7天灾/自适应戏剧导演门禁（SPACE-OPERA-M3）
+import { suite as spaceOperaM3 } from './m3-space-opera-drama-director.suite.js';
+// doc48 GATE-18-M4：太空歌剧 M4 活体合龙/双轨经济桥/六大视图/28命令端到端门禁（SPACE-OPERA-M4）
+import { suite as spaceOperaM4 } from './m4-space-opera-live-bridge-ui.suite.js';
 
 export function collectSuites() {
   return [
@@ -64,6 +74,11 @@ export function collectSuites() {
     surf03,
     surf04,
     surf05,
+    spaceOperaFoundation,
+    spaceOperaM1,
+    spaceOperaM2,
+    spaceOperaM3,
+    spaceOperaM4,
     coreRng,
     coreSerialization,
     coreMath,

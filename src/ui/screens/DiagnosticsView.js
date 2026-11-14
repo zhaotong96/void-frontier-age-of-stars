@@ -12,6 +12,7 @@ import { panel } from '../components/panels.js';
 import { progressBar } from '../components/progress.js';
 import { L } from '../../core/i18n.js';
 import { surfaceCycleDebugMode, surfaceGLSnapshot } from '../../devtools/glGateTest.js';
+import { spaceOperaView } from '../../simulation/ViewModels.js';
 
 /** 地表诊断模式显示名（0..3，与 PlanetSurface3D.setDebugMode 契约一致） */
 const SURFACE_MODE_NAMES = ['0 off', '1 unlit_nocull', '2 wireframe_normal', '3 winding_audit'];
@@ -41,9 +42,73 @@ export const DiagnosticsView = {
     this.resultsBox = el('div', { class: 'mt-2' });
     body.appendChild(this.resultsBox);
     body.appendChild(this.buildSurfaceDiagCard());
+    // SPEC-PLAN-046 M3：太空歌剧态势小节（world.spaceOperaState 不存在则整节不渲染；
+    // 只读投影消费 spaceOperaView，绝不改动世界状态）
+    const soSection = this.buildSpaceOperaSection(app && app.world);
+    if (soSection) body.appendChild(soSection);
     wrap.appendChild(body);
     root.appendChild(wrap);
     this.results = [];
+  },
+
+  /**
+   * 「太空歌剧态势」只读小节（SPEC-PLAN-046 M3）：systemVector 七维条 / 张力与适应 /
+   * 活跃局势表 / 因果链尾 4 条。world 缺失或未挂载 spaceOperaState → 返回 null（整节不渲染）。
+   */
+  buildSpaceOperaSection(world) {
+    const view = world ? spaceOperaView(world) : null;
+    if (!view) return null;
+    const p = panel({ title: '太空歌剧态势', open: true });
+
+    // —— 七维宏观状态条（S1..S7 ∈ [0,100]）——
+    const SYS_NAMES = ['S1 考古', 'S2 生态', 'S3 社会', 'S4 经济', 'S5 舰队', 'S6 黑市', 'S7 议会'];
+    const vectorBox = el('div', { class: 'mt-1' });
+    for (let i = 0; i < view.systemVector.length; i++) {
+      vectorBox.appendChild(progressBar({
+        value: view.systemVector[i],
+        max: 100,
+        label: `${SYS_NAMES[i] || `S${i + 1}`} ${view.systemVector[i].toFixed(1)}`,
+        detail: `偏离均衡 ${view.equilibriumGap[i].toFixed(2)}`,
+      }));
+    }
+    p.appendChild(vectorBox);
+
+    // —— 张力 / 适应 / 信标 / 天灾态势行 ——
+    p.appendChild(el('div', {
+      class: 'vf-row mt-1',
+      text: `张力 T ${view.drama.tension.toFixed(1)} / 100 · 适应 A ${view.drama.adaptationFactor.toFixed(3)} · 适应天数 ${view.drama.adaptDays.toFixed(1)} · 高潮次数 ${view.drama.climaxCount}`
+        + ` · 信标 ${view.beacons.total}（非帝国 ${view.beacons.nonEmpire} / 机遇 ${view.beacons.opportunity}）`
+        + ` · 主权违约 ${view.empireDefaulted ? '进行中' : '无'}`
+        + ` · 终局天灾 ${view.endgameCrisis.active || '无'}${view.endgameCrisis.ghostSignalActive ? '（幽灵信号）' : ''}`,
+    }));
+
+    // —— 活跃局势表 ——
+    if (view.activeSituations.length > 0) {
+      const sitBox = el('div', { class: 'mt-1' });
+      sitBox.appendChild(el('div', { class: 'vf-faint vf-small', text: `活跃局势 ${view.activeSituations.length} 场（弧 / 进度 / 幕 / 对策）` }));
+      for (const sit of view.activeSituations) {
+        sitBox.appendChild(el('div', {
+          class: 'vf-row vf-mono vf-small',
+          text: `#${sit.id} ${sit.arc} · ${sit.progress.toFixed(1)} · 第${sit.act}幕 · ${sit.approach || '—'}`,
+        }));
+      }
+      p.appendChild(sitBox);
+    }
+
+    // —— 三阶蝴蝶效应因果链尾 4 条 ——
+    if (view.butterflyCausalLog.length > 0) {
+      const logBox = el('div', { class: 'mt-1' });
+      logBox.appendChild(el('div', { class: 'vf-faint vf-small', text: '蝴蝶效应因果链（尾 4 条）' }));
+      for (const chain of view.butterflyCausalLog.slice(-4)) {
+        const fmt = (o) => `S${o.system + 1}(${o.value >= 0 ? '+' : ''}${o.value})`;
+        logBox.appendChild(el('div', {
+          class: 'vf-row vf-mono vf-small',
+          text: `tick ${chain.tick}：S${chain.sourceSystem + 1} ${chain.delta >= 0 ? '+' : ''}${chain.delta} → ${fmt(chain.order1)} → ${fmt(chain.order2)} → ${fmt(chain.order3)}`,
+        }));
+      }
+      p.appendChild(logBox);
+    }
+    return p;
   },
 
   /** 地表渲染诊断卡：循环诊断模式（F3 同效）+ 导出 GL 状态快照 JSON */

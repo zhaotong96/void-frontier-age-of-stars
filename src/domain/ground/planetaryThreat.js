@@ -23,6 +23,7 @@ import { clamp } from '../../core/math.js';
 import { derivePlanetSeedsExtended } from './planetSeeds.js';
 import { ensurePlanetThreat } from './planetWeather.js';
 import { ensurePlanetInd } from '../industry/planetaryLogistics.js';
+import { onLeviathanDefeated } from '../diplomacy/galacticSenateAndCrisisArc.js';
 
 /** 警戒阶级阈值（PTI 0..1000） */
 export const PTI_THRESHOLDS = Object.freeze([0, 200, 400, 650, 850]);
@@ -179,6 +180,11 @@ export function reportLeviathanDefeated(world, planet) {
   }
   chronicle(world, 'crisis', `行星 ${planet.name} 利维坦讨伐成功：PTI 归零，先驱者奇异物质 ×5 入账`, { planetId: planet.id });
   emit(world, 'LeviathanDefeated', { planetId: planet.id, loot }, 'ground');
+  // —— 42 号总纲 §二.7 第四幕「巨兽凯旋大游行局势」实战可达整改：巨兽击杀结算处
+  //    直连 LEVIATHAN_PARADE 局势唯一生成口（域内幂等：同星系已有游行复用现有局势；
+  //    金快照/未挂 spaceOperaState 世界首行守卫返回 null 零写入零漂移；
+  //    eventBus 'LeviathanDefeated' 监听器路径保留，双路径经 onLeviathanDefeated 幂等收敛）——
+  onLeviathanDefeated(world, planet.systemId);
   return { ok: true, loot };
 }
 
