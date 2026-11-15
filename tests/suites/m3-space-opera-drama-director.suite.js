@@ -707,7 +707,8 @@ function chk0308() {
 /* ============================== CHK-M3-09：S7 第二幕命令与兰兹拉德宪章表决 ============================== */
 
 function chk0309() {
-  assertEq(LANDSRAAD_BILL_KINDS.length, 3, 'CHK-M3-09 宪章法案种类须为 3');
+  // SPEC-PLAN-056 赛道 D（M5 总纲优先）：新增第 4 宪章 CHARTER_STARFIRE_PACT
+  assertEq(LANDSRAAD_BILL_KINDS.length, 4, 'CHK-M3-09 宪章法案种类须为 4（M5 星火公约）');
   const w = makeOperaWorld(4);
   w.playerFactionId = 'fac_player';
   w.relations = { diplomacy: {} };

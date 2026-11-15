@@ -139,12 +139,16 @@ function transformModule(id, source) {
   // 3. export default <expr>; → __exports.default = <expr>;
   body = body.replace(/^[ \t]*export\s+default\s+/gm, '__exports.default = ');
 
-  // 4. export { a, b as c };（本地重导出）→ Object.assign(__exports, { a, b: c });
+  // 4. export { a, b as c };（本地重导出）→ Object.assign(__exports, { a, c: b });
+  //    SPEC-PLAN-057 Task 57.4 配套修复：键必须是「导出名」，值必须是「局部名」。
+  //    旧实现写反为 { b: c }，使 `export { leaderTickEntry as stepParagonLeaderTick }`
+  //    生成对未定义标识符的引用，生产 Bundle 首次执行即抛 ReferenceError，
+  //    App 无法挂载（ESM 源码路径不受影响，故仅在 Bundle 默认加载后暴露）。
   body = body.replace(/^[ \t]*export\s*\{([^}]*)\}\s*;?[ \t]*$/gm, (whole, names) => {
     const mapped = names.split(',').map((n) => n.trim()).filter(Boolean)
       .map((n) => {
         const [orig, alias] = n.split(/\s+as\s+/);
-        return `${orig}: ${alias || orig}`;
+        return `${alias || orig}: ${orig}`;
       }).join(', ');
     return `Object.assign(__exports, { ${mapped} });`;
   });
@@ -236,4 +240,8 @@ export function buildBundle({ log = console.log } = {}) {
 }
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
-if (isMain) buildBundle();
+// SPEC-PLAN-057 CHK-57-05 / SPEC-PLAN-060 Task 60.3：显式接受 --rebuild / -r 强制重打包。
+// 构建本身恒为全量重打包（无增量缓存），参数仅用于门禁命令的可读性与意图声明。
+if (isMain) {
+  buildBundle();
+}

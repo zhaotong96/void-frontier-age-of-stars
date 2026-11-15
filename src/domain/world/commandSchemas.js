@@ -224,6 +224,32 @@ const SCHEMA_BY_TYPE = new Map(SPACE_OPERA_COMMANDS.map((def) => [def.type, def]
  * @param {{type: string, params?: object}} cmd - 命令信封
  * @returns {{ok: boolean, reason: string|null}} ok=false 时 reason 指明首个违规字段
  */
+/**
+ * SPEC-PLAN-057 Task 57.3（BUG-04 / doc56 Task 56.1 §3）：实体 ID 双模判定。
+ * 运行时 ID 形如 'plt_101' / 'fac_553' / 'flt_563' / 'shp_12' / 'chr_7'，
+ * 契约表层声明为 number；外部探针与 UI 直接派发字符串 ID 时必须兼容放行。
+ * 严格匹配「可选小写字母前缀 + 下划线 + 数字」或「纯数字」，拒绝任意脏字符串。
+ */
+export function isCoercibleEntityId(val) {
+  if (typeof val === 'number') return Number.isInteger(val) && val >= 0;
+  if (typeof val !== 'string') return false;
+  return normalizeEntityIdValue(val) !== val;
+}
+
+/** 字段名是否为实体 ID（以 'Id' 结尾；如 planetId / targetPlanetId / situationId） */
+export function isEntityIdField(name) {
+  return typeof name === 'string' && name.endsWith('Id');
+}
+
+/** 字符串实体 ID → 有限整数键；不可解析时原样返回（由调用方拒绝） */
+export function normalizeEntityIdValue(val) {
+  if (typeof val !== 'string') return val;
+  const m = /^(?:[a-z]+_)?(\d+)$/i.exec(String(val).trim());
+  if (!m) return val;
+  const num = Number.parseInt(m[1], 10);
+  return Number.isInteger(num) && num >= 0 ? num : val;
+}
+
 export function validateSpaceOperaCommandPayload(cmd) {
   if (!cmd || typeof cmd !== 'object' || Array.isArray(cmd)) {
     return { ok: false, reason: 'SO: 命令信封必须为对象 {type, params}' };
@@ -243,7 +269,12 @@ export function validateSpaceOperaCommandPayload(cmd) {
       return { ok: false, reason: `SO: ${cmd.type} 缺少必填字段 ${f.name}（${f.type}）` };
     }
     if (f.type === 'number') {
-      if (typeof v !== 'number' || !Number.isFinite(v) || !Number.isInteger(v)) {
+      // SPEC-PLAN-057 Task 57.3：以 'Id' 结尾的实体 ID 字段允许可归一化字符串 ID
+      if (isEntityIdField(f.name) && typeof v === 'string') {
+        if (!isCoercibleEntityId(v)) {
+          return { ok: false, reason: `SO: ${cmd.type}.${f.name} 字符串实体 ID 不可解析（实测 ${String(v)}）` };
+        }
+      } else if (typeof v !== 'number' || !Number.isFinite(v) || !Number.isInteger(v)) {
         return { ok: false, reason: `SO: ${cmd.type}.${f.name} 必须为有限整数（实测 ${String(v)}）` };
       }
     } else if (f.type === 'string') {

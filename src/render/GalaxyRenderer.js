@@ -269,11 +269,75 @@ export class GalaxyRenderer {
   /** 更新渲染用的最新快照引用（不复制、不修改） */
   setSnapshot(snap) {
     this._snapshot = snap || null;
+    // SPEC-PLAN-058 Task 58.4（BUG-06）：视图未精确居中时的首帧质心兜底
+    if (!this._viewCentered && snap && Array.isArray(snap.systems) && snap.systems.length) {
+      let sx = 0; let sy = 0; let n = 0;
+      for (const s of snap.systems) {
+        if (s && Number.isFinite(s.x) && Number.isFinite(s.y)) { sx += s.x; sy += s.y; n += 1; }
+      }
+      if (n > 0 && this.centerOnCoordinates(sx / n, sy / n)) this._viewCentered = true;
+    }
   }
 
   /** 更新悬停星系 id */
   setHover(id) {
     this._hoverId = id || null;
+  }
+
+  /**
+   * SPEC-PLAN-058 Task 58.4（BUG-06）：把视角中心对准指定策略坐标。
+   * 递增 _camVersion 并置脏投影缓存，强制下一帧重建相机矩阵（GL/2D 同口径）。
+   */
+  centerOnCoordinates(x, y) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+    this.view.x = x;
+    this.view.y = y;
+    this._camVersion += 1;
+    this._projValid = false;
+    return true;
+  }
+
+  /** 母星系（玩家首座殖民地所在星系）→ 全星系质心 两级自适配 */
+  centerOnHomeSystem(world) {
+    this._homeWorld = world || null;
+    const systems = world && world.entities && world.entities.systems ? world.entities.systems : {};
+    const keys = Object.keys(systems).sort();
+    if (keys.length === 0) return false;
+    const pf = world.playerFactionId;
+    const planets = (world.entities && world.entities.planets) || {};
+    const colonies = (world.entities && world.entities.colonies) || {};
+    let home = null;
+    for (const key of Object.keys(colonies).sort()) {
+      const col = colonies[key];
+      if (!col || (pf && col.factionId && col.factionId !== pf)) continue;
+      const planet = planets[col.planetId];
+      const sys = planet && systems[planet.systemId];
+      if (sys && Number.isFinite(sys.x) && Number.isFinite(sys.y)) { home = sys; break; }
+    }
+    let cx; let cy;
+    if (home) {
+      cx = home.x; cy = home.y;
+    } else {
+      let sx = 0; let sy = 0; let n = 0;
+      for (const key of keys) {
+        const s = systems[key];
+        if (s && Number.isFinite(s.x) && Number.isFinite(s.y)) { sx += s.x; sy += s.y; n += 1; }
+      }
+      if (n === 0) return false;
+      cx = sx / n; cy = sy / n;
+    }
+    const ok = this.centerOnCoordinates(cx, cy);
+    if (ok) this._viewCentered = true;
+    return ok;
+  }
+
+  /** 【🎯 复位视角】：zoom 归 1× 并重新对准母星系/质心 */
+  resetView() {
+    this.view.zoom = 1;
+    this._camVersion += 1;
+    this._projValid = false;
+    if (this._homeWorld) return this.centerOnHomeSystem(this._homeWorld);
+    return this.centerOnCoordinates(WORLD / 2, WORLD / 2);
   }
 
   // —— 路径判定 ——————————————————————————————————

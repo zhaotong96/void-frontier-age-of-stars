@@ -17,6 +17,7 @@
  */
 
 import { el, clearEl } from '../components/dom.js';
+import { toast } from '../components/index.js'; // SPEC-PLAN-058 Task 58.4：情报点不足前置提示
 import { panel, kvList } from '../components/panels.js';
 import { gauge } from '../charts/index.js';
 import { L } from '../../core/i18n.js';
@@ -369,7 +370,7 @@ export const DiplomacyView = {
 
 import { el as elSO } from '../components/dom.js';
 import { panel as panelSO } from '../components/panels.js';
-import { LANDSRAAD_BILL_KINDS, ENDGAME_CRISIS_KINDS } from '../../domain/diplomacy/galacticSenateAndCrisisArc.js';
+import { LANDSRAAD_BILL_KINDS, ENDGAME_CRISIS_KINDS, SPY_LAYER_UP_INTEL_COST } from '../../domain/diplomacy/galacticSenateAndCrisisArc.js';
 
 /** 法案种类中文 */
 const BILL_ZH = {
@@ -411,6 +412,11 @@ export function renderSpaceOperaDiplomacyPanel(view) {
   const choam = Number.isFinite(landsraad.choamShares) ? landsraad.choamShares : 0;
   const spy = so.palaceEspionage && typeof so.palaceEspionage === 'object' ? so.palaceEspionage : {};
   const spyNets = spy.spyNetworks && typeof spy.spyNetworks === 'object' ? spy.spyNetworks : {};
+  // SPEC-PLAN-058 Task 58.4（BUG-08.3）：情报点前置门控，根除 0 点点击静默失败
+  const pfLedger = (w.economy && w.economy.ledgers && w.economy.ledgers[w.playerFactionId]) || null;
+  const intelPoints = (pfLedger && pfLedger.balances && Number.isFinite(pfLedger.balances.intelPoints))
+    ? pfLedger.balances.intelPoints : 0;
+  const SPY_INTEL_HINT_THRESHOLD = 25; // doc58 §Task 58.4 §3：储备偏低提示线
   const otherFactions = Object.keys((w.entities && w.entities.factions) || {})
     .sort()
     .filter((fid) => fid !== w.playerFactionId);
@@ -505,11 +511,27 @@ export function renderSpaceOperaDiplomacyPanel(view) {
     row.appendChild(elSO('span', { class: 'vf-grow vf-small', text: factionLabel(w, fid)
       + ' · 渗透深度 Tier ' + (net.layers || 0) + '/3'
       + (net.doubleAgent === true ? ' · 双面间谍已植入' : '') }));
+    const shortIntel = intelPoints < SPY_LAYER_UP_INTEL_COST;
     row.appendChild(elSO('button', {
       class: 'vf-btn small', text: '深度渗透',
-      disabled: (net.layers || 0) >= 3,
-      title: 'LayerUpSpyNetwork（每层扣 10 情报点；≥2 层使目标派系表决弃权）',
-      on: { click: () => { app.dispatch('LayerUpSpyNetwork', { targetFactionId: fid }); view._rebuild(); } },
+      disabled: (net.layers || 0) >= 3 || shortIntel,
+      title: shortIntel
+        ? `情报点不足（当前 ${intelPoints}/需 ${SPY_LAYER_UP_INTEL_COST} 点），请先派遣侦察巡航舰或等待解密`
+        : `LayerUpSpyNetwork（每层扣 ${SPY_LAYER_UP_INTEL_COST} 情报点；≥2 层使目标派系表决弃权）`
+          + (intelPoints < SPY_INTEL_HINT_THRESHOLD ? ` · 当前储备 ${intelPoints} 点偏低` : ''),
+      on: {
+        click: () => {
+          if (shortIntel) {
+            toast(`情报点不足（当前 ${intelPoints}/需 ${SPY_LAYER_UP_INTEL_COST} 点），请先派遣侦察巡航舰或等待解密`, { kind: 'warn' });
+            return;
+          }
+          if (intelPoints < SPY_INTEL_HINT_THRESHOLD) {
+            toast(`情报储备偏低（${intelPoints} 点），建议先部署监听`, { kind: 'info' });
+          }
+          app.dispatch('LayerUpSpyNetwork', { targetFactionId: fid });
+          view._rebuild();
+        },
+      },
     }));
     row.appendChild(elSO('button', {
       class: 'vf-btn small', text: '植入双面间谍',

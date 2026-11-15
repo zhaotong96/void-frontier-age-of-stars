@@ -14,7 +14,7 @@
  */
 
 import { el, clearEl } from '../components/dom.js';
-import { dataTable, panel, kvList, statBar, progressBar } from '../components/index.js';
+import { dataTable, panel, kvList, statBar, progressBar, toast } from '../components/index.js';
 import { gauge, stackBar } from '../charts/index.js';
 import { L } from '../../core/i18n.js';
 import { dateStr } from '../../core/clock.js';
@@ -628,7 +628,11 @@ export const ColonyView = {
           title: def.blocked || '排入建造队列（开工时支付资源）',
           on: {
             click: () => {
-              this.app.dispatch('BuildOnColony', { colonyId: detail.id, defId: def.defId });
+              // SPEC-PLAN-058 Task 58.4（BUG-08.2）：入队即时回执 + 缺合金采购指引
+              const res = this.app.dispatch('BuildOnColony', { colonyId: detail.id, defId: def.defId });
+              if (res && res.ok) {
+                toast(`已排入建造队列：${def.name}（缺合金时可在【市场】采购）`, { kind: 'ok' });
+              }
               this._forceRefresh();
             },
           },

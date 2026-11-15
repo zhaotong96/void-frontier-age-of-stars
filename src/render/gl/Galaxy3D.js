@@ -32,20 +32,33 @@
  *   galaxy3d.shell   超新星球壳（视图空间射线-球求交 imposter，limb 增亮）
  */
 
-// —— 并行模块探测（非阻塞动态 import） ——
-// 交付模块在场（http 直连模式）即优先采用其导出；缺席/加载失败静默回退本文件内的
-// 本地确定性实现（接口不变）。刻意不用顶层 await：R1 单文件打包器把模块体封装进
-// 同步工厂函数（tests/tools/build-static-bundle.mjs），await 会使 dist 构建失效；
-// 动态 import 不进入其静态依赖图，file:// 单文件模式下探测 404 后同样回退本地。
-let _extParticles = null;
-let _extNebula = null;
-function _probeExternal(spec, assign) {
-  try {
-    import(spec).then(assign, () => { /* 缺席：保持 null → 本地回退 */ });
-  } catch (_) { /* 极老环境无动态 import：仅用本地回退 */ }
-}
-_probeExternal('./GalaxyParticles.js', (m) => { _extParticles = m || null; });
-_probeExternal('../shaders/NebulaShader.js', (m) => { _extNebula = m || null; });
+// —— 并行模块静态接线（SPEC-PLAN-057 Task 57.4 / BUG-05 配套） ——
+// 两个「并行交付模块」现已真实入库。旧实现用 `import('./GalaxyParticles.js')` 非阻塞
+// 探测：ESM 模式基准为 src/render/gl/ → 200；切换为单文件 Bundle 优先后基准变为
+// dist/ → /dist/GalaxyParticles.js 404，触发 CDP「Network 0 404」门禁失败，并回退到
+// 本地近似实现（与 ESM 行为不一致）。改为静态 import：产物内含真实实现、零网络请求、
+// ESM 与 Bundle 两条路径行为逐位一致。包装层与本地回退保留（接口不变）。
+import {
+  generateGalaxyParticles as generateGalaxyParticlesExt,
+  generateSupernovaSeeds as generateSupernovaSeedsExt,
+} from './GalaxyParticles.js';
+import {
+  NEBULA_VERT as EXT_NEBULA_VERT,
+  NEBULA_FRAG as EXT_NEBULA_FRAG,
+  SUPERNOVA_VERT as EXT_SUPERNOVA_VERT,
+  SUPERNOVA_FRAG as EXT_SUPERNOVA_FRAG,
+} from '../shaders/NebulaShader.js';
+
+const _extParticles = {
+  generateGalaxyParticles: generateGalaxyParticlesExt,
+  generateSupernovaSeeds: generateSupernovaSeedsExt,
+};
+const _extNebula = {
+  NEBULA_VERT: EXT_NEBULA_VERT,
+  NEBULA_FRAG: EXT_NEBULA_FRAG,
+  SUPERNOVA_VERT: EXT_SUPERNOVA_VERT,
+  SUPERNOVA_FRAG: EXT_SUPERNOVA_FRAG,
+};
 
 /** 策略坐标 (0..1000) → 世界坐标的缩放系数（±10 世界单位银盘） */
 export const WORLD_SCALE = 0.02;

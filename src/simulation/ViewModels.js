@@ -20,6 +20,8 @@ import { BUILDINGS } from '../content/buildings.js';
 import { BAL } from '../content/constants.js';
 // SPEC-PLAN-052 Task 52.1/52.2（M4 工位 D）：16 大天体原型名称投影（content 只读表，零环）
 import { PLANETARY_ARCHETYPES } from '../content/planetaryArchetypes.js';
+// SPEC-PLAN-056 Task 56.2 §4 / 058 Task 58.3：频段颜色简写权威映射
+import { BEACON_FREQ_BAND } from '../content/spaceOperaBeacons.js';
 
 /** 殖民地详情 */
 export function colonyDetail(world, colonyId) {
@@ -420,17 +422,21 @@ export function governmentView(world, factionId) {
  */
 function paragonsProjection(world) {
   const characters = (world.entities && world.entities.characters) || {};
+  const pf = world.playerFactionId;
   const out = [];
   for (const key of Object.keys(characters).sort()) {
     const ch = characters[key];
     const pg = ch && ch.paragon;
     if (!ch || !pg || ch.health === 'dead') continue;
+    // SPEC-PLAN-058 Task 58.1（BUG-02）：投影层严格隔离非玩家派系领袖
+    if (pf && ch.factionId && ch.factionId !== pf) continue;
     const lvl = Number.isFinite(ch.level) ? ch.level : 1;
     const xp = Number.isFinite(ch.xp) ? ch.xp : 0;
     // 在编口径与 leaderCapStats 同源：职业内、非 capExempt、存活
     const sameProf = Object.keys(characters).filter((k2) => {
       const c2 = characters[k2];
       return c2 && c2.paragon && c2.health !== 'dead'
+        && (!pf || !c2.factionId || c2.factionId === pf)
         && c2.paragon.profession === pg.profession && c2.paragon.capExempt !== true;
     }).length;
     const cap = (world.spaceOperaState && world.spaceOperaState.leaderCaps
@@ -761,7 +767,7 @@ function spaceOperaBeaconsList(world, so) {
     out.push({
       id: b.id,
       kind: b.kind || 'NARRATIVE',
-      band: b.freqClass || null,
+      band: BEACON_FREQ_BAND[b.freqClass] || b.band || 'gold',
       frequencyName: meta.nameZh,
       color: meta.color,
       position: sys && Number.isFinite(sys.x) ? { x: sys.x, y: sys.y } : null,
@@ -776,6 +782,39 @@ function spaceOperaBeaconsList(world, so) {
     });
   }
   return out;
+}
+
+/** 信标奖励资源中文名（Toast 回执显示用） */
+const BEACON_RES_ZH = Object.freeze({
+  credits: '信用点', researchData: '科研数据', intelPoints: '情报点',
+  influence: '影响力', ancientData: '先驱者数据', exoticMatter: '奇异物质',
+  alloy: '合金', medicine: '医药', powerCell: '动力电池', food: '食物',
+});
+
+/**
+ * SPEC-PLAN-058 Task 58.4（BUG-08.1 / doc56 Task 56.2 §5）：把
+ * world.spaceOperaState.lastBeaconResponse 的机读结算结果格式化为中文收益回执。
+ * 纯函数、零世界态改动；未知效果回退到 outcome.summaryZh / 选项提示。
+ */
+export function beaconOutcomeSummaryZh(outcome, option) {
+  const o = outcome && typeof outcome === 'object' ? outcome : {};
+  const parts = [];
+  const addRes = (r) => {
+    if (!r || !Number.isFinite(Number(r.amount))) return;
+    parts.push(`获得 +${r.amount} ${BEACON_RES_ZH[r.resId] || r.resId}`);
+  };
+  addRes(o.credited);
+  addRes(o.fallbackCredit);
+  if (o.unityGranted != null && Number.isFinite(Number(o.unityGranted))) {
+    parts.push(`帝国凝聚力 +${o.unityGranted}`);
+  }
+  if (o.blackMarket && Number.isFinite(Number(o.blackMarket.qty))) {
+    parts.push(`黑市窗口 ${o.blackMarket.contrabandId} ×${o.blackMarket.qty}`);
+  }
+  if (o.refugees != null && Number.isFinite(Number(o.refugees))) parts.push(`难民入殖 +${o.refugees}`);
+  if (o.tempBuff) parts.push('临时增益窗口已激活');
+  if (parts.length) return parts.join('、');
+  return o.summaryZh || (option && (option.effectHint || option.label)) || '信标响应已执行';
 }
 
 /**

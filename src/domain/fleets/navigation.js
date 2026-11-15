@@ -24,6 +24,28 @@ export function laneHours(world, fleet, fromSystem, toSystem) {
   return Math.max(1, Math.ceil(hours));
 }
 
+/**
+ * SPEC-PLAN-059 Task 59.2（doc56 赛道 C）：玩家帝国招募「缄默制图师·赛拉」后，
+ * 全帝国舰队享受折叠航道直连：燃料消耗 ×0.60（−40%）、战略航速 ×1.25（+25%）。
+ * 纯读、零写入；无 spaceOperaState / 无赛拉档案时恒返回 1（REG-01 零漂移）。
+ */
+export function seraFleetModifiers(world, fleet) {
+  const neutral = { fuelMultiplier: 1, speedMultiplier: 1 };
+  const so = world && world.spaceOperaState;
+  if (!so) return neutral;
+  const pf = world.playerFactionId;
+  if (!pf || !fleet || (fleet.factionId && fleet.factionId !== pf)) return neutral;
+  const chars = (world.entities && world.entities.characters) || {};
+  for (const key of Object.keys(chars).sort()) {
+    const ch = chars[key];
+    const pg = ch && ch.paragon;
+    if (!pg || pg.paragonId !== 'SERA_CARTOGRAPHER') continue;
+    if (ch.factionId && ch.factionId !== pf) continue;
+    return { fuelMultiplier: 0.60, speedMultiplier: 1.25 };
+  }
+  return neutral;
+}
+
 /** 舰队战略速度（最慢船决定 —— 任务书 3.3） */
 export function fleetSpeed(fleet, world) {
   let min = Infinity;
@@ -33,7 +55,7 @@ export function fleetSpeed(fleet, world) {
     const stats = ship.stats || {};
     min = Math.min(min, stats.strategicSpeed ?? 1.0);
   }
-  return Number.isFinite(min) ? min : 1.0;
+  return (Number.isFinite(min) ? min : 1.0) * seraFleetModifiers(world, fleet).speedMultiplier;
 }
 
 
@@ -216,7 +238,7 @@ function fleetFuelMult(fleet, world) {
     mult += ship.stats?.fuelEfficiency ?? 1.0;
     n++;
   }
-  return n > 0 ? mult / n : 1;
+  return (n > 0 ? mult / n : 1) * seraFleetModifiers(world, fleet).fuelMultiplier;
 }
 
 /** 从舰队随行补给船/货舱扣燃料；返回是否还有燃料 */

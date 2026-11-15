@@ -228,7 +228,11 @@ function chk0005() {
   }
   // 契约校验负样本（严格 typeof / 整数 / 枚举 / 缺字段 / 未知命令）
   assertEq(validateSpaceOperaCommandPayload({ type: 'ExcavateSubterraneanLayer', params: { planetId: 1, depthTier: 9 } }).ok, false, 'CHK-00-05 枚举外值须拒收');
-  assertEq(validateSpaceOperaCommandPayload({ type: 'SetSituationApproach', params: { situationId: '1', approachId: 'cautious' } }).ok, false, 'CHK-00-05 number 字段传 string 须拒收');
+  // SPEC-PLAN-056 Task 56.1 §3（M5 总纲优先）：实体 ID 字段允许 number|string 双模；
+  // 非 ID 的 number 字段（depthTier 等）仍严格拒收字符串，契约门强度不降。
+  assertEq(validateSpaceOperaCommandPayload({ type: 'ExcavateSubterraneanLayer', params: { planetId: 1, depthTier: '1' } }).ok, false, 'CHK-00-05 非 ID number 字段传 string 须拒收');
+  assertEq(validateSpaceOperaCommandPayload({ type: 'SetSituationApproach', params: { situationId: '1', approachId: 'cautious' } }).ok, true, 'CHK-00-05 实体 ID 字段可归一化字符串须放行（SPEC-PLAN-056）');
+  assertEq(validateSpaceOperaCommandPayload({ type: 'SetSituationApproach', params: { situationId: 'INVALID', approachId: 'cautious' } }).ok, false, 'CHK-00-05 脏字符串实体 ID 仍须拒收');
   assertEq(validateSpaceOperaCommandPayload({ type: 'SetSituationApproach', params: { situationId: 1.5, approachId: 'x' } }).ok, false, 'CHK-00-05 非整数 number 须拒收');
   assertEq(validateSpaceOperaCommandPayload({ type: 'SetSituationApproach', params: { situationId: 1 } }).ok, false, 'CHK-00-05 缺必填字段须拒收');
   assertEq(validateSpaceOperaCommandPayload({ type: 'NoSuchSpaceOperaCmd', params: {} }).ok, false, 'CHK-00-05 未知太空歌剧命令须拒收');

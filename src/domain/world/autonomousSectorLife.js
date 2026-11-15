@@ -37,7 +37,7 @@
  */
 
 import { DOMAIN_SALTS, deriveSeed, sampleFloat01, sampleWeightedIndex } from './deterministicRng.js';
-import { ensureSpaceOperaState } from './worldMigration.js';
+import { ensureSpaceOperaState } from './spaceOperaState.js'; // 叶子模块（破环）
 import { OPERA_RESOURCE_KEYS, numericEntityKey } from '../planets/planetStateSchema.js';
 import { computeDoctrineTemplate } from '../fleets/fleetDoctrineAndScars.js';
 import { ensureBlackMarket, CONTRABAND_IDS } from '../economy/blackMarket.js';

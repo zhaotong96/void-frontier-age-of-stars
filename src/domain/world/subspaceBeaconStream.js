@@ -31,13 +31,14 @@
  */
 
 import { DOMAIN_SALTS, deriveSeed, sampleWeightedIndex } from './deterministicRng.js';
-import { ensureSpaceOperaState } from './worldMigration.js';
+import { ensureSpaceOperaState } from './spaceOperaState.js'; // 叶子模块（破环）
 import {
   SUBSPACE_BEACON_TEMPLATES,
   OPPORTUNITY_BEACON_TEMPLATES,
   SUBSPACE_FREQ_CLASSES,
   FREQ_CLASS_WEIGHTS,
   OPPORTUNITY_FREQ_CLASS,
+  BEACON_FREQ_BAND,
 } from '../../content/spaceOperaBeacons.js';
 import { ensureBlackMarket } from '../economy/blackMarket.js';
 import { credit } from '../economy/ledger.js';
@@ -130,6 +131,7 @@ function spawnNarrativeBeacon(world, tick, idx) {
   return {
     id: world.spaceOperaState.nextSubspaceBeaconId++,
     freqClass,
+    band: BEACON_FREQ_BAND[freqClass] || 'gold', // SPEC-PLAN-056 §Task 56.2 §4
     systemId: sysKey,
     text: fillText(`${tpl.title}：${tpl.body}`, systemName, factionName),
     spawnedTick: tick,
@@ -160,6 +162,7 @@ function spawnOpportunityBeacon(world, tick, i) {
   return {
     id: world.spaceOperaState.nextSubspaceBeaconId++,
     freqClass: OPPORTUNITY_FREQ_CLASS,
+    band: BEACON_FREQ_BAND[OPPORTUNITY_FREQ_CLASS] || 'gold', // SPEC-PLAN-056 §Task 56.2 §4
     systemId: sysKey,
     text: fillText(`${tpl.title}：${tpl.body}`, systemName, factionName),
     spawnedTick: tick,

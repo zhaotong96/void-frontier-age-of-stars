@@ -910,7 +910,7 @@ export const SystemView = {
 
 /* ==================== SPEC-PLAN-052 Task 52.1：星系内信标脉冲、自主舰队与响应卡片（M4 工位 D） ==================== */
 
-import { spaceOperaView } from '../../simulation/ViewModels.js';
+import { spaceOperaView, beaconOutcomeSummaryZh } from '../../simulation/ViewModels.js';
 import { showModal } from '../components/modal.js';
 
 /**
@@ -1020,7 +1020,12 @@ export function buildSystemSpaceOperaPanel(view) {
         title: 'RespondSubspaceBeacon → ' + opt.id + (opt.effectHint ? '（' + opt.effectHint + '）' : ''),
         on: {
           click: () => {
-            view.app.dispatch('RespondSubspaceBeacon', { beaconId: b.id, responseOptionId: opt.id });
+            // SPEC-PLAN-058 Task 58.4（BUG-08.1）：信标响应即时收益回执
+            const res = view.app.dispatch('RespondSubspaceBeacon', { beaconId: b.id, responseOptionId: opt.id });
+            if (res && res.ok) {
+              const outcome = (world.spaceOperaState && world.spaceOperaState.lastBeaconResponse) || {};
+              toast(`◈ 信标响应完成：${beaconOutcomeSummaryZh(outcome, opt)}`, { kind: 'ok' });
+            }
             view._refreshDossier && view._refreshDossier();
           },
         },
@@ -1068,7 +1073,11 @@ export function openSystemBeaconModal(view, beacon) {
     btn.className = 'vf-btn small primary';
     btn.textContent = opt.label || opt.id;
     btn.addEventListener('click', () => {
-      app.dispatch('RespondSubspaceBeacon', { beaconId: beacon.id, responseOptionId: opt.id });
+      const res = app.dispatch('RespondSubspaceBeacon', { beaconId: beacon.id, responseOptionId: opt.id });
+      if (res && res.ok) {
+        const outcome = (w.spaceOperaState && w.spaceOperaState.lastBeaconResponse) || {};
+        toast(`◈ 信标响应完成：${beaconOutcomeSummaryZh(outcome, opt)}`, { kind: 'ok' });
+      }
       if (modalHandle && typeof modalHandle.close === 'function') modalHandle.close();
     });
     body.appendChild(btn);

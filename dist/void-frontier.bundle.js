@@ -1120,9 +1120,14 @@ class App {
       this.sideNav.refresh();
       this.refreshSnapshot();
     } catch (e) {
-      // 未知路由回菜单
-      console.warn('路由失败', e);
+      // SPEC-PLAN-057 Task 57.2（BUG-01 / CHK-M5-01）：严禁静默回退。
+      // 旧实现仅以 warn 级日志提示「路由失败」后直接闪回菜单，导致 3D 地表挂载崩溃
+      // 被只检查 console.error 的门禁漏检。升级为显式致命断言 + 可见错误横幅。
+      console.error(`[CRITICAL] 视图挂载致命异常 (${route.screen}):`, e);
+      this._lastRouteError = e;
+      this.showFatalError(`视图 ${route.screen} 加载失败: ${e && e.message}`);
       if (route.screen !== 'menu') navigate('menu');
+      throw e;
     }
   }
 
@@ -1190,6 +1195,29 @@ class App {
     console.error('致命错误', err);
     this.setSpeed(0);
     toast(`发生未处理错误: ${err && err.message}`, { kind: 'error' });
+  }
+
+  /**
+   * SPEC-PLAN-057 Task 57.2：可见致命错误横幅（替代静默闪回）。
+   * 幂等挂载在 #app 首子节点之前；DOM 桩/受限环境下静默降级，绝不二次抛错。
+   */
+  showFatalError(msg) {
+    const text = String(msg || '发生未处理错误');
+    try {
+      const host = this.root || (typeof document !== 'undefined' ? document.getElementById('app') : null);
+      if (host && typeof document !== 'undefined' && typeof host.insertBefore === 'function') {
+        const prev = typeof host.querySelector === 'function' ? host.querySelector('.vf-fatal-banner') : null;
+        if (prev) {
+          prev.textContent = `⚠ ${text}`;
+        } else {
+          const banner = document.createElement('div');
+          banner.className = 'boot-error vf-fatal-banner';
+          banner.textContent = `⚠ ${text}`;
+          host.insertBefore(banner, host.firstChild || null);
+        }
+      }
+      toast(text, { kind: 'error' });
+    } catch (_) { /* 受限宿主环境：横幅降级，异常已在控制台显式记录 */ }
   }
 
   /** 帮助/确认弹窗（供各视图复用） */
@@ -2633,8 +2661,8 @@ __register("src/app/commandsSpaceOpera.js", function (__exports, __require) {
 
 const { registerCommand: registerCommand } = __require("src/core/commandBus.js");
 const { emit: emit } = __require("src/core/eventBus.js");
-const { SPACE_OPERA_COMMANDS: SPACE_OPERA_COMMANDS, validateSpaceOperaCommandPayload: validateSpaceOperaCommandPayload } = __require("src/domain/world/commandSchemas.js");
-const { ensureSpaceOperaState: ensureSpaceOperaState } = __require("src/domain/world/worldMigration.js");
+const { SPACE_OPERA_COMMANDS: SPACE_OPERA_COMMANDS, validateSpaceOperaCommandPayload: validateSpaceOperaCommandPayload, isEntityIdField: isEntityIdField, normalizeEntityIdValue: normalizeEntityIdValue } = __require("src/domain/world/commandSchemas.js");
+const { ensureSpaceOperaState: ensureSpaceOperaState } = __require("src/domain/world/spaceOperaState.js");
 const { registerSituationArc: registerSituationArc, spawnSituation: spawnSituation, switchSituationApproach: switchSituationApproach, getSituation: getSituation, listActiveSituations: listActiveSituations } = __require("src/domain/events/situationEngine.js");
 const { ensureCompactPlanetState: ensureCompactPlanetState, configureUrbanZone: configureUrbanZone, excavateSubterranean: excavateSubterranean, appendHistory: appendHistory, HISTORY_EVENT_CODES: HISTORY_EVENT_CODES } = __require("src/domain/planets/planetStateSchema.js");
 const { setCutInvestments: setCutInvestments } = __require("src/domain/economy/shortageSituationArc.js");
@@ -2644,7 +2672,7 @@ const { applyArchetypeProfile: applyArchetypeProfile, setQuantumPhaseLock: setQu
 // M3 领域模块挂载（import 副作用：S5 CR 时钟阶段 / 群像月度 XP 与 leader 桶钩子 /
 // 信标流密度阶段 / S7 议会与天灾月度钩子 / 戏剧导演 GRAND_CLIMAX 弧与日·月时钟阶段）
 const { setPatrolHQDoctrine: setPatrolHQDoctrine, computeDoctrineTemplate: computeDoctrineTemplate, restoreShipDMod: restoreShipDMod, installShipSMod: installShipSMod, salvageBattleWreckHabitat: salvageBattleWreckHabitat, SMOD_CATALOG: SMOD_CATALOG } = __require("src/domain/fleets/fleetDoctrineAndScars.js");
-const { assignParagonDestinyTrait: assignParagonDestinyTrait, toggleBeholderMode: toggleBeholderMode } = __require("src/domain/characters/galacticParagons.js");
+const { assignParagonDestinyTrait: assignParagonDestinyTrait, toggleBeholderMode: toggleBeholderMode, awakeLegendaryBeholder: awakeLegendaryBeholder, recruitSeraCartographer: recruitSeraCartographer } = __require("src/domain/characters/galacticParagons.js");
 const { listActiveBeacons: listActiveBeacons, respondSubspaceBeacon: respondSubspaceBeacon } = __require("src/domain/world/subspaceBeaconStream.js");
 const { manageLeviathanParade: manageLeviathanParade } = __require("src/domain/diplomacy/galacticSenateAndCrisisArc.js");
 const { signCommission: signCommission, adjustChoamShares: adjustChoamShares, adjustLandsraadStanding: adjustLandsraadStanding, upgradePalaceEspionage: upgradePalaceEspionage, layerUpSpyNetwork: layerUpSpyNetwork, plantDoubleAgent: plantDoubleAgent, assassinate: assassinate, proposeLandsraadBill: proposeLandsraadBill, LANDSRAAD_BILL_KINDS: LANDSRAAD_BILL_KINDS } = __require("src/domain/diplomacy/galacticSenateAndCrisisArc.js");
@@ -2687,8 +2715,30 @@ function validateSpaceOpera(ctx, cmd) {
   return { ok: true };
 }
 
+/**
+ * SPEC-PLAN-057 Task 57.3（BUG-04）：把 cmd.params 内全部字符串实体 ID 原地
+ * 归一化为统一整数键，确保底层领域层始终收到确定性数字（validate 已先行放行）。
+ * @returns {number} 归一化字段数
+ */
+function normalizeSpaceOperaEntityIds(params) {
+  if (!params || typeof params !== 'object' || Array.isArray(params)) return 0;
+  let count = 0;
+  for (const key of Object.keys(params)) {
+    if (!isEntityIdField(key)) continue;
+    const val = params[key];
+    if (typeof val !== 'string') continue;
+    const normalized = normalizeEntityIdValue(val);
+    if (typeof normalized === 'number') {
+      params[key] = normalized;
+      count += 1;
+    }
+  }
+  return count;
+}
+
 /** 18 条命令共用 execute：幂等挂载容器 → 查阶段 handler；无 handler 静默不做事 */
 function executeSpaceOpera(ctx, cmd) {
+  normalizeSpaceOperaEntityIds(cmd && cmd.params);
   const state = ensureSpaceOperaState(ctx.world);
   const fn = handlers.get(cmd.type);
   if (!fn) return state; // 阶段未施工属正常：编排层后续注入，此处零业务副作用
@@ -3202,6 +3252,18 @@ registerCommand('HireEnclaveMentor', {
   execute(ctx, cmd) { hireEnclaveMentor(ctx.world, cmd.params.enclaveType); },
 });
 
+registerCommand('RecruitSeraCartographer', {
+  desc: 'M5 共创赛道 C：招募第 3 位传奇群像缄默制图师·赛拉（幂等；虚空裁缝天命）',
+  validate() { return { ok: true }; },
+  execute(ctx) { recruitSeraCartographer(ctx.world); },
+});
+
+registerCommand('AwakeLegendaryBeholder', {
+  desc: 'M5 开局保底唤醒先驱者核心 The Beholder（幂等；capExempt 不占在编领袖容量）',
+  validate() { return { ok: true }; },
+  execute(ctx) { awakeLegendaryBeholder(ctx.world); },
+});
+
 registerCommand('AttackEnclave', {
   desc: 'S7 攻击中立城邦（该城邦雇佣导师立即愤然离职 + 内阁议程进度 −20%）',
   validate(ctx, cmd) {
@@ -3214,7 +3276,7 @@ registerCommand('AttackEnclave', {
   execute(ctx, cmd) { attackEnclaveConsequence(ctx.world, cmd.params.mentorId); },
 });
 
-Object.assign(__exports, { SPACE_OPERA_COMMAND_TYPES, registerSpaceOperaCommandHandler });
+Object.assign(__exports, { SPACE_OPERA_COMMAND_TYPES, registerSpaceOperaCommandHandler, normalizeSpaceOperaEntityIds });
 
 });
 __register("src/domain/planets/ecologicalPhaseArc.js", function (__exports, __require) {
@@ -6462,7 +6524,7 @@ __register("src/domain/characters/galacticParagons.js", function (__exports, __r
 
 const { registerSituationMonthlyHook: registerSituationMonthlyHook } = __require("src/domain/events/situationEngine.js");
 const { DOMAIN_SALTS: DOMAIN_SALTS, deriveSeed: deriveSeed, mix32: mix32, sampleFloat01: sampleFloat01 } = __require("src/domain/world/deterministicRng.js");
-const { ensureSpaceOperaState: ensureSpaceOperaState } = __require("src/domain/world/worldMigration.js");
+const { ensureSpaceOperaState: ensureSpaceOperaState } = __require("src/domain/world/spaceOperaState.js");
 const { numericEntityKey: numericEntityKey, ensureCompactPlanetState: ensureCompactPlanetState } = __require("src/domain/planets/planetStateSchema.js");
 const { techDef: techDef } = __require("src/domain/research/research.js");
 const { shipSizeOf: shipSizeOf } = __require("src/domain/fleets/fleetDoctrineAndScars.js");
@@ -6599,14 +6661,19 @@ function leaderCapOf(world, profession) {
  * 统计某职业在编领袖数与软惩罚倍率（纯读，零写入）：
  *  在编口径：health !== 'dead' 且 profession 匹配且 非 capExempt（传奇/导师不占容量）。
  */
-function leaderCapStats(world, profession) {
+function leaderCapStats(world, profession, factionId = null) {
   const characters = world && world.entities && world.entities.characters ? world.entities.characters : {};
+  // SPEC-PLAN-058 Task 58.1（BUG-02 / doc56 Task 56.2 §1）：默认只统计玩家派系在编领袖。
+  // 原实现遍历全银河 30 名角色，把 5 个 AI 帝国的 25 名将领算进玩家编制，导致开局
+  // 「在编 18/上限 4」的 ×4.50 维护费与 ×0.10 XP 假象。无 factionId 的合成人物照旧兼容。
+  const targetFaction = factionId || (world && world.playerFactionId) || null;
   let employed = 0;
   for (const key of Object.keys(characters).sort()) {
     const ch = characters[key];
     const p = ch && ch.paragon;
     if (!ch || !isPlainObject(p)) continue;
     if (ch.health === 'dead') continue;
+    if (targetFaction && ch.factionId && ch.factionId !== targetFaction) continue;
     if (p.profession !== profession) continue;
     if (p.capExempt === true) continue;
     employed += 1;
@@ -6930,6 +6997,12 @@ const DESTINY_TRAITS = Object.freeze({
     nameZh: '铁血后勤', profession: 'commander',
     bonus: Object.freeze({ supplySaving: 0.10 }),
     descZh: '舰队补给消耗 −10%',
+  }),
+  // SPEC-PLAN-059 Task 59.2（赛道 C）：赛拉专属天命【虚空裁缝】
+  commander_void_tailor: Object.freeze({
+    nameZh: '虚空裁缝', profession: 'commander',
+    bonus: Object.freeze({ foldLaneFuelSaving: 0.40, disengageChance: 0.20 }),
+    descZh: '全帝国舰队跨星系折叠航行燃料消耗 −40%、紧急撤退成功率 +20%',
   }),
   official_pillar_stability: Object.freeze({
     nameZh: '定海基石', profession: 'official',
@@ -7369,6 +7442,14 @@ function performBorderlordCoup(world, leader) {
 const LEGENDARY_PARAGONS = Object.freeze({
   TUBOREK: Object.freeze({ nameZh: '图博雷克', capExempt: true, buildSpeedBonus: 1.0 }),
   THE_BEHOLDER: Object.freeze({ nameZh: '全视凝视者', capExempt: true, dualMode: true }),
+  // SPEC-PLAN-059 Task 59.2 / doc56 赛道 C：第 3 位传奇群像（导航官）
+  SERA_CARTOGRAPHER: Object.freeze({
+    nameZh: '缄默制图师·赛拉',
+    capExempt: true,
+    foldLaneFuelSaving: 0.40,   // 全帝国舰队跨星系燃料消耗 −40%
+    fleetSpeedBonus: 0.25,      // doc56 赛道 C：跨星系航速 +25%
+    traumaBackgroundZh: '她曾把一整支远征舰队画进一条不存在的折叠航道；此后便不再开口说话。',
+  }),
 });
 
 /** 灵能合唱体月产额（每名/月；M3 裁决值，产出 = 能量 + 凝聚双通道） */
@@ -7393,7 +7474,126 @@ function applyLegendaryParagon(world, characterId, paragonId) {
   p.capExempt = def.capExempt === true;
   if (Number.isFinite(def.buildSpeedBonus)) p.buildSpeedBonus = def.buildSpeedBonus;
   if (def.dualMode === true) p.dualMode = true;
+  // SPEC-PLAN-059 Task 59.2：赛拉专属属性灌注（折叠航道燃料 / 航速 / 创伤背景）
+  if (Number.isFinite(def.foldLaneFuelSaving)) p.foldLaneFuelSaving = def.foldLaneFuelSaving;
+  if (Number.isFinite(def.fleetSpeedBonus)) p.fleetSpeedBonus = def.fleetSpeedBonus;
+  if (def.traumaBackgroundZh) p.traumaBackgroundZh = def.traumaBackgroundZh;
+  if (paragonId === 'SERA_CARTOGRAPHER') {
+    p.destinyTrait = 'commander_void_tailor';
+    p.trauma = ['melancholic'];
+  }
   return p;
+}
+
+/**
+ * SPEC-PLAN-058 Task 58.1（BUG-10 / doc56 Task 56.2 §2）：开局保底唤醒 The Beholder。
+ * 幂等：玩家派系已有 THE_BEHOLDER 档案时原样返回；否则确定性构造待命态传奇人物
+ * （capExempt 不占编制），锚定首个玩家殖民地行星以支持双形态切换，并登记抵达台账
+ * 阻止月度招募流程重复刷出。仅供活体战役激活器与 AwakeLegendaryBeholder 命令触达，
+ * REG-01 金快照世界（无 spaceOperaState）首行守卫零读取零写入。
+ *
+ * @returns {object|null} 已存在/新建的 THE_BEHOLDER 人物实体
+ */
+function awakeLegendaryBeholder(world) {
+  if (!world || !world.spaceOperaState) return null;
+  const pf = world.playerFactionId;
+  if (!pf) return null;
+  const characters = (world.entities && world.entities.characters) || {};
+  for (const key of Object.keys(characters).sort()) {
+    const ch = characters[key];
+    if (ch && isPlainObject(ch.paragon) && ch.paragon.paragonId === 'THE_BEHOLDER'
+      && (!ch.factionId || ch.factionId === pf)) return ch;
+  }
+  const planets = (world.entities && world.entities.planets) || {};
+  const colonies = (world.entities && world.entities.colonies) || {};
+  let anchorId = null;
+  let anchorPlanet = null;
+  for (const key of Object.keys(colonies).sort()) {
+    const col = colonies[key];
+    if (!col || (col.factionId && col.factionId !== pf)) continue;
+    const planet = planets[col.planetId];
+    if (planet) { anchorId = planet.id; anchorPlanet = planet; break; }
+  }
+  const leader = createEntity(world, 'characters', {
+    factionId: pf,
+    name: '全视凝视者',
+    species: 'machine',
+    age: 0,
+    role: 'tactical',
+    roleName: '灵能机械核心',
+    fleetId: null,
+    level: 6,
+    xp: 0,
+    traits: ['steady'],
+    loyalty: 90,
+    stress: 0,
+    health: 'healthy',
+    history: [],
+    note: '先驱者灵能核心（M5 开局保底唤醒，capExempt）',
+    statModifiers: {},
+  });
+  const pg = ensureParagonProfile(leader, world);
+  applyLegendaryParagon(world, leader.id, 'THE_BEHOLDER');
+  pg.mode = 'WARSHIP_COMMANDER';
+  if (anchorId != null) {
+    pg.governedPlanetId = anchorId;
+    // toggleBeholderMode 的 MONOLITH 前置要求 compact.colony.ownerId >= 0。
+    // 开局 HourlySystems 首 tick 才由 syncColonyToSpaceOpera 写入该字段 —— 这里在
+    // 保底唤醒时同步落账（数值与桥函数完全同源），确保第 1 天即可真实切换双形态。
+    const cColony = anchorPlanet && anchorPlanet.compactState
+      ? anchorPlanet.compactState.colony : null;
+    if (cColony) {
+      cColony.ownerId = numericEntityKey(pf);
+      cColony.ownerFactionId = pf;
+    }
+  }
+  const soState = world.spaceOperaState;
+  if (!isPlainObject(soState.legendaryParagons)) soState.legendaryParagons = {};
+  if (!soState.legendaryParagons.THE_BEHOLDER) {
+    soState.legendaryParagons.THE_BEHOLDER = {
+      leaderId: leader.id,
+      arrivedTick: clampTick(world.tick),
+      source: 'm5Guaranteed',
+    };
+  }
+  emit(world, 'LegendaryParagonAwakened', { paragonId: 'THE_BEHOLDER', leaderId: leader.id }, 'politics');
+  chronicle(world, 'politics', '先驱者核心「全视凝视者」已唤醒（M5 开局保底，不占在编领袖容量）', { leaderId: leader.id });
+  return leader;
+}
+
+/**
+ * SPEC-PLAN-059 Task 59.2（doc56 赛道 C）：招募第 3 位传奇群像「缄默制图师·赛拉」。
+ * 幂等；确定性构造（零 world.rng）；自带专属天命【虚空裁缝】与创伤背景。
+ * 仅由玩家命令触达，REG-01 金快照世界首行守卫零触达。
+ */
+function recruitSeraCartographer(world) {
+  if (!world || !world.spaceOperaState) return null;
+  const pf = world.playerFactionId;
+  if (!pf) return null;
+  const characters = (world.entities && world.entities.characters) || {};
+  for (const key of Object.keys(characters).sort()) {
+    const ch = characters[key];
+    if (ch && isPlainObject(ch.paragon) && ch.paragon.paragonId === 'SERA_CARTOGRAPHER'
+      && (!ch.factionId || ch.factionId === pf)) return ch;
+  }
+  const leader = createEntity(world, 'characters', {
+    factionId: pf, name: '缄默制图师·赛拉', species: 'human', age: 41,
+    role: 'navigator', roleName: '折叠航道制图官', fleetId: null,
+    level: 6, xp: 0, traits: ['steady', 'bookish'], loyalty: 88, stress: 12,
+    health: 'healthy', history: [], note: '外网实测共创精选 · 第 3 位传奇群像（capExempt）',
+    statModifiers: {},
+  });
+  applyLegendaryParagon(world, leader.id, 'SERA_CARTOGRAPHER');
+  const soState = world.spaceOperaState;
+  if (!isPlainObject(soState.legendaryParagons)) soState.legendaryParagons = {};
+  if (!soState.legendaryParagons.SERA_CARTOGRAPHER) {
+    soState.legendaryParagons.SERA_CARTOGRAPHER = {
+      leaderId: leader.id, arrivedTick: clampTick(world.tick), source: 'm5CoCreation',
+    };
+  }
+  emit(world, 'LegendaryParagonRecruited', { paragonId: 'SERA_CARTOGRAPHER', leaderId: leader.id }, 'politics');
+  chronicle(world, 'politics', '缄默制图师·赛拉加入帝国宫廷：折叠航道直连，舰队燃料消耗 −40%', { leaderId: leader.id });
+  return leader;
 }
 
 /**
@@ -7594,6 +7794,7 @@ function paragonFleetModifiers(character) {
   const out = {
     weaponDamage: 0, fireRate: 0, disengageChance: 0, shieldRegen: 0,
     baseDamage: 0, orbitalBombardment: 0, armyDamage: 0, supplySaving: 0,
+    foldLaneFuelSaving: 0, // SPEC-PLAN-059 赛道 C：【虚空裁缝】折叠航道燃料节省
     crossSpaceFireControl: false, psychicShieldPenetration: false,
   };
   const p = isPlainObject(character) && isPlainObject(character.paragon) ? character.paragon : null;
@@ -7756,9 +7957,9 @@ function ensureLeaderHookInjected() {
 injectLeaderTickHook();
 
 /* —— SPEC-PLAN-049 Task 49.3 别名导出（doc49 导入名 ≙ leaderTick 桶钩子入口；零行为增量）—— */
-Object.assign(__exports, { leaderTickEntry: stepParagonLeaderTick });
+Object.assign(__exports, { stepParagonLeaderTick: leaderTickEntry });
 
-Object.assign(__exports, { MONTHLY_XP, BUILD_COMPLETION_XP, SPACE_BATTLE_XP, GROUND_BATTLE_XP, SCIENTIST_XP_RANGE, PARAGON_PROFESSIONS, ensureParagonProfile, LEADER_CAP_DEFAULT, upkeepMultiplier, xpGainMultiplier, leaderCapOf, leaderCapStats, grantMonthlyXp, grantBuildXp, grantBattleXp, grantGroundXp, grantSpaceBattleParagonXp, grantGroundMissionParagonXp, grantScientistXp, DESTINY_TRAITS, lv8Offers, assignParagonDestinyTrait, TRAUMA_TRAITS, traumaCheck, traumaEffects, ETHICS_LOCAL_RADIATION, ETHICS_SECTOR_RADIATION, governorEthicsRadiation, UNAPPOINTED_LOYALTY_DECAY, FLEET_LOSS_LOYALTY_HIT, COUP_LOYALTY_THRESHOLD, COUP_MONTHLY_CHANCE, tickLeaderLoyalty, LEGENDARY_PARAGONS, TELEPATH_ENERGY_PER_POP_MONTH, TELEPATH_UNITY_PER_POP_MONTH, applyLegendaryParagon, toggleBeholderMode, ENCLAVE_TYPES, COUNCIL_AGENDA_PENALTY, hireEnclaveMentor, attackEnclaveConsequence, paragonFleetModifiers, paragonGovernorModifiers, tuborekBuildSpeedBonus, LEGENDARY_ARRIVAL_MONTHLY_CHANCE, LEGENDARY_ARRIVAL_MIN_MONTH, stepLegendaryParagonRecruitment, ensureLeaderHookInjected });
+Object.assign(__exports, { MONTHLY_XP, BUILD_COMPLETION_XP, SPACE_BATTLE_XP, GROUND_BATTLE_XP, SCIENTIST_XP_RANGE, PARAGON_PROFESSIONS, ensureParagonProfile, LEADER_CAP_DEFAULT, upkeepMultiplier, xpGainMultiplier, leaderCapOf, leaderCapStats, grantMonthlyXp, grantBuildXp, grantBattleXp, grantGroundXp, grantSpaceBattleParagonXp, grantGroundMissionParagonXp, grantScientistXp, DESTINY_TRAITS, lv8Offers, assignParagonDestinyTrait, TRAUMA_TRAITS, traumaCheck, traumaEffects, ETHICS_LOCAL_RADIATION, ETHICS_SECTOR_RADIATION, governorEthicsRadiation, UNAPPOINTED_LOYALTY_DECAY, FLEET_LOSS_LOYALTY_HIT, COUP_LOYALTY_THRESHOLD, COUP_MONTHLY_CHANCE, tickLeaderLoyalty, LEGENDARY_PARAGONS, TELEPATH_ENERGY_PER_POP_MONTH, TELEPATH_UNITY_PER_POP_MONTH, applyLegendaryParagon, awakeLegendaryBeholder, recruitSeraCartographer, toggleBeholderMode, ENCLAVE_TYPES, COUNCIL_AGENDA_PENALTY, hireEnclaveMentor, attackEnclaveConsequence, paragonFleetModifiers, paragonGovernorModifiers, tuborekBuildSpeedBonus, LEGENDARY_ARRIVAL_MONTHLY_CHANCE, LEGENDARY_ARRIVAL_MIN_MONTH, stepLegendaryParagonRecruitment, ensureLeaderHookInjected });
 
 });
 __register("src/domain/entities/registry.js", function (__exports, __require) {
@@ -8159,7 +8360,7 @@ __register("src/domain/fleets/fleetDoctrineAndScars.js", function (__exports, __
 
 const { HULLS: HULLS } = __require("src/content/hulls.js");
 const { DOMAIN_SALTS: DOMAIN_SALTS, deriveSeed: deriveSeed, sampleFloat01: sampleFloat01 } = __require("src/domain/world/deterministicRng.js");
-const { ensureSpaceOperaState: ensureSpaceOperaState } = __require("src/domain/world/worldMigration.js");
+const { ensureSpaceOperaState: ensureSpaceOperaState } = __require("src/domain/world/spaceOperaState.js");
 const { numericEntityKey: numericEntityKey } = __require("src/domain/planets/planetStateSchema.js");
 const { debit: debit, credit: credit } = __require("src/domain/economy/ledger.js");
 const { emit: emit } = __require("src/core/eventBus.js");
@@ -8485,6 +8686,18 @@ const SMOD_CATALOG = Object.freeze({
   smod_flux_coil_overdrive: Object.freeze({ nameZh: '幅能线圈超驰', fireRate: 0.10, weaponDamage: 0.05 }),
   smod_aurora_armor_weave: Object.freeze({ nameZh: '极光装甲织网', armor: 0.15 }),
   smod_psychic_relay: Object.freeze({ nameZh: '灵能中继核', shieldRegen: 0.20, psychicShieldPenetration: true }),
+  // —— 外测共创精选 S-Mod（SPEC-PLAN-059 Task 59.4 / doc56 赛道 E）——
+  smod_unsinkable_medal: Object.freeze({
+    nameZh: '不沉勋章',
+    structureThreshold: 0.25,
+    criticalDamageBonus: 0.30,
+    descZh: '舰体结构低于 25% 时全武器伤害 +30%',
+  }),
+  smod_nanite_symbiont: Object.freeze({
+    nameZh: '纳米寄生修复群',
+    autoRepairPct: 0.05,
+    descZh: '战斗结束后自动修复战舰 5% 结构',
+  }),
 });
 
 /** S-Mod 安装费用（1 exoticMatter，doc46 交付契约精确值） */
@@ -8608,6 +8821,37 @@ function installShipSMod(world, shipId, moduleId) {
   scars.sMods.push(moduleId);
   emit(world, 'ShipSModInstalled', { shipId: ship.id, moduleId, sMods: scars.sMods.slice() }, 'fleet');
   return scars;
+}
+
+/**
+ * SPEC-PLAN-059 Task 59.4（赛道 E）：【不沉勋章】伤害倍率。
+ * 结构 HP / 结构上限 < 25% 时全武器伤害 ×1.30；未安装/已毁/数据缺失恒 1.0，
+ * 保证既有世界（无新词条）逐位零漂移。
+ */
+function unsinkableDamageMultiplier(ship) {
+  const scars = ship && ship.scars;
+  if (!scars || !Array.isArray(scars.sMods) || !scars.sMods.includes('smod_unsinkable_medal')) return 1.0;
+  if (!ship.hp || ship.status === 'destroyed') return 1.0;
+  const def = SMOD_CATALOG.smod_unsinkable_medal;
+  const max = ship.stats && Number.isFinite(ship.stats.structure) ? ship.stats.structure : 0;
+  const cur = Number.isFinite(ship.hp.structure) ? ship.hp.structure : 0;
+  if (max <= 0) return 1.0;
+  return cur / max < def.structureThreshold ? 1 + def.criticalDamageBonus : 1.0;
+}
+
+/** 【纳米寄生修复群】：战后自动修复 5% 结构，返回实际修复量 */
+function naniteSymbiontRepair(ship) {
+  const scars = ship && ship.scars;
+  if (!scars || !Array.isArray(scars.sMods) || !scars.sMods.includes('smod_nanite_symbiont')) return 0;
+  if (!ship.hp || ship.status === 'destroyed') return 0;
+  const max = ship.stats && Number.isFinite(ship.stats.structure) ? ship.stats.structure : 0;
+  if (max <= 0) return 0;
+  const def = SMOD_CATALOG.smod_nanite_symbiont;
+  const before = Number.isFinite(ship.hp.structure) ? ship.hp.structure : 0;
+  const after = Math.min(max, before + max * def.autoRepairPct);
+  const healed = Math.max(0, after - before);
+  if (healed > 0) ship.hp.structure = Math.round(after * 100) / 100;
+  return healed;
 }
 
 /** 战舰是否挂载零幅能导弹挂架（ZERO_FLUX_MISSILES 权威集） */
@@ -8838,7 +9082,7 @@ function stepFleetReadiness(world) {
 //    'fleet-doctrine-readiness' 归一为 doc49 契约名）。原 import 期副作用注册拆除；
 //    stepFleetReadiness 首行自守卫 world.spaceOperaState（金快照世界零读取零写入）。——
 
-Object.assign(__exports, { PATROL_HQ_UPGRADE_CREDITS, DEFAULT_DOCTRINE, upgradePatrolHQ, setPatrolHQDoctrine, DOCTRINE_FORMATION_CLASSES, computeDoctrineTemplate, ADMIRAL_BONUS_PER_LEVEL, GENERAL_BONUS_PER_LEVEL, commanderModifiers, DEFAULT_SUPPLY_COST, SHIP_SUPPLY_COSTS, ZERO_FLUX_MISSILE_MODULES, ALPHA_STRIKE_AGGRESSION_THRESHOLD, CR_DRAIN_PER_TICK, CR_FAILURE_THRESHOLD, SUBSYSTEM_CATALOG, ensureFleetScars, ensureShipScars, deploymentCostMultiplier, supplyCostOfHull, shipSizeOf, deploySupplyCost, monthlyMaintenanceCost, fleetMonthlyMaintenance, DMOD_CATALOG, DMOD_DISCOUNT_PER, DMOD_MAX_STACK, DMOD_RESTORE_ALLOY, SMOD_CATALOG, SMOD_INSTALL_EXOTIC_MATTER, salvageShipWithDMods, restoreShipDMod, installShipSMod, hasZeroFluxMissiles, shipBonusSummary, EPIC_BATTLE_WRECK_THRESHOLD, WRECK_HABITAT_UNITY_PER_MONTH, WRECK_SALVAGE_ALLOY_PER_CAPITAL, WRECK_SALVAGE_CREDITS_PER_CAPITAL, recordEpicBattleWreck, salvageBattleWreckHabitat, stepFleetReadiness });
+Object.assign(__exports, { PATROL_HQ_UPGRADE_CREDITS, DEFAULT_DOCTRINE, upgradePatrolHQ, setPatrolHQDoctrine, DOCTRINE_FORMATION_CLASSES, computeDoctrineTemplate, ADMIRAL_BONUS_PER_LEVEL, GENERAL_BONUS_PER_LEVEL, commanderModifiers, DEFAULT_SUPPLY_COST, SHIP_SUPPLY_COSTS, ZERO_FLUX_MISSILE_MODULES, ALPHA_STRIKE_AGGRESSION_THRESHOLD, CR_DRAIN_PER_TICK, CR_FAILURE_THRESHOLD, SUBSYSTEM_CATALOG, ensureFleetScars, ensureShipScars, deploymentCostMultiplier, supplyCostOfHull, shipSizeOf, deploySupplyCost, monthlyMaintenanceCost, fleetMonthlyMaintenance, DMOD_CATALOG, DMOD_DISCOUNT_PER, DMOD_MAX_STACK, DMOD_RESTORE_ALLOY, SMOD_CATALOG, SMOD_INSTALL_EXOTIC_MATTER, salvageShipWithDMods, restoreShipDMod, installShipSMod, unsinkableDamageMultiplier, naniteSymbiontRepair, hasZeroFluxMissiles, shipBonusSummary, EPIC_BATTLE_WRECK_THRESHOLD, WRECK_HABITAT_UNITY_PER_MONTH, WRECK_SALVAGE_ALLOY_PER_CAPITAL, WRECK_SALVAGE_CREDITS_PER_CAPITAL, recordEpicBattleWreck, salvageBattleWreckHabitat, stepFleetReadiness });
 
 });
 __register("src/domain/economy/ledger.js", function (__exports, __require) {
@@ -9091,1214 +9335,2269 @@ function shortageEvent(world, colony, resId) {
 Object.assign(__exports, { FLOW, ensureLedger, balance, credit, debit, canAfford, pay, refund, transferBetween, closeDailyLedgers, verifyLedgerConsistency, applyDecay, collectTax, colonyStock, creditColony, debitColony, colonyToFaction, factionToColony, shortageEvent });
 
 });
-__register("src/domain/world/worldMigration.js", function (__exports, __require) {
+__register("src/content/hulls.js", function (__exports, __require) {
 /**
- * domain/world/worldMigration.js — 存档平滑迁移器与 world.spaceOperaState 根容器
- * （SPEC-PLAN-043 总控卷 Task 0.3；责任人：Eng-A）
- * （SPEC-PLAN-049 阶段四 M4 工位 A Task 49.1 增补：activateSpaceOperaCampaign 活体战役激活器）
+ * content/hulls.js — 舰船船体定义（任务书 13.2：首发不少于 12 种原型）
  *
- * 职责：在 world 根对象下挂载向后兼容的惰性初始化容器 world.spaceOperaState。
- * 旧版存档（容器缺失）加载后由 ensureSpaceOperaState(world) 无损补齐默认值。
- *
- * M4 模块图裁决（SPEC-PLAN-049 工位 A 施工 notes）：
- *  - ensureSpaceOperaState 实现下沉至零依赖叶子模块 ./spaceOperaState.js（situationEngine
- *    改 import 叶子，环断裂；缘由见该文件头裁决注释）；
- *  - 本文件以 re-export 保全 doc43 冻结契约（全部既有导入方零改动）；
- *  - activateSpaceOperaCampaign 仍在本文件（doc48 §Task 4.1 指定落点）。
- *
- * 纪律（doc43 §1.4.2 金快照零漂移铁律）：
- *  - 幂等早返：容器已存在时直接返回同一引用，绝不重建；
- *  - 零 world.rng 消费：默认值全部为常量字面量，不触碰任何随机流；
- *  - 惰性挂载：仅在阶段入口/命令 execute 显式调用时才写入 world —— 默认 tick
- *    流程与默认世界创建不调用本函数，金快照 8be8ce2c 保持逐位零漂移；
- *  - SPACE_OPERA_SCHEMA_VERSION=200 是本容器自身的版本号，与 world.schemaVersion
- *    （core/World.js 的存档 v2）正交，不升存档 SCHEMA_VERSION。
+ * 12 种定位互异的船体：侦察、截击、护卫、驱逐、炮击巡洋、防空巡洋、
+ * 战列、航母、工业、矿业、科学、补给。
+ * baseStats.power 为船体集成反应堆的基础发电量；模块耗电与其叠加结算。
+ * 数值为首发平衡基线，按标准场景批量模拟调参（任务书 13.5）。
  */
 
-const { ensureSpaceOperaState: ensureSpaceOperaState } = __require("src/domain/world/spaceOperaState.js");
-const { ensureCompactPlanetState: ensureCompactPlanetState, seedCompactTiles: seedCompactTiles } = __require("src/domain/planets/planetStateSchema.js");
-const { applyArchetypeProfile: applyArchetypeProfile } = __require("src/domain/planets/archetypeMechanics.js");
-const { ensureBeaconStream: ensureBeaconStream, stepBeaconStream: stepBeaconStream } = __require("src/domain/world/subspaceBeaconStream.js");
-const { ensureAutonomousFleets: ensureAutonomousFleets } = __require("src/domain/world/autonomousSectorLife.js");
-const { ensureParagonProfile: ensureParagonProfile } = __require("src/domain/characters/galacticParagons.js");
+const HULLS = [
+  {
+    id: 'hull_scout',
+    nameZh: '侦察艇',
+    nameEn: 'Scout Craft',
+    descZh: '轻型侦察艇体，为深空扫描与航线测绘优化，传感器功率远超同级，武装仅够自卫。',
+    descEn: 'Light recon hull tuned for deep-space survey and lane mapping; sensor output far exceeds its class, armament is self-defense only.',
+    category: 'support',
+    techReq: null,
+    cost: { credits: 900, alloy: 60, polymer: 10 },
+    buildHours: 72,
+    baseStats: {
+      structure: 80, armor: 8, shield: 12, power: 30, cpu: 40,
+      strategicSpeed: 4.4, fuelCap: 200, cargo: 30, crew: 4,
+      sensor: 95, signature: 10, lockons: 1, hangar: 0,
+    },
+    slots: { high: 1, mid: 1, low: 1 },
+  },
+  {
+    id: 'hull_interceptor',
+    nameZh: '截击艇',
+    nameEn: 'Interceptor',
+    descZh: '高速突击艇体，凭借低信号特征与高航速抢占有利阵位，结构脆弱，不宜持久作战。',
+    descEn: 'Fast strike hull that uses low signature and high speed to seize firing positions; fragile and unsuited to prolonged engagements.',
+    category: 'combat',
+    techReq: 'tech_kinetic_1',
+    cost: { credits: 1400, alloy: 90, polymer: 20 },
+    buildHours: 96,
+    baseStats: {
+      structure: 140, armor: 15, shield: 25, power: 45, cpu: 30,
+      strategicSpeed: 4.8, fuelCap: 140, cargo: 15, crew: 5,
+      sensor: 55, signature: 16, lockons: 2, hangar: 0,
+    },
+    slots: { high: 2, mid: 1, low: 1 },
+  },
+  {
+    id: 'hull_frigate',
+    nameZh: '护卫舰',
+    nameEn: 'Frigate',
+    descZh: '均衡的多用途护卫舰体，护航与巡逻的主力，火力和防护在同级中最稳定，造价低廉可批量列装。',
+    descEn: 'Balanced multirole escort hull, the backbone of patrol and convoy duty; dependable firepower and protection at low cost for mass fielding.',
+    category: 'combat',
+    techReq: null,
+    cost: { credits: 2200, alloy: 130, polymer: 25 },
+    buildHours: 120,
+    baseStats: {
+      structure: 260, armor: 30, shield: 40, power: 70, cpu: 45,
+      strategicSpeed: 3.8, fuelCap: 220, cargo: 60, crew: 12,
+      sensor: 50, signature: 28, lockons: 2, hangar: 0,
+    },
+    slots: { high: 2, mid: 2, low: 2 },
+  },
+  {
+    id: 'hull_destroyer',
+    nameZh: '驱逐舰',
+    nameEn: 'Destroyer',
+    descZh: '强调火力密度的驱逐舰体，多个武器槽位支持复合打击方案，为舰队提供中距离压制火力。',
+    descEn: 'Firepower-focused hull whose multiple weapon slots support combined strike loadouts, delivering mid-range suppression for the fleet.',
+    category: 'combat',
+    techReq: 'tech_missile_1',
+    cost: { credits: 4200, alloy: 240, polymer: 40 },
+    buildHours: 180,
+    baseStats: {
+      structure: 520, armor: 55, shield: 70, power: 120, cpu: 55,
+      strategicSpeed: 3.4, fuelCap: 260, cargo: 80, crew: 24,
+      sensor: 60, signature: 46, lockons: 3, hangar: 0,
+    },
+    slots: { high: 4, mid: 3, low: 2 },
+  },
+  {
+    id: 'hull_gun_cruiser',
+    nameZh: '炮击巡洋舰',
+    nameEn: 'Gun Cruiser',
+    descZh: '大动能火力平台，宽裕的电力与散热余量支持重炮列装，擅长正面战线对轰与要塞压制。',
+    descEn: 'Heavy kinetic fire platform with generous power and heat margins for massed cannon, built for line engagements and fortress suppression.',
+    category: 'combat',
+    techReq: 'tech_kinetic_2',
+    cost: { credits: 7000, alloy: 380, polymer: 60 },
+    buildHours: 264,
+    baseStats: {
+      structure: 980, armor: 130, shield: 90, power: 200, cpu: 70,
+      strategicSpeed: 2.9, fuelCap: 300, cargo: 90, crew: 45,
+      sensor: 55, signature: 78, lockons: 3, hangar: 0,
+    },
+    slots: { high: 5, mid: 3, low: 3 },
+  },
+  {
+    id: 'hull_aa_cruiser',
+    nameZh: '防空巡洋舰',
+    nameEn: 'Point-Defense Cruiser',
+    descZh: '舰队防空核心，多近防槽位与高锁定通道专司拦截导弹和舰载机，是航母编队必备的护卫幕。',
+    descEn: 'Fleet air-defense core; dense point-defense slots and high lock channels intercept missiles and craft, the mandatory escort screen of carrier groups.',
+    category: 'combat',
+    techReq: 'tech_pd_1',
+    cost: { credits: 6600, alloy: 350, polymer: 60 },
+    buildHours: 252,
+    baseStats: {
+      structure: 900, armor: 105, shield: 125, power: 190, cpu: 85,
+      strategicSpeed: 3.0, fuelCap: 300, cargo: 70, crew: 42,
+      sensor: 78, signature: 72, lockons: 4, hangar: 0,
+    },
+    slots: { high: 4, mid: 4, low: 3 },
+  },
+  {
+    id: 'hull_battleship',
+    nameZh: '战列舰',
+    nameEn: 'Battleship',
+    descZh: '巨型装甲战列平台，重甲重炮低速推进，作为舰队核心投入决战，建造与维护代价高昂。',
+    descEn: 'Massive armored battleship platform; heavy plating and heavy guns at low speed, committed as fleet core in decisive battle at extreme cost.',
+    category: 'combat',
+    techReq: 'tech_armor_2',
+    cost: { credits: 16000, alloy: 900, polymer: 150 },
+    buildHours: 600,
+    baseStats: {
+      structure: 2600, armor: 420, shield: 260, power: 520, cpu: 180,
+      strategicSpeed: 2.0, fuelCap: 420, cargo: 140, crew: 120,
+      sensor: 70, signature: 195, lockons: 6, hangar: 0,
+    },
+    slots: { high: 8, mid: 6, low: 6 },
+  },
+  {
+    id: 'hull_carrier',
+    nameZh: '航母',
+    nameEn: 'Carrier',
+    descZh: '舰载机投放平台，巨型机库搭载无人机与舰载机联队，自身武装薄弱，须依赖护航舰群。',
+    descEn: 'Drone and craft deployment platform with an enormous hangar wing; lightly armed and dependent on its escort group.',
+    category: 'carrier',
+    techReq: 'tech_carrier_1',
+    cost: { credits: 12000, alloy: 650, polymer: 120 },
+    buildHours: 480,
+    baseStats: {
+      structure: 1500, armor: 190, shield: 190, power: 280, cpu: 110,
+      strategicSpeed: 2.4, fuelCap: 380, cargo: 160, crew: 80,
+      sensor: 80, signature: 140, lockons: 4, hangar: 60,
+    },
+    slots: { high: 3, mid: 4, low: 4 },
+  },
+  {
+    id: 'hull_industrial',
+    nameZh: '工业舰',
+    nameEn: 'Industrial Freighter',
+    descZh: '移动工业平台，超大货舱与前哨建造模块使其成为殖民与设施部署的骨干运力。',
+    descEn: 'Mobile industrial platform; the oversized hold and outpost fabrication role make it the backbone of colonization and facility deployment.',
+    category: 'industrial',
+    techReq: 'tech_colonization_1',
+    cost: { credits: 5000, alloy: 280, polymer: 50 },
+    buildHours: 200,
+    baseStats: {
+      structure: 700, armor: 45, shield: 30, power: 110, cpu: 60,
+      strategicSpeed: 2.6, fuelCap: 280, cargo: 420, crew: 20,
+      sensor: 40, signature: 62, lockons: 1, hangar: 0,
+    },
+    slots: { high: 1, mid: 2, low: 3 },
+  },
+  {
+    id: 'hull_miner',
+    nameZh: '矿业舰',
+    nameEn: 'Mining Vessel',
+    descZh: '采掘作业舰体，配备采矿器槽位与大容量矿舱，是小行星带与矿脉星系的经济支柱。',
+    descEn: 'Extraction hull with mining rig slots and a high-volume ore hold; the economic pillar of asteroid belts and rich systems.',
+    category: 'industrial',
+    techReq: 'tech_mining_1',
+    cost: { credits: 3600, alloy: 200, polymer: 35 },
+    buildHours: 160,
+    baseStats: {
+      structure: 480, armor: 40, shield: 25, power: 90, cpu: 40,
+      strategicSpeed: 2.7, fuelCap: 260, cargo: 330, crew: 14,
+      sensor: 48, signature: 52, lockons: 1, hangar: 0,
+    },
+    slots: { high: 2, mid: 1, low: 3 },
+  },
+  {
+    id: 'hull_science',
+    nameZh: '科学船',
+    nameEn: 'Science Vessel',
+    descZh: '科研考察舰体，高算力与高灵敏度传感阵列专用于异常调查、扫描测绘与实验室作业。',
+    descEn: 'Research hull with high computing and sensitive sensor arrays dedicated to anomaly investigation, survey and laboratory work.',
+    category: 'science',
+    techReq: 'tech_science_1',
+    cost: { credits: 3000, alloy: 160, polymer: 40 },
+    buildHours: 144,
+    baseStats: {
+      structure: 320, armor: 22, shield: 45, power: 85, cpu: 90,
+      strategicSpeed: 3.6, fuelCap: 300, cargo: 80, crew: 16,
+      sensor: 115, signature: 34, lockons: 1, hangar: 0,
+    },
+    slots: { high: 1, mid: 2, low: 2 },
+  },
+  {
+    id: 'hull_supply',
+    nameZh: '补给舰',
+    nameEn: 'Fleet Tender',
+    descZh: '舰队后勤舰体，巨型燃料舱与再补给系统可在战区为编队续注燃料与弹药，是远程作战的前提。',
+    descEn: 'Fleet logistics hull; enormous fuel tanks and resupply systems refuel and rearm task forces in theater, the prerequisite of deep operations.',
+    category: 'support',
+    techReq: 'tech_logistics_1',
+    cost: { credits: 4400, alloy: 240, polymer: 45 },
+    buildHours: 192,
+    baseStats: {
+      structure: 560, armor: 45, shield: 40, power: 100, cpu: 40,
+      strategicSpeed: 2.8, fuelCap: 900, cargo: 260, crew: 18,
+      sensor: 35, signature: 55, lockons: 1, hangar: 0,
+    },
+    slots: { high: 1, mid: 2, low: 2 },
+  },
+  {
+    id: 'hull_titan',
+    nameZh: '泰坦级无畏巨舰',
+    nameEn: 'Titan Dreadnought',
+    descZh: '终局旗舰：仅能由行星货运弹射供应链（20 装甲模块舱 + 5 量子核心舱）合拢龙骨的超旗舰体，集舰队火力与指挥中枢于一身。',
+    descEn: 'Endgame flagship: keel laid only by the planetary freight-catapult supply chain (20 armor module pods + 5 quantum core pods).',
+    category: 'capital',
+    techReq: 'tech_precursor_mass_catapult',
+    cost: { credits: 20000, alloy: 1200 },
+    buildHours: 480,
+    baseStats: {
+      structure: 2600, armor: 160, shield: 120, power: 420, cpu: 160,
+      strategicSpeed: 2.0, fuelCap: 800, cargo: 600, crew: 90,
+      sensor: 90, signature: 120, lockons: 6, hangar: 2,
+    },
+    slots: { high: 6, mid: 5, low: 6 },
+  },
+];
 
-/** spaceOperaState 容器版本（冻结契约值；实现在 ./spaceOperaState.js 叶子模块） */
-Object.assign(__exports, (function(){ const __m = __require("src/domain/world/spaceOperaState.js"); return { SPACE_OPERA_SCHEMA_VERSION: __m.SPACE_OPERA_SCHEMA_VERSION, ensureSpaceOperaState: __m.ensureSpaceOperaState }; })());
-
-/* ===================== M4 工位 A（SPEC-PLAN-049 Task 49.1）：活体战役激活器 ===================== */
-
-/**
- * 将一个已完成基础实体构建的 world 实例深度激活为太空歌剧活体战役
- * （SPEC-PLAN-048 §Task 4.1 / SPEC-PLAN-049 §Task 49.1；调用点：App.startNewGame）。
- *
- * 施工细则（doc49 §Task 49.1 逐条契约）：
- *  1. 根容器初始化：幂等 ensureSpaceOperaState + ensureBeaconStream + ensureAutonomousFleets；
- *  2. 全星系行星深度底座铺设：确定性键序（Object.keys(...).sort()）遍历 planets，
- *     依次 ensureCompactPlanetState（紧凑容器）→ applyArchetypeProfile
- *     （16 大天体物理原型法则与 8D envVector）→ seedCompactTiles（256-Tile uint32
- *     位编码地形与初始覆盖层）；
- *  3. 全局群像领袖档案初始化：确定性键序遍历 characters，ensureParagonProfile 挂载
- *     character.paragon 档案（galacticParagons.js:111 权威落点；
- *     doc49 文案「paragonProfile」≙ 代码世界 character.paragon，不重命名字段）；
- *  4. 首帧信标池预热：立即 stepBeaconStream 一次，非帝国叙事信标（kind='NARRATIVE'）
- *     密度铁律即刻补齐至 ≥ 15（BEACON_MIN_NARRATIVE，subspaceBeaconStream.js:58）。
- *
- * 红线（doc49 §1.3 不变量）：
- *  - 严禁调用 world.rng：全链路仅消费 ensure/deriveSeed 派生盐子流
- *    （ensureCompactPlanetState/seedCompactTiles/applyArchetypeProfile/spawnNarrativeBeacon
- *    均为 deterministicRng 派生流，无 world.rng 消费点）；
- *  - 全键稳定排序遍历：planets/characters 一律 Object.keys(...).sort()；
- *  - 幂等性：全部 ensure 函数幂等（同引用直返），重复调用不破坏既有数据；
- *  - 金快照纯洁性：本函数仅在 App.startNewGame 显式启用太空歌剧时调用；
- *    REG-01 无参 createStarterCampaign() 永不触达，金快照 8be8ce2c 零漂移。
- *
- * @param {object} world - 主游戏世界状态（Plain Data）
- * @returns {Object|null} world.spaceOperaState 实例（world 非法时返回 null）
- */
-function activateSpaceOperaCampaign(world) {
-  if (!world || typeof world !== 'object') return null;
-
-  // —— 1. 根容器初始化（幂等；零 world.rng 消费）——
-  const soState = ensureSpaceOperaState(world);
-  ensureBeaconStream(world);
-  ensureAutonomousFleets(world);
-
-  // —— 2. 全星系行星深度底座铺设（确定性键序）——
-  const planets = (world.entities && world.entities.planets) || {};
-  const planetIds = Object.keys(planets).sort();
-  for (let i = 0; i < planetIds.length; i++) {
-    const pid = planetIds[i];
-    const planet = planets[pid];
-    if (!planet) continue;
-    // 挂载紧凑 PlanetState（幂等）
-    ensureCompactPlanetState(planet, world);
-    // 注入 16 大天体物理原型法则与 8D envVector（幂等）
-    applyArchetypeProfile(planet, world);
-    // 播种 256-Tile uint32 位编码地形与初始覆盖层（幂等；只覆盖地形三字段）
-    seedCompactTiles(planet, world);
-  }
-
-  // —— 3. 全局群像领袖档案初始化（确定性键序）——
-  const characters = (world.entities && world.entities.characters) || {};
-  const charIds = Object.keys(characters).sort();
-  for (let i = 0; i < charIds.length; i++) {
-    const ch = characters[charIds[i]];
-    if (ch) ensureParagonProfile(ch, world);
-  }
-
-  // —— 4. 首帧信标池预热（立即补齐至 >= 15 条非帝国叙事信标）——
-  stepBeaconStream(world);
-
-  return soState;
-}
-
-Object.assign(__exports, { activateSpaceOperaCampaign });
+Object.assign(__exports, { HULLS });
 
 });
-__register("src/domain/world/autonomousSectorLife.js", function (__exports, __require) {
+__register("src/domain/research/research.js", function (__exports, __require) {
 /**
- * domain/world/autonomousSectorLife.js — 5 类自主星区生态舰队（反孤独活体星区仿真）
+ * domain/research/research.js — 科技树与科研队列（任务书 4.7 / TECH-01..03）
+ *
+ * 科研点按类别（统一单池简化模型 + 项目优先级）累积；
+ * 完成 → effectIndex 重建（modifiers 即时生效）→ 领域事件解锁。
+ */
+
+const { TECHNOLOGIES: TECHNOLOGIES } = __require("src/content/technologies.js");
+const { emit: emit } = __require("src/core/eventBus.js");
+const { createEntity: createEntity } = __require("src/domain/entities/registry.js");
+
+const techIndex = new Map(TECHNOLOGIES.map((t) => [t.id, t]));
+function techDef(id) {
+  return techIndex.get(id);
+}
+function allTechs() {
+  return TECHNOLOGIES;
+}
+
+/** 校验 DAG 无环 + prereq 存在（启动与测试调用） */
+function validateTechGraph() {
+  const problems = [];
+  const state = new Map(); // 0 unvisited 1 visiting 2 done
+  const visit = (id) => {
+    const st = state.get(id);
+    if (st === 1) {
+      problems.push(`科技环依赖: ${id}`);
+      return;
+    }
+    if (st === 2) return;
+    state.set(id, 1);
+    const t = techIndex.get(id);
+    if (!t) {
+      problems.push(`未知科技引用: ${id}`);
+      return;
+    }
+    for (const p of t.prereqs || []) visit(p);
+    state.set(id, 2);
+  };
+  for (const t of TECHNOLOGIES) visit(t.id);
+  return problems;
+}
+
+/** 初始化阵营科研状态 */
+function initResearch(world, factionId) {
+  world.research[factionId] = {
+    completed: [],
+    active: [],   // [{ projectId, techId, progress }]
+    queue: [],    // [techId...]
+    points: 0,    // 当前科研点池
+    effectIndex: {},
+  };
+}
+
+/** 前置检查（TECH-01） */
+function canStart(world, factionId, techId) {
+  const rs = world.research[factionId];
+  const tech = techIndex.get(techId);
+  if (!tech) return { ok: false, reason: '未知科技' };
+  // doc18 WP-3：先驱者遗落科技仅能由五阶段巨石遗迹核心破译解锁，常规科研拒启动
+  if (tech.special === 'precursor') return { ok: false, reason: '先驱者遗落科技：需在地表破译先驱者巨石核心' };
+  if (!rs) return { ok: false, reason: '科研状态未初始化' };
+  if (rs.completed.includes(techId)) return { ok: false, reason: '已研究完成' };
+  if (rs.active.some((a) => a.techId === techId)) return { ok: false, reason: '已在研究中' };
+  for (const p of tech.prereqs || []) {
+    if (!rs.completed.includes(p)) {
+      return { ok: false, reason: `缺少前置: ${techIndex.get(p)?.nameZh || p}` };
+    }
+  }
+  return { ok: true };
+}
+
+/** 启动项目（StartResearch 命令执行体） */
+function startResearch(world, factionId, techId) {
+  const rs = world.research[factionId];
+  const tech = techIndex.get(techId);
+  const project = createEntity(world, 'buildQueues', {
+    kind: 'research',
+    factionId,
+    techId,
+    progress: 0,
+    cost: tech.cost,
+  });
+  rs.active.push({ projectId: project.id, techId, progress: 0 });
+  return project;
+}
+
+/** 每小时科研推进（实验室产出已折算为 points 注入） */
+function tickResearch(world, factionId, pointsPerHour) {
+  const rs = world.research[factionId];
+  if (!rs || rs.active.length === 0) return;
+  // 多项目抢占：按队列顺序分配（TECH-03：分配之和 ≤ 实际产出）
+  let budget = pointsPerHour;
+  for (const a of rs.active) {
+    if (budget <= 0) break;
+    const tech = techIndex.get(a.techId);
+    const give = Math.min(budget, tech.cost - a.progress);
+    a.progress += give;
+    budget -= give;
+    if (a.progress >= tech.cost) {
+      completeTech(world, factionId, a.techId);
+    }
+  }
+  rs.active = rs.active.filter((a) => {
+    const tech = techIndex.get(a.techId);
+    return a.progress < tech.cost;
+  });
+  // 队列自动补充
+  while (rs.active.length < 1 && rs.queue.length > 0) {
+    const nextId = rs.queue.shift();
+    const chk = canStart(world, factionId, nextId);
+    if (chk.ok) {
+      const tech = techIndex.get(nextId);
+      rs.active.push({ projectId: `auto_${nextId}`, techId: nextId, progress: 0 });
+    } else {
+      break; // 前置未满足，停止（不静默跳过）
+    }
+  }
+}
+
+/** 完成科技：重建 effectIndex 并广播 */
+function completeTech(world, factionId, techId) {
+  const rs = world.research[factionId];
+  if (rs.completed.includes(techId)) return; // 幂等（EVENT-01 思路）
+  rs.completed.push(techId);
+  rs.active = rs.active.filter((a) => a.techId !== techId);
+  rebuildEffectIndex(world, factionId);
+  const tech = techIndex.get(techId);
+  emit(world, 'TechCompleted', { factionId, techId, unlocks: tech.unlocks || [] }, 'research');
+}
+
+/** 重建科技效果索引（modifiers.getMod 消费） */
+function rebuildEffectIndex(world, factionId) {
+  const rs = world.research[factionId];
+  if (!rs) return;
+  const idx = {};
+  for (const techId of rs.completed) {
+    const tech = techIndex.get(techId);
+    if (!tech || !tech.effects) continue;
+    for (const e of tech.effects) {
+      (idx[e.stat] ||= []).push({ value: e.value, mode: e.mode, techId });
+    }
+  }
+  rs.effectIndex = idx;
+}
+
+/** 科技可用状态（UI 树着色） */
+function techStatus(world, factionId, techId) {
+  const rs = world.research[factionId];
+  const tech = techIndex.get(techId);
+  if (!rs || !tech) return 'hidden';
+  if (rs.completed.includes(techId)) return 'done';
+  if (rs.active.some((a) => a.techId === techId)) return 'active';
+  const prereqMet = (tech.prereqs || []).every((p) => rs.completed.includes(p));
+  return prereqMet ? 'available' : 'locked';
+}
+
+Object.assign(__exports, { techDef, allTechs, validateTechGraph, initResearch, canStart, startResearch, tickResearch, completeTech, rebuildEffectIndex, techStatus });
+
+});
+__register("src/content/technologies.js", function (__exports, __require) {
+/**
+ * content/technologies.js — 科技树定义（任务书 13.3：不少于 60 项，7 类主路线）
+ *
+ * 七类：propulsion / industry / energy / bio / computing / space / society。
+ * cost 为科研点（tier1 80-140 → tier4 900-1600）；prereqs 构成无环依赖图，
+ * tier n 的前置 tier ≤ n；unlocks 引用 hulls/modules/buildings 的内容 id。
+ * special: 'story' 为主线特殊项目，'crisis' 为危机线项目。
+ */
+
+const TECHNOLOGIES = [
+  // ── propulsion 推进与航行 ──
+  {
+    id: 'tech_propulsion_1',
+    nameZh: '离子推进',
+    nameEn: 'Ion Propulsion',
+    descZh: '实用化离子推进器设计，为舰船提供可靠的基础战略机动与燃效改善。',
+    descEn: 'Practical ion thruster design giving ships dependable baseline strategic mobility and modest fuel gains.',
+    category: 'propulsion', tier: 1, cost: 100, prereqs: [],
+    effects: [{ stat: 'fuelEfficiency', mode: 'add', value: 0.03 }],
+    unlocks: ['mod_ion_thruster'], special: null,
+  },
+  {
+    id: 'tech_propulsion_2',
+    nameZh: '聚变推进',
+    nameEn: 'Fusion Propulsion',
+    descZh: '聚变喷流推进工程，显著提升推力上限，是中型舰艇高速机动的技术门槛。',
+    descEn: 'Fusion-jet propulsion engineering raising the thrust ceiling; the technical gate for high-speed mid-size hulls.',
+    category: 'propulsion', tier: 2, cost: 260, prereqs: ['tech_propulsion_1'],
+    effects: [{ stat: 'fuelEfficiency', mode: 'mult', value: 1.08 }],
+    unlocks: ['mod_fusion_thruster'], special: null,
+  },
+  {
+    id: 'tech_propulsion_3',
+    nameZh: '磁约束聚变推进',
+    nameEn: 'Confined-Fusion Propulsion',
+    descZh: '磁约束喷管与能量回收技术，将推进效率推至现役极限。',
+    descEn: 'Magnetically confined nozzles with energy recovery push propulsion efficiency to the service limit.',
+    category: 'propulsion', tier: 3, cost: 620, prereqs: ['tech_propulsion_2'],
+    effects: [
+      { stat: 'strategicSpeed', mode: 'mult', value: 1.05 },
+      { stat: 'fuelEfficiency', mode: 'mult', value: 1.08 },
+    ],
+    unlocks: ['mod_advanced_fusion_thruster'], special: null,
+  },
+  {
+    id: 'tech_warpdrive_1',
+    nameZh: '跃迁引擎',
+    nameEn: 'Warp Drive',
+    descZh: '首批实用化跃迁场发生器，压缩航路航行时间，是远航殖民与舰队投送的前提。',
+    descEn: 'First practical warp-field generator compressing lane transit time; the prerequisite of deep-range colonization and force projection.',
+    category: 'propulsion', tier: 2, cost: 300, prereqs: ['tech_propulsion_1', 'tech_energy_1'],
+    effects: [{ stat: 'strategicSpeed', mode: 'mult', value: 1.1 }],
+    unlocks: ['mod_warp_core'], special: null,
+  },
+  {
+    id: 'tech_warpdrive_2',
+    nameZh: '长距跃迁',
+    nameEn: 'Long-Range Warp',
+    descZh: '跃迁场稳定性改进，延长单次跃迁距离并降低燃耗，缩短战役级机动周期。',
+    descEn: 'Warp-field stability refinements extend per-jump range, cut fuel burn and shorten campaign-level maneuvers.',
+    category: 'propulsion', tier: 3, cost: 700, prereqs: ['tech_warpdrive_1'],
+    effects: [
+      { stat: 'strategicSpeed', mode: 'mult', value: 1.15 },
+      { stat: 'fuelEfficiency', mode: 'mult', value: 1.1 },
+    ],
+    unlocks: [], special: null,
+  },
+  {
+    id: 'tech_fuel_1',
+    nameZh: '燃料循环',
+    nameEn: 'Fuel Cycling',
+    descZh: '标准化燃料储存与转运规程，降低舰队远航损耗，并解锁氘精炼产能。',
+    descEn: 'Standardized fuel storage and transfer doctrine cutting fleet burn while unlocking deuterium refining capacity.',
+    category: 'propulsion', tier: 1, cost: 90, prereqs: [],
+    effects: [{ stat: 'fuelEfficiency', mode: 'mult', value: 1.1 }],
+    unlocks: ['mod_fuel_scoop', 'bld_deuterium_plant'], special: null,
+  },
+  {
+    id: 'tech_fuel_2',
+    nameZh: '深冷燃料工程',
+    nameEn: 'Cryo-Fuel Engineering',
+    descZh: '深冷储存与高密度装填工艺，同步改善舰队燃效与机动半径。',
+    descEn: 'Cryogenic storage and high-density loading improve fleet fuel economy and operational radius together.',
+    category: 'propulsion', tier: 3, cost: 560, prereqs: ['tech_fuel_1', 'tech_propulsion_2'],
+    effects: [
+      { stat: 'fuelEfficiency', mode: 'mult', value: 1.12 },
+      { stat: 'strategicSpeed', mode: 'mult', value: 1.05 },
+    ],
+    unlocks: [], special: null,
+  },
+  {
+    id: 'tech_navigation_1',
+    nameZh: '航路规划',
+    nameEn: 'Lane Navigation',
+    descZh: '航路引力图与批量航线规划算法，提升全舰队战略航行速度。',
+    descEn: 'Gravitational lane charts and batch routing algorithms raise strategic cruise speed fleet-wide.',
+    category: 'propulsion', tier: 2, cost: 240, prereqs: ['tech_warpdrive_1'],
+    effects: [{ stat: 'strategicSpeed', mode: 'mult', value: 1.08 }],
+    unlocks: [], special: null,
+  },
+  {
+    id: 'tech_logistics_1',
+    nameZh: '舰队后勤',
+    nameEn: 'Fleet Logistics',
+    descZh: '舰队级后勤组织学，统一货柜标准并建立战区再补给体系，解锁补给舰体。',
+    descEn: 'Fleet-level logistics organization unifying cargo standards and theater resupply; unlocks the tender hull.',
+    category: 'propulsion', tier: 2, cost: 220, prereqs: ['tech_warpdrive_1'],
+    effects: [{ stat: 'cargoCapacity', mode: 'mult', value: 1.1 }],
+    unlocks: ['mod_cargo_ext', 'mod_supply_pod', 'hull_supply'], special: null,
+  },
+
+  // ── industry 工业与采掘 ──
+  {
+    id: 'tech_mining_1',
+    nameZh: '采掘作业',
+    nameEn: 'Extraction Operations',
+    descZh: '机械化采掘规程与矿业舰设计，是资源产业链与矿业舰体的起点。',
+    descEn: 'Mechanized extraction doctrine and mining hull design; the start of the resource chain.',
+    category: 'industry', tier: 1, cost: 100, prereqs: [],
+    effects: [{ stat: 'mineOutput', mode: 'mult', value: 1.1 }],
+    unlocks: ['bld_mine_heavy', 'bld_volatile_well', 'bld_gas_harvester', 'mod_miner_std', 'hull_miner'], special: null,
+  },
+  {
+    id: 'tech_mining_2',
+    nameZh: '深层采掘',
+    nameEn: 'Deep-Core Extraction',
+    descZh: '深井与高压矿脉开采技术，解锁稀土深采与深层采矿器。',
+    descEn: 'Deep-shaft and pressurized-vein mining technology unlocking rare-earth deep mines and deep-core rigs.',
+    category: 'industry', tier: 2, cost: 300, prereqs: ['tech_mining_1'],
+    effects: [{ stat: 'mineOutput', mode: 'mult', value: 1.12 }],
+    unlocks: ['bld_mine_rare', 'mod_miner_deep'], special: null,
+  },
+  {
+    id: 'tech_mining_3',
+    nameZh: '大规模采掘',
+    nameEn: 'Mass Extraction',
+    descZh: '连续作业面与自动化矿队管理，将采掘效率提升至工业规模。',
+    descEn: 'Continuous working faces and automated mining-train management raise extraction to industrial scale.',
+    category: 'industry', tier: 3, cost: 640, prereqs: ['tech_mining_2'],
+    effects: [
+      { stat: 'mineOutput', mode: 'mult', value: 1.15 },
+      { stat: 'anomalyChanceBonus', mode: 'add', value: 0.02 },
+    ],
+    unlocks: [], special: null,
+  },
+  {
+    id: 'tech_alloy_1',
+    nameZh: '结构冶金学',
+    nameEn: 'Structural Metallurgy',
+    descZh: '铁族-硅质原矿冶炼工艺，建立合金量产线，是一切造舰与建设的基础。',
+    descEn: 'Ferro-silicate smelting establishing mass alloy production; the basis of all shipbuilding and construction.',
+    category: 'industry', tier: 1, cost: 120, prereqs: [],
+    effects: [{ stat: 'alloyOutput', mode: 'mult', value: 1.1 }],
+    unlocks: ['bld_alloy_plant'], special: null,
+  },
+  {
+    id: 'tech_alloy_2',
+    nameZh: '高强度合金',
+    nameEn: 'High-Strength Alloys',
+    descZh: '晶粒控制与真空浇铸工艺，提高合金强度与冶金产出效率。',
+    descEn: 'Grain control and vacuum casting raise alloy strength and metallurgical yield.',
+    category: 'industry', tier: 2, cost: 320, prereqs: ['tech_alloy_1'],
+    effects: [{ stat: 'alloyOutput', mode: 'mult', value: 1.12 }],
+    unlocks: [], special: null,
+  },
+  {
+    id: 'tech_polymer_1',
+    nameZh: '高分子化学',
+    nameEn: 'Polymer Chemistry',
+    descZh: '高分子合成路线设计，建立化学试剂与聚合物的工业产能。',
+    descEn: 'Synthetic polymer routes establishing industrial output of reagents and polymers.',
+    category: 'industry', tier: 1, cost: 110, prereqs: [],
+    effects: [{ stat: 'factoryOutput', mode: 'mult', value: 1.05 }],
+    unlocks: ['bld_chem_plant', 'bld_polymer_plant'], special: null,
+  },
+  {
+    id: 'tech_industry_1',
+    nameZh: '标准化制造',
+    nameEn: 'Standardized Manufacturing',
+    descZh: '统一规格与流水线组织，降低建筑与模块制造成本，解锁模块工厂。',
+    descEn: 'Unified specifications and line organization cut construction costs and unlock the module factory.',
+    category: 'industry', tier: 1, cost: 130, prereqs: ['tech_alloy_1'],
+    effects: [
+      { stat: 'factoryOutput', mode: 'mult', value: 1.08 },
+      { stat: 'buildSpeed', mode: 'mult', value: 1.05 },
+    ],
+    unlocks: ['bld_module_factory'], special: null,
+  },
+  {
+    id: 'tech_industry_2',
+    nameZh: '精密工业',
+    nameEn: 'Precision Industry',
+    descZh: '微电子装配与精密烧结工艺，解锁电子元件厂与陶瓷窑。',
+    descEn: 'Microelectronic assembly and precision sintering unlock the electronics plant and ceramic kiln.',
+    category: 'industry', tier: 2, cost: 340, prereqs: ['tech_industry_1'],
+    effects: [{ stat: 'factoryOutput', mode: 'mult', value: 1.1 }],
+    unlocks: ['bld_electronics_plant', 'bld_ceramic_kiln'], special: null,
+  },
+  {
+    id: 'tech_industry_3',
+    nameZh: '大规模生产',
+    nameEn: 'Mass Production',
+    descZh: '全流程自动化产线，同步提升工业产出与建设速度。',
+    descEn: 'End-to-end automated lines raise industrial output and construction speed together.',
+    category: 'industry', tier: 3, cost: 680, prereqs: ['tech_industry_2'],
+    effects: [
+      { stat: 'factoryOutput', mode: 'mult', value: 1.1 },
+      { stat: 'buildSpeed', mode: 'mult', value: 1.1 },
+    ],
+    unlocks: [], special: null,
+  },
+  {
+    id: 'tech_shipyard_1',
+    nameZh: '轨道船坞',
+    nameEn: 'Orbital Shipyard',
+    descZh: '轨道建造平台与舾装工艺，建立舰队规模化建造能力。',
+    descEn: 'Orbital construction platforms and fitting-out doctrine establish fleet-scale shipbuilding.',
+    category: 'industry', tier: 1, cost: 140, prereqs: ['tech_industry_1'],
+    effects: [{ stat: 'shipBuildSpeed', mode: 'mult', value: 1.1 }],
+    unlocks: ['bld_shipyard'], special: null,
+  },
+  {
+    id: 'tech_shipyard_2',
+    nameZh: '舰船流水线',
+    nameEn: 'Ship Production Line',
+    descZh: '模块化分段建造法，缩短舰船工期并降低建造成本。',
+    descEn: 'Modular section construction shortens ship build times and lowers costs.',
+    category: 'industry', tier: 2, cost: 320, prereqs: ['tech_shipyard_1'],
+    effects: [
+      { stat: 'shipBuildSpeed', mode: 'mult', value: 1.15 },
+      { stat: 'shipBuildCostReduction', mode: 'add', value: 0.05 },
+    ],
+    unlocks: [], special: null,
+  },
+
+  // ── energy 能源与防护系统 ──
+  {
+    id: 'tech_energy_1',
+    nameZh: '电网工程',
+    nameEn: 'Grid Engineering',
+    descZh: '殖民地区域电网设计规范，减少输配损耗，提升整体供电效率。',
+    descEn: 'Regional grid design standards for colonies, cutting transmission losses and raising supply efficiency.',
+    category: 'energy', tier: 1, cost: 90, prereqs: [],
+    effects: [{ stat: 'powerOutput', mode: 'mult', value: 1.08 }],
+    unlocks: [], special: null,
+  },
+  {
+    id: 'tech_energy_2',
+    nameZh: '高压电网',
+    nameEn: 'High-Capacity Grid',
+    descZh: '高压输配电与储能调度算法，支撑大规模工业与军事设施的用电峰值。',
+    descEn: 'High-tension transmission and storage scheduling sustain peak demand of large industrial and military sites.',
+    category: 'energy', tier: 2, cost: 240, prereqs: ['tech_energy_1'],
+    effects: [{ stat: 'powerOutput', mode: 'mult', value: 1.1 }],
+    unlocks: [], special: null,
+  },
+  {
+    id: 'tech_reactor_1',
+    nameZh: '裂变反应堆',
+    nameEn: 'Fission Reactor',
+    descZh: '紧凑裂变堆芯设计，为舰载模块提供第一代高功率电源。',
+    descEn: 'Compact fission core design providing the first generation of high-output shipboard power.',
+    category: 'energy', tier: 1, cost: 110, prereqs: [],
+    effects: [{ stat: 'powerOutput', mode: 'mult', value: 1.05 }],
+    unlocks: ['mod_reactor_fission'], special: null,
+  },
+  {
+    id: 'tech_reactor_2',
+    nameZh: '聚变反应堆',
+    nameEn: 'Fusion Reactor',
+    descZh: '可控聚变堆工程化，功率密度与安全性大幅优于裂变方案。',
+    descEn: 'Engineered controlled fusion, a major step up in power density and safety over fission.',
+    category: 'energy', tier: 2, cost: 280, prereqs: ['tech_reactor_1'],
+    effects: [{ stat: 'powerOutput', mode: 'mult', value: 1.08 }],
+    unlocks: ['mod_reactor_fusion', 'bld_fusion_plant'], special: null,
+  },
+  {
+    id: 'tech_reactor_3',
+    nameZh: '反物质堆芯',
+    nameEn: 'Antimatter Core',
+    descZh: '受控湮灭堆芯，单机功率冠绝现役装备，需配套严格的储存与屏蔽体系。',
+    descEn: 'Controlled annihilation core with unmatched single-unit output, demanding strict storage and shielding systems.',
+    category: 'energy', tier: 3, cost: 720, prereqs: ['tech_reactor_2'],
+    effects: [{ stat: 'powerOutput', mode: 'mult', value: 1.1 }],
+    unlocks: ['mod_reactor_antimatter'], special: null,
+  },
+  {
+    id: 'tech_fuelcell_1',
+    nameZh: '储能单元',
+    nameEn: 'Energy Cell Storage',
+    descZh: '高密度储能单元制造工艺，建立储能组产能以支撑建筑与地面任务。',
+    descEn: 'High-density cell manufacturing establishing power cell output for buildings and ground missions.',
+    category: 'energy', tier: 2, cost: 260, prereqs: ['tech_energy_1', 'tech_industry_1'],
+    effects: [{ stat: 'moduleOutput', mode: 'mult', value: 1.05 }],
+    unlocks: ['bld_storage_plant'], special: null,
+  },
+  {
+    id: 'tech_shield_1',
+    nameZh: '偏导护盾',
+    nameEn: 'Deflector Shield',
+    descZh: '第一代偏导护盾发生器，为舰船提供可再生的能量防护层。',
+    descEn: 'First-generation deflector shields give ships a regenerating energy barrier.',
+    category: 'energy', tier: 2, cost: 240, prereqs: ['tech_reactor_1'],
+    effects: [{ stat: 'maxShield', mode: 'mult', value: 1.05 }],
+    unlocks: ['mod_shield_std'], special: null,
+  },
+  {
+    id: 'tech_shield_2',
+    nameZh: '相移护盾',
+    nameEn: 'Phase-Shift Shield',
+    descZh: '多层相移护盾调制技术，大幅提高护盾容量与再生速率。',
+    descEn: 'Multi-layer phase-shift modulation greatly raises shield capacity and regeneration.',
+    category: 'energy', tier: 3, cost: 560, prereqs: ['tech_shield_1'],
+    effects: [
+      { stat: 'maxShield', mode: 'mult', value: 1.08 },
+      { stat: 'shieldRegen', mode: 'mult', value: 1.1 },
+    ],
+    unlocks: ['mod_shield_adv'], special: null,
+  },
+  {
+    id: 'tech_shield_3',
+    nameZh: '再生护盾矩阵',
+    nameEn: 'Regenerative Shield Matrix',
+    descZh: '自适应护盾矩阵，受击后即时回充，将持续作战能力推至新高度。',
+    descEn: 'Adaptive shield matrix recharging on impact, pushing sustained combat endurance to a new level.',
+    category: 'energy', tier: 4, cost: 1100, prereqs: ['tech_shield_2', 'tech_ai_1'],
+    effects: [
+      { stat: 'maxShield', mode: 'mult', value: 1.1 },
+      { stat: 'shieldRegen', mode: 'mult', value: 1.15 },
+    ],
+    unlocks: ['mod_shield_regen'], special: null,
+  },
+  {
+    id: 'tech_heat_1',
+    nameZh: '热管理',
+    nameEn: 'Thermal Management',
+    descZh: '舰载散热回路与辐射板优化，提升全舰散热能力与持续火力。',
+    descEn: 'Optimized coolant loops and radiator panels raise shipwide heat dissipation and sustained firepower.',
+    category: 'energy', tier: 2, cost: 220, prereqs: ['tech_reactor_1'],
+    effects: [{ stat: 'heatDissipation', mode: 'mult', value: 1.15 }],
+    unlocks: [], special: null,
+  },
+  {
+    id: 'tech_exotic_matter',
+    nameZh: '奇异物质工程',
+    nameEn: 'Exotic Matter Engineering',
+    descZh: '主线特殊项目：稳定封存并应用奇异物质样本，为动力与武器系统开辟全新能级。',
+    descEn: 'Story project: stabilizing and applying exotic matter samples, opening an entirely new energy tier for drives and weapons.',
+    category: 'energy', tier: 4, cost: 1500, prereqs: ['tech_quantum_1', 'tech_reactor_3'],
+    effects: [
+      { stat: 'powerOutput', mode: 'mult', value: 1.15 },
+      { stat: 'weaponDamage', mode: 'mult', value: 1.05 },
+    ],
+    unlocks: [], special: 'story',
+  },
+
+  // ── bio 生态与生命科学 ──
+  {
+    id: 'tech_bio_1',
+    nameZh: '封闭生态',
+    nameEn: 'Closed Ecology',
+    descZh: '封闭生态循环工程，建立藻类反应与民品生物合成产能。',
+    descEn: 'Closed ecological cycling establishing algal reactors and bio-based consumer production.',
+    category: 'bio', tier: 1, cost: 100, prereqs: [],
+    effects: [{ stat: 'farmOutput', mode: 'mult', value: 1.1 }],
+    unlocks: ['bld_algae_reactor', 'bld_consumer_plant'], special: null,
+  },
+  {
+    id: 'tech_bio_2',
+    nameZh: '生态优化',
+    nameEn: 'Ecology Optimization',
+    descZh: '循环回路与种群调控模型，提高农业产出并小幅促进人口增长。',
+    descEn: 'Cycle tuning and population modeling raise farm output and modestly boost growth.',
+    category: 'bio', tier: 2, cost: 280, prereqs: ['tech_bio_1'],
+    effects: [
+      { stat: 'farmOutput', mode: 'mult', value: 1.1 },
+      { stat: 'popGrowth', mode: 'mult', value: 1.04 },
+    ],
+    unlocks: [], special: null,
+  },
+  {
+    id: 'tech_bio_3',
+    nameZh: '人口生理学',
+    nameEn: 'Population Physiology',
+    descZh: '极端环境生理适应研究，系统提升人口健康水平与增长上限。',
+    descEn: 'Physiological adaptation studies for extreme environments, systematically raising population health and growth ceiling.',
+    category: 'bio', tier: 3, cost: 600, prereqs: ['tech_bio_2', 'tech_med_1'],
+    effects: [
+      { stat: 'popGrowth', mode: 'mult', value: 1.06 },
+      { stat: 'farmOutput', mode: 'mult', value: 1.1 },
+    ],
+    unlocks: [], special: null,
+  },
+  {
+    id: 'tech_med_1',
+    nameZh: '临床医学',
+    nameEn: 'Clinical Medicine',
+    descZh: '标准化临床医疗体系，降低死亡率并改善殖民地稳定度。',
+    descEn: 'Standardized clinical care lowering mortality and improving colonial stability.',
+    category: 'bio', tier: 2, cost: 260, prereqs: ['tech_bio_1'],
+    effects: [
+      { stat: 'stabilityBonus', mode: 'add', value: 3 },
+      { stat: 'popGrowth', mode: 'mult', value: 1.04 },
+    ],
+    unlocks: ['bld_medical_center'], special: null,
+  },
+  {
+    id: 'tech_terraform_1',
+    nameZh: '环境改造',
+    nameEn: 'Terraforming',
+    descZh: '大气调节与水循环恢复工程，开启不宜居行星的分阶段改造能力。',
+    descEn: 'Atmospheric conditioning and water-cycle restoration, opening staged transformation of hostile worlds.',
+    category: 'bio', tier: 3, cost: 700, prereqs: ['tech_colonization_1', 'tech_bio_2'],
+    effects: [
+      { stat: 'terraformSpeed', mode: 'mult', value: 1.15 },
+      { stat: 'habitabilityBonus', mode: 'add', value: 3 },
+    ],
+    unlocks: [], special: null,
+  },
+  {
+    id: 'tech_terraform_2',
+    nameZh: '星球工程',
+    nameEn: 'Planetary Engineering',
+    descZh: '全尺度星球工程学，加速改造进程并进一步放宽极端环境的殖民门槛。',
+    descEn: 'Full-scale planetary engineering accelerating terraforming and further relaxing extreme-world colonization thresholds.',
+    category: 'bio', tier: 4, cost: 1300, prereqs: ['tech_terraform_1'],
+    effects: [
+      { stat: 'terraformSpeed', mode: 'mult', value: 1.2 },
+      { stat: 'habitabilityBonus', mode: 'add', value: 4 },
+    ],
+    unlocks: [], special: null,
+  },
+
+  // ── computing 计算与科研 ──
+  {
+    id: 'tech_computing_1',
+    nameZh: '计算架构',
+    nameEn: 'Computing Architecture',
+    descZh: '新一代分布式计算架构，全面提升科研数据处理能力。',
+    descEn: 'A new distributed computing architecture raising research data throughput across the board.',
+    category: 'computing', tier: 1, cost: 90, prereqs: [],
+    effects: [{ stat: 'researchOutput', mode: 'mult', value: 1.08 }],
+    unlocks: [], special: null,
+  },
+  {
+    id: 'tech_science_1',
+    nameZh: '系统科研法',
+    nameEn: 'Systematic Research',
+    descZh: '标准化科研流程与考察舰设计规范，解锁科学船并提升研究效率。',
+    descEn: 'Standardized research process and survey hull design; unlocks the science vessel and raises research efficiency.',
+    category: 'computing', tier: 1, cost: 110, prereqs: [],
+    effects: [
+      { stat: 'researchOutput', mode: 'mult', value: 1.1 },
+      { stat: 'scanSpeed', mode: 'mult', value: 1.05 },
+    ],
+    unlocks: ['hull_science'], special: null,
+  },
+  {
+    id: 'tech_science_2',
+    nameZh: '深空分析',
+    nameEn: 'Deep-Space Analysis',
+    descZh: '深空观测数据处理体系，解锁深空分析中心与晶体提纯工艺。',
+    descEn: 'Deep-space observation data processing; unlocks the analytics center and crystal refining.',
+    category: 'computing', tier: 2, cost: 300, prereqs: ['tech_science_1', 'tech_computing_1'],
+    effects: [
+      { stat: 'scanSpeed', mode: 'mult', value: 1.12 },
+      { stat: 'scanPrecision', mode: 'mult', value: 1.1 },
+    ],
+    unlocks: ['bld_deepspace_analytics', 'bld_crystal_plant'], special: null,
+  },
+  {
+    id: 'tech_science_3',
+    nameZh: '理论大综合',
+    nameEn: 'Grand Synthesis',
+    descZh: '跨学科理论大综合，显著提高科研产出与异常现象的识别概率。',
+    descEn: 'Cross-disciplinary theoretical synthesis markedly lifting research output and anomaly identification odds.',
+    category: 'computing', tier: 3, cost: 640, prereqs: ['tech_science_2'],
+    effects: [
+      { stat: 'researchOutput', mode: 'mult', value: 1.12 },
+      { stat: 'anomalyChanceBonus', mode: 'add', value: 0.03 },
+    ],
+    unlocks: [], special: null,
+  },
+  {
+    id: 'tech_sensors_1',
+    nameZh: '传感阵列',
+    nameEn: 'Sensor Arrays',
+    descZh: '相控传感阵列标准，提升全部舰船的探测能力。',
+    descEn: 'Phased sensor array standards improving detection strength for all ships.',
+    category: 'computing', tier: 1, cost: 100, prereqs: [],
+    effects: [{ stat: 'sensorStrength', mode: 'mult', value: 1.1 }],
+    unlocks: ['mod_sensor_std'], special: null,
+  },
+  {
+    id: 'tech_sensors_2',
+    nameZh: '深空扫描',
+    nameEn: 'Deep-Space Scanning',
+    descZh: '长基线干涉扫描技术，大幅扩展探测距离与识别精度。',
+    descEn: 'Long-baseline interferometric scanning greatly extending detection range and identification precision.',
+    category: 'computing', tier: 2, cost: 260, prereqs: ['tech_sensors_1'],
+    effects: [
+      { stat: 'sensorStrength', mode: 'mult', value: 1.12 },
+      { stat: 'scanPrecision', mode: 'mult', value: 1.1 },
+    ],
+    unlocks: ['mod_sensor_deepspace'], special: null,
+  },
+  {
+    id: 'tech_ai_1',
+    nameZh: '舰载智能',
+    nameEn: 'Shipboard Intelligence',
+    descZh: '受限舰载智能系统，接管无人机调度与行政辅助，是无人作战体系的前提。',
+    descEn: 'Constrained shipboard intelligence taking over drone control and administrative assistance; the gate to unmanned combat systems.',
+    category: 'computing', tier: 2, cost: 320, prereqs: ['tech_computing_1'],
+    effects: [
+      { stat: 'researchOutput', mode: 'mult', value: 1.06 },
+      { stat: 'adminCapacity', mode: 'add', value: 3 },
+    ],
+    unlocks: ['mod_drone_bay', 'mod_drone_weapon'], special: null,
+  },
+  {
+    id: 'tech_ai_2',
+    nameZh: '自主系统',
+    nameEn: 'Autonomous Systems',
+    descZh: '大规模自主系统集群管理，减轻治理负荷并提升工业调度效率。',
+    descEn: 'Large-scale autonomous swarm management easing governance load and improving industrial scheduling.',
+    category: 'computing', tier: 3, cost: 700, prereqs: ['tech_ai_1'],
+    effects: [
+      { stat: 'adminCapacity', mode: 'add', value: 5 },
+      { stat: 'factoryOutput', mode: 'mult', value: 1.08 },
+    ],
+    unlocks: [], special: null,
+  },
+  {
+    id: 'tech_ewar_1',
+    nameZh: '电子战基础',
+    nameEn: 'Electronic Warfare',
+    descZh: '电子对抗作战条令与制式干扰装备，建立舰队电子战能力。',
+    descEn: 'Electronic warfare doctrine and standard jamming equipment establishing fleet EW capability.',
+    category: 'computing', tier: 2, cost: 260, prereqs: ['tech_sensors_1'],
+    effects: [{ stat: 'ewarStrength', mode: 'mult', value: 1.12 }],
+    unlocks: ['mod_jammer', 'mod_target_illuminator'], special: null,
+  },
+  {
+    id: 'tech_ewar_2',
+    nameZh: '定向压制',
+    nameEn: 'Directional Suppression',
+    descZh: '定向能压制与诱饵回波技术，强化电子战强度并改善本舰命中率修正。',
+    descEn: 'Directed-energy suppression and decoy returns, strengthening EW power and friendly hit correction.',
+    category: 'computing', tier: 3, cost: 580, prereqs: ['tech_ewar_1'],
+    effects: [
+      { stat: 'ewarStrength', mode: 'mult', value: 1.15 },
+      { stat: 'hitChanceBonus', mode: 'add', value: 0.03 },
+    ],
+    unlocks: ['mod_sensor_damper'], special: null,
+  },
+  {
+    id: 'tech_quantum_1',
+    nameZh: '量子计算',
+    nameEn: 'Quantum Computing',
+    descZh: '量子级计算平台，为高端科研与特殊项目提供必需的算力底座。',
+    descEn: 'Quantum-grade computing platforms providing the compute floor for top-end research and special projects.',
+    category: 'computing', tier: 4, cost: 1200, prereqs: ['tech_ai_2', 'tech_science_3'],
+    effects: [{ stat: 'researchOutput', mode: 'mult', value: 1.15 }],
+    unlocks: [], special: null,
+  },
+  {
+    id: 'tech_signal_decipher',
+    nameZh: '异常信号破译',
+    nameEn: 'Anomalous Signal Deciphering',
+    descZh: '主线特殊项目：针对未知信号的破译框架，大幅提升异常发现与扫描效率。',
+    descEn: 'Story project: a deciphering framework for unknown signals, sharply improving anomaly discovery and scan efficiency.',
+    category: 'computing', tier: 2, cost: 450, prereqs: ['tech_sensors_2'],
+    effects: [
+      { stat: 'anomalyChanceBonus', mode: 'add', value: 0.05 },
+      { stat: 'scanSpeed', mode: 'mult', value: 1.1 },
+    ],
+    unlocks: [], special: 'story',
+  },
+
+  // ── space 舰船与军事 ──
+  {
+    id: 'tech_survey_1',
+    nameZh: '星域测绘',
+    nameEn: 'Stellar Cartography',
+    descZh: '标准化星域测绘规程，加快扫描速度并提高异常现象的发现概率。',
+    descEn: 'Standardized survey doctrine speeding scans and raising anomaly discovery odds.',
+    category: 'space', tier: 1, cost: 100, prereqs: [],
+    effects: [
+      { stat: 'scanSpeed', mode: 'mult', value: 1.1 },
+      { stat: 'anomalyChanceBonus', mode: 'add', value: 0.03 },
+    ],
+    unlocks: [], special: null,
+  },
+  {
+    id: 'tech_kinetic_1',
+    nameZh: '动能武器',
+    nameEn: 'Kinetic Weapons',
+    descZh: '制式动能武器族谱，提供廉价可靠的直射火力，并解锁截击艇体。',
+    descEn: 'Standard kinetic weapon family providing cheap, dependable direct fire; unlocks the interceptor hull.',
+    category: 'space', tier: 1, cost: 100, prereqs: [],
+    effects: [{ stat: 'weaponDamage', mode: 'mult', value: 1.05 }],
+    unlocks: ['mod_kinetic_cannon', 'hull_interceptor'], special: null,
+  },
+  {
+    id: 'tech_kinetic_2',
+    nameZh: '电磁轨道炮',
+    nameEn: 'Electromagnetic Railgun',
+    descZh: '长导轨电磁加速技术，将动能武器的穿透力提升一个等级，并解锁炮击巡洋舰。',
+    descEn: 'Long-rail electromagnetic acceleration lifting kinetic penetration a full tier; unlocks the gun cruiser.',
+    category: 'space', tier: 2, cost: 280, prereqs: ['tech_kinetic_1'],
+    effects: [{ stat: 'weaponDamage', mode: 'mult', value: 1.08 }],
+    unlocks: ['mod_railgun', 'hull_gun_cruiser'], special: null,
+  },
+  {
+    id: 'tech_siege_1',
+    nameZh: '攻城火炮',
+    nameEn: 'Siege Artillery',
+    descZh: '要塞压制用重炮工程，为舰队提供对固定目标的高爆毁伤手段。',
+    descEn: 'Heavy artillery for fortress suppression, giving fleets high-explosive means against fixed targets.',
+    category: 'space', tier: 3, cost: 600, prereqs: ['tech_kinetic_2', 'tech_armor_1'],
+    effects: [{ stat: 'weaponDamage', mode: 'mult', value: 1.1 }],
+    unlocks: ['mod_siege_cannon'], special: null,
+  },
+  {
+    id: 'tech_laser_1',
+    nameZh: '激光武器',
+    nameEn: 'Laser Weapons',
+    descZh: '实用化高能激光武器，光速命中免予预判，是能束武器路线的起点。',
+    descEn: 'Practical high-energy lasers hitting at lightspeed without lead; the start of the beam line.',
+    category: 'space', tier: 1, cost: 110, prereqs: [],
+    effects: [{ stat: 'weaponDamage', mode: 'mult', value: 1.05 }],
+    unlocks: ['mod_laser_array'], special: null,
+  },
+  {
+    id: 'tech_laser_2',
+    nameZh: '脉冲激光',
+    nameEn: 'Pulse Lasers',
+    descZh: '高频脉冲调制技术，压缩单发能耗并提高对小型目标的毁伤效率。',
+    descEn: 'High-frequency pulse modulation trimming per-shot energy while raising lethality against small targets.',
+    category: 'space', tier: 3, cost: 520, prereqs: ['tech_laser_1', 'tech_energy_2'],
+    effects: [{ stat: 'weaponDamage', mode: 'mult', value: 1.08 }],
+    unlocks: ['mod_pulse_laser'], special: null,
+  },
+  {
+    id: 'tech_particle_1',
+    nameZh: '粒子束武器',
+    nameEn: 'Particle Beam Weapons',
+    descZh: '高能粒子加速与束流聚焦，无视常规装甲表层的复合毁伤武器。',
+    descEn: 'High-energy acceleration and beam focusing yielding composite damage that ignores surface plating.',
+    category: 'space', tier: 3, cost: 600, prereqs: ['tech_laser_1', 'tech_reactor_2'],
+    effects: [
+      { stat: 'weaponDamage', mode: 'mult', value: 1.08 },
+      { stat: 'weaponRange', mode: 'mult', value: 1.05 },
+    ],
+    unlocks: ['mod_particle_lance'], special: null,
+  },
+  {
+    id: 'tech_plasma_1',
+    nameZh: '等离子武器',
+    nameEn: 'Plasma Weapons',
+    descZh: '磁约束等离子团投射技术，在近距离造成毁灭性的持续灼烧毁伤。',
+    descEn: 'Magnetically confined plasma bolt projection delivering devastating sustained burns at close range.',
+    category: 'space', tier: 3, cost: 620, prereqs: ['tech_laser_2'],
+    effects: [{ stat: 'weaponDamage', mode: 'mult', value: 1.1 }],
+    unlocks: ['mod_plasma_thrower'], special: null,
+  },
+  {
+    id: 'tech_missile_1',
+    nameZh: '导弹技术',
+    nameEn: 'Missile Technology',
+    descZh: '制导导弹武器族谱与发射架标准，提供超视距打击能力，并解锁驱逐舰体。',
+    descEn: 'Guided missile family and rack standards providing beyond-visual-range strikes; unlocks the destroyer hull.',
+    category: 'space', tier: 1, cost: 110, prereqs: [],
+    effects: [{ stat: 'weaponDamage', mode: 'mult', value: 1.05 }],
+    unlocks: ['mod_missile_rack', 'hull_destroyer'], special: null,
+  },
+  {
+    id: 'tech_missile_2',
+    nameZh: '重型鱼雷',
+    nameEn: 'Heavy Torpedoes',
+    descZh: '重装甲远程鱼雷与突防引导头，专用于对大型目标的首轮齐射打击。',
+    descEn: 'Heavy armored long-range torpedoes with penetration seekers, built for opening salvos against capitals.',
+    category: 'space', tier: 3, cost: 560, prereqs: ['tech_missile_1', 'tech_computing_1'],
+    effects: [
+      { stat: 'weaponDamage', mode: 'mult', value: 1.08 },
+      { stat: 'trackingBonus', mode: 'add', value: 0.1 },
+    ],
+    unlocks: ['mod_torpedo_launcher'], special: null,
+  },
+  {
+    id: 'tech_pd_1',
+    nameZh: '近防系统',
+    nameEn: 'Point-Defense Systems',
+    descZh: '近防火力与火控分发体系，显著提升对导弹与舰载机的拦截效率，并解锁防空巡洋舰。',
+    descEn: 'Point-defense fire and distributed fire control sharply improving missile and craft interception; unlocks the PD cruiser.',
+    category: 'space', tier: 2, cost: 240, prereqs: ['tech_laser_1'],
+    effects: [
+      { stat: 'pdEfficiency', mode: 'mult', value: 1.2 },
+      { stat: 'trackingBonus', mode: 'add', value: 0.1 },
+    ],
+    unlocks: ['mod_pd_turret', 'bld_defense_grid', 'hull_aa_cruiser'], special: null,
+  },
+  {
+    id: 'tech_armor_1',
+    nameZh: '复合装甲',
+    nameEn: 'Composite Armor',
+    descZh: '多层复合装甲工艺，全面增强舰体物理防护能力。',
+    descEn: 'Multi-layer composite plating comprehensively enhancing hull physical protection.',
+    category: 'space', tier: 2, cost: 240, prereqs: ['tech_alloy_1'],
+    effects: [{ stat: 'armor', mode: 'mult', value: 1.1 }],
+    unlocks: ['mod_armor_composite'], special: null,
+  },
+  {
+    id: 'tech_armor_2',
+    nameZh: '烧蚀装甲',
+    nameEn: 'Ablative Armor',
+    descZh: '烧蚀耗散装甲体系，在持续火力下维持有效减伤，并解锁战列舰体。',
+    descEn: 'Ablative dissipative armor sustaining damage reduction under sustained fire; unlocks the battleship hull.',
+    category: 'space', tier: 3, cost: 560, prereqs: ['tech_armor_1'],
+    effects: [
+      { stat: 'armor', mode: 'mult', value: 1.12 },
+      { stat: 'damageReduction', mode: 'add', value: 0.03 },
+    ],
+    unlocks: ['mod_armor_ablative', 'hull_battleship'], special: null,
+  },
+  {
+    id: 'tech_carrier_1',
+    nameZh: '舰载机作战',
+    nameEn: 'Carrier Operations',
+    descZh: '舰载机联队作战条令与大型机库工程，解锁航母体与舰载机库。',
+    descEn: 'Carrier wing doctrine and large hangar engineering; unlocks the carrier hull and fighter bay.',
+    category: 'space', tier: 3, cost: 640, prereqs: ['tech_ai_1', 'tech_shipyard_1'],
+    effects: [{ stat: 'hangarCapacity', mode: 'mult', value: 1.15 }],
+    unlocks: ['mod_fighter_bay', 'hull_carrier'], special: null,
+  },
+  {
+    id: 'tech_repair_1',
+    nameZh: '纳米维修',
+    nameEn: 'Nanorepair Systems',
+    descZh: '纳米级原位维修技术，提升舰船战损修复速度并解锁维修厂区。',
+    descEn: 'Nanoscale in-situ repair technology speeding battle-damage restoration; unlocks the repair yard.',
+    category: 'space', tier: 2, cost: 220, prereqs: ['tech_industry_1'],
+    effects: [{ stat: 'repairRate', mode: 'mult', value: 1.15 }],
+    unlocks: ['mod_repair_system', 'bld_repair_yard'], special: null,
+  },
+  {
+    id: 'tech_dark_matter',
+    nameZh: '暗物质研究',
+    nameEn: 'Dark Matter Research',
+    descZh: '主线特殊项目：解析暗物质样本的结构特征，其成果将重塑动力与武器设计范式。',
+    descEn: 'Story project: deciphering the structure of dark matter samples, reshaping the paradigms of drive and weapon design.',
+    category: 'space', tier: 4, cost: 1600, prereqs: ['tech_exotic_matter', 'tech_science_3'],
+    effects: [
+      { stat: 'researchOutput', mode: 'mult', value: 1.1 },
+      { stat: 'weaponDamage', mode: 'mult', value: 1.08 },
+    ],
+    unlocks: [], special: 'story',
+  },
+
+  // ── society 治理与社会 ──
+  {
+    id: 'tech_colonization_1',
+    nameZh: '殖民学',
+    nameEn: 'Colonization Doctrine',
+    descZh: '殖民地选址与初期建设规程，提升宜居度评估并解锁工业舰体与水循环设施。',
+    descEn: 'Site selection and initial buildout doctrine; raises habitability assessment and unlocks the industrial hull and water reclamation.',
+    category: 'society', tier: 1, cost: 120, prereqs: [],
+    effects: [{ stat: 'habitabilityBonus', mode: 'add', value: 2 }],
+    unlocks: ['hull_industrial', 'bld_water_recycler'], special: null,
+  },
+  {
+    id: 'tech_admin_1',
+    nameZh: '行政管理',
+    nameEn: 'Public Administration',
+    descZh: '现代行政管理体系，扩充行政容量，是多星系治理的第一步。',
+    descEn: 'Modern public administration expanding administrative capacity; the first step of multi-system governance.',
+    category: 'society', tier: 1, cost: 100, prereqs: [],
+    effects: [{ stat: 'adminCapacity', mode: 'add', value: 5 }],
+    unlocks: ['bld_admin_center'], special: null,
+  },
+  {
+    id: 'tech_trade_1',
+    nameZh: '商路网络',
+    nameEn: 'Trade Networks',
+    descZh: '商路规划与护航体系，大幅扩充贸易容量并解锁轨道港口。',
+    descEn: 'Route planning and convoy systems greatly expanding trade capacity; unlocks the orbital port.',
+    category: 'society', tier: 1, cost: 120, prereqs: [],
+    effects: [{ stat: 'tradeCapacity', mode: 'mult', value: 1.15 }],
+    unlocks: ['bld_orbital_port'], special: null,
+  },
+  {
+    id: 'tech_trade_2',
+    nameZh: '市场调控',
+    nameEn: 'Market Regulation',
+    descZh: '价格干预与储备调度机制，改善交易价格并小幅提升税收。',
+    descEn: 'Price intervention and reserve management improving trade prices with a small tax gain.',
+    category: 'society', tier: 2, cost: 300, prereqs: ['tech_trade_1'],
+    effects: [
+      { stat: 'tradeCapacity', mode: 'mult', value: 1.1 },
+      { stat: 'marketPriceBonus', mode: 'add', value: 0.04 },
+      { stat: 'taxRateBonus', mode: 'add', value: 0.02 },
+    ],
+    unlocks: ['bld_exchange'], special: null,
+  },
+  {
+    id: 'tech_diplomacy_1',
+    nameZh: '星际外交',
+    nameEn: 'Interstellar Diplomacy',
+    descZh: '跨文明外交礼仪与谈判框架，提升外交信任积累与影响力获取。',
+    descEn: 'Cross-civilization protocol and negotiation frameworks raising diplomatic trust gain and influence income.',
+    category: 'society', tier: 2, cost: 240, prereqs: [],
+    effects: [
+      { stat: 'diplomacyTrustGain', mode: 'mult', value: 1.15 },
+      { stat: 'influenceGain', mode: 'mult', value: 1.08 },
+    ],
+    unlocks: [], special: null,
+  },
+  {
+    id: 'tech_diplomacy_2',
+    nameZh: '联合谈判',
+    nameEn: 'Coalition Negotiation',
+    descZh: '多边谈判与联合声明机制，在复杂局势下维持外交主动权。',
+    descEn: 'Multilateral negotiation and joint-statement mechanisms preserving diplomatic initiative in complex situations.',
+    category: 'society', tier: 3, cost: 540, prereqs: ['tech_diplomacy_1'],
+    effects: [
+      { stat: 'diplomacyTrustGain', mode: 'mult', value: 1.1 },
+      { stat: 'influenceGain', mode: 'mult', value: 1.1 },
+    ],
+    unlocks: [], special: null,
+  },
+  {
+    id: 'tech_colony_admin_1',
+    nameZh: '殖民治理',
+    nameEn: 'Colonial Governance',
+    descZh: '殖民地社会治理体系，提升稳定度与行政容量，并解锁服务类设施扩建。',
+    descEn: 'Colonial social governance raising stability and administrative capacity; unlocks expanded service facilities.',
+    category: 'society', tier: 2, cost: 260, prereqs: ['tech_admin_1', 'tech_colonization_1'],
+    effects: [
+      { stat: 'stabilityBonus', mode: 'add', value: 4 },
+      { stat: 'adminCapacity', mode: 'add', value: 3 },
+    ],
+    unlocks: ['bld_education_center', 'bld_entertainment_center'], special: null,
+  },
+  {
+    id: 'tech_law_1',
+    nameZh: '法令体系',
+    nameEn: 'Legal Doctrine',
+    descZh: '战时法令与治安条例，稳固殖民地秩序并降低战争疲劳的影响。',
+    descEn: 'Wartime decrees and security ordinances steadying colonial order and damping war exhaustion.',
+    category: 'society', tier: 3, cost: 520, prereqs: ['tech_colony_admin_1'],
+    effects: [
+      { stat: 'stabilityBonus', mode: 'add', value: 5 },
+      { stat: 'governanceLoad', mode: 'add', value: -2 },
+      { stat: 'warExhaustionResistance', mode: 'add', value: 0.08 },
+    ],
+    unlocks: [], special: null,
+  },
+  {
+    id: 'tech_intel_1',
+    nameZh: '情报体系',
+    nameEn: 'Intelligence Doctrine',
+    descZh: '系统化情报采集与分析流程，显著提升情报效能。',
+    descEn: 'Systematic collection and analysis pipelines markedly raising intelligence effectiveness.',
+    category: 'society', tier: 2, cost: 260, prereqs: ['tech_admin_1'],
+    effects: [{ stat: 'intelEffectiveness', mode: 'mult', value: 1.15 }],
+    unlocks: [], special: null,
+  },
+  {
+    id: 'tech_ancient_data',
+    nameZh: '古代数据解析',
+    nameEn: 'Ancient Data Analysis',
+    descZh: '主线特殊项目：解析古代数据样本中的结构与语义，触及某个早已消亡文明的知识残响。',
+    descEn: 'Story project: parsing structure and semantics in ancient data samples, touching the lingering knowledge of a long-dead civilization.',
+    category: 'society', tier: 3, cost: 800, prereqs: ['tech_science_2', 'tech_signal_decipher'],
+    effects: [
+      { stat: 'researchOutput', mode: 'mult', value: 1.1 },
+      { stat: 'anomalyChanceBonus', mode: 'add', value: 0.03 },
+    ],
+    unlocks: [], special: 'story',
+  },
+  {
+    id: 'tech_crisis_theory',
+    nameZh: '危机预警理论',
+    nameEn: 'Crisis Prediction Doctrine',
+    descZh: '危机线特殊项目：建立银河级威胁的预警模型，强化情报效能与战争承受力。',
+    descEn: 'Crisis-line project: a warning model for galaxy-scale threats, hardening intelligence effectiveness and war resilience.',
+    category: 'society', tier: 4, cost: 1400, prereqs: ['tech_ancient_data'],
+    effects: [
+      { stat: 'intelEffectiveness', mode: 'mult', value: 1.2 },
+      { stat: 'warExhaustionResistance', mode: 'add', value: 0.1 },
+    ],
+    unlocks: [], special: 'crisis',
+  },
+  // ── doc20 v0.6 WP-2：特种外骨骼环境抗性模块（风暴庇护三重判定的第三重） ──
+  {
+    id: 'exo_mod_thermal_shield',
+    nameZh: '外骨骼耐热盾模块',
+    nameEn: 'Exo Thermal Shield',
+    descZh: '特种外骨骼插件：热浪与极寒风暴中完全免除环境扣血与喷气散热惩罚。',
+    descEn: 'Exosuit module granting full environmental immunity in thermal and cryo storms.',
+    category: 'bio', tier: 3, cost: 420, prereqs: ['tech_bio_2'],
+    effects: [{ stat: 'stormResist', mode: 'add', value: 1 }],
+    unlocks: [], special: 'exo_mod',
+  },
+  {
+    id: 'exo_mod_acid_carapace',
+    nameZh: '外骨骼防酸甲壳',
+    nameEn: 'Exo Acid Carapace',
+    descZh: '特种外骨骼插件：酸雹风暴中完全免除 4.5 HP/s 腐蚀扣盾。',
+    descEn: 'Exosuit carapace nullifying corrosive acid-hail damage on exposed operators.',
+    category: 'bio', tier: 3, cost: 420, prereqs: ['tech_bio_2'],
+    effects: [{ stat: 'stormResistAcid', mode: 'add', value: 1 }],
+    unlocks: [], special: 'exo_mod',
+  },
+  // ── 先驱者遗落科技（doc18 WP-3：仅能由五阶段巨石遗迹核心破译解锁，常规科研不可研发） ──
+  {
+    id: 'tech_precursor_shield_harmonics',
+    nameZh: '先驱者谐振护盾',
+    nameEn: 'Precursor Shield Harmonics',
+    descZh: '先驱者遗落科技：逆向先驱者核心的谐振波形，为全体舰船叠加一层相位护盾谐振。',
+    descEn: 'Precursor tech: reverse-engineering resonant waveforms from a Precursor core to phase-harmonize all ship shields.',
+    category: 'society', tier: 4, cost: 0, prereqs: [],
+    effects: [{ stat: 'damageReduction', mode: 'add', value: 0.05 }],
+    unlocks: [], special: 'precursor',
+  },
+  {
+    id: 'tech_precursor_mass_catapult',
+    nameZh: '先驱者零点能质量弹射器',
+    nameEn: 'Precursor Mass Catapult',
+    descZh: '先驱者遗落科技：零点能场驱动的质量弹射结构，大幅降低舰队推进燃料损耗。',
+    descEn: 'Precursor tech: zero-point mass catapult structures slashing fleet propulsion fuel losses.',
+    category: 'propulsion', tier: 4, cost: 0, prereqs: [],
+    effects: [{ stat: 'fuelEfficiency', mode: 'mult', value: 1.15 }],
+    unlocks: [], special: 'precursor',
+  },
+];
+
+Object.assign(__exports, { TECHNOLOGIES });
+
+});
+__register("src/simulation/dramaDirector.js", function (__exports, __require) {
+/**
+ * simulation/dramaDirector.js — 自适应太空歌剧戏剧导演（Adaptive Space Opera Drama Director）
+ * （SPEC-PLAN-046 阶段三 M3 Task 3.5；责任人：Eng-C，M3 集成落位 simulation/ 层）
+ *
+ * 职责（doc46 §Task 3.5 + doc42 总纲 §五.4 逐条契约）：
+ *  1. 双核心状态变量（权威容器 world.spaceOperaState.dramaDirector，六键冻结契约见
+ *     worldMigration.js / CHK-00-04）：宏观戏剧张力 T ∈ [0,100]、创伤适应系数 A ∈ [0.75,1.35]
+ *     （由 adaptDays ∈ [-50,100] 驱动）。
+ *  2. adaptDays 日演进（registerDaily 'space-opera-drama-adapt'，函数体首行守卫
+ *     world.spaceOperaState）：adaptDays<0 → +3.0/天；0..60 → +1.0/天；>60 → +0.5/天；
+ *     封顶 100.0、下限 −50.0；步进后 adaptationFactor = clamp(1+0.0035×adaptDays, 0.75, 1.35)，
+ *     恢复宽限期（recoveryGraceUntilTick ≥ tick）期间 A 锁 0.75。
+ *  3. 伤亡折算：reportDowned(world,n) → adaptDays −4.0×n；reportKilled(world,n) →
+ *     adaptDays −20.0×n（1 Killed = 5 Downed 精确折算比）；扣减后同步重算 A。
+ *  4. 戏剧预算：W_base = min(10000, 0.5×popAndFleetScore + 0.5×industrialWealthScore)，
+ *     W_effective = min(10000, W_base×G(c)×A)；G(c)：c=floor(tick/720)（0 基月周期序），
+ *     c≤10 → 0.70；10<c<40 → 0.70+0.30×(c−10)/30；c≥40 → 1.00。
+ *  5. 张力 T 月度推进（月末收口；注册序恒在 'space-opera-jacobian' 之后，见文件尾接线裁决）：
+ *     T += 1.0 × (0.4×mean(|S_i−eq_i|) + 2×活跃危机局势数 + 近 30 天战役烈度) × A，clamp [0,100]。
+ *  6. 高潮宣泄：T ≥ 75 且无活跃 GRAND_CLIMAX → spawnSituation('GRAND_CLIMAX'，meta 记录
+ *     tensionTop2 弧线 + W_effective)；局势收束（climax 或 defused）→ resolveGrandClimax：
+ *     T 强制 25.0、A 强制 0.75、adaptDays=−50.0、recoveryGraceUntilTick=tick+2160、
+ *     climaxCount+1、injectOpportunityBeacons(world,18)（OPPORTUNITY_BEACON 精确 18 个）。
+ *
+ * A=0.75 与公式 0.825 的裁决（doc46 §Task 3.5 §2/§4 内部张力）：
+ *  climax 复位时 adaptDays=−50.0，按公式 1+0.0035×(−50)=0.825 ≠ 0.75。裁决：reset 显式置
+ *  A=0.75 并在 2160 tick 宽限期内锁定 0.75（黄金喘息重建期语义，doc42 §五.4「将适应因子下调
+ *  至 0.75 的创伤恢复期」为权威）；宽限期过后恢复公式推导（adaptDays=−50 → 0.825，随后每日
+ *  +3 天数爬升）。CHK-M3-06 两段断言分别覆盖「结算瞬间 A===0.75」与「宽限期满公式恢复 0.825」。
+ *
+ * 月度收口接线裁决（doc46 §Task 3.5(d)「在雅可比步进之后」）：
+ *  月度阶段注册统一收敛到 src/simulation/SpaceOperaWiring.js 的同步显式接线
+ *  （monthly → jacobian → drama 按注册序执行）。原「动态 import('./jacobianCoupling.js')
+ *  .then(...) 链式注册」方案在静态打包产物（build-static-bundle IIFE）中相对说明符
+ *  不可达（404 → catch 降级 → 收口永不注册），且存在同步 import 后立即跨月推演的
+ *  时序洞，已废除。
+ */
+
+const { registerDaily: registerDaily, registerMonthly: registerMonthly } = __require("src/simulation/TickPipeline.js");
+const { registerSituationArc: registerSituationArc, spawnSituation: spawnSituation, listActiveSituations: listActiveSituations } = __require("src/domain/events/situationEngine.js");
+const { injectOpportunityBeacons: injectOpportunityBeacons } = __require("src/domain/world/subspaceBeaconStream.js");
+const { ensureSpaceOperaState: ensureSpaceOperaState } = __require("src/domain/world/spaceOperaState.js");
+const { emit: emit, chronicle: chronicle } = __require("src/core/eventBus.js");
+const { TICKS_PER_DAY: TICKS_PER_DAY, TICKS_PER_MONTH: TICKS_PER_MONTH } = __require("src/core/clock.js");
+
+/* ============================== 冻结常量（doc46 §Task 3.5 精确值） ============================== */
+
+/**
+ * 七大系统平衡点向量 S_eq（与 jacobianCoupling.SYSTEM_EQUILIBRIUM 同源常量的本地复制；
+ * 刻意不静态 import 该模块 —— 见文件头「月度收口接线裁决」。M3 套件 CHK-M3-06 逐位互证）。
+ */
+const EQUILIBRIUM_S = Object.freeze([15.0, 15.0, 20.0, 15.0, 15.0, 10.0, 10.0]);
+
+/** 张力阈值与宣泄落点（doc46 精确值） */
+const CLIMAX_TENSION_THRESHOLD = 75.0;
+const CATHARSIS_TENSION = 25.0;
+const CATHARSIS_ADAPTATION = 0.75;
+const CATHARSIS_ADAPT_DAYS = -50.0;
+const RECOVERY_GRACE_TICKS = 2160; // 90 游戏日黄金喘息重建期
+const CATHARSIS_OPPORTUNITY_BEACONS = 18;
+
+/** adaptDays 三段日增速与值域（doc46 精确值） */
+const ADAPT_RECOVER_PER_DAY = 3.0; // adaptDays < 0
+const ADAPT_GROW_PER_DAY = 1.0; // 0 ≤ adaptDays ≤ 60
+const ADAPT_SLOW_PER_DAY = 0.5; // adaptDays > 60
+const ADAPT_SLOW_THRESHOLD = 60.0;
+const ADAPT_DAYS_MIN = -50.0;
+const ADAPT_DAYS_MAX = 100.0;
+
+/** 适应系数映射（A = clamp(1 + 0.0035×adaptDays, 0.75, 1.35)） */
+const ADAPT_SLOPE = 0.0035;
+const ADAPT_FACTOR_MIN = 0.75;
+const ADAPT_FACTOR_MAX = 1.35;
+
+/** 伤亡折算（doc46 精确值：1 Killed = 5 Downed） */
+const DOWNED_ADAPT_COST = 4.0;
+const KILLED_ADAPT_COST = 20.0;
+
+/** 早期宽限斜坡 G(c)（doc46 精确式） */
+const GRACE_RAMP_START_CYCLE = 10;
+const GRACE_RAMP_END_CYCLE = 40;
+const GRACE_RAMP_BASE = 0.70;
+
+/** 预算双因子权重与硬上限（doc46 精确值 50/50 与 10000） */
+const BUDGET_POP_WEIGHT = 0.5;
+const BUDGET_WEALTH_WEIGHT = 0.5;
+const BUDGET_CAP = 10000;
+
+/** 评分口径常数（doc46 给结构不给常数 → M3 落地裁决，写入 notes） */
+const POP_SCORE_PER_POP = 10;
+const FLEET_SCORE_PER_SHIP = 40;
+const BUILDING_SCORE_PER_TILE = 15;
+const STOCKPILE_SCORE_DIVISOR = 10;
+
+/** 张力月度推进系数（doc46 精确值 0.4 / 2；dt=1.0 月/收口） */
+const TENSION_MEAN_DEV_COEF = 0.4;
+const TENSION_PER_CRISIS = 2.0;
+const TENSION_DT_PER_CLOSE = 1.0;
+const TENSION_MIN = 0.0;
+const TENSION_MAX = 100.0;
+
+/** 战役烈度统计窗口：30 游戏日 = 720 tick */
+const BATTLE_INTENSITY_WINDOW_TICKS = 30 * TICKS_PER_DAY;
+
+/** 庆典/机遇弧（不计入「活跃危机局势数」） */
+const CELEBRATION_ARCS = Object.freeze({ GRAND_CLIMAX: true, LEVIATHAN_PARADE: true });
+
+const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+const round4 = (v) => Number(v.toFixed(4));
+
+function tickOf(world) {
+  return Number.isFinite(world && world.tick) ? Math.max(0, Math.trunc(world.tick)) : 0;
+}
+
+/** 戏剧导演状态只读守卫（容器/子容器缺失 → null；绝不 ensure、绝不重建） */
+function dramaStateOf(world) {
+  const so = world && world.spaceOperaState;
+  const dd = so && so.dramaDirector;
+  return dd && typeof dd === 'object' ? dd : null;
+}
+
+/* ============================== Task 3.5 §2 adaptDays 演进与伤亡折算 ============================== */
+
+/** 恢复宽限期判定（recoveryGraceUntilTick ≥ tick 视为在期内；边界含） */
+function inRecoveryGrace(world, dd = null) {
+  const state = dd || dramaStateOf(world);
+  if (!state) return false;
+  const until = Number.isFinite(state.recoveryGraceUntilTick) ? state.recoveryGraceUntilTick : -1;
+  return until >= tickOf(world);
+}
+
+/**
+ * 创伤适应系数推导（纯函数）：宽限期内锁定 0.75（裁决见文件头），
+ * 期外 A = clamp(1 + 0.0035×adaptDays, 0.75, 1.35)。
+ */
+function deriveAdaptationFactor(adaptDays, graceLocked) {
+  if (graceLocked === true) return CATHARSIS_ADAPTATION;
+  const d = Number.isFinite(adaptDays) ? adaptDays : 0;
+  return clamp(1 + ADAPT_SLOPE * d, ADAPT_FACTOR_MIN, ADAPT_FACTOR_MAX);
+}
+
+/**
+ * adaptDays 日演进（registerDaily 'space-opera-drama-adapt' 注册形态）。
+ * 三段增速：<0 → +3.0；0..60 → +1.0；>60 → +0.5；clamp [−50, 100]。
+ * 步进后重算 adaptationFactor（宽限期锁 0.75）。
+ * 首行守卫 world.spaceOperaState（金快照世界零读取零写入）。
+ *
+ * @returns {object|null} {adaptDays, adaptationFactor, graceLocked}（容器缺失返回 null）
+ */
+function stepDramaAdaptationDaily(world) {
+  const dd = dramaStateOf(world);
+  if (!dd) return null;
+  const cur = Number.isFinite(dd.adaptDays) ? dd.adaptDays : 0;
+  const rate = cur < 0 ? ADAPT_RECOVER_PER_DAY : (cur <= ADAPT_SLOW_THRESHOLD ? ADAPT_GROW_PER_DAY : ADAPT_SLOW_PER_DAY);
+  const next = clamp(cur + rate, ADAPT_DAYS_MIN, ADAPT_DAYS_MAX);
+  dd.adaptDays = next;
+  const grace = inRecoveryGrace(world, dd);
+  dd.adaptationFactor = deriveAdaptationFactor(next, grace);
+  return { adaptDays: next, adaptationFactor: dd.adaptationFactor, graceLocked: grace };
+}
+
+/** 伤亡折算内核（Downed −4.0/单位；Killed −20.0/单位；下限 −50；同步重算 A） */
+function reportTrauma(world, count, perUnitCost, kind) {
+  const dd = dramaStateOf(world);
+  if (!dd) return null;
+  const n = Math.max(0, Math.trunc(Number.isFinite(count) ? count : 0));
+  if (n <= 0) return null; // 零伤亡零写入
+  const before = Number.isFinite(dd.adaptDays) ? dd.adaptDays : 0;
+  const next = Math.max(ADAPT_DAYS_MIN, before - perUnitCost * n);
+  dd.adaptDays = next;
+  dd.adaptationFactor = deriveAdaptationFactor(next, inRecoveryGrace(world, dd));
+  emit(world, 'DramaTraumaReported', {
+    kind,
+    count: n,
+    adaptCostPerUnit: perUnitCost,
+    deducted: perUnitCost * n,
+    adaptDays: next,
+    adaptationFactor: dd.adaptationFactor,
+  }, 'world');
+  return { kind, count: n, deducted: perUnitCost * n, adaptDays: next, adaptationFactor: dd.adaptationFactor };
+}
+
+/**
+ * 上报瘫痪/重伤单位（Storyteller Trauma Reduction）：每单位 adaptDays −4.0。
+ * 守卫式读取（容器缺失返回 null）；n ≤ 0 零写入。
+ */
+function reportDowned(world, n) {
+  return reportTrauma(world, n, DOWNED_ADAPT_COST, 'downed');
+}
+
+/**
+ * 上报阵亡/沦陷/主力舰击毁：每单位 adaptDays −20.0（1 Killed = 5 Downed 精确折算比）。
+ */
+function reportKilled(world, n) {
+  return reportTrauma(world, n, KILLED_ADAPT_COST, 'killed');
+}
+
+// —— import 副作用：adaptDays 日演进阶段注册（函数体首行守卫 world.spaceOperaState）——
+registerDaily('space-opera-drama-adapt', (world) => {
+  stepDramaAdaptationDaily(world);
+});
+
+/* ============================== Task 3.5 §3 宽限斜坡与戏剧预算 ============================== */
+
+/**
+ * 早期宽限斜坡 G(c)（纯函数）：c = floor(tick/720)（0 基月周期序）。
+ * c ≤ 10 → 0.70；10 < c < 40 → 0.70 + 0.30×(c−10)/30；c ≥ 40 → 1.00。
+ */
+function graceSlopeG(c) {
+  const cycle = Number.isFinite(c) ? c : 0;
+  if (cycle <= GRACE_RAMP_START_CYCLE) return GRACE_RAMP_BASE;
+  if (cycle >= GRACE_RAMP_END_CYCLE) return 1.00;
+  return GRACE_RAMP_BASE + 0.30 * ((cycle - GRACE_RAMP_START_CYCLE) / (GRACE_RAMP_END_CYCLE - GRACE_RAMP_START_CYCLE));
+}
+
+/**
+ * 基础帝国规模预算（纯读，零写入；评分口径见文件头 notes 裁决）：
+ *  popAndFleetScore       = Σ(compact.colony.popTotal)×10 + Σ(world.entities.fleets 舰船数)×40
+ *                           （dissolved 舰队不计；仅统计已挂 compactState 的行星，绝不 ensure）
+ *  industrialWealthScore  = Σ(compact tiles buildingId≠0 格数)×15 + Σ(stockpile 总值)/10
+ *  W_base                 = min(10000, 0.5×popAndFleetScore + 0.5×industrialWealthScore)
+ *  W_effective            = min(10000, W_base × G(c) × A)
+ *
+ * @returns {object|null} 预算档案（容器缺失返回 null）
+ */
+function computeDramaBudget(world) {
+  if (!world || !world.spaceOperaState) return null;
+  const dd = dramaStateOf(world);
+  const tick = tickOf(world);
+  const cycle = Math.floor(tick / TICKS_PER_MONTH);
+  const g = graceSlopeG(cycle);
+  const grace = inRecoveryGrace(world, dd);
+  const adaptDays = dd && Number.isFinite(dd.adaptDays) ? dd.adaptDays : 0;
+  const a = deriveAdaptationFactor(adaptDays, grace);
+
+  const planets = world.entities && world.entities.planets ? world.entities.planets : {};
+  let popTotal = 0;
+  let buildingTiles = 0;
+  let stockpileValue = 0;
+  for (const key of Object.keys(planets).sort()) {
+    const planet = planets[key];
+    const compact = planet && planet.compactState;
+    const colony = compact && compact.colony;
+    if (colony && Number.isFinite(colony.popTotal) && colony.popTotal > 0) {
+      popTotal += colony.popTotal;
+    }
+    if (compact && Array.isArray(compact.tiles)) {
+      for (let i = 0; i < compact.tiles.length; i++) {
+        if (((compact.tiles[i] >>> 16) & 0x3f) !== 0) buildingTiles += 1;
+      }
+    }
+    if (colony && Array.isArray(colony.stockpile)) {
+      for (let i = 0; i < colony.stockpile.length; i++) {
+        const v = Number(colony.stockpile[i]);
+        if (Number.isFinite(v) && v > 0) stockpileValue += v;
+      }
+    }
+  }
+  const fleets = world.entities && world.entities.fleets ? world.entities.fleets : {};
+  let shipCount = 0;
+  for (const key of Object.keys(fleets).sort()) {
+    const fleet = fleets[key];
+    if (!fleet || fleet.status === 'dissolved') continue;
+    if (Array.isArray(fleet.shipIds)) shipCount += fleet.shipIds.length;
+  }
+
+  const popAndFleetScore = popTotal * POP_SCORE_PER_POP + shipCount * FLEET_SCORE_PER_SHIP;
+  const industrialWealthScore = buildingTiles * BUILDING_SCORE_PER_TILE + stockpileValue / STOCKPILE_SCORE_DIVISOR;
+  const wBase = Math.min(BUDGET_CAP, BUDGET_POP_WEIGHT * popAndFleetScore + BUDGET_WEALTH_WEIGHT * industrialWealthScore);
+  const wEffective = Math.min(BUDGET_CAP, wBase * g * a);
+  return {
+    cycle,
+    g,
+    a,
+    graceLocked: grace,
+    adaptDays,
+    popTotal,
+    shipCount,
+    buildingTiles,
+    stockpileValue,
+    popAndFleetScore,
+    industrialWealthScore,
+    wBase,
+    wEffective,
+  };
+}
+
+/* ============================== 战役烈度与危机计数（纯读） ============================== */
+
+/** 近 30 天战役烈度：Σ(1 + 双方战损舰数)（endedTick ∈ [tick−720, tick] 的战报） */
+function battleIntensityLast30Days(world, tick) {
+  const battles = world && world.battles;
+  const history = battles && Array.isArray(battles.history) ? battles.history : [];
+  const cutoff = tick - BATTLE_INTENSITY_WINDOW_TICKS;
+  let intensity = 0;
+  for (let i = 0; i < history.length; i++) {
+    const report = history[i];
+    if (!report || typeof report !== 'object') continue;
+    const ended = Number.isFinite(report.endedTick) ? report.endedTick : 0;
+    if (ended < cutoff) continue;
+    const losses = report.losses && typeof report.losses === 'object' ? report.losses : {};
+    const a = Number(losses.a);
+    const b = Number(losses.b);
+    intensity += 1 + (Number.isFinite(a) && a > 0 ? a : 0) + (Number.isFinite(b) && b > 0 ? b : 0);
+  }
+  return intensity;
+}
+
+/** 活跃危机局势数：除庆典/机遇弧（GRAND_CLIMAX / LEVIATHAN_PARADE）外的活跃局势总数 */
+function activeCrisisCount(world) {
+  return listActiveSituations(world).filter((s) => s && CELEBRATION_ARCS[s.systemArcId] !== true).length;
+}
+
+/* ============================== Task 3.5 §4 高潮宣泄（Climax Catharsis） ============================== */
+
+/**
+ * 史诗高潮宣泄结算（GRAND_CLIMAX 弧 climax 钩子与显式结算入口）：
+ *  1. T 强制回落 25.0；2. A 强制重置 0.75（adaptDays = −50.0）；3. 开启 2160 tick
+ *  黄金喘息重建期（recoveryGraceUntilTick = tick + 2160）；4. climaxCount +1、
+ *  lastClimaxTick 记账；5. injectOpportunityBeacons(world, 18) 注入 18 个机遇信标。
+ *  幂等：同一局势 meta.catharsisApplied 已置位 → 零重复结算。
+ * 首行守卫 world.spaceOperaState。
+ *
+ * @param {object} world - 世界根对象
+ * @param {object|null} situation - GRAND_CLIMAX 局势实例（可为 null 直接结算）
+ * @param {string} [outcome] - 'climax' | 'defused'（平定或度过皆触发宣泄）
+ * @returns {object|null} 宣泄结算档案（容器缺失/重复结算返回 null）
+ */
+function resolveGrandClimax(world, situation, outcome = 'climax') {
+  if (!world || !world.spaceOperaState) return null;
+  const dd = dramaStateOf(world);
+  if (!dd) return null;
+  const sit = situation && typeof situation === 'object' ? situation : null;
+  if (sit && sit.meta && sit.meta.catharsisApplied === true) return null; // 幂等防重入
+  const tick = tickOf(world);
+
+  if (sit) {
+    if (!sit.meta || typeof sit.meta !== 'object') sit.meta = {};
+    sit.meta.catharsisApplied = true;
+    sit.meta.catharsisOutcome = outcome === 'defused' ? 'defused' : 'climax';
+  }
+  dd.tension = CATHARSIS_TENSION;
+  dd.adaptDays = CATHARSIS_ADAPT_DAYS;
+  dd.adaptationFactor = CATHARSIS_ADAPTATION;
+  dd.recoveryGraceUntilTick = tick + RECOVERY_GRACE_TICKS;
+  dd.climaxCount = (Number.isFinite(dd.climaxCount) ? dd.climaxCount : 0) + 1;
+  dd.lastClimaxTick = tick;
+
+  const injected = injectOpportunityBeacons(world, CATHARSIS_OPPORTUNITY_BEACONS);
+  emit(world, 'GrandClimaxResolved', {
+    situationId: sit ? sit.id : null,
+    outcome: sit && sit.meta ? sit.meta.catharsisOutcome : outcome,
+    tension: dd.tension,
+    adaptationFactor: dd.adaptationFactor,
+    adaptDays: dd.adaptDays,
+    recoveryGraceUntilTick: dd.recoveryGraceUntilTick,
+    climaxCount: dd.climaxCount,
+    opportunityBeacons: injected,
+  }, 'world');
+  chronicle(world, 'world', '史诗高潮落幕：张力宣泄回落 25.0，帝国步入 90 日黄金喘息重建期，星区涌现 18 个战后机遇信标', {
+    situationId: sit ? sit.id : null,
+    climaxCount: dd.climaxCount,
+  });
+  return {
+    tension: dd.tension,
+    adaptationFactor: dd.adaptationFactor,
+    adaptDays: dd.adaptDays,
+    recoveryGraceUntilTick: dd.recoveryGraceUntilTick,
+    climaxCount: dd.climaxCount,
+    opportunityBeacons: injected,
+  };
+}
+
+/** tensionTop2 弧线裁决：按 |S_i−eq_i| 降序取前二（tie 取系统下标较小者） */
+function top2Arcs(deviations) {
+  const ranked = deviations.map((d, i) => ({ system: i, arc: `S${i + 1}`, deviation: round4(d) }));
+  ranked.sort((a, b) => (b.deviation - a.deviation) || (a.system - b.system));
+  return ranked.slice(0, 2);
+}
+
+/** 生成 GRAND_CLIMAX 四幕史诗高潮局势（meta 记录 tensionTop2 弧线 + W_effective） */
+function spawnGrandClimax(world, deviations, budget, tension) {
+  const top2 = top2Arcs(deviations);
+  const sit = spawnSituation(world, {
+    arcId: 'GRAND_CLIMAX',
+    targetEntityId: null,
+    progress: 0,
+    meta: {
+      tensionAtTrigger: round4(tension),
+      tensionTop2: top2,
+      wEffective: round4(budget.wEffective),
+      cycle: budget.cycle,
+      adaptationFactor: budget.a,
+    },
+  });
+  emit(world, 'GrandClimaxTriggered', {
+    situationId: sit.id,
+    tension: round4(tension),
+    tensionTop2: top2,
+    wEffective: round4(budget.wEffective),
+    cycle: budget.cycle,
+  }, 'world');
+  chronicle(world, 'world', `戏剧导演：宏观张力突破 ${CLIMAX_TENSION_THRESHOLD.toFixed(1)}，最尖锐的两条系统弧线（${top2.map((t) => t.arc).join(' / ')}）合并升格为四幕史诗高潮大事件`, {
+    situationId: sit.id,
+  });
+  return sit;
+}
+
+/**
+ * 戏剧导演月末收口（registerMonthly 'space-opera-drama' 注册形态；注册序恒在
+ * 'space-opera-jacobian' 之后 —— 张力推进消费雅可比步进后的 S 快照，接线裁决见文件头）：
+ *  1. A 刷新（宽限期锁 0.75 / 期外公式）；
+ *  2. T += 1.0 × (0.4×mean(|S_i−eq_i|) + 2×活跃危机局势数 + 近 30 天战役烈度) × A，clamp [0,100]；
+ *  3. T ≥ 75 且无活跃 GRAND_CLIMAX → spawnSituation('GRAND_CLIMAX')。
+ *
+ * @returns {object|null} {tension, gained, adaptationFactor, wEffective, spawnedClimax, climaxId}
+ */
+function stepSpaceOperaDramaMonthly(world) {
+  const dd = dramaStateOf(world);
+  if (!dd) return null;
+  const so = world.spaceOperaState;
+  if (!Array.isArray(so.systemVector) || so.systemVector.length !== 7) return null; // 防御手造容器（与 jacobian 同口径）
+  const tick = tickOf(world);
+
+  const budget = computeDramaBudget(world);
+  dd.adaptationFactor = budget.a;
+
+  const deviations = so.systemVector.map((v, i) => Math.abs((Number.isFinite(v) ? v : 0) - EQUILIBRIUM_S[i]));
+  const meanDev = deviations.reduce((s, v) => s + v, 0) / deviations.length;
+  const crisisCount = activeCrisisCount(world);
+  const intensity = battleIntensityLast30Days(world, tick);
+  const gain = TENSION_DT_PER_CLOSE
+    * (TENSION_MEAN_DEV_COEF * meanDev + TENSION_PER_CRISIS * crisisCount + intensity)
+    * budget.a;
+  const prev = Number.isFinite(dd.tension) ? dd.tension : TENSION_MIN;
+  const next = clamp(prev + gain, TENSION_MIN, TENSION_MAX);
+  dd.tension = next;
+
+  let spawned = null;
+  const hasActiveClimax = listActiveSituations(world).some((s) => s && s.systemArcId === 'GRAND_CLIMAX');
+  if (next >= CLIMAX_TENSION_THRESHOLD && !hasActiveClimax) {
+    spawned = spawnGrandClimax(world, deviations, budget, next);
+  }
+  return {
+    tension: next,
+    gained: gain,
+    adaptationFactor: budget.a,
+    wEffective: budget.wEffective,
+    spawnedClimax: !!spawned,
+    climaxId: spawned ? spawned.id : null,
+  };
+}
+
+/* ============================== GRAND_CLIMAX 弧定义（import 期注册） ============================== */
+
+/**
+ * 四幕史诗高潮大事件弧（doc46 §Task 3.5 §4）：
+ *  - 未干预时 baseMonthlyDelta +25/月（四幕每幕一个月，四个月自然演满 → climax）；
+ *  - 玩家平定（defused）或度过（climax）皆触发 resolveGrandClimax 宣泄结算；
+ *  - 同一时刻至多一场活跃（月度收口 spawn 前置检定）。
+ */
+registerSituationArc('GRAND_CLIMAX', {
+  progressMax: 100,
+  baseMonthlyDelta: 25,
+  actBounds: [
+    [0, 25],
+    [25, 50],
+    [50, 75],
+    [75, 100],
+  ],
+  approaches: {},
+  climax(world, situation, outcome) {
+    resolveGrandClimax(world, situation, outcome);
+  },
+});
+
+/* ============================== 月末收口接线（静态显式注册） ============================== */
+
+let dramaMonthlyRegistered = false;
+
+/**
+ * 幂等注册戏剧导演月度收口（由 SpaceOperaWiring 在 'space-opera-jacobian' 之后显式调用）。
+ * 原动态 import('./jacobianCoupling.js').then(...) 链式注册在静态打包产物（build-static-bundle
+ * IIFE）中相对说明符不可达（404），且异步注册存在「同步 import 后立即跨月推演」的时序洞——
+ * 统一改为 SpaceOperaWiring 的同步显式接线，注册序恒为 monthly → jacobian → drama。
+ */
+function registerDramaMonthlyClose() {
+  if (dramaMonthlyRegistered) return;
+  dramaMonthlyRegistered = true;
+  registerMonthly('space-opera-drama', stepSpaceOperaDramaMonthly);
+}
+
+/**
+ * 幂等预等待月度收口注册完成（返回完成的 Promise；保留套件兼容签名）。
+ * 注册已改为 SpaceOperaWiring 的同步显式接线，本函数现为同步注册 + 立即 resolve。
+ */
+function ensureDramaMonthlyRegistered() {
+  registerDramaMonthlyClose();
+  return Promise.resolve();
+}
+
+Object.assign(__exports, { EQUILIBRIUM_S, CLIMAX_TENSION_THRESHOLD, CATHARSIS_TENSION, CATHARSIS_ADAPTATION, CATHARSIS_ADAPT_DAYS, RECOVERY_GRACE_TICKS, CATHARSIS_OPPORTUNITY_BEACONS, ADAPT_RECOVER_PER_DAY, ADAPT_GROW_PER_DAY, ADAPT_SLOW_PER_DAY, ADAPT_SLOW_THRESHOLD, ADAPT_DAYS_MIN, ADAPT_DAYS_MAX, ADAPT_SLOPE, ADAPT_FACTOR_MIN, ADAPT_FACTOR_MAX, DOWNED_ADAPT_COST, KILLED_ADAPT_COST, GRACE_RAMP_START_CYCLE, GRACE_RAMP_END_CYCLE, GRACE_RAMP_BASE, BUDGET_POP_WEIGHT, BUDGET_WEALTH_WEIGHT, BUDGET_CAP, POP_SCORE_PER_POP, FLEET_SCORE_PER_SHIP, BUILDING_SCORE_PER_TILE, STOCKPILE_SCORE_DIVISOR, TENSION_MEAN_DEV_COEF, TENSION_PER_CRISIS, TENSION_DT_PER_CLOSE, TENSION_MIN, TENSION_MAX, BATTLE_INTENSITY_WINDOW_TICKS, inRecoveryGrace, deriveAdaptationFactor, stepDramaAdaptationDaily, reportDowned, reportKilled, graceSlopeG, computeDramaBudget, resolveGrandClimax, stepSpaceOperaDramaMonthly, registerDramaMonthlyClose, ensureDramaMonthlyRegistered });
+
+});
+__register("src/domain/world/subspaceBeaconStream.js", function (__exports, __require) {
+/**
+ * domain/world/subspaceBeaconStream.js — 全频段子空间信标流（反孤独硬性不变量）
  * （SPEC-PLAN-046 阶段三 M3 Task 3.3；责任人：Eng-C）
  *
- * 职责（doc46 §Task 3.3 §1 + doc42 总纲 §五.1 逐条契约）：
- *  舰队实例存 world.spaceOperaState.autonomousFleets，元素契约：
- *    { id, type, factionId, originSystemId, destSystemId,
- *      cargo: { resourceId, qty } | null, transitProgress, spawnedTick, interdicted,
- *      travelTicks, formationClass?, homePlanetId? }（后三者为 M3 派生附加字段，施工 notes 记录）。
- *  5 类派生规则（月度周期末 tick%720===0 确定性派生；deriveSeed(SECTOR_AUTONOMOUS,…)）：
- *   1. TRADE_CONVOY：净流>0 星 → 净流<0 同资源星（跨星系套利）；到港交付
- *      目的星 stockpile +qty 且源头 netFlow 扣减 -qty；途中同系统有敌对/海盗舰队 →
- *      interdicted：货物损失 + 目的星短缺进度推升（活跃 S4 局势 progress +3，
- *      否则 pendingSystemShocks['S4'] += 3）；
- *   2. SMUGGLER_RUNNER：向高关税（tariffRate ≥ 0.35）/ 叛乱前夕（活跃 PLANETARY_REVOLT）/
- *      高犯罪（crime ≥ 15）星运违禁品；到港入黑市库存；
- *   3. PATROL_FLOTILLA：有 patrolHQ 的星按 computeDoctrineTemplate 派生轻/中/重编队
- *      （每司令部常驻一支）；同系统反走私扫描（确定性查获，0.5 概率档）；
- *   4. MARKET_EXPEDITION：玩家某商品市场份额 > 40% → 霸权派系生成远征军指向玩家产区；
- *      玩家歼灭 → getRelation 调整 opinion −5 而绝不 declareWar（war.js 关系口径）；
- *   5. BOUNTY_HUNTER：响应赏金公会悬赏（world.economy.bounties / lettersOfMarque 在场）
- *      向敌对舰队所在星系游猎。
+ * 职责（doc46 §Task 3.3 §2 + doc42 总纲 §五.3 逐条契约）：
+ *  1. 常驻密度铁律：任何时刻非帝国官方动态叙事信标（kind='NARRATIVE'）活跃数必须 ≥
+ *     BEACON_MIN_NARRATIVE(15)；stepBeaconStream 每帧先清过期、再按
+ *     deriveSeed(world.seed, SUBSPACE_BEACON, world.tick, idx) 确定性补足到 15
+ *     （频段 sampleWeightedIndex 四等权选一、系统确定性选、模板确定性选）；
+ *  2. 信标实例契约：{ id, freqClass, systemId, text, spawnedTick, expiresTick,
+ *     kind:'NARRATIVE'|'OPPORTUNITY', templateId, responseOptions:[{id,label,effectHint,effect}] }
+ *     —— 存 world.spaceOperaState.subspaceBeacons（帝国官方信标 kind='OFFICIAL'，
+ *     不计入 15 密度，由上层投放，本模块只做密度统计区分）；
+ *  3. injectOpportunityBeacons(world, n)：追加 n 个 OPPORTUNITY_BEACON 机遇信标
+ *     （戏剧导演高潮宣泄 +18 爆发的唯一投放口，doc46 §Task 3.5 §4）；
+ *  4. respondSubspaceBeacon(world, beaconId, responseOptionId)：救援 → 资源奖励 /
+ *     星海日报 → 临时增益 / 黑市合约 → blackMarket 交易窗口 / 先驱者低语 → researchData
+ *     / 凝聚奖励 → unityTreasury / 难民 → 玩家殖民地人口；响应后信标从流中移除，
+ *     结果写入 world.spaceOperaState.lastBeaconResponse（命令总线返回值不透传契约）。
  *
- * 时钟接线裁决（与 Task 3.1 stepFleetReadiness 同款，见该文件头注释）：
- *  registerHourly('space-opera-autonomous-fleets', …) 由 SpaceOperaWiring.js 注册为每 tick 阶段，
- *  舰队桶按 numericEntityKey(fleet.id) % 10 === tick % 10 轮询（每支舰队每 10 tick 访问
- *  一次，访问即 transitProgress += 10 游戏小时 ≈ 1h/tick 摊销）——不经
- *  setClockHooks.fleetTick（该钩子按 world.entities.fleets 实体数每 tick 多调 12 次
- *  且零实体世界永不触发，直接注入会双重步进或失步，施工 notes 记录裁决）。
+ * 时钟接线裁决：registerHourly('space-opera-beacon-stream', …) 由 SpaceOperaWiring.js 注册为每
+ * tick（fast）阶段 —— 函数体首行守卫 world.spaceOperaState：未挂载容器（默认流程 /
+ * 金快照 8be8ce2c 世界）零读取零写入，逐位零漂移。
  *
  * 纪律（doc43 §1.4 零漂移铁律）：
- *  - import 期仅注册时钟阶段与冻结常量；stepAutonomousFleets 首行守卫
- *    world.spaceOperaState（金快照世界零读取零写入）；
- *  - 确定性随机一律 deriveSeed/sampleFloat01/sampleWeightedIndex +
- *    DOMAIN_SALTS.SECTOR_AUTONOMOUS（0xD401）；零 Math.random / Date.now / world.rng；
- *  - ensureAutonomousFleets 幂等惰性挂载，仅供显式生命周期入口调用。
+ *  - import 期仅注册时钟阶段与冻结常量，不改任何世界状态、不 ensure 容器；
+ *  - 密度补足 / 注入 / 响应全部确定性：deriveSeed/sampleWeightedIndex +
+ *    DOMAIN_SALTS.SUBSPACE_BEACON（0xE501）；零 Math.random / Date.now / world.rng；
+ *  - stepBeaconStream / injectOpportunityBeacons 守卫式读取（绝不 ensure）；
+ *    ensureBeaconStream 仅由显式生命周期入口（集成层/套件）调用。
  */
 
-const { DOMAIN_SALTS: DOMAIN_SALTS, deriveSeed: deriveSeed, sampleFloat01: sampleFloat01, sampleWeightedIndex: sampleWeightedIndex } = __require("src/domain/world/deterministicRng.js");
-const { ensureSpaceOperaState: ensureSpaceOperaState } = __require("src/domain/world/worldMigration.js");
-const { OPERA_RESOURCE_KEYS: OPERA_RESOURCE_KEYS, numericEntityKey: numericEntityKey } = __require("src/domain/planets/planetStateSchema.js");
-const { computeDoctrineTemplate: computeDoctrineTemplate } = __require("src/domain/fleets/fleetDoctrineAndScars.js");
-const { ensureBlackMarket: ensureBlackMarket, CONTRABAND_IDS: CONTRABAND_IDS } = __require("src/domain/economy/blackMarket.js");
-const { listActiveSituations: listActiveSituations } = __require("src/domain/events/situationEngine.js");
-const { getRelation: getRelation } = __require("src/domain/diplomacy/war.js");
-const { emit: emit, chronicle: chronicle } = __require("src/core/eventBus.js");
+const { DOMAIN_SALTS: DOMAIN_SALTS, deriveSeed: deriveSeed, sampleWeightedIndex: sampleWeightedIndex } = __require("src/domain/world/deterministicRng.js");
+const { ensureSpaceOperaState: ensureSpaceOperaState } = __require("src/domain/world/spaceOperaState.js");
+const { SUBSPACE_BEACON_TEMPLATES: SUBSPACE_BEACON_TEMPLATES, OPPORTUNITY_BEACON_TEMPLATES: OPPORTUNITY_BEACON_TEMPLATES, SUBSPACE_FREQ_CLASSES: SUBSPACE_FREQ_CLASSES, FREQ_CLASS_WEIGHTS: FREQ_CLASS_WEIGHTS, OPPORTUNITY_FREQ_CLASS: OPPORTUNITY_FREQ_CLASS, BEACON_FREQ_BAND: BEACON_FREQ_BAND } = __require("src/content/spaceOperaBeacons.js");
+const { ensureBlackMarket: ensureBlackMarket } = __require("src/domain/economy/blackMarket.js");
+const { credit: credit } = __require("src/domain/economy/ledger.js");
+const { emit: emit } = __require("src/core/eventBus.js");
 
-/** 自主生态舰队确定性子流盐值（DOMAIN_SALTS 冻结表：自主舰队路由域） */
-const SALT = DOMAIN_SALTS.SECTOR_AUTONOMOUS;
+/** 信标流确定性子流盐值（DOMAIN_SALTS 冻结表：信标流生成与频段调制域） */
+const SALT = DOMAIN_SALTS.SUBSPACE_BEACON;
 
-/** 5 类自主舰队类型枚举（冻结；顺序即派生优先序） */
-const AUTONOMOUS_FLEET_TYPES = Object.freeze([
-  'TRADE_CONVOY',
-  'SMUGGLER_RUNNER',
-  'PATROL_FLOTILLA',
-  'MARKET_EXPEDITION',
-  'BOUNTY_HUNTER',
-]);
+/** 密度铁律：非帝国叙事信标（kind='NARRATIVE'）常驻下限（doc46 精确值 15） */
+const BEACON_MIN_NARRATIVE = 15;
 
-/** 中立自主派系哨兵 ID（未注册派系默认视作海盗敌对；此二者豁免） */
-const AUTONOMOUS_NEUTRAL_FACTIONS = Object.freeze({
-  fac_syndicate: true,
-  fac_bounty_hunters: true,
-});
+/** 流总量硬上限（机遇爆发叠加后的膨胀护栏；防长线漂移失控） */
+const BEACON_MAX_TOTAL = 96;
 
-/** 并存上限：全类型总数 / 单类型数（防长线膨胀，M3 裁决值） */
-const AUTONOMOUS_FLEET_CAP = 24;
-const AUTONOMOUS_FLEET_CAP_PER_TYPE = 6;
+/** 叙事信标存续时长（360 tick = 15 游戏日；M3 裁决值，写入 notes） */
+const BEACON_NARRATIVE_LIFETIME_TICKS = 360;
 
-/** 舰队 10 桶轮询：每桶访问推进的 transit 游戏小时数（10 tick 周期 ≈ 1h/tick 摊销） */
-const FLEET_BUCKET_COUNT = 10;
-const TRANSIT_HOURS_PER_VISIT = 10;
+/** 机遇信标存续时长（720 tick = 1 真实月；机遇窗口更宽裕） */
+const BEACON_OPPORTUNITY_LIFETIME_TICKS = 720;
 
-/** 跨星系航程折算：1 星系坐标单位（=1LY，doc44 S4 裁决口径）× 2 小时，钳 [24,720] */
-const TRAVEL_TICKS_PER_LY = 2;
-const TRAVEL_MIN_TICKS = 24;
-const TRAVEL_MAX_TICKS = 720;
+/** 单次密度补足最大尝试数（护栏：防词库耗尽/无星系时死循环） */
+const MAX_FILL_PER_STEP = 32;
 
-/** 商队货量（80–120 t 区间，M3 裁决） */
-const TRADE_CARGO_QTY_BASE = 80;
-const TRADE_CARGO_QTY_SPAN = 41;
-
-/** 走私单次运量（24 单位违禁品，M3 裁决） */
-const SMUGGLER_CARGO_QTY = 24;
-
-/** 巡逻反走私确定性查获概率档（0.5；deriveSeed 采样 < p 判查获） */
-const PATROL_BUST_PROBABILITY = 0.5;
-
-/** 高关税走私目的地阈值（market.tariffRate ≥ 0.35，doc34 §4.2.1 黑市生成同源档） */
-const SMUGGLER_TARIFF_THRESHOLD = 0.35;
-
-/** 高犯罪走私目的地阈值（colony.crime ≥ 15） */
-const SMUGGLER_CRIME_THRESHOLD = 15;
-
-/** 市场份额远征阈值：玩家单一商品份额 > 40%（doc46 精确值） */
-const MARKET_SHARE_EXPEDITION_THRESHOLD = 0.4;
-
-/** 玩家歼灭远征军的关系折价（−5，doc42 §五.1「每摧毁一支远征军关系降低 5 点」；绝不宣战） */
-const MARKET_EXPEDITION_RELATION_HIT = 5;
-
-/** 截击推升目的星短缺局势进度的精确值（doc46 Task 3.3：progress +3） */
-const INTERDICT_SHORTAGE_PUSH = 3;
-
-/** 每月度周期末派生的巡逻司令部数量上限（M3 裁决：防超大规模世界事件风暴） */
-const PATROL_DERIVE_CAP_PER_MONTH = 4;
-
-/** 自主舰队派生起始月界（首个真实月末 tick=720 起；开局宽限，防 tick0 立即远征） */
-const DERIVE_START_TICK = 720;
-
-/* ============================== 惰性容器与基础查询 ============================== */
+/* ============================== 惰性容器与只读查询 ============================== */
 
 /**
- * 显式生命周期入口：幂等挂载自主舰队容器（ensureSpaceOperaState + ID 游标）。
+ * 显式生命周期入口：幂等挂载信标流容器（ensureSpaceOperaState + 游标字段）。
  * 绝不消费 world.rng；重复调用同引用。默认 tick 流程不调用本函数。
  */
-function ensureAutonomousFleets(world) {
+function ensureBeaconStream(world) {
   const soState = ensureSpaceOperaState(world);
-  if (!Number.isFinite(soState.nextAutonomousFleetId)) soState.nextAutonomousFleetId = 1;
-  if (!Array.isArray(soState.autonomousFleets)) soState.autonomousFleets = [];
+  if (!Number.isFinite(soState.nextSubspaceBeaconId)) soState.nextSubspaceBeaconId = 1;
+  if (!Array.isArray(soState.subspaceBeacons)) soState.subspaceBeacons = [];
   return soState;
 }
 
-/** 自主舰队列表只读（容器缺失返回 []，绝不 ensure） */
-function listAutonomousFleets(world) {
+/** 活跃信标列表只读（容器缺失返回 []，绝不 ensure） */
+function listActiveBeacons(world) {
   const soState = world && world.spaceOperaState;
-  return soState && Array.isArray(soState.autonomousFleets) ? soState.autonomousFleets : [];
+  return soState && Array.isArray(soState.subspaceBeacons) ? soState.subspaceBeacons : [];
 }
+
+/** 非帝国叙事信标活跃数（kind==='NARRATIVE'；只读；密度铁律断言口径） */
+function countActiveNarrative(world) {
+  return listActiveBeacons(world).filter((b) => b && b.kind === 'NARRATIVE').length;
+}
+
+/* ============================== 确定性生成 ============================== */
 
 /** world.seed 归一（与 fleetDoctrineAndScars / planetStateSchema 同款守卫） */
 function worldSeedOf(world) {
   return (typeof world.seed === 'number' && Number.isFinite(world.seed)) ? world.seed >>> 0 : 0;
 }
 
-/** tick 归一 */
-function tickOf(world) {
-  return Number.isFinite(world.tick) ? Math.max(0, Math.trunc(world.tick)) : 0;
+/** 系统键确定性序（sortedEntityKeys 同款：字符串键字典序） */
+function sortedSystemKeys(world) {
+  const systems = world && world.entities && world.entities.systems ? world.entities.systems : {};
+  return Object.keys(systems).sort();
+}
+
+/** {system}/{faction} 占位符替换（确定性：占位值全部来自实体字段） */
+function fillText(text, systemName, factionName) {
+  return String(text)
+    .split('{system}').join(systemName)
+    .split('{faction}').join(factionName);
 }
 
 /**
- * 派系身份桥接（opera 层 colony.ownerId 数字键 / 外交层字符串 id，双口径同型匹配；
- * 与 shadowSyndicateArc.hasTradeAgreement 的 String 同值口径一致）。
- */
-function matchesFaction(ownerId, factionId) {
-  if (ownerId === factionId) return true;
-  if (String(ownerId) === String(factionId)) return true;
-  return numericEntityKey(ownerId) === numericEntityKey(factionId);
-}
-
-/** 派系注册解析：返回 entities.factions 的真实键（未注册返回 null） */
-function resolveFactionKey(world, factionId) {
-  const factions = world && world.entities && world.entities.factions ? world.entities.factions : {};
-  for (const k of Object.keys(factions)) {
-    if (matchesFaction(k, factionId)) return k;
-  }
-  return null;
-}
-
-/**
- * 两派系敌对判定（截击/游猎目标共用口径）：
- *  - 同派系 → 不敌对；
- *  - 危机派系（fac_crisis）敌视一切；
- *  - 未注册派系（海盗/天灾集群）敌对，唯 AUTONOMOUS_NEUTRAL_FACTIONS 哨兵豁免；
- *  - 注册派系间：存在 active 战争（relations.diplomacy[relationKey].warId）才敌对。
- */
-function factionHostile(world, a, b) {
-  if (a == null || b == null || matchesFaction(a, b)) return false;
-  if (a === 'fac_crisis' || b === 'fac_crisis') return true;
-  const keyA = resolveFactionKey(world, a);
-  const keyB = resolveFactionKey(world, b);
-  if (!keyA || !keyB) {
-    // 至少一方未注册：中立哨兵豁免，其余（海盗等）敌对
-    const neutralA = !keyA && AUTONOMOUS_NEUTRAL_FACTIONS[a] === true;
-    const neutralB = !keyB && AUTONOMOUS_NEUTRAL_FACTIONS[b] === true;
-    return !(neutralA || neutralB);
-  }
-  const rel = world.relations && world.relations.diplomacy
-    ? world.relations.diplomacy[relationKey(keyA, keyB)]
-    : null;
-  if (!rel || !rel.warId) return false;
-  const war = world.entities && world.entities.wars ? world.entities.wars[rel.warId] : null;
-  return !!war && war.status === 'active';
-}
-
-/** 星系坐标（缺省 null；1 坐标单位 = 1 LY，doc44 S4 裁决） */
-function systemPos(world, systemId) {
-  const sys = world && world.entities && world.entities.systems
-    ? world.entities.systems[systemId] : null;
-  return sys && Number.isFinite(sys.x) && Number.isFinite(sys.y) ? { x: sys.x, y: sys.y } : null;
-}
-
-/** 跨星系航程折算 tick（TRAVEL_TICKS_PER_LY × LY，钳 [24,720]；无坐标回退下限） */
-function travelTicksFor(world, originSystemId, destSystemId) {
-  const a = systemPos(world, originSystemId);
-  const b = systemPos(world, destSystemId);
-  if (!a || !b) return TRAVEL_MIN_TICKS;
-  const ly = Math.hypot(a.x - b.x, a.y - b.y) * 1.0;
-  const t = Math.round(ly * TRAVEL_TICKS_PER_LY);
-  return Math.max(TRAVEL_MIN_TICKS, Math.min(TRAVEL_MAX_TICKS, t));
-}
-
-/** 舰队当前位置：半程前在起点星系、半程后算抵达星系（截击判定口径） */
-function currentSystemIdOf(fleet) {
-  if (!fleet) return null;
-  const half = (Number.isFinite(fleet.travelTicks) ? fleet.travelTicks : 0) / 2;
-  return (Number.isFinite(fleet.transitProgress) && fleet.transitProgress < half)
-    ? fleet.originSystemId
-    : fleet.destSystemId;
-}
-
-/** 已殖民行星确定性收集（含 compactState + colony + 8 维数组；键序升序） */
-function colonizedPlanets(world) {
-  const planets = world && world.entities && world.entities.planets ? world.entities.planets : {};
-  const out = [];
-  for (const key of Object.keys(planets).sort()) {
-    const p = planets[key];
-    const compact = p && p.compactState;
-    const colony = compact && compact.colony;
-    if (compact && colony && Array.isArray(colony.stockpile) && Array.isArray(colony.netFlow)) {
-      out.push(p);
-    }
-  }
-  return out;
-}
-
-/** 星系内第一颗已殖民行星（数值键升序；无则 null） */
-function firstColonizedPlanetInSystem(world, systemId) {
-  const planets = world && world.entities && world.entities.planets ? world.entities.planets : {};
-  const found = [];
-  for (const key of Object.keys(planets)) {
-    const p = planets[key];
-    if (p && p.systemId === systemId && p.compactState && p.compactState.colony) {
-      found.push({ num: numericEntityKey(p.id), p });
-    }
-  }
-  found.sort((a, b) => a.num - b.num);
-  return found.length > 0 ? found[0].p : null;
-}
-
-/** 待决系统冲击写入（jacobianCoupling.consumePendingShocks 消费契约；同键累加） */
-function pushSystemShock(world, key, delta) {
-  const soState = world && world.spaceOperaState;
-  if (!soState) return;
-  if (!soState.pendingSystemShocks || typeof soState.pendingSystemShocks !== 'object') {
-    soState.pendingSystemShocks = {};
-  }
-  soState.pendingSystemShocks[key] = (Number(soState.pendingSystemShocks[key]) || 0) + delta;
-}
-
-/* ============================== 派生与登记 ============================== */
-
-/**
- * 登记一支自主舰队（容量护栏：全类型 24 / 单类型 6，超限返回 null）。
- * @param {object} spec - { type, factionId, originSystemId, destSystemId, cargo?, travelTicks?, formationClass?, homePlanetId? }
- */
-function spawnAutonomousFleet(world, spec) {
-  if (!world || !world.spaceOperaState) return null;
-  const soState = ensureAutonomousFleets(world);
-  const fleets = soState.autonomousFleets;
-  if (fleets.length >= AUTONOMOUS_FLEET_CAP) return null;
-  if (!AUTONOMOUS_FLEET_TYPES.includes(spec.type)) return null;
-  if (fleets.filter((f) => f.type === spec.type).length >= AUTONOMOUS_FLEET_CAP_PER_TYPE) return null;
-  const fleet = {
-    id: soState.nextAutonomousFleetId++,
-    type: spec.type,
-    factionId: spec.factionId != null ? spec.factionId : null,
-    originSystemId: spec.originSystemId != null ? spec.originSystemId : null,
-    destSystemId: spec.destSystemId != null ? spec.destSystemId : spec.originSystemId,
-    cargo: spec.cargo ? { resourceId: spec.cargo.resourceId, qty: spec.cargo.qty } : null,
-    transitProgress: 0,
-    spawnedTick: tickOf(world),
-    interdicted: false,
-    travelTicks: Number.isFinite(spec.travelTicks) ? spec.travelTicks : travelTicksFor(world, spec.originSystemId, spec.destSystemId),
-  };
-  if (spec.formationClass) fleet.formationClass = spec.formationClass;
-  if (spec.homePlanetId != null) fleet.homePlanetId = spec.homePlanetId;
-  fleets.push(fleet);
-  return fleet;
-}
-
-/** 单类型/总量计数（派生护栏） */
-function countByType(fleets, type) {
-  return fleets.filter((f) => f && f.type === type).length;
-}
-
-/**
- * 月度周期末派生（tick%720===0 且 tick ≥ DERIVE_START_TICK；stepAutonomousFleets 内联调用，
- * 亦可被套件直调）。5 类规则逐一按 deriveSeed(SECTOR_AUTONOMOUS,…) 确定性执行。
+ * 生成一条叙事信标（kind='NARRATIVE'；step 契约严格按 doc46：
+ * deriveSeed(SUBSPACE_BEACON, world.tick, idx) → 频段/模板/系统三路子采样）。
  *
- * @returns {{derived: number, byType: Object<string, number>}}
+ * @returns {object|null} 信标实例（无星系可挂载时返回 null）
  */
-function deriveAutonomousFleets(world) {
-  const stats = { derived: 0, byType: {} };
-  if (!world || !world.spaceOperaState) return stats;
-  const tick = tickOf(world);
-  if (tick < DERIVE_START_TICK) return stats; // 开局宽限：首个真实月末（720）起派生
+function spawnNarrativeBeacon(world, tick, idx) {
   const seed = worldSeedOf(world);
-  const soState = world.spaceOperaState;
-  const fleets = Array.isArray(soState.autonomousFleets) ? soState.autonomousFleets : [];
-  const planets = colonizedPlanets(world);
-  if (planets.length === 0) return stats;
+  const sysKeys = sortedSystemKeys(world);
+  if (sysKeys.length === 0) return null;
 
-  // —— 1) TRADE_CONVOY：净流>0 星 → 净流<0 同资源星（跨星系套利）——
-  {
-    const srcs = [];
-    const dsts = [];
-    const weights = [];
-    for (let i = 0; i < OPERA_RESOURCE_KEYS.length; i++) {
-      const s = planets.filter((p) => Number(p.compactState.colony.netFlow[i]) > 0);
-      const d = planets.filter((p) => Number(p.compactState.colony.netFlow[i]) < 0);
-      srcs.push(s);
-      dsts.push(d);
-      weights.push(s.length * d.length);
-    }
-    const idx = sampleWeightedIndex(seed, SALT, tick, 11, weights);
-    if (weights[idx] > 0 && srcs[idx].length > 0 && dsts[idx].length > 0) {
-      const src = srcs[idx][deriveSeed(seed, SALT, tick, 21 + idx) % srcs[idx].length];
-      const dst = dsts[idx][deriveSeed(seed, SALT, tick, 31 + idx) % dsts[idx].length];
-      if (src.systemId !== dst.systemId && countByType(fleets, 'TRADE_CONVOY') < AUTONOMOUS_FLEET_CAP_PER_TYPE) {
-        const qty = TRADE_CARGO_QTY_BASE + (deriveSeed(seed, SALT, tick, 41 + idx) % TRADE_CARGO_QTY_SPAN);
-        const fleet = spawnAutonomousFleet(world, {
-          type: 'TRADE_CONVOY',
-          factionId: src.compactState.colony.ownerId,
-          originSystemId: src.systemId,
-          destSystemId: dst.systemId,
-          cargo: { resourceId: OPERA_RESOURCE_KEYS[idx], qty },
-        });
-        if (fleet) bump(stats, 'TRADE_CONVOY');
-      }
-    }
-  }
+  const freqIdx = sampleWeightedIndex(seed, SALT, tick, idx * 16 + 1, FREQ_CLASS_WEIGHTS);
+  const freqClass = SUBSPACE_FREQ_CLASSES[freqIdx] || SUBSPACE_FREQ_CLASSES[0];
+  const pool = SUBSPACE_BEACON_TEMPLATES.filter((t) => t.freqClass === freqClass);
+  if (pool.length === 0) return null;
+  const tpl = pool[deriveSeed(seed, SALT, tick, idx * 16 + 2) % pool.length];
+  const sysKey = sysKeys[deriveSeed(seed, SALT, tick, idx * 16 + 3) % sysKeys.length];
+  const sys = world.entities.systems[sysKey];
+  const systemName = (sys && sys.name) ? sys.name : `星系 ${sysKey}`;
+  const owner = sys && sys.ownerFactionId && world.entities.factions[sys.ownerFactionId];
+  const factionName = (owner && owner.name) || '自治殖民地';
 
-  // —— 2) SMUGGLER_RUNNER：高关税 / 叛乱前夕 / 高犯罪星 ——
-  {
-    const revoltTargets = new Set(
-      listActiveSituations(world)
-        .filter((s) => s.systemArcId === 'PLANETARY_REVOLT' && s.resolvedTick == null)
-        .map((s) => String(s.targetEntityId)),
-    );
-    const dsts = planets.filter((p) => {
-      const market = world.economy && world.economy.markets
-        ? world.economy.markets[p.systemId] : null;
-      const tariff = market && Number.isFinite(market.tariffRate) ? market.tariffRate : 0;
-      const crime = Number(p.compactState.colony.crime);
-      return tariff >= SMUGGLER_TARIFF_THRESHOLD
-        || (Number.isFinite(crime) && crime >= SMUGGLER_CRIME_THRESHOLD)
-        || revoltTargets.has(String(p.id));
-    });
-    if (dsts.length > 0 && countByType(fleets, 'SMUGGLER_RUNNER') < AUTONOMOUS_FLEET_CAP_PER_TYPE) {
-      const sysKeys = Object.keys(world.entities.systems || {}).sort();
-      if (sysKeys.length > 0) {
-        const dst = dsts[deriveSeed(seed, SALT, tick, 51) % dsts.length];
-        const origins = sysKeys.filter((k) => k !== dst.systemId);
-        const origin = origins.length > 0
-          ? origins[deriveSeed(seed, SALT, tick, 52) % origins.length]
-          : dst.systemId;
-        const resIdx = deriveSeed(seed, SALT, tick, 53) % CONTRABAND_IDS.length;
-        const fleet = spawnAutonomousFleet(world, {
-          type: 'SMUGGLER_RUNNER',
-          factionId: 'fac_syndicate',
-          originSystemId: origin,
-          destSystemId: dst.systemId,
-          cargo: { resourceId: CONTRABAND_IDS[resIdx], qty: SMUGGLER_CARGO_QTY },
-        });
-        if (fleet) bump(stats, 'SMUGGLER_RUNNER');
-      }
-    }
-  }
-
-  // —— 3) PATROL_FLOTILLA：patrolHQ 星按 computeDoctrineTemplate 派生轻/中/重编队 ——
-  {
-    const hqPlanets = planets
-      .filter((p) => p.patrolHQ && p.patrolHQ.doctrine)
-      .slice(0, PATROL_DERIVE_CAP_PER_MONTH);
-    for (const p of hqPlanets) {
-      const already = fleets.some((f) => f.type === 'PATROL_FLOTILLA' && f.homePlanetId === p.id);
-      if (already) continue; // 每司令部常驻一支巡逻编队
-      const tpl = computeDoctrineTemplate(p.patrolHQ.doctrine);
-      const clsIdx = sampleWeightedIndex(
-        seed, SALT, numericEntityKey(p.id), 61,
-        [tpl.light, tpl.mid, tpl.heavy],
-      );
-      const formationClass = ['light', 'mid', 'heavy'][clsIdx] || 'light';
-      const fleet = spawnAutonomousFleet(world, {
-        type: 'PATROL_FLOTILLA',
-        factionId: p.patrolHQ.factionId,
-        originSystemId: p.systemId,
-        destSystemId: p.systemId,
-        cargo: null,
-        travelTicks: TRAVEL_MIN_TICKS,
-        formationClass,
-        homePlanetId: p.id,
-      });
-      if (fleet) bump(stats, 'PATROL_FLOTILLA');
-    }
-  }
-
-  // —— 4) MARKET_EXPEDITION：玩家单一商品份额 > 40% → 霸权派系远征军指向玩家产区 ——
-  {
-    const pf = world.playerFactionId;
-    if (pf) {
-      const totals = new Array(OPERA_RESOURCE_KEYS.length).fill(0);
-      const playerTotals = new Array(OPERA_RESOURCE_KEYS.length).fill(0);
-      for (const p of planets) {
-        const stock = p.compactState.colony.stockpile;
-        const isPlayer = matchesFaction(p.compactState.colony.ownerId, pf);
-        for (let i = 0; i < totals.length; i++) {
-          const v = Number.isFinite(Number(stock[i])) ? Math.max(0, Number(stock[i])) : 0;
-          totals[i] += v;
-          if (isPlayer) playerTotals[i] += v;
-        }
-      }
-      let bestIdx = -1;
-      let bestShare = 0;
-      for (let i = 0; i < totals.length; i++) {
-        if (totals[i] <= 0) continue;
-        const share = playerTotals[i] / totals[i];
-        if (share > MARKET_SHARE_EXPEDITION_THRESHOLD && share > bestShare) {
-          bestShare = share;
-          bestIdx = i;
-        }
-      }
-      if (bestIdx >= 0 && countByType(fleets, 'MARKET_EXPEDITION') < AUTONOMOUS_FLEET_CAP_PER_TYPE) {
-        // 霸权派系：键序首个非玩家注册派系（确定性）
-        const factions = world.entities.factions || {};
-        let hegemon = null;
-        for (const k of Object.keys(factions).sort()) {
-          if (!matchesFaction(k, pf)) { hegemon = k; break; }
-        }
-        if (hegemon) {
-          // 玩家产区：该商品库存最高的玩家殖民星（tie 数值键升序）
-          let dest = null;
-          let destNum = Infinity;
-          let destStock = -1;
-          for (const p of planets) {
-            if (!matchesFaction(p.compactState.colony.ownerId, pf)) continue;
-            const v = Math.max(0, Number(p.compactState.colony.stockpile[bestIdx]) || 0);
-            const num = numericEntityKey(p.id);
-            if (v > destStock || (v === destStock && num < destNum)) {
-              destStock = v;
-              destNum = num;
-              dest = p;
-            }
-          }
-          if (dest) {
-            const hegFac = factions[hegemon];
-            const originSystemId = (hegFac && hegFac.homePlanetId
-              && world.entities.planets[hegFac.homePlanetId])
-              ? world.entities.planets[hegFac.homePlanetId].systemId
-              : dest.systemId;
-            const fleet = spawnAutonomousFleet(world, {
-              type: 'MARKET_EXPEDITION',
-              factionId: hegemon,
-              originSystemId,
-              destSystemId: dest.systemId,
-              cargo: { resourceId: OPERA_RESOURCE_KEYS[bestIdx], qty: 60 },
-            });
-            if (fleet) bump(stats, 'MARKET_EXPEDITION');
-          }
-        }
-      }
-    }
-  }
-
-  // —— 5) BOUNTY_HUNTER：赏金公会悬赏在场 → 向敌对舰队星系游猎 ——
-  {
-    const hasBounty = !!(world.economy && world.economy.bounties)
-      || !!(world.economy && world.economy.lettersOfMarque
-        && Object.keys(world.economy.lettersOfMarque).length > 0);
-    if (hasBounty && countByType(fleets, 'BOUNTY_HUNTER') < AUTONOMOUS_FLEET_CAP_PER_TYPE) {
-      const pf = world.playerFactionId;
-      const hostileSystems = [];
-      const seen = new Set();
-      const fleetsAll = world.entities && world.entities.fleets ? world.entities.fleets : {};
-      for (const key of Object.keys(fleetsAll).sort()) {
-        const f = fleetsAll[key];
-        if (!f || f.role !== 'combat' || f.status === 'dissolved' || f.systemId == null) continue;
-        if (seen.has(f.systemId)) continue;
-        if (factionHostile(world, pf, f.factionId)) {
-          hostileSystems.push(f.systemId);
-          seen.add(f.systemId);
-        }
-      }
-      if (hostileSystems.length > 0) {
-        hostileSystems.sort((a, b) => String(a).localeCompare(String(b)));
-        const dest = hostileSystems[deriveSeed(seed, SALT, tick, 71) % hostileSystems.length];
-        const sysKeys = Object.keys(world.entities.systems || {}).sort().filter((k) => k !== dest);
-        const origin = sysKeys.length > 0 ? sysKeys[deriveSeed(seed, SALT, tick, 72) % sysKeys.length] : dest;
-        const fleet = spawnAutonomousFleet(world, {
-          type: 'BOUNTY_HUNTER',
-          factionId: 'fac_bounty_hunters',
-          originSystemId: origin,
-          destSystemId: dest,
-          cargo: null,
-        });
-        if (fleet) bump(stats, 'BOUNTY_HUNTER');
-      }
-    }
-  }
-
-  return stats;
-}
-
-/** 派生统计累加（内部） */
-function bump(stats, type) {
-  stats.derived++;
-  stats.byType[type] = (stats.byType[type] || 0) + 1;
-}
-
-/* ============================== 截击与到港结算 ============================== */
-
-/** 同系统敌方战斗舰队存在判定（截击口径；见 factionHostile） */
-function hostileFleetInSystem(world, fleet, systemId) {
-  const fleets = world.entities && world.entities.fleets ? world.entities.fleets : {};
-  for (const key of Object.keys(fleets).sort()) {
-    const f = fleets[key];
-    if (!f || f.systemId !== systemId) continue;
-    if (f.status === 'dissolved') continue;
-    if ((f.role || 'combat') !== 'combat') continue;
-    if (factionHostile(world, fleet.factionId, f.factionId)) return f;
-  }
-  return null;
-}
-
-/**
- * 截击结算（TRADE_CONVOY / SMUGGLER_RUNNER 途中检定）：
- * 货物损失 + 目的星短缺进度推升（活跃 S4 局势 progress +3，否则 pendingSystemShocks['S4'] += 3）。
- * 舰队置 interdicted=true 后于下次桶访问移除（世界态可观测窗口）。
- */
-function settleInterdiction(world, fleet, tick) {
-  fleet.interdicted = true;
-  emit(world, 'AutonomousFleetInterdicted', {
-    fleetId: fleet.id,
-    type: fleet.type,
-    factionId: fleet.factionId,
-    systemId: currentSystemIdOf(fleet),
-    cargoLost: fleet.cargo ? { ...fleet.cargo } : null,
-  }, 'fleet');
-  chronicle(world, 'fleet', `自主${fleetTypeName(fleet.type)}在途遭截击，货物尽失`, { fleetId: fleet.id });
-
-  // —— 目的星短缺进度推升（断供后果，doc46 §Task 3.3 §1）——
-  const dstPlanet = firstColonizedPlanetInSystem(world, fleet.destSystemId);
-  if (dstPlanet) {
-    const sit = listActiveSituations(world).find((s) => s.systemArcId === 'S4'
-      && (s.targetEntityId === dstPlanet.id || String(s.targetEntityId) === String(dstPlanet.id)));
-    if (sit) {
-      sit.progress = Math.min(
-        Number.isFinite(sit.progressMax) ? sit.progressMax : 100,
-        (Number.isFinite(sit.progress) ? sit.progress : 0) + INTERDICT_SHORTAGE_PUSH,
-      );
-      emit(world, 'ConvoyInterdictShortagePushed', {
-        fleetId: fleet.id,
-        planetId: dstPlanet.id,
-        situationId: sit.id,
-        pushed: INTERDICT_SHORTAGE_PUSH,
-      }, 'economy');
-    } else {
-      pushSystemShock(world, 'S4', INTERDICT_SHORTAGE_PUSH);
-    }
-  }
-}
-
-/** 中文类型名（事件文案） */
-function fleetTypeName(type) {
   return {
-    TRADE_CONVOY: '套利商队',
-    SMUGGLER_RUNNER: '走私快船',
-    PATROL_FLOTILLA: '治安巡逻队',
-    MARKET_EXPEDITION: '市场份额远征军',
-    BOUNTY_HUNTER: '赏金猎人',
-  }[type] || type;
+    id: world.spaceOperaState.nextSubspaceBeaconId++,
+    freqClass,
+    band: BEACON_FREQ_BAND[freqClass] || 'gold', // SPEC-PLAN-056 §Task 56.2 §4
+    systemId: sysKey,
+    text: fillText(`${tpl.title}：${tpl.body}`, systemName, factionName),
+    spawnedTick: tick,
+    expiresTick: tick + BEACON_NARRATIVE_LIFETIME_TICKS,
+    kind: 'NARRATIVE',
+    templateId: tpl.templateId,
+    responseOptions: tpl.responseOptions.map((o) => ({ ...o })),
+  };
 }
-
-/** 巡逻队同系统反走私扫描（确定性查获：sampleFloat01 < PATROL_BUST_PROBABILITY） */
-function patrolAntiSmugglingScan(world, patrol, tick) {
-  const seed = worldSeedOf(world);
-  const fleets = listAutonomousFleets(world);
-  const patrolSystem = currentSystemIdOf(patrol);
-  let busted = 0;
-  for (const s of fleets) {
-    if (!s || s.type !== 'SMUGGLER_RUNNER' || s.interdicted) continue;
-    if (currentSystemIdOf(s) !== patrolSystem) continue;
-    const roll = sampleFloat01(seed, SALT, numericEntityKey(s.id), tick * 13 + 7);
-    if (roll < PATROL_BUST_PROBABILITY) {
-      s.interdicted = true;
-      busted++;
-      emit(world, 'SmugglerBustedByPatrol', {
-        smugglerId: s.id,
-        patrolId: patrol.id,
-        systemId: patrolSystem,
-        cargoSeized: s.cargo ? { ...s.cargo } : null,
-      }, 'fleet');
-    }
-  }
-  return busted;
-}
-
-/** 到港结算（按类型分派；返回 true = 舰队已移除） */
-function settleArrival(world, fleet, tick) {
-  const planets = world.entities && world.entities.planets ? world.entities.planets : {};
-  const idx = fleet.cargo ? OPERA_RESOURCE_KEYS.indexOf(fleet.cargo.resourceId) : -1;
-
-  switch (fleet.type) {
-    case 'TRADE_CONVOY': {
-      const dstPlanet = firstColonizedPlanetInSystem(world, fleet.destSystemId);
-      const srcPlanet = firstColonizedPlanetInSystem(world, fleet.originSystemId);
-      if (dstPlanet && idx >= 0) {
-        dstPlanet.compactState.colony.stockpile[idx] += fleet.cargo.qty; // 到港交付
-      }
-      if (srcPlanet && idx >= 0) {
-        srcPlanet.compactState.colony.netFlow[idx] -= fleet.cargo.qty; // 源头净流扣减
-      }
-      emit(world, 'TradeConvoyDelivered', {
-        fleetId: fleet.id,
-        originSystemId: fleet.originSystemId,
-        destSystemId: fleet.destSystemId,
-        cargo: fleet.cargo ? { ...fleet.cargo } : null,
-        delivered: !!dstPlanet && idx >= 0,
-      }, 'economy');
-      return true;
-    }
-    case 'SMUGGLER_RUNNER': {
-      const bm = ensureBlackMarket(world, fleet.destSystemId);
-      if (bm && fleet.cargo) {
-        bm.stock[fleet.cargo.resourceId] = (bm.stock[fleet.cargo.resourceId] || 0) + fleet.cargo.qty;
-      }
-      emit(world, 'SmugglerRunDelivered', {
-        fleetId: fleet.id,
-        destSystemId: fleet.destSystemId,
-        cargo: fleet.cargo ? { ...fleet.cargo } : null,
-        marketPresent: !!bm,
-      }, 'economy');
-      return true;
-    }
-    case 'PATROL_FLOTILLA': {
-      patrolAntiSmugglingScan(world, fleet, tick);
-      const home = fleet.homePlanetId != null ? planets[fleet.homePlanetId] || planets[`plt_${fleet.homePlanetId}`] : null;
-      if (!home || !home.patrolHQ) return true; // 司令部撤编 → 巡逻队解散
-      fleet.transitProgress = 0; // 常驻编队：重置航程继续巡逻
-      return false;
-    }
-    case 'MARKET_EXPEDITION': {
-      const dstPlanet = firstColonizedPlanetInSystem(world, fleet.destSystemId);
-      if (dstPlanet && idx >= 0) {
-        const stock = dstPlanet.compactState.colony.stockpile;
-        stock[idx] = Math.max(0, stock[idx] - fleet.cargo.qty); // 袭击产区掠获
-      }
-      emit(world, 'MarketExpeditionRaided', {
-        fleetId: fleet.id,
-        factionId: fleet.factionId,
-        destSystemId: fleet.destSystemId,
-        cargo: fleet.cargo ? { ...fleet.cargo } : null,
-      }, 'economy');
-      chronicle(world, 'politics', `霸权市场份额远征军袭击玩家产区（${fleetTypeName(fleet.type)}）`, { fleetId: fleet.id });
-      return true;
-    }
-    case 'BOUNTY_HUNTER': {
-      emit(world, 'BountyHuntSettled', {
-        fleetId: fleet.id,
-        destSystemId: fleet.destSystemId,
-      }, 'fleet');
-      return true;
-    }
-    default:
-      return true;
-  }
-}
-
-/* ============================== 每 tick 桶步进 ============================== */
 
 /**
- * 自主生态舰队每 tick 步进（registerHourly 'space-opera-autonomous-fleets' 注册形态）。
- * 首行守卫 world.spaceOperaState（未挂载容器 → 金快照世界零读取零写入）；
- * 舰队桶：numericEntityKey(fleet.id) % 10 === tick % 10；月度周期末（tick%720===0 且
- * tick ≥ 720）触发 5 类派生规则。
- *
- * @returns {{visited: number, arrived: number, interdicted: number, derived: number}}
+ * 生成一条机遇信标（kind='OPPORTUNITY'；injectOpportunityBeacons 与高潮宣泄消费）。
+ * 子采样 step 与叙事流（idx*16 段）正交（900000 偏移段），互不串流。
  */
-function stepAutonomousFleets(world) {
-  const stats = { visited: 0, arrived: 0, interdicted: 0, derived: 0 };
-  if (!world || !world.spaceOperaState) return stats;
+function spawnOpportunityBeacon(world, tick, i) {
+  const seed = worldSeedOf(world);
+  const sysKeys = sortedSystemKeys(world);
+  if (sysKeys.length === 0 || OPPORTUNITY_BEACON_TEMPLATES.length === 0) return null;
+  const tpl = OPPORTUNITY_BEACON_TEMPLATES[
+    deriveSeed(seed, SALT, tick, 900000 + i * 4 + 1) % OPPORTUNITY_BEACON_TEMPLATES.length
+  ];
+  const sysKey = sysKeys[deriveSeed(seed, SALT, tick, 900000 + i * 4 + 2) % sysKeys.length];
+  const sys = world.entities.systems[sysKey];
+  const systemName = (sys && sys.name) ? sys.name : `星系 ${sysKey}`;
+  const owner = sys && sys.ownerFactionId && world.entities.factions[sys.ownerFactionId];
+  const factionName = (owner && owner.name) || '自治殖民地';
+
+  return {
+    id: world.spaceOperaState.nextSubspaceBeaconId++,
+    freqClass: OPPORTUNITY_FREQ_CLASS,
+    band: BEACON_FREQ_BAND[OPPORTUNITY_FREQ_CLASS] || 'gold', // SPEC-PLAN-056 §Task 56.2 §4
+    systemId: sysKey,
+    text: fillText(`${tpl.title}：${tpl.body}`, systemName, factionName),
+    spawnedTick: tick,
+    expiresTick: tick + BEACON_OPPORTUNITY_LIFETIME_TICKS,
+    kind: 'OPPORTUNITY',
+    templateId: tpl.templateId,
+    responseOptions: tpl.responseOptions.map((o) => ({ ...o })),
+  };
+}
+
+/* ============================== 每帧步进（密度铁律） ============================== */
+
+/**
+ * 信标流每 tick 步进（registerHourly 'space-opera-beacon-stream' 注册形态）：
+ *  1. 首行守卫 world.spaceOperaState（金快照世界零读取零写入）；
+ *  2. 过期清除（expiresTick ≤ world.tick，帝国官方信标同规则老化）；
+ *  3. 密度铁律：kind==='NARRATIVE' 活跃数 < 15 → 确定性补足到 15。
+ *
+ * @returns {{activeBeacons: number, narrativeBeacons: number, expired: number, filled: number}}
+ */
+function stepBeaconStream(world) {
+  if (!world || !world.spaceOperaState) {
+    return { activeBeacons: 0, narrativeBeacons: 0, expired: 0, filled: 0 };
+  }
   const soState = world.spaceOperaState;
-  if (!Array.isArray(soState.autonomousFleets)) soState.autonomousFleets = [];
-  if (!Number.isFinite(soState.nextAutonomousFleetId)) soState.nextAutonomousFleetId = 1;
-  const tick = tickOf(world);
+  if (!Array.isArray(soState.subspaceBeacons)) soState.subspaceBeacons = [];
+  if (!Number.isFinite(soState.nextSubspaceBeaconId)) soState.nextSubspaceBeaconId = 1;
+  const tick = Number.isFinite(world.tick) ? Math.max(0, Math.trunc(world.tick)) : 0;
 
-  // —— 月度周期末：5 类派生规则 ——
-  if (tick > 0 && tick % 720 === 0) {
-    const d = deriveAutonomousFleets(world);
-    stats.derived = d.derived;
-  }
-
-  const fleets = soState.autonomousFleets;
-  const bucket = tick % FLEET_BUCKET_COUNT;
-  for (let i = fleets.length - 1; i >= 0; i--) {
-    const fleet = fleets[i];
-    if (!fleet || typeof fleet !== 'object') {
-      fleets.splice(i, 1);
+  // —— 1) 过期清除（保留顺序遍历，确定性）——
+  let expired = 0;
+  const kept = [];
+  for (let i = 0; i < soState.subspaceBeacons.length; i++) {
+    const b = soState.subspaceBeacons[i];
+    if (b && Number.isFinite(b.expiresTick) && b.expiresTick <= tick) {
+      expired++;
       continue;
     }
-    if (numericEntityKey(fleet.id) % FLEET_BUCKET_COUNT !== bucket) continue;
-    stats.visited++;
+    kept.push(b);
+  }
+  soState.subspaceBeacons = kept;
 
-    // —— 截击善后：上轮置 interdicted 的舰队本轮移除（世界态可观测窗口 10 tick）——
-    if (fleet.interdicted) {
-      fleets.splice(i, 1);
-      stats.interdicted++;
-      continue;
-    }
-
-    // —— 截击检定（商队/走私船在途；同系统出现敌对/海盗战斗舰队）——
-    if (fleet.type === 'TRADE_CONVOY' || fleet.type === 'SMUGGLER_RUNNER') {
-      const cur = currentSystemIdOf(fleet);
-      if (cur != null && hostileFleetInSystem(world, fleet, cur)) {
-        settleInterdiction(world, fleet, tick);
-        continue;
-      }
-    }
-
-    // —— 航线推进（每桶访问 +10 游戏小时）——
-    fleet.transitProgress = (Number.isFinite(fleet.transitProgress) ? fleet.transitProgress : 0)
-      + TRANSIT_HOURS_PER_VISIT;
-
-    // —— 到港结算 ——
-    if (fleet.transitProgress >= (Number.isFinite(fleet.travelTicks) ? fleet.travelTicks : TRAVEL_MIN_TICKS)) {
-      const removed = settleArrival(world, fleet, tick);
-      if (removed) {
-        fleets.splice(i, 1);
-        stats.arrived++;
-      }
+  // —— 2) 密度铁律补足（确定性派生；每次生成消费独立 idx 防同帧串流）——
+  let filled = 0;
+  for (let idx = 0; idx < MAX_FILL_PER_STEP; idx++) {
+    if (countActiveNarrative(world) >= BEACON_MIN_NARRATIVE) break;
+    if (soState.subspaceBeacons.length >= BEACON_MAX_TOTAL) break;
+    const beacon = spawnNarrativeBeacon(world, tick, idx);
+    if (beacon) {
+      soState.subspaceBeacons.push(beacon);
+      filled++;
     }
   }
-  return stats;
+
+  return {
+    activeBeacons: soState.subspaceBeacons.length,
+    narrativeBeacons: countActiveNarrative(world),
+    expired,
+    filled,
+  };
 }
 
 // —— 时钟阶段注册已收拢至 src/simulation/SpaceOperaWiring.js（SPEC-PLAN-049 §Task 49.3
-//    唯一注册点：registerHourly('space-opera-autonomous-fleets', …)）。原 import 期副作用
-//    注册拆除；stepAutonomousFleets 首行自守卫 world.spaceOperaState（金快照世界零读取零写入）。——
+//    唯一注册点：registerHourly('space-opera-beacon-stream', …)）。原 import 期副作用注册
+//    拆除，消除模块图求值顺序对注册序的脆弱依赖；stepBeaconStream 首行自守卫
+//    world.spaceOperaState（金快照世界零读取零写入）。——
 
-/* ============================== 玩家歼灭结算（远征军关系折价） ============================== */
+/* ============================== 机遇信标投放（高潮宣泄入口） ============================== */
 
 /**
- * 自主舰队被玩家歼灭（战斗层/命令路径上报的领域落点）：
- *  - MARKET_EXPEDITION：getRelation 调整 opinion −5（MARKET_EXPEDITION_RELATION_HIT），
- *    **绝不调用 declareWar**（doc42 §五.1：摧毁远征军仅关系降低 5 点，不触发全面宣战）；
- *  - 其余类型：仅移除并记账。
- * 目标不存在返回 { ok:false, reason }；成功返回歼灭记录（同时落 soState.lastAutonomousFleetKill）。
+ * 注入 n 个机遇信标（OPPORTUNITY_BEACON；戏剧导演 catharsis +18 的唯一投放口）。
+ * 守卫式读取：容器未挂载（金快照世界）返回 0，绝不 ensure（零漂移铁律）。
  *
  * @param {object} world - 世界根对象
- * @param {number|string} fleetId - 自主舰队 ID
- * @param {string|number} [byFactionId] - 动手方派系（缺省按玩家派系）
+ * @param {number} n - 注入数量（非有限/负数按 0；上限单次 36 护栏）
+ * @returns {number} 实际注入条数
  */
-function onAutonomousFleetDestroyed(world, fleetId, byFactionId) {
-  if (!world || !world.spaceOperaState) return { ok: false, reason: 'SO: 自主舰队容器未挂载' };
+function injectOpportunityBeacons(world, n) {
+  if (!world || !world.spaceOperaState) return 0;
   const soState = world.spaceOperaState;
-  const fleets = Array.isArray(soState.autonomousFleets) ? soState.autonomousFleets : [];
-  const pos = fleets.findIndex((f) => f && (f.id === fleetId || String(f.id) === String(fleetId)));
-  if (pos < 0) return { ok: false, reason: `SO: 自主舰队不存在 ${String(fleetId)}` };
-  const fleet = fleets[pos];
-  fleets.splice(pos, 1);
-
-  const actor = byFactionId != null ? byFactionId : world.playerFactionId;
-  const record = {
-    fleetId: fleet.id,
-    type: fleet.type,
-    factionId: fleet.factionId,
-    byFactionId: actor != null ? actor : null,
-    relationHit: 0,
-    tick: tickOf(world),
-  };
-
-  if (fleet.type === 'MARKET_EXPEDITION' && actor != null) {
-    const keyA = resolveFactionKey(world, actor);
-    const keyB = resolveFactionKey(world, fleet.factionId);
-    if (keyA && keyB && keyA !== keyB) {
-      // war.js getRelation 惰性取关系并震荡 −5；
-      // 刻意绕开 war.declareWar —— 商业远征摩擦不构成宣战理由（doc42 §五.1）
-      const rel = getRelation(world, keyA, keyB);
-      rel.opinion = Math.max(-100, (Number.isFinite(rel.opinion) ? rel.opinion : 0) - MARKET_EXPEDITION_RELATION_HIT);
-      record.relationHit = -MARKET_EXPEDITION_RELATION_HIT;
+  if (!Array.isArray(soState.subspaceBeacons)) soState.subspaceBeacons = [];
+  if (!Number.isFinite(soState.nextSubspaceBeaconId)) soState.nextSubspaceBeaconId = 1;
+  const tick = Number.isFinite(world.tick) ? Math.max(0, Math.trunc(world.tick)) : 0;
+  const want = Number.isFinite(n) ? Math.max(0, Math.min(36, Math.trunc(n))) : 0;
+  let injected = 0;
+  for (let i = 0; i < want; i++) {
+    if (soState.subspaceBeacons.length >= BEACON_MAX_TOTAL) break;
+    const beacon = spawnOpportunityBeacon(world, tick, i);
+    if (beacon) {
+      soState.subspaceBeacons.push(beacon);
+      injected++;
     }
-    emit(world, 'MarketExpeditionDestroyed', {
-      fleetId: fleet.id,
-      hegemonFactionId: fleet.factionId,
-      byFactionId: record.byFactionId,
-      opinionDelta: record.relationHit,
-      warDeclared: false,
-    }, 'diplomacy');
-    chronicle(world, 'diplomacy', '市场份额远征军遭伏击歼灭——商业摩擦仅折损关系 5 点，未构成宣战', { fleetId: fleet.id });
-  } else {
-    emit(world, 'AutonomousFleetDestroyed', {
-      fleetId: fleet.id,
-      type: fleet.type,
-      byFactionId: record.byFactionId,
-    }, 'fleet');
   }
-
-  soState.lastAutonomousFleetKill = record;
-  return { ok: true, record };
+  if (injected > 0) {
+    emit(world, 'OpportunityBeaconsInjected', {
+      count: injected,
+      tick,
+    }, 'world');
+  }
+  return injected;
 }
 
-Object.assign(__exports, { AUTONOMOUS_FLEET_TYPES, AUTONOMOUS_NEUTRAL_FACTIONS, AUTONOMOUS_FLEET_CAP, AUTONOMOUS_FLEET_CAP_PER_TYPE, FLEET_BUCKET_COUNT, TRANSIT_HOURS_PER_VISIT, TRAVEL_TICKS_PER_LY, TRAVEL_MIN_TICKS, TRAVEL_MAX_TICKS, TRADE_CARGO_QTY_BASE, TRADE_CARGO_QTY_SPAN, SMUGGLER_CARGO_QTY, PATROL_BUST_PROBABILITY, SMUGGLER_TARIFF_THRESHOLD, SMUGGLER_CRIME_THRESHOLD, MARKET_SHARE_EXPEDITION_THRESHOLD, MARKET_EXPEDITION_RELATION_HIT, INTERDICT_SHORTAGE_PUSH, PATROL_DERIVE_CAP_PER_MONTH, DERIVE_START_TICK, ensureAutonomousFleets, listAutonomousFleets, travelTicksFor, currentSystemIdOf, spawnAutonomousFleet, deriveAutonomousFleets, stepAutonomousFleets, onAutonomousFleetDestroyed });
+/* ============================== 信标响应（RespondSubspaceBeacon 领域落点） ============================== */
 
-});
-__register("src/domain/diplomacy/war.js", function (__exports, __require) {
+/** 玩家派系 ID（信标响应奖励入账权威；未定义抛 SO 由命令总线回滚） */
+function playerFaction(world) {
+  const pf = world && world.playerFactionId;
+  if (!pf) throw new Error('SO: 信标响应需要已定义的玩家派系（world.playerFactionId）');
+  return pf;
+}
+
+/** TEMP_BUFF / 携带 unityGrant 的复合效果入账 */
+function applyTempBuff(world, soState, tick, effect, result) {
+  soState.beaconJournalBuff = {
+    untilTick: tick + (Number.isFinite(effect.untilTicks) ? effect.untilTicks : 2160),
+    happinessPct: Number.isFinite(effect.happinessPct) ? effect.happinessPct : 0,
+    sourceBeaconId: result.beaconId,
+  };
+  if (Number.isFinite(effect.unityGrant) && effect.unityGrant > 0) {
+    applyUnityGrant(world, soState, effect.unityGrant);
+    result.unityGranted = effect.unityGrant;
+  }
+  result.buff = { untilTick: soState.beaconJournalBuff.untilTick, happinessPct: soState.beaconJournalBuff.happinessPct };
+}
+
+/** 凝聚力入账（spaceOperaState.unityTreasury；权威 API 为 galacticSenateAndCrisisArc.grantUnity） */
+function applyUnityGrant(world, soState, amount) {
+  if (!Number.isFinite(soState.unityTreasury)) soState.unityTreasury = 0;
+  soState.unityTreasury += amount;
+}
+
+/** 难民入殖：首个玩家殖民地 popTotal 增员；无殖民地 → 折算资源入账 */
+function applyRefugeePop(world, soState, tick, effect, result) {
+  const pf = playerFaction(world);
+  const planets = world.entities && world.entities.planets ? world.entities.planets : {};
+  const keys = Object.keys(planets).sort();
+  for (const key of keys) {
+    const planet = planets[key];
+    const colony = planet && planet.compactState && planet.compactState.colony;
+    if (!colony) continue;
+    const same = colony.ownerId === pf || String(colony.ownerId) === String(pf);
+    if (!same) continue;
+    colony.popTotal = (Number.isFinite(colony.popTotal) ? colony.popTotal : 0)
+      + (Number.isFinite(effect.amount) ? effect.amount : 1);
+    result.refugeePlanetId = planet.id;
+    return;
+  }
+  // 无玩家殖民地 → 确定性折算：默认食物 +50
+  const resId = effect.fallbackResId || 'food';
+  const amount = Number.isFinite(effect.fallbackAmount) ? effect.fallbackAmount : 50;
+  if (world.economy) {
+    credit(world, pf, resId, amount, 'beaconRefugeeFallback', result.beaconId);
+  }
+  result.fallbackCredit = { resId, amount };
+}
+
 /**
- * domain/diplomacy/war.js — 战争状态机、条约计时与关系维护（任务书 5.1 / 5.4）
+ * 响应子空间信标（RespondSubspaceBeacon 命令领域落点；M3 编排层注入 handler）。
+ * 效果按机读 effect 分派（CREDIT / TEMP_BUFF / BLACK_MARKET_WINDOW / UNITY_GRANT /
+ * REFUGEE_POP）；响应后信标从流中移除，结果写入 soState.lastBeaconResponse
+ * （命令总线 execute 返回值不透传契约 → 套件从世界态断言）。
  *
- * 当前版本：条约到期处理、战争疲劳累积、关系维度自然回归。
- * 宣战/和谈/占领逻辑随阶段09扩展（均通过命令总线）。
+ * 业务失败（信标不存在 / 选项不存在 / 无玩家派系）抛 Error('SO:…') → 总线回滚。
+ *
+ * @param {object} world - 世界根对象
+ * @param {number|string} beaconId - 信标 ID
+ * @param {string} responseOptionId - 响应选项 ID
+ * @returns {object} 响应结果（同时落 soState.lastBeaconResponse）
  */
+function respondSubspaceBeacon(world, beaconId, responseOptionId) {
+  if (!world || !world.spaceOperaState) throw new Error('SO: 信标流容器未挂载（须先 ensureSpaceOperaState）');
+  const soState = world.spaceOperaState;
+  const tick = Number.isFinite(world.tick) ? Math.max(0, Math.trunc(world.tick)) : 0;
 
-const { emit: emit } = __require("src/core/eventBus.js");
-const { relationKey: relationKey } = __require("src/core/ids.js");
-const { RNG: RNG } = __require("src/core/rng.js");
-
-// ———— 战争终局：占领积分 / 和谈 / 割地吞并（doc5 TD2 / DIP-02） ————
-
-/** 占领吞并积分阈值：占领 1 个星系（30 分）即可在战争结束时主张割地 */
-const OCCUPATION_ANNEX_THRESHOLD = 30;
-const OCCUPIED_SYSTEM_SCORE = 30;
-
-/**
- * 战争积分（确定性）：占领星系 × 30 + 敌方战争疲劳 × 0.5。
- * 和谈接受概率与占领吞并阈值共用此口径。
- */
-function warScore(war, factionId) {
-  const enemy = war.attackers.includes(factionId) ? war.defenders : war.attackers;
-  let occupied = 0;
-  for (const sid of Object.keys(war.occupiedSystems || {})) {
-    if (war.occupiedSystems[sid] === factionId) occupied += 1;
-  }
-  let enemyExhaust = 0;
-  for (const fid of enemy) enemyExhaust += war.exhaustion[fid] || 0;
-  return occupied * OCCUPIED_SYSTEM_SCORE + enemyExhaust * 0.5;
-}
-
-/** 标记星系被某交战方实际占领（战场结算系统调用；不转移主权） */
-function markSystemOccupied(world, warId, systemId, occupantFactionId) {
-  const war = world.entities.wars[warId];
-  if (!war || war.status !== 'active') return false;
-  if (!war.attackers.includes(occupantFactionId) && !war.defenders.includes(occupantFactionId)) return false;
-  const sys = world.entities.systems[systemId];
-  if (!sys) return false;
-  war.occupiedSystems[systemId] = occupantFactionId;
-  emit(world, 'SystemOccupied', { warId, systemId, occupantFactionId }, 'diplomacy');
-  return true;
-}
-
-/**
- * 和谈提案（ProposePeace 执行体）：
- * 接受概率 = 0.30 + 敌方战争疲劳/200 + 敌方对我方占领积分/120，钳制 [0.05, 0.95]。
- * 接受 → 战争结束（occupied 星系按占领积分阈值决定割留，见 endWarPeace）；
- * 拒绝 → 记入 war.peaceOffers 并轻微恶化关系（确定性 RNG）。
- */
-function resolvePeaceProposal(world, proposerId, warId, terms = 'whitePeace') {
-  const war = world.entities.wars[warId];
-  if (!war || war.status !== 'active') return { ok: false, reason: '战争不存在或已结束' };
-  if (!war.attackers.includes(proposerId) && !war.defenders.includes(proposerId)) {
-    return { ok: false, reason: '非交战方' };
-  }
-  const enemy = war.attackers.includes(proposerId) ? war.defenders : war.attackers;
-  const enemyId = enemy[0];
-  let enemyExhaust = 0;
-  for (const fid of enemy) enemyExhaust += war.exhaustion[fid] || 0;
-  const p = Math.max(0.05, Math.min(0.95,
-    0.30 + enemyExhaust / 200 + warScore(war, proposerId) / 120));
-  const accepted = RNG.chance(world, p);
-  war.peaceOffers.push({ tick: world.tick, from: proposerId, terms, accepted });
-  if (!accepted) {
-    const rel = getRelation(world, proposerId, enemyId);
-    rel.opinion = Math.max(-100, rel.opinion - 2);
-    emit(world, 'PeaceRejected', { warId, from: proposerId, terms }, 'diplomacy');
-    return { ok: true, accepted: false, p };
-  }
-  endWarPeace(world, war, { peaceTerms: terms, initiator: proposerId });
-  return { ok: true, accepted: true, p };
-}
-
-/**
- * 和平终局：占领星系按 warScore 阈值割留给占领方，其余回到原主权；
- * 解除双方 warId 关联并发出 WarEnded 事件。
- */
-function endWarPeace(world, war, opts = {}) {
-  war.status = 'ended';
-  war.endedTick = world.tick;
-  war.peaceTerms = opts.peaceTerms || 'whitePeace';
-
-  // 占领星系结算：占领方积分达阈值 → 主权转移（割地）；否则占领解除
-  for (const sid of Object.keys(war.occupiedSystems)) {
-    const occupant = war.occupiedSystems[sid];
-    const sys = world.entities.systems[sid];
-    if (!sys) continue;
-    if (warScore(war, occupant) >= OCCUPATION_ANNEX_THRESHOLD) {
-      const prevOwner = sys.ownerFactionId || null;
-      sys.ownerFactionId = occupant;
-      war.annexedSystems ||= [];
-      if (!war.annexedSystems.includes(sid)) war.annexedSystems.push(sid);
-      emit(world, 'SystemAnnexed', { warId: war.id, systemId: sid, from: prevOwner, to: occupant }, 'diplomacy');
-    }
-    delete war.occupiedSystems[sid];
+  const beacon = listActiveBeacons(world).find((b) => b && (b.id === beaconId || String(b.id) === String(beaconId)));
+  if (!beacon) throw new Error(`SO: 信标不存在或已过期 ${String(beaconId)}`);
+  const option = (beacon.responseOptions || []).find((o) => o && o.id === responseOptionId);
+  if (!option) {
+    throw new Error(`SO: 信标 ${String(beacon.id)} 无响应选项 ${String(responseOptionId)}`);
   }
 
-  const parties = [...war.attackers, ...war.defenders];
-  for (const fid of parties) {
-    for (const other of parties) {
-      if (fid === other) continue;
-      const rel = world.relations.diplomacy[relationKey(fid, other)];
-      if (rel && rel.warId === war.id) rel.warId = null;
-    }
-  }
-  emit(world, 'WarEnded', {
-    warId: war.id,
-    peaceTerms: war.peaceTerms,
-    initiator: opts.initiator || null,
-    attackers: war.attackers,
-    defenders: war.defenders,
-  }, 'diplomacy');
-}
-
-/**
- * 割地吞并（AnnexOccupied 执行体）：交战方对已实际占领且积分达阈值的星系
- * 立即完成主权转移（战争进行中即可割地；战争结束时 endWarPeace 自动结算剩余占领）。
- */
-function annexOccupiedSystem(world, warId, systemId, actorId) {
-  const war = world.entities.wars[warId];
-  if (!war) return { ok: false, reason: '战争不存在' };
-  if (!war.attackers.includes(actorId) && !war.defenders.includes(actorId)) {
-    return { ok: false, reason: '非交战方' };
-  }
-  if (war.occupiedSystems[systemId] !== actorId) {
-    return { ok: false, reason: '该星系未被己方实际占领' };
-  }
-  if (warScore(war, actorId) < OCCUPATION_ANNEX_THRESHOLD) {
-    return { ok: false, reason: '占领积分不足，无法割地' };
-  }
-  const sys = world.entities.systems[systemId];
-  if (!sys) return { ok: false, reason: '星系不存在' };
-  const prevOwner = sys.ownerFactionId || null;
-  sys.ownerFactionId = actorId;
-  delete war.occupiedSystems[systemId];
-  war.annexedSystems ||= [];
-  if (!war.annexedSystems.includes(systemId)) war.annexedSystems.push(systemId);
-  emit(world, 'SystemAnnexed', { warId, systemId, from: prevOwner, to: actorId }, 'diplomacy');
-  return { ok: true };
-}
-
-/** 每小时计时器：条约到期、战争状态推进 */
-function runDiplomacyTimers(world) {
-  const E = world.entities;
-
-  // 条约到期
-  for (const tid of Object.keys(E.treaties).sort()) {
-    const treaty = E.treaties[tid];
-    if (treaty.status === 'active' && typeof treaty.expiryTick === 'number' && world.tick >= treaty.expiryTick) {
-      treaty.status = 'expired';
-      emit(world, 'TreatyExpired', { treatyId: tid, type: treaty.type, parties: treaty.parties }, 'diplomacy');
-      onTreatyEnd(world, treaty, 'expired');
-    }
-  }
-
-  // 战争疲劳（每小时微量累积，战斗损失在战斗结算中额外累加）
-  for (const wid of Object.keys(E.wars).sort()) {
-    const war = E.wars[wid];
-    if (war.status !== 'active') continue;
-    for (const fid of [...war.attackers, ...war.defenders]) {
-      war.exhaustion[fid] = Math.min(100, (war.exhaustion[fid] || 0) + 0.005);
-    }
-  }
-}
-
-/** 条约结束时的关系反馈（DIP-02 违约/到期差异） */
-function onTreatyEnd(world, treaty, reason) {
-  const [a, b] = treaty.parties;
-  const rel = getRelation(world, a, b);
-  if (reason === 'breached') {
-    rel.trust = Math.max(0, rel.trust - 18);
-    rel.opinion = Math.max(-100, rel.opinion - 15);
-    rel.grievances += 1;
-  } else if (reason === 'expired') {
-    rel.trust = Math.max(0, rel.trust - 2);
-  }
-}
-
-/** 取得（或惰性创建）两阵营多维关系记录 */
-function getRelation(world, a, b) {
-  if (a === b) throw new Error('关系不能指向自身');
-  const key = relationKey(a, b);
-  let rel = world.relations.diplomacy[key];
-  if (!rel) {
-    // 幂等防御（fuzz 硬化 F-04）：惰性创建仅允许真实存在的双方——悬空阵营/垃圾 id
-    // 一律抛错，由命令总线 VALIDATE_ERROR 受控拦截（validate 阶段绝不触碰状态）。
-    // 已存在记录（含阵营被吞并后的历史关系）的读取不受影响。
-    if (!world.entities.factions[a] || !world.entities.factions[b]) {
-      throw new Error(`关系派系不存在: ${String(a)} / ${String(b)}`);
-    }
-    rel = {
-      key,
-      parties: [a, b].sort(),
-      contactState: 'none', // none|signal|analyzing|contacted
-      firstContactTick: null,
-      opinion: 0,
-      trust: 10,
-      threat: 0,
-      borderTension: 0,
-      tradeInterdependence: 0,
-      grievances: 0,
-      warWeariness: 0,
-      intelConfidence: 0.2,
-      treaties: [],
-    };
-    world.relations.diplomacy[key] = rel;
-  }
-  return rel;
-}
-
-/** 宣战（由 DeclareWar 命令调用；校验在命令层） */
-function declareWar(world, attackerId, defenderId, wargoals) {
-  const rel = getRelation(world, attackerId, defenderId);
-  if (rel.warId && world.entities.wars[rel.warId]?.status === 'active') {
-    return null; // 已在战争中
-  }
-  rel.borderTension = Math.min(100, rel.borderTension + 40);
-  rel.opinion = Math.max(-100, rel.opinion - 30);
-
-  // 解除双方条约
-  for (const tid of rel.treaties.slice()) {
-    const t = world.entities.treaties[tid];
-    if (t && t.status === 'active') {
-      t.status = 'breached';
-      onTreatyEnd(world, t, 'breached');
-      emit(world, 'TreatyBreached', { treatyId: tid, reason: 'war' }, 'diplomacy');
-    }
-  }
-  rel.treaties = [];
-
-  const war = {
-    id: `war_${++world.seq}`,
-    type: 'war',
-    createdAtTick: world.tick,
-    attackers: [attackerId],
-    defenders: [defenderId],
-    startTick: world.tick,
-    wargoals: wargoals || [],
-    occupiedSystems: {},
-    exhaustion: {},
-    battles: 0,
-    status: 'active',
-    peaceOffers: [],
+  const result = {
+    beaconId: beacon.id,
+    templateId: beacon.templateId || null,
+    responseOptionId,
+    effectApplied: false,
+    tick,
   };
-  world.entities.wars[war.id] = war;
-  rel.warId = war.id;
-  emit(world, 'WarDeclared', { warId: war.id, attackerId, defenderId, wargoals: war.wargoals }, 'diplomacy');
-  return war;
+
+  const effect = option.effect;
+  if (effect && typeof effect === 'object') {
+    switch (effect.kind) {
+      case 'CREDIT': {
+        const pf = playerFaction(world);
+        credit(world, pf, effect.resId, effect.amount, 'beaconResponse', beacon.id);
+        result.credited = { resId: effect.resId, amount: effect.amount };
+        result.effectApplied = true;
+        break;
+      }
+      case 'TEMP_BUFF':
+        applyTempBuff(world, soState, tick, effect, result);
+        result.effectApplied = true;
+        break;
+      case 'BLACK_MARKET_WINDOW': {
+        const bm = ensureBlackMarket(world, beacon.systemId);
+        if (bm) {
+          bm.unlocked = true; // 合约成立 → 该星系黑市交易窗口开启
+          bm.stock[effect.contrabandId] = (bm.stock[effect.contrabandId] || 0)
+            + (Number.isFinite(effect.qty) ? effect.qty : 0);
+          result.blackMarket = { systemId: beacon.systemId, contrabandId: effect.contrabandId, qty: effect.qty };
+          result.effectApplied = true;
+        } else {
+          // 目标星系无市场结构 → 确定性折算情报报酬（合约情报兜底）
+          const pf = playerFaction(world);
+          credit(world, pf, 'intelPoints', 8, 'beaconContractFallback', beacon.id);
+          result.fallbackCredit = { resId: 'intelPoints', amount: 8 };
+          result.effectApplied = true;
+        }
+        break;
+      }
+      case 'UNITY_GRANT':
+        applyUnityGrant(world, soState, effect.amount);
+        result.unityGranted = effect.amount;
+        result.effectApplied = true;
+        break;
+      case 'REFUGEE_POP':
+        applyRefugeePop(world, soState, tick, effect, result);
+        result.effectApplied = true;
+        break;
+      default:
+        break; // 未知 effect kind → 仅移除信标（零副作用）
+    }
+  }
+
+  // —— 响应即消费：从流中移除（密度铁律由下一帧步进自动补足）——
+  soState.subspaceBeacons = soState.subspaceBeacons.filter((b) => b !== beacon);
+  soState.lastBeaconResponse = result;
+  emit(world, 'SubspaceBeaconResponded', {
+    beaconId: beacon.id,
+    templateId: beacon.templateId,
+    freqClass: beacon.freqClass,
+    responseOptionId,
+    effectApplied: result.effectApplied,
+  }, 'world');
+  return result;
 }
 
-/** 缔结条约（OfferTreaty 被接受后调用） */
-function createTreaty(world, a, b, type, durationDays = 360) {
-  const rel = getRelation(world, a, b);
-  const treaty = {
-    id: `try_${++world.seq}`,
-    type: 'treaty',
-    createdAtTick: world.tick,
-    kind: type, // nonaggression|trade|research|openBorders|mutualDefense
-    parties: [a, b].sort(),
-    startTick: world.tick,
-    expiryTick: world.tick + durationDays * 24,
-    status: 'active',
-    terms: TREATY_TERMS[type] || {},
-  };
-  world.entities.treaties[treaty.id] = treaty;
-  rel.treaties.push(treaty.id);
-  rel.trust = Math.min(100, rel.trust + 6);
-  emit(world, 'TreatySigned', { treatyId: treaty.id, kind: type, parties: treaty.parties }, 'diplomacy');
-  return treaty;
+/**
+ * 活跃临时增益查询（集成层幸福度/士气结算消费；只读，未激活返回 null）。
+ */
+function activeJournalBuff(world) {
+  const soState = world && world.spaceOperaState;
+  if (!soState || !soState.beaconJournalBuff) return null;
+  const buff = soState.beaconJournalBuff;
+  const tick = Number.isFinite(world.tick) ? world.tick : 0;
+  if (!(Number.isFinite(buff.untilTick) && tick < buff.untilTick)) return null;
+  return buff;
 }
 
-const TREATY_TERMS = {
-  nonaggression: { desc: '互不侵犯', tensionDecayMult: 2.0 },
-  trade: { desc: '贸易协定', tradeCapacityMult: 1.15, trustPerMonth: 1 },
-  research: { desc: '科研交流', researchOutputMult: 1.05 },
-  openBorders: { desc: '开放边境', fleetPass: true },
-  mutualDefense: { desc: '共同防御', joinWars: true },
-};
-
-/** 条约接受效用（AI 判定与 UI 预估共用，DIP-01） */
-function treatyAcceptanceScore(world, proposerId, targetId, type) {
-  const rel = getRelation(world, proposerId, targetId);
-  let score = 0;
-  score += (rel.opinion || 0) * 0.4;
-  score += (rel.trust || 0) * 0.5;
-  score -= (rel.threat || 0) * 0.3;
-  score -= (rel.borderTension || 0) * 0.2;
-  if (type === 'trade') score += (rel.tradeInterdependence || 0) * 0.5 + 15;
-  if (type === 'nonaggression') score += 10;
-  if (type === 'mutualDefense') score -= 10;
-  const fac = world.entities.factions[targetId];
-  if (fac?.personality === 'trader' && type === 'trade') score += 20;
-  if (fac?.personality === 'defensive' && type === 'nonaggression') score += 15;
-  if (fac?.personality === 'expansionist') score -= 8;
-  return Math.round(score);
-}
-
-Object.assign(__exports, { OCCUPATION_ANNEX_THRESHOLD, warScore, markSystemOccupied, resolvePeaceProposal, endWarPeace, annexOccupiedSystem, runDiplomacyTimers, onTreatyEnd, getRelation, declareWar, createTreaty, TREATY_TERMS, treatyAcceptanceScore });
+Object.assign(__exports, { BEACON_MIN_NARRATIVE, BEACON_MAX_TOTAL, BEACON_NARRATIVE_LIFETIME_TICKS, BEACON_OPPORTUNITY_LIFETIME_TICKS, ensureBeaconStream, listActiveBeacons, countActiveNarrative, stepBeaconStream, injectOpportunityBeacons, respondSubspaceBeacon, activeJournalBuff });
 
 });
 __register("src/domain/economy/blackMarket.js", function (__exports, __require) {
@@ -10543,6 +11842,23 @@ const { BAL: BAL } = __require("src/content/constants.js");
 const { tradeableResourceIds: tradeableResourceIds, resourceDef: resourceDef } = __require("src/content/resources.js");
 const { clamp: clamp, lerp: lerp } = __require("src/core/math.js");
 const { emit: emit } = __require("src/core/eventBus.js");
+const { relationKey: relationKey } = __require("src/core/ids.js");
+
+/**
+ * SPEC-PLAN-056 Wave2 赛道 D：星火公约生效期间，对玩家宣战的违约方承受
+ * +25% 市场交易税（买入加价 / 卖出入账折减）。纯读、无副作用。
+ */
+const STARFIRE_PACT_VIOLATOR_TAX_MULT = 1.25;
+function starfirePactTradeTaxMult(world, factionId) {
+  const lan = world && world.spaceOperaState && world.spaceOperaState.landsraad;
+  if (!lan || lan.starfirePactActive !== true) return 1.0;
+  const pf = world.playerFactionId;
+  if (!pf || factionId === pf) return 1.0;
+  const dip = world.relations && world.relations.diplomacy ? world.relations.diplomacy : null;
+  if (!dip) return 1.0;
+  const rel = dip[relationKey(pf, factionId)];
+  return rel && rel.warId ? STARFIRE_PACT_VIOLATOR_TAX_MULT : 1.0;
+}
 
 /** 确保星系市场存在 */
 function ensureMarket(world, systemId) {
@@ -10606,7 +11922,7 @@ function marketBuy(world, factionId, systemId, resId, amount, ledgerApi) {
   const embargo = m.embargo[factionId];
   if (embargo) return { ok: false, reason: '禁运中' };
   const unit = marketUnitPrice(m, resId, qty, 'buy');
-  const cost = Math.ceil(unit * qty);
+  const cost = Math.ceil(unit * qty * starfirePactTradeTaxMult(world, factionId));
   if (!ledgerApi.debit(world, factionId, 'credits', cost, `marketBuy:${resId}`, systemId)) {
     return { ok: false, reason: '信用点不足' };
   }
@@ -10621,7 +11937,7 @@ function marketSell(world, factionId, systemId, resId, amount, ledgerApi) {
   const qty = Math.max(0, Math.round(amount));
   if (qty <= 0) return { ok: false, reason: '数量无效' };
   const unit = marketUnitPrice(m, resId, qty, 'sell');
-  const gain = Math.floor(unit * qty);
+  const gain = Math.floor(unit * qty / starfirePactTradeTaxMult(world, factionId));
   m.stock[resId] += qty;
   ledgerApi.credit(world, factionId, 'credits', gain, `marketSell:${resId}`, systemId);
   return { ok: true, gained: gain, unitPrice: unit };
@@ -10655,7 +11971,7 @@ function takeFromMarket(world, systemId, resId, qty) {
   return take;
 }
 
-Object.assign(__exports, { ensureMarket, price, updateMarketPrices, addDemand, marketBuy, marketSell, marketUnitPrice, setEmbargo, deliverToMarket, takeFromMarket });
+Object.assign(__exports, { STARFIRE_PACT_VIOLATOR_TAX_MULT, starfirePactTradeTaxMult, ensureMarket, price, updateMarketPrices, addDemand, marketBuy, marketSell, marketUnitPrice, setEmbargo, deliverToMarket, takeFromMarket });
 
 });
 __register("src/content/resources.js", function (__exports, __require) {
@@ -12050,425 +13366,6 @@ function derivePlanetSeedsExtended(world, planetId) {
 Object.assign(__exports, { SALT_PRECURSOR, SALT_DAG_ROLL, SALT_BLACK_MARKET, SALT_CRISIS_HUB, SALT_SOS, SALT_SLATE, SALT_HEAT_WAVE, mix32, createSubRng, derivePlanetSeeds, derivePlanetSeedsExtended });
 
 });
-__register("src/domain/world/subspaceBeaconStream.js", function (__exports, __require) {
-/**
- * domain/world/subspaceBeaconStream.js — 全频段子空间信标流（反孤独硬性不变量）
- * （SPEC-PLAN-046 阶段三 M3 Task 3.3；责任人：Eng-C）
- *
- * 职责（doc46 §Task 3.3 §2 + doc42 总纲 §五.3 逐条契约）：
- *  1. 常驻密度铁律：任何时刻非帝国官方动态叙事信标（kind='NARRATIVE'）活跃数必须 ≥
- *     BEACON_MIN_NARRATIVE(15)；stepBeaconStream 每帧先清过期、再按
- *     deriveSeed(world.seed, SUBSPACE_BEACON, world.tick, idx) 确定性补足到 15
- *     （频段 sampleWeightedIndex 四等权选一、系统确定性选、模板确定性选）；
- *  2. 信标实例契约：{ id, freqClass, systemId, text, spawnedTick, expiresTick,
- *     kind:'NARRATIVE'|'OPPORTUNITY', templateId, responseOptions:[{id,label,effectHint,effect}] }
- *     —— 存 world.spaceOperaState.subspaceBeacons（帝国官方信标 kind='OFFICIAL'，
- *     不计入 15 密度，由上层投放，本模块只做密度统计区分）；
- *  3. injectOpportunityBeacons(world, n)：追加 n 个 OPPORTUNITY_BEACON 机遇信标
- *     （戏剧导演高潮宣泄 +18 爆发的唯一投放口，doc46 §Task 3.5 §4）；
- *  4. respondSubspaceBeacon(world, beaconId, responseOptionId)：救援 → 资源奖励 /
- *     星海日报 → 临时增益 / 黑市合约 → blackMarket 交易窗口 / 先驱者低语 → researchData
- *     / 凝聚奖励 → unityTreasury / 难民 → 玩家殖民地人口；响应后信标从流中移除，
- *     结果写入 world.spaceOperaState.lastBeaconResponse（命令总线返回值不透传契约）。
- *
- * 时钟接线裁决：registerHourly('space-opera-beacon-stream', …) 由 SpaceOperaWiring.js 注册为每
- * tick（fast）阶段 —— 函数体首行守卫 world.spaceOperaState：未挂载容器（默认流程 /
- * 金快照 8be8ce2c 世界）零读取零写入，逐位零漂移。
- *
- * 纪律（doc43 §1.4 零漂移铁律）：
- *  - import 期仅注册时钟阶段与冻结常量，不改任何世界状态、不 ensure 容器；
- *  - 密度补足 / 注入 / 响应全部确定性：deriveSeed/sampleWeightedIndex +
- *    DOMAIN_SALTS.SUBSPACE_BEACON（0xE501）；零 Math.random / Date.now / world.rng；
- *  - stepBeaconStream / injectOpportunityBeacons 守卫式读取（绝不 ensure）；
- *    ensureBeaconStream 仅由显式生命周期入口（集成层/套件）调用。
- */
-
-const { DOMAIN_SALTS: DOMAIN_SALTS, deriveSeed: deriveSeed, sampleWeightedIndex: sampleWeightedIndex } = __require("src/domain/world/deterministicRng.js");
-const { ensureSpaceOperaState: ensureSpaceOperaState } = __require("src/domain/world/worldMigration.js");
-const { SUBSPACE_BEACON_TEMPLATES: SUBSPACE_BEACON_TEMPLATES, OPPORTUNITY_BEACON_TEMPLATES: OPPORTUNITY_BEACON_TEMPLATES, SUBSPACE_FREQ_CLASSES: SUBSPACE_FREQ_CLASSES, FREQ_CLASS_WEIGHTS: FREQ_CLASS_WEIGHTS, OPPORTUNITY_FREQ_CLASS: OPPORTUNITY_FREQ_CLASS } = __require("src/content/spaceOperaBeacons.js");
-const { ensureBlackMarket: ensureBlackMarket } = __require("src/domain/economy/blackMarket.js");
-const { credit: credit } = __require("src/domain/economy/ledger.js");
-const { emit: emit } = __require("src/core/eventBus.js");
-
-/** 信标流确定性子流盐值（DOMAIN_SALTS 冻结表：信标流生成与频段调制域） */
-const SALT = DOMAIN_SALTS.SUBSPACE_BEACON;
-
-/** 密度铁律：非帝国叙事信标（kind='NARRATIVE'）常驻下限（doc46 精确值 15） */
-const BEACON_MIN_NARRATIVE = 15;
-
-/** 流总量硬上限（机遇爆发叠加后的膨胀护栏；防长线漂移失控） */
-const BEACON_MAX_TOTAL = 96;
-
-/** 叙事信标存续时长（360 tick = 15 游戏日；M3 裁决值，写入 notes） */
-const BEACON_NARRATIVE_LIFETIME_TICKS = 360;
-
-/** 机遇信标存续时长（720 tick = 1 真实月；机遇窗口更宽裕） */
-const BEACON_OPPORTUNITY_LIFETIME_TICKS = 720;
-
-/** 单次密度补足最大尝试数（护栏：防词库耗尽/无星系时死循环） */
-const MAX_FILL_PER_STEP = 32;
-
-/* ============================== 惰性容器与只读查询 ============================== */
-
-/**
- * 显式生命周期入口：幂等挂载信标流容器（ensureSpaceOperaState + 游标字段）。
- * 绝不消费 world.rng；重复调用同引用。默认 tick 流程不调用本函数。
- */
-function ensureBeaconStream(world) {
-  const soState = ensureSpaceOperaState(world);
-  if (!Number.isFinite(soState.nextSubspaceBeaconId)) soState.nextSubspaceBeaconId = 1;
-  if (!Array.isArray(soState.subspaceBeacons)) soState.subspaceBeacons = [];
-  return soState;
-}
-
-/** 活跃信标列表只读（容器缺失返回 []，绝不 ensure） */
-function listActiveBeacons(world) {
-  const soState = world && world.spaceOperaState;
-  return soState && Array.isArray(soState.subspaceBeacons) ? soState.subspaceBeacons : [];
-}
-
-/** 非帝国叙事信标活跃数（kind==='NARRATIVE'；只读；密度铁律断言口径） */
-function countActiveNarrative(world) {
-  return listActiveBeacons(world).filter((b) => b && b.kind === 'NARRATIVE').length;
-}
-
-/* ============================== 确定性生成 ============================== */
-
-/** world.seed 归一（与 fleetDoctrineAndScars / planetStateSchema 同款守卫） */
-function worldSeedOf(world) {
-  return (typeof world.seed === 'number' && Number.isFinite(world.seed)) ? world.seed >>> 0 : 0;
-}
-
-/** 系统键确定性序（sortedEntityKeys 同款：字符串键字典序） */
-function sortedSystemKeys(world) {
-  const systems = world && world.entities && world.entities.systems ? world.entities.systems : {};
-  return Object.keys(systems).sort();
-}
-
-/** {system}/{faction} 占位符替换（确定性：占位值全部来自实体字段） */
-function fillText(text, systemName, factionName) {
-  return String(text)
-    .split('{system}').join(systemName)
-    .split('{faction}').join(factionName);
-}
-
-/**
- * 生成一条叙事信标（kind='NARRATIVE'；step 契约严格按 doc46：
- * deriveSeed(SUBSPACE_BEACON, world.tick, idx) → 频段/模板/系统三路子采样）。
- *
- * @returns {object|null} 信标实例（无星系可挂载时返回 null）
- */
-function spawnNarrativeBeacon(world, tick, idx) {
-  const seed = worldSeedOf(world);
-  const sysKeys = sortedSystemKeys(world);
-  if (sysKeys.length === 0) return null;
-
-  const freqIdx = sampleWeightedIndex(seed, SALT, tick, idx * 16 + 1, FREQ_CLASS_WEIGHTS);
-  const freqClass = SUBSPACE_FREQ_CLASSES[freqIdx] || SUBSPACE_FREQ_CLASSES[0];
-  const pool = SUBSPACE_BEACON_TEMPLATES.filter((t) => t.freqClass === freqClass);
-  if (pool.length === 0) return null;
-  const tpl = pool[deriveSeed(seed, SALT, tick, idx * 16 + 2) % pool.length];
-  const sysKey = sysKeys[deriveSeed(seed, SALT, tick, idx * 16 + 3) % sysKeys.length];
-  const sys = world.entities.systems[sysKey];
-  const systemName = (sys && sys.name) ? sys.name : `星系 ${sysKey}`;
-  const owner = sys && sys.ownerFactionId && world.entities.factions[sys.ownerFactionId];
-  const factionName = (owner && owner.name) || '自治殖民地';
-
-  return {
-    id: world.spaceOperaState.nextSubspaceBeaconId++,
-    freqClass,
-    systemId: sysKey,
-    text: fillText(`${tpl.title}：${tpl.body}`, systemName, factionName),
-    spawnedTick: tick,
-    expiresTick: tick + BEACON_NARRATIVE_LIFETIME_TICKS,
-    kind: 'NARRATIVE',
-    templateId: tpl.templateId,
-    responseOptions: tpl.responseOptions.map((o) => ({ ...o })),
-  };
-}
-
-/**
- * 生成一条机遇信标（kind='OPPORTUNITY'；injectOpportunityBeacons 与高潮宣泄消费）。
- * 子采样 step 与叙事流（idx*16 段）正交（900000 偏移段），互不串流。
- */
-function spawnOpportunityBeacon(world, tick, i) {
-  const seed = worldSeedOf(world);
-  const sysKeys = sortedSystemKeys(world);
-  if (sysKeys.length === 0 || OPPORTUNITY_BEACON_TEMPLATES.length === 0) return null;
-  const tpl = OPPORTUNITY_BEACON_TEMPLATES[
-    deriveSeed(seed, SALT, tick, 900000 + i * 4 + 1) % OPPORTUNITY_BEACON_TEMPLATES.length
-  ];
-  const sysKey = sysKeys[deriveSeed(seed, SALT, tick, 900000 + i * 4 + 2) % sysKeys.length];
-  const sys = world.entities.systems[sysKey];
-  const systemName = (sys && sys.name) ? sys.name : `星系 ${sysKey}`;
-  const owner = sys && sys.ownerFactionId && world.entities.factions[sys.ownerFactionId];
-  const factionName = (owner && owner.name) || '自治殖民地';
-
-  return {
-    id: world.spaceOperaState.nextSubspaceBeaconId++,
-    freqClass: OPPORTUNITY_FREQ_CLASS,
-    systemId: sysKey,
-    text: fillText(`${tpl.title}：${tpl.body}`, systemName, factionName),
-    spawnedTick: tick,
-    expiresTick: tick + BEACON_OPPORTUNITY_LIFETIME_TICKS,
-    kind: 'OPPORTUNITY',
-    templateId: tpl.templateId,
-    responseOptions: tpl.responseOptions.map((o) => ({ ...o })),
-  };
-}
-
-/* ============================== 每帧步进（密度铁律） ============================== */
-
-/**
- * 信标流每 tick 步进（registerHourly 'space-opera-beacon-stream' 注册形态）：
- *  1. 首行守卫 world.spaceOperaState（金快照世界零读取零写入）；
- *  2. 过期清除（expiresTick ≤ world.tick，帝国官方信标同规则老化）；
- *  3. 密度铁律：kind==='NARRATIVE' 活跃数 < 15 → 确定性补足到 15。
- *
- * @returns {{activeBeacons: number, narrativeBeacons: number, expired: number, filled: number}}
- */
-function stepBeaconStream(world) {
-  if (!world || !world.spaceOperaState) {
-    return { activeBeacons: 0, narrativeBeacons: 0, expired: 0, filled: 0 };
-  }
-  const soState = world.spaceOperaState;
-  if (!Array.isArray(soState.subspaceBeacons)) soState.subspaceBeacons = [];
-  if (!Number.isFinite(soState.nextSubspaceBeaconId)) soState.nextSubspaceBeaconId = 1;
-  const tick = Number.isFinite(world.tick) ? Math.max(0, Math.trunc(world.tick)) : 0;
-
-  // —— 1) 过期清除（保留顺序遍历，确定性）——
-  let expired = 0;
-  const kept = [];
-  for (let i = 0; i < soState.subspaceBeacons.length; i++) {
-    const b = soState.subspaceBeacons[i];
-    if (b && Number.isFinite(b.expiresTick) && b.expiresTick <= tick) {
-      expired++;
-      continue;
-    }
-    kept.push(b);
-  }
-  soState.subspaceBeacons = kept;
-
-  // —— 2) 密度铁律补足（确定性派生；每次生成消费独立 idx 防同帧串流）——
-  let filled = 0;
-  for (let idx = 0; idx < MAX_FILL_PER_STEP; idx++) {
-    if (countActiveNarrative(world) >= BEACON_MIN_NARRATIVE) break;
-    if (soState.subspaceBeacons.length >= BEACON_MAX_TOTAL) break;
-    const beacon = spawnNarrativeBeacon(world, tick, idx);
-    if (beacon) {
-      soState.subspaceBeacons.push(beacon);
-      filled++;
-    }
-  }
-
-  return {
-    activeBeacons: soState.subspaceBeacons.length,
-    narrativeBeacons: countActiveNarrative(world),
-    expired,
-    filled,
-  };
-}
-
-// —— 时钟阶段注册已收拢至 src/simulation/SpaceOperaWiring.js（SPEC-PLAN-049 §Task 49.3
-//    唯一注册点：registerHourly('space-opera-beacon-stream', …)）。原 import 期副作用注册
-//    拆除，消除模块图求值顺序对注册序的脆弱依赖；stepBeaconStream 首行自守卫
-//    world.spaceOperaState（金快照世界零读取零写入）。——
-
-/* ============================== 机遇信标投放（高潮宣泄入口） ============================== */
-
-/**
- * 注入 n 个机遇信标（OPPORTUNITY_BEACON；戏剧导演 catharsis +18 的唯一投放口）。
- * 守卫式读取：容器未挂载（金快照世界）返回 0，绝不 ensure（零漂移铁律）。
- *
- * @param {object} world - 世界根对象
- * @param {number} n - 注入数量（非有限/负数按 0；上限单次 36 护栏）
- * @returns {number} 实际注入条数
- */
-function injectOpportunityBeacons(world, n) {
-  if (!world || !world.spaceOperaState) return 0;
-  const soState = world.spaceOperaState;
-  if (!Array.isArray(soState.subspaceBeacons)) soState.subspaceBeacons = [];
-  if (!Number.isFinite(soState.nextSubspaceBeaconId)) soState.nextSubspaceBeaconId = 1;
-  const tick = Number.isFinite(world.tick) ? Math.max(0, Math.trunc(world.tick)) : 0;
-  const want = Number.isFinite(n) ? Math.max(0, Math.min(36, Math.trunc(n))) : 0;
-  let injected = 0;
-  for (let i = 0; i < want; i++) {
-    if (soState.subspaceBeacons.length >= BEACON_MAX_TOTAL) break;
-    const beacon = spawnOpportunityBeacon(world, tick, i);
-    if (beacon) {
-      soState.subspaceBeacons.push(beacon);
-      injected++;
-    }
-  }
-  if (injected > 0) {
-    emit(world, 'OpportunityBeaconsInjected', {
-      count: injected,
-      tick,
-    }, 'world');
-  }
-  return injected;
-}
-
-/* ============================== 信标响应（RespondSubspaceBeacon 领域落点） ============================== */
-
-/** 玩家派系 ID（信标响应奖励入账权威；未定义抛 SO 由命令总线回滚） */
-function playerFaction(world) {
-  const pf = world && world.playerFactionId;
-  if (!pf) throw new Error('SO: 信标响应需要已定义的玩家派系（world.playerFactionId）');
-  return pf;
-}
-
-/** TEMP_BUFF / 携带 unityGrant 的复合效果入账 */
-function applyTempBuff(world, soState, tick, effect, result) {
-  soState.beaconJournalBuff = {
-    untilTick: tick + (Number.isFinite(effect.untilTicks) ? effect.untilTicks : 2160),
-    happinessPct: Number.isFinite(effect.happinessPct) ? effect.happinessPct : 0,
-    sourceBeaconId: result.beaconId,
-  };
-  if (Number.isFinite(effect.unityGrant) && effect.unityGrant > 0) {
-    applyUnityGrant(world, soState, effect.unityGrant);
-    result.unityGranted = effect.unityGrant;
-  }
-  result.buff = { untilTick: soState.beaconJournalBuff.untilTick, happinessPct: soState.beaconJournalBuff.happinessPct };
-}
-
-/** 凝聚力入账（spaceOperaState.unityTreasury；权威 API 为 galacticSenateAndCrisisArc.grantUnity） */
-function applyUnityGrant(world, soState, amount) {
-  if (!Number.isFinite(soState.unityTreasury)) soState.unityTreasury = 0;
-  soState.unityTreasury += amount;
-}
-
-/** 难民入殖：首个玩家殖民地 popTotal 增员；无殖民地 → 折算资源入账 */
-function applyRefugeePop(world, soState, tick, effect, result) {
-  const pf = playerFaction(world);
-  const planets = world.entities && world.entities.planets ? world.entities.planets : {};
-  const keys = Object.keys(planets).sort();
-  for (const key of keys) {
-    const planet = planets[key];
-    const colony = planet && planet.compactState && planet.compactState.colony;
-    if (!colony) continue;
-    const same = colony.ownerId === pf || String(colony.ownerId) === String(pf);
-    if (!same) continue;
-    colony.popTotal = (Number.isFinite(colony.popTotal) ? colony.popTotal : 0)
-      + (Number.isFinite(effect.amount) ? effect.amount : 1);
-    result.refugeePlanetId = planet.id;
-    return;
-  }
-  // 无玩家殖民地 → 确定性折算：默认食物 +50
-  const resId = effect.fallbackResId || 'food';
-  const amount = Number.isFinite(effect.fallbackAmount) ? effect.fallbackAmount : 50;
-  if (world.economy) {
-    credit(world, pf, resId, amount, 'beaconRefugeeFallback', result.beaconId);
-  }
-  result.fallbackCredit = { resId, amount };
-}
-
-/**
- * 响应子空间信标（RespondSubspaceBeacon 命令领域落点；M3 编排层注入 handler）。
- * 效果按机读 effect 分派（CREDIT / TEMP_BUFF / BLACK_MARKET_WINDOW / UNITY_GRANT /
- * REFUGEE_POP）；响应后信标从流中移除，结果写入 soState.lastBeaconResponse
- * （命令总线 execute 返回值不透传契约 → 套件从世界态断言）。
- *
- * 业务失败（信标不存在 / 选项不存在 / 无玩家派系）抛 Error('SO:…') → 总线回滚。
- *
- * @param {object} world - 世界根对象
- * @param {number|string} beaconId - 信标 ID
- * @param {string} responseOptionId - 响应选项 ID
- * @returns {object} 响应结果（同时落 soState.lastBeaconResponse）
- */
-function respondSubspaceBeacon(world, beaconId, responseOptionId) {
-  if (!world || !world.spaceOperaState) throw new Error('SO: 信标流容器未挂载（须先 ensureSpaceOperaState）');
-  const soState = world.spaceOperaState;
-  const tick = Number.isFinite(world.tick) ? Math.max(0, Math.trunc(world.tick)) : 0;
-
-  const beacon = listActiveBeacons(world).find((b) => b && (b.id === beaconId || String(b.id) === String(beaconId)));
-  if (!beacon) throw new Error(`SO: 信标不存在或已过期 ${String(beaconId)}`);
-  const option = (beacon.responseOptions || []).find((o) => o && o.id === responseOptionId);
-  if (!option) {
-    throw new Error(`SO: 信标 ${String(beacon.id)} 无响应选项 ${String(responseOptionId)}`);
-  }
-
-  const result = {
-    beaconId: beacon.id,
-    templateId: beacon.templateId || null,
-    responseOptionId,
-    effectApplied: false,
-    tick,
-  };
-
-  const effect = option.effect;
-  if (effect && typeof effect === 'object') {
-    switch (effect.kind) {
-      case 'CREDIT': {
-        const pf = playerFaction(world);
-        credit(world, pf, effect.resId, effect.amount, 'beaconResponse', beacon.id);
-        result.credited = { resId: effect.resId, amount: effect.amount };
-        result.effectApplied = true;
-        break;
-      }
-      case 'TEMP_BUFF':
-        applyTempBuff(world, soState, tick, effect, result);
-        result.effectApplied = true;
-        break;
-      case 'BLACK_MARKET_WINDOW': {
-        const bm = ensureBlackMarket(world, beacon.systemId);
-        if (bm) {
-          bm.unlocked = true; // 合约成立 → 该星系黑市交易窗口开启
-          bm.stock[effect.contrabandId] = (bm.stock[effect.contrabandId] || 0)
-            + (Number.isFinite(effect.qty) ? effect.qty : 0);
-          result.blackMarket = { systemId: beacon.systemId, contrabandId: effect.contrabandId, qty: effect.qty };
-          result.effectApplied = true;
-        } else {
-          // 目标星系无市场结构 → 确定性折算情报报酬（合约情报兜底）
-          const pf = playerFaction(world);
-          credit(world, pf, 'intelPoints', 8, 'beaconContractFallback', beacon.id);
-          result.fallbackCredit = { resId: 'intelPoints', amount: 8 };
-          result.effectApplied = true;
-        }
-        break;
-      }
-      case 'UNITY_GRANT':
-        applyUnityGrant(world, soState, effect.amount);
-        result.unityGranted = effect.amount;
-        result.effectApplied = true;
-        break;
-      case 'REFUGEE_POP':
-        applyRefugeePop(world, soState, tick, effect, result);
-        result.effectApplied = true;
-        break;
-      default:
-        break; // 未知 effect kind → 仅移除信标（零副作用）
-    }
-  }
-
-  // —— 响应即消费：从流中移除（密度铁律由下一帧步进自动补足）——
-  soState.subspaceBeacons = soState.subspaceBeacons.filter((b) => b !== beacon);
-  soState.lastBeaconResponse = result;
-  emit(world, 'SubspaceBeaconResponded', {
-    beaconId: beacon.id,
-    templateId: beacon.templateId,
-    freqClass: beacon.freqClass,
-    responseOptionId,
-    effectApplied: result.effectApplied,
-  }, 'world');
-  return result;
-}
-
-/**
- * 活跃临时增益查询（集成层幸福度/士气结算消费；只读，未激活返回 null）。
- */
-function activeJournalBuff(world) {
-  const soState = world && world.spaceOperaState;
-  if (!soState || !soState.beaconJournalBuff) return null;
-  const buff = soState.beaconJournalBuff;
-  const tick = Number.isFinite(world.tick) ? world.tick : 0;
-  if (!(Number.isFinite(buff.untilTick) && tick < buff.untilTick)) return null;
-  return buff;
-}
-
-Object.assign(__exports, { BEACON_MIN_NARRATIVE, BEACON_MAX_TOTAL, BEACON_NARRATIVE_LIFETIME_TICKS, BEACON_OPPORTUNITY_LIFETIME_TICKS, ensureBeaconStream, listActiveBeacons, countActiveNarrative, stepBeaconStream, injectOpportunityBeacons, respondSubspaceBeacon, activeJournalBuff });
-
-});
 __register("src/content/spaceOperaBeacons.js", function (__exports, __require) {
 /**
  * content/spaceOperaBeacons.js — 全频段子空间信标流中文词库
@@ -12509,6 +13406,24 @@ const OPPORTUNITY_FREQ_CLASS = 'OPPORTUNITY_BEACON';
 
 /** 频段等权权重表（doc46 未给频段偏置 → 四频段等概率；冻结） */
 const FREQ_CLASS_WEIGHTS = Object.freeze([1, 1, 1, 1]);
+
+/**
+ * SPEC-PLAN-056 Task 56.2 §4 / CHECKLIST CHK-M5-04：频段 → 颜色简写 band 权威映射。
+ * 语义以 56 号总纲为准：求援/军事 SOS → red、商业黑市 → gold、先驱者低语 → cyan、
+ * 银河日报 → purple、机遇信标 → gold。58 号子卷把求援与黑市两色对调，按
+ * 「任何冲突一律以 56 号总纲为准」修正。后半组为总纲使用的别名，保证双口径一致。
+ */
+const BEACON_FREQ_BAND = Object.freeze({
+  FREQ_DISTRESSED_CIV: 'red',
+  FREQ_SHADOW_CONTRACT: 'gold',
+  FREQ_PRECURSOR_ECHO: 'cyan',
+  FREQ_STAR_JOURNAL: 'purple',
+  OPPORTUNITY_BEACON: 'gold',
+  FREQ_MILITARY_SOS: 'red',
+  FREQ_COMMERCE_BLACK: 'gold',
+  FREQ_PRECURSOR_WHISPER: 'cyan',
+  FREQ_GALACTIC_DAILY: 'purple',
+});
 
 /* ============================== 非帝国动态叙事信标模板（26 条 ≥ 24） ============================== */
 
@@ -12780,6 +13695,46 @@ const SUBSPACE_BEACON_TEMPLATES = Object.freeze([
       Object.freeze({ id: 'dismiss', label: '静默标记航路', effectHint: '无效果，仅标记', effect: null }),
     ]),
   }),
+
+  // —— 外网实测共创精选 1：致谢外测指挥官 K. 维瑟尔（SPEC-PLAN-059 Task 59.1 / doc56 赛道 B）——
+  Object.freeze({
+    templateId: 'tpl_co_last_lighthouse',
+    freqClass: 'FREQ_STAR_JOURNAL',
+    title: '最后的跃迁灯塔员（K. 维瑟尔 遗言广播）',
+    body: '「……我是第三象限第 4107 号退役引力灯塔守钟人 K. 维瑟尔。自动化矩阵已全面替代人工灯塔，今日是我值守的最后一秒。在关停人工折叠光束前，我将这本星图手记与一万两千次人工校准数据广播给深空……愿航向永明。」（外网实测玩家共创投稿 · 致谢 K. 维瑟尔）',
+    responseOptions: Object.freeze([
+      Object.freeze({
+        id: 'claim_heritage', label: '回拨坐标继承灯塔手记',
+        effectHint: '继承遗产 → 获得 +350 信用点与航行校准数据',
+        effect: Object.freeze({ kind: 'CREDIT', resId: 'credits', amount: 350 }),
+      }),
+      Object.freeze({
+        id: 'inscribe_beacon', label: '将灯塔员铭文刻入子空间中继站',
+        effectHint: '向先驱守望致敬 → 帝国凝聚力 +25',
+        effect: Object.freeze({ kind: 'UNITY_GRANT', amount: 25 }),
+      }),
+    ]),
+  }),
+
+  // —— 外网实测共创精选 2：致谢外测先锋指挥官（SPEC-PLAN-059 Task 59.1 / doc56 赛道 B）——
+  Object.freeze({
+    templateId: 'tpl_co_automated_toll_7',
+    freqClass: 'FREQ_SHADOW_CONTRACT',
+    title: '自动收费门架 Toll-Station-7 扣款拦截',
+    body: '「警告：检测到未注册跃迁波形切入 Toll-Station-7 走廊。本设施由旧银河公理财团全自动运转，已持续向过往星舰扣取过路费 420 年。请立即缴费 50 点或接受巡逻无人机扫描。」（外网实测玩家共创投稿 · 致谢先锋指挥官）',
+    responseOptions: Object.freeze([
+      Object.freeze({
+        id: 'pay_toll', label: '照付过路费并下载中继固件',
+        effectHint: '合规通行 → 获得 +40 科研数据',
+        effect: Object.freeze({ kind: 'CREDIT', resId: 'researchData', amount: 40 }),
+      }),
+      Object.freeze({
+        id: 'hack_station', label: '黑入收费门架溢流资金池',
+        effectHint: '截留黑金 → 获得 +400 信用点',
+        effect: Object.freeze({ kind: 'CREDIT', resId: 'credits', amount: 400 }),
+      }),
+    ]),
+  }),
 ]);
 
 /* ============================== 机遇信标专用模板（12 条 ≥ 10） ============================== */
@@ -12921,740 +13876,75 @@ function beaconTemplateById(templateId) {
     || null;
 }
 
-Object.assign(__exports, { SUBSPACE_FREQ_CLASSES, OPPORTUNITY_FREQ_CLASS, FREQ_CLASS_WEIGHTS, SUBSPACE_BEACON_TEMPLATES, OPPORTUNITY_BEACON_TEMPLATES, countBeaconTemplates, beaconTemplateById });
+Object.assign(__exports, { SUBSPACE_FREQ_CLASSES, OPPORTUNITY_FREQ_CLASS, FREQ_CLASS_WEIGHTS, BEACON_FREQ_BAND, SUBSPACE_BEACON_TEMPLATES, OPPORTUNITY_BEACON_TEMPLATES, countBeaconTemplates, beaconTemplateById });
 
 });
-__register("src/domain/planets/archetypeMechanics.js", function (__exports, __require) {
+__register("src/simulation/TickPipeline.js", function (__exports, __require) {
 /**
- * domain/planets/archetypeMechanics.js — 16 大行星原型专属模拟钩子
- * （SPEC-PLAN-045 阶段二 M2 Task 2.3；责任人：Eng-A）
+ * simulation/TickPipeline.js — 领域更新阶段注册与执行（任务书 4.10）
  *
- * 职责（doc45 §Task 2.3 机制绑定表逐条落地）：
- *  1. applyArchetypeProfile(planet, world)：ensureCompactPlanetState 之后按
- *     content/planetaryArchetypes.js hooks 一次性修正行星基线 ——
- *       #10 envVector[1] 与 envBaseline[1] = 70（超临界酸雾大气基线）；
- *       #11 orbitalLayer.maxOrbitalDistricts = 12（顶级轨道环带基座）；
- *       #12 subterraneanLayer.subUrbanSlots 容量 ×2（4 → 8 槽，人口工业转入地下溶洞）；
- *       #14 envVector[6] 与 envBaseline[6] = 0（农业与水圈恒 0）；
- *       #15 planet.habitability = 100（盖亚圣域宜居度恒定）；
- *       #3  3 处先驱者考古地标（buildingId 48，deriveSeed 确定性选址）。
- *     幂等（profileApplied 旗标），绝不消费 world.rng；
- *  2. stepArchetypeMechanics(world, planet, dtDay)：SpaceOperaClock Slow 桶钩子
- *     （经 setClockHooks 注入 slowPlanetHook 键位），周期判定全部
- *     deriveSeed/sampleFloat01 确定性、按「已见周期游标」推进（任意 tick 跳变不漏触发）——
- *       #0 每 90 天潮汐火山期：envVector[0] +20（clamp 100）、未护盾建筑
- *          受损判定（buildingId 1-47、护盾 Bit 28 免疫、p=0.5 清除 + DEVASTATED）、
- *          地热产出 +100% 旗标（tidalSurgePeriod，geothermalSurgeActive 消费）；
- *       #1 每 240 天物质倒灌相位切换：前半（phase 0）矿井掩埋维护 +35% /
- *          后半（phase 1）遗迹裸露 S1 速度 +60%（meta 相位旗标翻转）；
- *       #2 未锁定每 60 天确定性重排未锁定区划（zoneSlots Fisher-Yates，
- *          deriveSeed 逐位抽取）；锁定（quantumLocked）后停止重排且
- *          物理科研 +120%（quantumPhysicsResearchBonus）；
- *       #5 晨昏带建造罚：canBuildWithoutPenalty(compact, x) —— 列 x ∈ [6,9]
- *          无惩罚，其余列建造罚（hook.terminatorColumns 权威）；
- *       #6 envVector[0] > 80 → 复用 planetaryThreat.awakenLeviathan 惊醒幼兽；
- *       #7 decryptBonus/detectionBonus 导出（crystallineIntelBonus）；
- *       #15 envVector[7] > 35 → 必定刷远古净化守卫（hostileGuardians=true 棘轮），
- *          未护盾建筑（1-47）周期受损（护盾免疫）。
- *  3. 命令领域落点 setQuantumPhaseLock(compact, engageLock)：LockQuantumPhasePlanet
- *     handler（M2 集成注入）写 archetypeState.quantumLocked + 反应堆维护旗标
- *     reactorMaintenance（锁定 → 维护 +，解锁 → 双清）。
- *
- * 时钟接线裁决（动态 import）：本模块经动态 import SpaceOperaClock 注入
- * slowPlanetHook —— 与 situationEngine 同构（避免静态 import 改变 HourlySystems
- * 「space-opera 每 tick 最后注册」的阶段序不变量，见 src/simulation/HourlySystems.js:223
- * 注释）；套件/集成层可 await ensureArchetypeHookInjected() 保证钩子就位。
- *
- * 纪律（doc43 §1.4 零漂移铁律）：
- *  - import 期仅构建冻结常量 + 动态注入时钟钩子，不改任何世界状态；
- *  - stepArchetypeMechanics 首行守卫 world.spaceOperaState（金快照世界零读取零写入），
- *    仅处理已挂载 compactState 的行星（惰性容器守卫），绝不 ensure、绝不消费 world.rng；
- *  - 确定性随机一律 deriveSeed/sampleFloat01 + DOMAIN_SALTS.PLANET_MASTER 盐值
- *    （「行星静态天体原型」语义；盐值取自冻结表，无私编魔数）；零 Math.random / Date.now；
- *  - 周期历史码使用正值段 70..72（planetStateSchema HISTORY_EVENT_CODES 注释口径：
- *    负值段留给局势弧；70+ 为本模块私有枚举，不与既有 1..6 冲突）。
+ * 每个战略 tick 按稳定顺序运行已注册阶段；阶段顺序由 WorldSimulation.js
+ * 中的 import 顺序显式决定，杜绝插入次序依赖。
+ * 阶段输入/输出契约：每个阶段只读上一阶段产物并只写自己负责的字段。
  */
 
-const { getArchetype: getArchetype } = __require("src/content/planetaryArchetypes.js");
-const { ensureCompactPlanetState: ensureCompactPlanetState, appendHistory: appendHistory, STATUS_FLAG: STATUS_FLAG } = __require("src/domain/planets/planetStateSchema.js");
-const { DOMAIN_SALTS: DOMAIN_SALTS, deriveSeed: deriveSeed, sampleFloat01: sampleFloat01 } = __require("src/domain/world/deterministicRng.js");
-const { awakenLeviathan: awakenLeviathan } = __require("src/domain/ground/planetaryThreat.js");
-const { TICKS_PER_DAY: TICKS_PER_DAY } = __require("src/core/clock.js");
-const { emit: emit } = __require("src/core/eventBus.js");
+const hourlyPhases = [];
+const dailyCloses = [];
+const monthlyCloses = [];
+const yearlyCloses = [];
 
-/** 原型机制确定性子流盐值（DOMAIN_SALTS 冻结表：行星静态天体原型域） */
-const ARCH_SALT = DOMAIN_SALTS.PLANET_MASTER;
-
-/** #3 考古地标选址 step 基值（deriveSeed step 段位：0x4C00 = buildingId 48 纪念） */
-const LANDMARK_STEP_BASE = 0x4c00;
-
-/** #2 量子重排 Fisher-Yates step 段位基值（periodIndex × 16 + 槽位） */
-const QUANTUM_STEP_BASE = 0x5100;
-
-/** #0 潮汐火山未护盾建筑受损判定概率（M2 裁决：单周期 50% 火力覆盖） */
-const TIDAL_DAMAGE_PROB = 0.5;
-
-/** #15 净化守卫未护盾建筑周期受损概率（M2 裁决：每次 Slow 访问 35%） */
-const PURIFIER_DAMAGE_PROB = 0.35;
-
-/** 模块私有历史码（正值段 70..；负值段留给局势弧，见 planetStateSchema.js:497 注释） */
-const HIST_ARCHETYPE_TIDAL_VOLCANO = 70; // #0 潮汐火山期喷发（impactCode = 受损建筑数）
-const HIST_ARCHETYPE_BACKFLOW_FLIP = 71; // #1 物质倒灌相位翻转（impactCode = 新相位）
-const HIST_ARCHETYPE_GUARDIAN_AWAKENED = 72; // #15 净化守卫苏醒（impactCode = env7 取整）
-
-function isPlainObject(v) {
-  return !!v && typeof v === 'object' && !Array.isArray(v);
+/** 注册每 tick 阶段（顺序敏感，注册即锁定） */
+function registerHourly(name, fn) {
+  hourlyPhases.push({ name, fn });
 }
 
-function clampTick(tick) {
-  return Number.isFinite(tick) ? Math.max(0, Math.trunc(tick)) : 0;
+/** 注册日结回调（每天 00:00 tick 触发，按注册顺序） */
+function registerDaily(name, fn) {
+  dailyCloses.push({ name, fn });
 }
 
-/** 天数 → tick（1 tick = 1 游戏小时；TICKS_PER_DAY = 24，src/core/clock.js 权威口径） */
-function ticksFromDays(days) {
-  return Math.max(1, Math.round(days * TICKS_PER_DAY));
+function registerMonthly(name, fn) {
+  monthlyCloses.push({ name, fn });
 }
 
-/* ============================== 原型状态容器（惰性幂等） ============================== */
-
-/**
- * 惰性挂载 compact.archetypeState（幂等；绝不消费 world.rng）。
- * 结构：{ profileApplied, quantumLocked, reactorMaintenance, backflowPhase,
- *        backflowMineUpkeepPenaltyActive, backflowRelicSpeedBonusActive,
- *        hostileGuardians, purifierDamageEvents, tidalPeriodSeen, tidalSurgePeriod,
- *        quantumPeriodSeen, lastQuantumReshufflePeriod, landmarkTiles }
- */
-function ensureArchetypeState(compact) {
-  if (!isPlainObject(compact.archetypeState)) {
-    compact.archetypeState = {
-      profileApplied: false,
-      quantumLocked: false,
-      reactorMaintenance: false,
-      backflowPhase: 0,
-      backflowMineUpkeepPenaltyActive: false,
-      backflowRelicSpeedBonusActive: false,
-      hostileGuardians: false,
-      purifierDamageEvents: 0,
-      tidalPeriodSeen: 0,
-      tidalSurgePeriod: -1,
-      quantumPeriodSeen: 0,
-      lastQuantumReshufflePeriod: 0,
-      landmarkTiles: null,
-    };
-  }
-  return compact.archetypeState;
+function registerYearly(name, fn) {
+  yearlyCloses.push({ name, fn });
 }
 
-/* ============================== 建筑位段直读直写（热路径零分配） ============================== */
-
-const BUILDING_MASK = 0x3f << 16;
-const FLAGS_MASK = 0x3f << 26;
-
-/**
- * Tile 建筑段清零 + DEVASTATED 置位（其余位段无损；与 sparseFrontierCA 熔岩烧毁同口径：
- * withBuilding(t, 0) + withFlags(t, flags | DEVASTATED) 的内联形态）。
- */
-function devastateBuilding(t) {
-  const cleared = t & ~BUILDING_MASK;
-  const flags = ((cleared >>> 26) & 0x3f) | STATUS_FLAG.DEVASTATED;
-  return ((cleared & ~FLAGS_MASK) | ((flags & 0x3f) << 26)) >>> 0;
-}
-
-/* ============================== applyArchetypeProfile（doc45 Task 2.3 基线修正） ============================== */
-
-/**
- * #3 先驱者考古地标（buildingId 48，先驱者奇观段 48-63）：deriveSeed 确定性选址，
- * 仅落建筑空置格（buildingId === 0）；不足 count 时顺序重试至 512 次（确定性上限）。
- */
-function placeInitialLandmarks(world, compact, st, count) {
-  const seed = (typeof world.seed === 'number' && Number.isFinite(world.seed)) ? world.seed >>> 0 : 0;
-  const placed = [];
-  for (let attempt = 0; placed.length < count && attempt < 512; attempt++) {
-    const r = deriveSeed(seed, ARCH_SALT, compact.id, LANDMARK_STEP_BASE + attempt);
-    const idx = r % 256;
-    const t = compact.tiles[idx] >>> 0;
-    if (((t >>> 16) & 0x3f) !== 0) continue; // 建筑空置格才可落地标
-    compact.tiles[idx] = ((t & ~BUILDING_MASK) | (48 << 16)) >>> 0; // 48 = 先驱者奇观
-    placed.push(idx);
-  }
-  st.landmarkTiles = placed;
-  return placed;
-}
-
-/**
- * 按原型 hooks 一次性修正行星基线（ensureCompactPlanetState 之后调用；幂等）。
- *
- * @param {object} planet - 行星实体
- * @param {object} world - 世界根对象（读 world.seed，绝不读 world.rng）
- * @returns {object} planet.compactState（幂等：重复调用同引用零重写）
- */
-function applyArchetypeProfile(planet, world) {
-  const compact = ensureCompactPlanetState(planet, world);
-  const st = ensureArchetypeState(compact);
-  if (st.profileApplied === true) return compact;
-  st.profileApplied = true;
-
-  const arch = getArchetype(compact.archetypeId & 0x0f);
-  const hooks = arch.hooks;
-  const tick = clampTick(world && world.tick);
-
-  // —— #10 超临界硫磺毒釜：envVector[1] 基线 70（含 Slow Tick 漂移基线快照）——
-  if (Number.isFinite(hooks.initialEnv1)) {
-    compact.envVector[1] = hooks.initialEnv1;
-    if (Array.isArray(compact.envBaseline) && compact.envBaseline.length === compact.envVector.length) {
-      compact.envBaseline[1] = hooks.initialEnv1;
+function runHourly(world) {
+  for (const p of hourlyPhases) {
+    try {
+      p.fn(world);
+    } catch (e) {
+      // 阶段定位（诊断与错误边界）；原样上抛由调用方决定回滚
+      e.phaseName = p.name;
+      throw e;
     }
   }
-  // —— #14 剥离地幔铁核星：农业与水圈恒 0（envVector[6] HydrosphereLevel 基线归零）——
-  if (hooks.agriHydroZero === true) {
-    compact.envVector[6] = 0;
-    if (Array.isArray(compact.envBaseline) && compact.envBaseline.length === compact.envVector.length) {
-      compact.envBaseline[6] = 0;
-    }
-    st.agriHydroZero = true;
-  }
-  // —— #11 断环天工界：顶级轨道环带基座 ——
-  if (Number.isFinite(hooks.maxOrbitalDistricts) && isPlainObject(compact.orbitalLayer)) {
-    compact.orbitalLayer.maxOrbitalDistricts = hooks.maxOrbitalDistricts;
-  }
-  // —— #12 蜂巢溶洞死月：地下溶洞容量翻倍（4 → 8 槽，追加空槽）——
-  if (Number.isFinite(hooks.subUrbanSlotsMultiplier)
-    && isPlainObject(compact.subterraneanLayer)
-    && Array.isArray(compact.subterraneanLayer.subUrbanSlots)) {
-    const mul = Math.max(1, Math.round(hooks.subUrbanSlotsMultiplier));
-    const slots = compact.subterraneanLayer.subUrbanSlots;
-    const target = Math.min(16, slots.length * mul);
-    while (slots.length < target) slots.push(0);
-    st.subUrbanSlotsMultiplier = mul;
-  }
-  // —— #15 盖亚圣域：宜居度恒定 100%（planet 实体字段存在才写）——
-  if (Number.isFinite(hooks.habitabilityFixed) && Number.isFinite(planet.habitability)) {
-    planet.habitability = hooks.habitabilityFixed;
-  }
-  // —— #3 先驱者机械墓园：3 处高阶考古地标（buildingId 48 确定性选址）——
-  if (Number.isFinite(hooks.initialArchaeologyLandmarks) && Array.isArray(compact.tiles)) {
-    placeInitialLandmarks(world, compact, st, hooks.initialArchaeologyLandmarks);
-  }
-  // —— #1 沙漏双星：倒灌相位按当前 tick 初始化（前半掩埋 / 后半裸露）——
-  if (Number.isFinite(hooks.backflowPeriodDays)) {
-    const phase = Math.floor(tick / ticksFromDays(hooks.backflowPeriodDays)) % 2;
-    st.backflowPhase = phase;
-    st.backflowMineUpkeepPenaltyActive = phase === 0;
-    st.backflowRelicSpeedBonusActive = phase === 1;
-  }
-  return compact;
 }
 
-/* ============================== 周期步进（#0 / #1 / #2 / #6 / #15） ============================== */
-
-/** #0 潮汐火山期（每 90 天；已见周期游标推进，任意 tick 跳变不漏触发） */
-function stepTidalVolcano(world, planet, compact, st, tick, hooks) {
-  const periodTicks = ticksFromDays(hooks.tidalVolcanoPeriodDays);
-  const periodIndex = Math.floor(tick / periodTicks);
-  if (periodIndex <= st.tidalPeriodSeen) return null;
-  st.tidalPeriodSeen = periodIndex;
-  st.tidalSurgePeriod = periodIndex; // 本周期地热产出 +100%（geothermalSurgeActive 消费）
-
-  compact.envVector[0] = Math.min(100, compact.envVector[0] + (hooks.tidalVolcanoEnv0Spike || 20));
-
-  const seed = (typeof world.seed === 'number' && Number.isFinite(world.seed)) ? world.seed >>> 0 : 0;
-  let damaged = 0;
-  for (let i = 0; i < compact.tiles.length; i++) {
-    const t = compact.tiles[i] >>> 0;
-    const bid = (t >>> 16) & 0x3f;
-    if (bid < 1 || bid > 47) continue; // 仅采集/城市/工业建筑（48-63 先驱者奇观豁免）
-    if (((t >>> 26) & 0x3f & STATUS_FLAG.SHIELDED) !== 0) continue; // 护盾 Bit 28 免疫
-    if (sampleFloat01(seed, ARCH_SALT, compact.id, periodIndex * 256 + i) >= TIDAL_DAMAGE_PROB) continue;
-    compact.tiles[i] = devastateBuilding(t);
-    damaged++;
-  }
-  appendHistory(compact, tick, HIST_ARCHETYPE_TIDAL_VOLCANO, compact.colony ? compact.colony.ownerId : -1, damaged);
-  emit(world, 'TidalVolcanoEruption', {
-    planetId: planet.id,
-    periodIndex,
-    env0: compact.envVector[0],
-    damagedBuildings: damaged,
-  }, 'world');
-  return { periodIndex, damaged };
+function runDaily(world) {
+  for (const p of dailyCloses) p.fn(world);
 }
 
-/** #1 物质倒灌相位切换（每 240 天；前半掩埋维护 +35% / 后半遗迹裸露 S1 +60%） */
-function stepBackflow(world, planet, compact, st, tick, hooks) {
-  const periodTicks = ticksFromDays(hooks.backflowPeriodDays);
-  const phase = Math.floor(tick / periodTicks) % 2;
-  if (phase === st.backflowPhase) return null;
-  st.backflowPhase = phase;
-  st.backflowMineUpkeepPenaltyActive = phase === 0;
-  st.backflowRelicSpeedBonusActive = phase === 1;
-  appendHistory(compact, tick, HIST_ARCHETYPE_BACKFLOW_FLIP, compact.colony ? compact.colony.ownerId : -1, phase);
-  emit(world, 'MatterBackflowPhase', {
-    planetId: planet.id,
-    phase,
-    mineUpkeepPenaltyActive: phase === 0,
-    relicSpeedBonusActive: phase === 1,
-  }, 'world');
-  return { phase };
+function runMonthly(world) {
+  for (const p of monthlyCloses) p.fn(world);
 }
 
-/** #2 量子相移重组（未锁定每 60 天确定性重排 zoneSlots；锁定后停止重排） */
-function stepQuantumPhase(world, planet, compact, st, tick, hooks) {
-  const periodTicks = ticksFromDays(hooks.phaseShiftPeriodDays);
-  const periodIndex = Math.floor(tick / periodTicks);
-  if (periodIndex <= st.quantumPeriodSeen) return null;
-  st.quantumPeriodSeen = periodIndex;
-  if (st.quantumLocked === true) return { locked: true }; // 观测场锁定：边界消费、绝不重排
-
-  const zoneSlots = isPlainObject(compact.urbanZones) && Array.isArray(compact.urbanZones.zoneSlots)
-    ? compact.urbanZones.zoneSlots
-    : null;
-  if (!zoneSlots || zoneSlots.length < 2) return { periodIndex, reshuffled: false };
-
-  // —— Fisher-Yates 确定性重排（逐位 deriveSeed 抽取；值集守恒仅次序变化）——
-  const seed = (typeof world.seed === 'number' && Number.isFinite(world.seed)) ? world.seed >>> 0 : 0;
-  for (let i = zoneSlots.length - 1; i > 0; i--) {
-    const r = deriveSeed(seed, ARCH_SALT, compact.id, QUANTUM_STEP_BASE + periodIndex * 16 + i);
-    const j = r % (i + 1);
-    const tmp = zoneSlots[i];
-    zoneSlots[i] = zoneSlots[j];
-    zoneSlots[j] = tmp;
-  }
-  st.lastQuantumReshufflePeriod = periodIndex;
-  emit(world, 'QuantumPhaseShift', { planetId: planet.id, periodIndex }, 'world');
-  return { periodIndex, reshuffled: true };
+function runYearly(world) {
+  for (const p of yearlyCloses) p.fn(world);
 }
 
-/** #6 巨兽孵化卫星：envVector[0] > 80 → 复用 awakenLeviathan 惊醒狂暴幼兽 */
-function stepLeviathanNursery(world, planet, compact, hooks) {
-  if (!(compact.envVector[0] > hooks.wakeThresholdEnv0)) return null;
-  const leviathan = awakenLeviathan(world, planet);
-  return { leviathanAwakened: !!(leviathan && leviathan.active) };
+function phaseNames() {
+  return hourlyPhases.map((p) => p.name);
 }
 
-/** #15 盖亚圣域：envVector[7] > 35 → 必定刷远古净化守卫（棘轮）+ 未护盾建筑周期受损 */
-function stepGaiaGuardians(world, planet, compact, st, tick, hooks) {
-  const threshold = hooks.guardianThresholdEnv7;
-  const polluted = compact.envVector[7] > threshold;
-  let awakenedNow = false;
-
-  if (polluted && st.hostileGuardians !== true) {
-    st.hostileGuardians = true; // 棘轮：一旦苏醒不再回落
-    awakenedNow = true;
-    appendHistory(compact, tick, HIST_ARCHETYPE_GUARDIAN_AWAKENED, compact.colony ? compact.colony.ownerId : -1, Math.round(compact.envVector[7]));
-    emit(world, 'PurifierGuardiansAwakened', {
-      planetId: planet.id,
-      env7: compact.envVector[7],
-      threshold,
-    }, 'world');
-  }
-
-  if (!(st.hostileGuardians === true && polluted)) return awakenedNow ? { awakened: true } : null;
-
-  // —— 未护盾建筑周期受损（每次 Slow 访问 35%；护盾 Bit 28 免疫；确定性 roll）——
-  const seed = (typeof world.seed === 'number' && Number.isFinite(world.seed)) ? world.seed >>> 0 : 0;
-  let damaged = 0;
-  for (let i = 0; i < compact.tiles.length; i++) {
-    const t = compact.tiles[i] >>> 0;
-    const bid = (t >>> 16) & 0x3f;
-    if (bid < 1 || bid > 47) continue;
-    if (((t >>> 26) & 0x3f & STATUS_FLAG.SHIELDED) !== 0) continue;
-    if (sampleFloat01(seed, ARCH_SALT, compact.id, tick * 256 + i) >= PURIFIER_DAMAGE_PROB) continue;
-    compact.tiles[i] = devastateBuilding(t);
-    damaged++;
-  }
-  if (damaged > 0) st.purifierDamageEvents += damaged;
-  return { awakened: awakenedNow || undefined, damaged };
+/** 月度收口阶段名清单（注册序；SPEC-PLAN-049 CHK-49-04 月度序断言消费） */
+function monthlyNames() {
+  return monthlyCloses.map((p) => p.name);
 }
 
-/* ============================== Slow 桶钩子（setClockHooks 注入） ============================== */
-
-/**
- * 原型专属模拟步进（SpaceOperaClock Slow 桶 slowPlanetHook 注册形态）。
- *
- * 首行守卫 world.spaceOperaState（未挂载容器 → null 零写入）；仅处理已挂载
- * compactState 的行星（惰性容器守卫，绝不 ensure）。周期判定按「已见周期游标」
- * 推进：任意 tick 跳变不漏触发、重复访问不重放。
- *
- * @param {object} world - 世界根对象
- * @param {object} planet - 行星实体
- * @param {number} dtDay - 本次步进折算天数（Slow 桶 30 tick = 1.25 天；离散事件步仅契约占位）
- * @returns {object|null} 本步原型事件摘要（无事件返回 null）
- */
-function stepArchetypeMechanics(world, planet, dtDay) {
-  void dtDay; // 契约占位：周期判定走绝对 tick 已见游标，杜绝浮点累积误触发
-  if (!world || typeof world !== 'object' || !world.spaceOperaState) return null;
-  if (!planet || typeof planet !== 'object') return null;
-  const compact = planet.compactState; // 惰性容器守卫：未触达行星零写入零漂移
-  if (!compact || typeof compact !== 'object') return null;
-  if (!Array.isArray(compact.envVector) || compact.envVector.length < 8) return null;
-
-  const st = ensureArchetypeState(compact);
-  applyArchetypeProfile(planet, world); // 幂等：已应用则零重写
-
-  const tick = clampTick(world.tick);
-  const arch = getArchetype(compact.archetypeId & 0x0f);
-  switch (arch.id) {
-    case 0: return stepTidalVolcano(world, planet, compact, st, tick, arch.hooks);
-    case 1: return stepBackflow(world, planet, compact, st, tick, arch.hooks);
-    case 2: return stepQuantumPhase(world, planet, compact, st, tick, arch.hooks);
-    case 6: return stepLeviathanNursery(world, planet, compact, arch.hooks);
-    case 15: return stepGaiaGuardians(world, planet, compact, st, tick, arch.hooks);
-    default: return null; // #3/#4/#5/#7/#8/#9/#10/#11/#12/#13/#14 为被动钩子（无周期步进）
-  }
-}
-
-/* ============================== 原型钩子消费口（集成层/结算层读取） ============================== */
-
-/**
- * #0 地热产出 +100% 旗标（火山期存续判定）：当前 tick 所属周期 === 最后喷发周期。
- */
-function geothermalSurgeActive(compact, tick) {
-  if (!isPlainObject(compact) || !isPlainObject(compact.archetypeState)) return false;
-  const st = compact.archetypeState;
-  if (!Number.isFinite(st.tidalSurgePeriod) || st.tidalSurgePeriod < 0) return false;
-  const arch = getArchetype(compact.archetypeId & 0x0f);
-  if (arch.id !== 0) return false;
-  return Math.floor(clampTick(tick) / ticksFromDays(arch.hooks.tidalVolcanoPeriodDays)) === st.tidalSurgePeriod;
-}
-
-/** #1 掩埋相位（矿井维护费 +35%）旗标 */
-function backflowMineUpkeepPenaltyActive(compact) {
-  return !!(isPlainObject(compact) && isPlainObject(compact.archetypeState)
-    && compact.archetypeState.backflowMineUpkeepPenaltyActive === true);
-}
-
-/** #1 裸露相位（先驱者遗迹 S1 考古速度 +60%）旗标 */
-function backflowRelicSpeedBonusActive(compact) {
-  return !!(isPlainObject(compact) && isPlainObject(compact.archetypeState)
-    && compact.archetypeState.backflowRelicSpeedBonusActive === true);
-}
-
-/**
- * #2 物理科研产出加成（倍率增量）：锁定（quantumLocked）→ +120%（1.2），否则 0。
- */
-function quantumPhysicsResearchBonus(compact) {
-  if (!isPlainObject(compact) || !isPlainObject(compact.archetypeState)) return 0;
-  const arch = getArchetype(compact.archetypeId & 0x0f);
-  if (arch.id !== 2) return 0;
-  return compact.archetypeState.quantumLocked === true ? arch.hooks.lockedPhysicsBonus : 0;
-}
-
-/**
- * #2 量子相位锁定切换（LockQuantumPhasePlanet 命令领域落点；M2 集成 handler 注入）。
- * engageLock=true → quantumLocked=true + 反应堆维护旗标 reactorMaintenance=true；
- * engageLock=false → 双旗标清零（观测场撤收）。
- *
- * @param {object} compact - 紧凑 PlanetState 容器
- * @param {boolean} engageLock - true 张开观测场锁定 | false 撤收
- * @returns {object} compact.archetypeState
- */
-function setQuantumPhaseLock(compact, engageLock) {
-  const st = ensureArchetypeState(compact);
-  st.quantumLocked = engageLock === true;
-  st.reactorMaintenance = st.quantumLocked; // 反应堆维护旗标随锁定同步
-  return st;
-}
-
-/**
- * #5 永昼永夜潮汐锁定界晨昏带建造检定：列 x ∈ hook.terminatorColumns（含端点）
- * 无惩罚；其余列建造罚。非 #5 原型恒无惩罚（true）。
- *
- * @param {object} compact - 紧凑 PlanetState 容器
- * @param {number} x - 地表列号 0..15
- * @returns {boolean} true = 无惩罚建造
- */
-function canBuildWithoutPenalty(compact, x) {
-  if (!isPlainObject(compact)) return true;
-  const arch = getArchetype(compact.archetypeId & 0x0f);
-  const cols = arch.hooks.terminatorColumns;
-  if (!Array.isArray(cols) || cols.length !== 2) return true;
-  const col = Number(x);
-  if (!Number.isFinite(col)) return false;
-  return col >= cols[0] && col <= cols[1];
-}
-
-/**
- * #7 全视晶化共鸣星情报加成汇总：遍历全部已挂载 compactState 的行星，对
- * 已殖民（colony.ownerId ≥ 0）的 archetype 7 行星逐星累计解密 +2 / 探测半径 +80%。
- *
- * @param {object} world - 世界根对象
- * @returns {{decryption: number, detectionBonus: number}} 情报修正合计
- */
-function crystallineIntelBonus(world) {
-  const bonus = { decryption: 0, detectionBonus: 0 };
-  const planets = world && world.entities && world.entities.planets ? world.entities.planets : {};
-  for (const key of Object.keys(planets).sort()) {
-    const compact = planets[key] && planets[key].compactState;
-    const colony = compact && compact.colony;
-    if (!compact || !colony || !(Number(colony.ownerId) >= 0)) continue;
-    const arch = getArchetype(compact.archetypeId & 0x0f);
-    if (arch.id !== 7) continue;
-    bonus.decryption += arch.hooks.decryptBonus;
-    bonus.detectionBonus += arch.hooks.detectionBonus;
-  }
-  return bonus;
-}
-
-/**
- * #8 万丈冰壳暗海界轨道轰炸伤害乘数：archetype 8 → 0.25（-75%），其余 → 1.0。
- */
-function bombardmentDamageMultiplier(compact) {
-  if (!isPlainObject(compact)) return 1.0;
-  const arch = getArchetype(compact.archetypeId & 0x0f);
-  const mult = arch.hooks.bombardmentDamageMultiplier;
-  return Number.isFinite(mult) ? mult : 1.0;
-}
-
-/* ============================== 时钟接线（动态 import，避免阶段序扰动） ============================== */
-// 静态打包产物中动态 import 相对说明符不可达（404 静默降级）——统一静态接线（SpaceOperaWiring.js）。
-const { setClockHooks: setClockHooks } = __require("src/simulation/SpaceOperaClock.js");
-
-/** Slow 桶钩子入口（setClockHooks.slowPlanetHook 注册形态；签名 (world, planet, dtDay)） */
-function slowPlanetHookEntry(world, planet, dtDay) {
-  return stepArchetypeMechanics(world, planet, dtDay);
-}
-
-let hookInjectState = 'idle'; // idle → injecting → registered | failed（注册完成以 .then 内为准）
-let hookInjectPromise = null;
-
-/** 动态 import SpaceOperaClock 并 setClockHooks 注入 slowPlanetHook（幂等） */
-function injectSlowPlanetHook() {
-  if (hookInjectState !== 'idle') return;
-  setClockHooks({ slowPlanetHook: slowPlanetHookEntry });
-  hookInjectState = 'registered';}
-
-/**
- * 幂等预注入 Slow 桶钩子（返回注入完成的 Promise）。
- * 同步 import 本模块后「立即同步跑 tick 循环」的调用方（套件/集成层）必须先
- * await ensureArchetypeHookInjected()，否则该轮同步循环内 slowPlanetHook 尚未就位。
- * 注入完成判定以 setClockHooks 实际执行（registered）为准，杜绝 .then 未落地即放行。
- *
- * @returns {Promise<void>} 注入完成（或已注入/已降级）信号
- */
-function ensureArchetypeHookInjected() {
-  injectSlowPlanetHook();
-  return Promise.resolve();
-}
-
-// import 副作用：向 SpaceOperaClock 注册 slowPlanetHook（动态 import 经 setClockHooks 注入；
-// 函数体首行守卫 world.spaceOperaState，未触达世界/金快照 8be8ce2c 零漂移；
-// 注入完成判定以 hookInjectState='registered' 为准 —— 套件须 await ensureArchetypeHookInjected()）
-injectSlowPlanetHook();
-
-Object.assign(__exports, { applyArchetypeProfile, stepArchetypeMechanics, geothermalSurgeActive, backflowMineUpkeepPenaltyActive, backflowRelicSpeedBonusActive, quantumPhysicsResearchBonus, setQuantumPhaseLock, canBuildWithoutPenalty, crystallineIntelBonus, bombardmentDamageMultiplier, ensureArchetypeHookInjected });
-
-});
-__register("src/domain/ground/planetaryThreat.js", function (__exports, __require) {
-/**
- * domain/ground/planetaryThreat.js — 开采警戒指数与阶梯威胁（doc20 v0.6 WP-3/WP-4）
- *
- * PTI 微分演化方程（doc20 WP-3.2，0..1000 千分比口径）：
- *   H_t = clamp(H_{t-1} + Δmine + Δind + Δcatapult − Δrestore − Δdampener − λH_{t-1}, 0, 1000)
- *   Δmine = +2.0 × 运行矿井数；Δind = +0.4 × 工业节点数；Δcatapult = +25.0/次发射；
- *   Δrestore = −1.5 × (plant/RestoreTerrain) 次数；Δdampener = −6.0 × 抑制塔数；
- *   λ = 1.5%/小时（自然阻尼——世界不会永远惩罚玩家，doc16 §11）。
- *
- * 阶梯响应（doc16 §4.17 / doc20 WP-3.4）：
- *   Tier 0 潜伏（0-199）→ Tier 1 侦测（200-399，120s 侦察波）→
- *   Tier 2 袭扰（400-649，90s 侧翼波，优先打输电塔/传送带）→
- *   Tier 3 围攻（650-849，75s 攻城波）→ Tier 4 利维坦苏醒（850-1000）。
- *
- * 双派系哲学（doc20 WP-3.3）：远古哨卫（机械/极地/晶原主题）优先打击电网与
- * 弹射井；原生异虫（自然主题）优先打击农场/矿井/居民区。
- *
- * 确定性红线：零 Math.random()、零 world.rng 消费（波次构成由 planetSeed 派生）。
- */
-
-const { emit: emit, chronicle: chronicle } = __require("src/core/eventBus.js");
-const { clamp: clamp } = __require("src/core/math.js");
-const { derivePlanetSeedsExtended: derivePlanetSeedsExtended } = __require("src/domain/ground/planetSeeds.js");
-const { ensurePlanetThreat: ensurePlanetThreat } = __require("src/domain/ground/planetWeather.js");
-const { ensurePlanetInd: ensurePlanetInd } = __require("src/domain/industry/planetaryLogistics.js");
-const { onLeviathanDefeated: onLeviathanDefeated } = __require("src/domain/diplomacy/galacticSenateAndCrisisArc.js");
-
-/** 警戒阶级阈值（PTI 0..1000） */
-const PTI_THRESHOLDS = Object.freeze([0, 200, 400, 650, 850]);
-
-/** 增援波次间隔（任务秒；Tier 1/2/3） */
-const WAVE_INTERVAL_S = Object.freeze({ 1: 120, 2: 90, 3: 75 });
-
-/** 弹射单次激发（doc20 WP-3.2 契约） */
-const PTI_CATAPULT_SPIKE = 25.0;
-
-/** 利维坦原型（按行星类别确定性派生） */
-function leviathanArchetypeOf(planet) {
-  if (planet.category === 'lava') return 'lev_magma_colossus';
-  if (planet.category === 'ocean') return 'lev_abyssal_kraken';
-  return 'lev_automata_dreadnought';
-}
-
-/** 主题 → 威胁派系（doc20 WP-3.3：机械/极地/晶原 = 远古哨卫，其余 = 原生异虫） */
-function factionOf(planet) {
-  const sentinelThemes = ['ancient_megastructure', 'magnetar_aurora', 'prism_crystal', 'dry_night_polar', 'permafrost_furnace', 'glassstorm_barrens', 'fractured_moon', 'cloud_giant_atolls'];
-  return sentinelThemes.includes(planet.primaryThemeId) ? 'sentinel' : 'xeno_swarm';
-}
-
-/**
- * 每战略小时 PTI 微分推进（HourlySystems production 后调用；O(nodes) 线性）。
- * @returns {{pti:number, tier:number, escalated:boolean}}
- */
-function tickPlanetaryThreatIndex(world, planet) {
-  const th = ensurePlanetThreat(planet);
-  const ind = ensurePlanetInd(planet);
-
-  // 1) 扰动增量与消减项统计（只读账本化状态，不重载地形场）
-  const colony = planet.colonyId ? world.entities.colonies[planet.colonyId] : null;
-  const buildings = (colony && colony.buildings) || [];
-  let mines = 0;
-  let dampeners = 0;
-  for (const b of buildings) {
-    if (b.state === 'active' || b.state === undefined) {
-      if (String(b.defId || '').startsWith('bld_mine')) mines++;
-      if (b.defId === 'bld_sonic_dampener') dampeners++;
-    }
-  }
-  const indNodes = (ind.nodes || []).length;
-  const edits = planet.terrainEdits && Array.isArray(planet.terrainEdits.ops)
-    ? planet.terrainEdits.ops : [];
-  let restores = 0;
-  for (const op of edits) {
-    if (op.kind === 'plant' || op.kind === 'restore') restores++;
-  }
-
-  const deltaMine = 2.0 * mines;
-  const deltaInd = 0.4 * indNodes;
-  const deltaCatapult = (planet.threat.pendingCatapultSpike || 0);
-  const deltaRestore = 1.5 * restores;
-  const deltaDampener = 6.0 * dampeners;
-  const damping = th.pti * 0.015; // λ = 1.5%/小时
-
-  th.pti = Math.round(clamp(th.pti + deltaMine + deltaInd + deltaCatapult - deltaRestore - deltaDampener - damping, 0, 1000));
-  planet.threat.pendingCatapultSpike = 0; // 单次激发消费即清
-
-  // 2) 阶梯跃迁判定
-  let newTier = 0;
-  for (let t = PTI_THRESHOLDS.length - 1; t >= 0; t--) {
-    if (th.pti >= PTI_THRESHOLDS[t]) { newTier = t; break; }
-  }
-  let escalated = false;
-  if (newTier > th.tier) {
-    th.tier = newTier;
-    escalated = true;
-    th.waveCdTicks = 2; // 2 战略小时后首波
-    emit(world, 'PlanetaryThreatEscalated', { planetId: planet.id, tier: newTier, pti: th.pti }, 'ground');
-    if (newTier >= 4 && !th.leviathan) {
-      awakenLeviathan(world, planet);
-    }
-  } else if (newTier < th.tier && (!th.leviathan || !th.leviathan.active)) {
-    th.tier = newTier; // 平降（恢复手段奏效）
-  }
-  if (th.waveCdTicks > 0) th.waveCdTicks--;
-  return { pti: th.pti, tier: th.tier, escalated };
-}
-
-/** 弹射发射瞬间的 PTI 激发（catapult.js 发射路径调用；hourly 结算时入账） */
-function spikeCatapultLaunch(planet) {
-  ensurePlanetThreat(planet);
-  planet.threat.pendingCatapultSpike = (planet.threat.pendingCatapultSpike || 0) + PTI_CATAPULT_SPIKE;
-}
-
-/**
- * Tier 4：超巨型漫游利维坦苏醒（3600 HP / 14m 级；三阶段部位破坏由战斗层消费）。
- * 持久化紧凑元组：{ active, archetype, hpPermille, wx, wz, phase }
- */
-function awakenLeviathan(world, planet) {
-  const th = ensurePlanetThreat(planet);
-  if (th.leviathan && th.leviathan.active) return th.leviathan;
-  const seeds = derivePlanetSeedsExtended(world, planet.id);
-  const ang = ((seeds.faunaSeed(99) % 3600) / 3600) * Math.PI * 2;
-  th.leviathan = {
-    active: true,
-    archetype: leviathanArchetypeOf(planet),
-    hpPermille: 1000,
-    wx: Math.round(Math.cos(ang) * 190),
-    wz: Math.round(Math.sin(ang) * 190),
-    phase: 1,
-    backCoreBroken: 0,
-    toxinSacsBroken: 0,
-    staggerT: 0,
-  };
-  planet.threat.catapultLock = true; // 利维坦场锁死货运弹射井（doc20 WP-4 战略后果）
-  chronicle(world, 'crisis', `行星 ${planet.name} 采掘扰动突破临界，超巨型利维坦苏醒！`, { planetId: planet.id });
-  emit(world, 'LeviathanAwakened', { planetId: planet.id, archetype: th.leviathan.archetype }, 'ground');
-  return th.leviathan;
-}
-
-/**
- * 利维坦部位破坏（战斗层命中回执）：背部散热晶核/双侧毒素腺囊独立判定体积，
- * 击碎触发 6.0s stagger 瘫痪硬直并永久关闭该部位 AoE。
- */
-function breakLeviathanPart(world, planet, part) {
-  const th = ensurePlanetThreat(planet);
-  const lev = th.leviathan;
-  if (!lev || !lev.active) return { ok: false, reason: 'NoLeviathan' };
-  if (part !== 'back_core' && part !== 'toxin_sacs') return { ok: false, reason: 'BadPart' };
-  if (part === 'back_core' && !lev.backCoreBroken) {
-    lev.backCoreBroken = 1;
-    lev.staggerT = 6.0;
-  } else if (part === 'toxin_sacs' && !lev.toxinSacsBroken) {
-    lev.toxinSacsBroken = 1;
-    lev.staggerT = 6.0;
-  } else {
-    return { ok: true, already: true };
-  }
-  emit(world, 'LeviathanPartBroken', { planetId: planet.id, part, staggerS: 6.0 }, 'ground');
-  return { ok: true, staggerS: 6.0 };
-}
-
-/**
- * 利维坦讨伐战果（战斗层上报）：PTI 归零、弹射井解锁、传奇战利品入账。
- * @returns {{ok:boolean, loot?:object}}
- */
-function reportLeviathanDefeated(world, planet) {
-  const th = ensurePlanetThreat(planet);
-  const lev = th.leviathan;
-  if (!lev || !lev.active) return { ok: false, reason: 'NoLeviathan' };
-  lev.active = false;
-  lev.phase = 0;
-  th.pti = 0;
-  th.tier = 0;
-  th.catapultLock = false;
-  const fid = world.playerFactionId;
-  const loot = { exoticMatter: 5, leviathanGene: 1 };
-  if (fid && world.economy.ledgers[fid]) {
-    const led = world.economy.ledgers[fid];
-    led.balances.exoticMatter = (led.balances.exoticMatter || 0) + loot.exoticMatter;
-  }
-  chronicle(world, 'crisis', `行星 ${planet.name} 利维坦讨伐成功：PTI 归零，先驱者奇异物质 ×5 入账`, { planetId: planet.id });
-  emit(world, 'LeviathanDefeated', { planetId: planet.id, loot }, 'ground');
-  // —— 42 号总纲 §二.7 第四幕「巨兽凯旋大游行局势」实战可达整改：巨兽击杀结算处
-  //    直连 LEVIATHAN_PARADE 局势唯一生成口（域内幂等：同星系已有游行复用现有局势；
-  //    金快照/未挂 spaceOperaState 世界首行守卫返回 null 零写入零漂移；
-  //    eventBus 'LeviathanDefeated' 监听器路径保留，双路径经 onLeviathanDefeated 幂等收敛）——
-  onLeviathanDefeated(world, planet.systemId);
-  return { ok: true, loot };
-}
-
-/**
- * 阶梯增援波次构成（纯函数；GroundMission/GroundView 刷怪消费）。
- * 编制随 Tier 与派系哲学差异化（哨卫打电网/异虫打农场——目标偏好由调用方消费）。
- */
-function composeWave(world, planet, tier) {
-  const seeds = derivePlanetSeedsExtended(world, planet.id);
-  const s = seeds.faunaSeed(50 + tier * 7 + (planet.threat ? planet.threat.wavesSpawned || 0 : 0));
-  const fac = factionOf(planet);
-  if (tier <= 1) {
-    return { faction: fac, units: [{ kind: 'grunt', count: 2 + (s % 2) }], targetPref: 'probe' };
-  }
-  if (tier === 2) {
-    return { faction: fac, units: [{ kind: 'grunt', count: 4 }, { kind: 'heavy', count: 1 }], targetPref: fac === 'sentinel' ? 'power_grid' : 'mines_farms', flank: true };
-  }
-  if (tier === 3) {
-    return { faction: fac, units: [{ kind: 'grunt', count: 6 }, { kind: 'heavy', count: 2 }, { kind: 'mortar', count: 1 }], targetPref: 'power_core', flank: true };
-  }
-  return { faction: fac, units: [{ kind: 'leviathan', count: 1 }], targetPref: 'all' };
-}
-
-Object.assign(__exports, { PTI_THRESHOLDS, WAVE_INTERVAL_S, PTI_CATAPULT_SPIKE, leviathanArchetypeOf, factionOf, tickPlanetaryThreatIndex, spikeCatapultLaunch, awakenLeviathan, breakLeviathanPart, reportLeviathanDefeated, composeWave });
+Object.assign(__exports, { registerHourly, registerDaily, registerMonthly, registerYearly, runHourly, runDaily, runMonthly, runYearly, phaseNames, monthlyNames });
 
 });
 __register("src/domain/diplomacy/galacticSenateAndCrisisArc.js", function (__exports, __require) {
@@ -13719,7 +14009,7 @@ __register("src/domain/diplomacy/galacticSenateAndCrisisArc.js", function (__exp
  */
 
 const { registerSituationArc: registerSituationArc, registerSituationMonthlyHook: registerSituationMonthlyHook, spawnSituation: spawnSituation, getSituation: getSituation, switchSituationApproach: switchSituationApproach, listActiveSituations: listActiveSituations } = __require("src/domain/events/situationEngine.js");
-const { ensureSpaceOperaState: ensureSpaceOperaState } = __require("src/domain/world/worldMigration.js");
+const { ensureSpaceOperaState: ensureSpaceOperaState } = __require("src/domain/world/spaceOperaState.js");
 const { DOMAIN_SALTS: DOMAIN_SALTS, deriveSeed: deriveSeed, sampleFloat01: sampleFloat01 } = __require("src/domain/world/deterministicRng.js");
 const { packTile: packTile, unpackTile: unpackTile, ensureCompactPlanetState: ensureCompactPlanetState, numericEntityKey: numericEntityKey, appendHistory: appendHistory, HISTORY_EVENT_CODES: HISTORY_EVENT_CODES } = __require("src/domain/planets/planetStateSchema.js");
 const { credit: credit, debit: debit, FLOW: FLOW } = __require("src/domain/economy/ledger.js");
@@ -13742,6 +14032,8 @@ const COMMISSION_PAY_PER_FLEET = 400;
 const CHOAM_DIVIDEND_SHARE_THRESHOLD = 30;
 const CHOAM_DIVIDEND_MULT = 1.15;
 const CHOAM_EMBARGO_SHARE_THRESHOLD = 50;
+/** 每 1% CHOAM 股份基准价（doc56 Task 56.2 §3 / SPEC-PLAN-058 Task 58.2：100 信用点，5% = 500） */
+const CHOAM_SHARE_CREDITS_PER_PCT = 100;
 
 /** 宫殿间谍翼升级费用与特工招募乘子（费用为 M3 裁决值；×1.5 为 doc46 精确值） */
 const PALACE_ESPIONAGE_UPGRADE_CREDITS = 8000;
@@ -13918,11 +14210,34 @@ function adjustChoamShares(world, delta) {
   const soState = ensureS7State(world);
   const cur = Number.isFinite(soState.landsraad.choamShares) ? soState.landsraad.choamShares : 0;
   const d = Number.isFinite(delta) ? delta : 0;
+  if (d === 0) return cur;
   const next = Math.max(0, Math.min(100, cur + d));
+  const actualDelta = next - cur;
+  if (actualDelta === 0) return cur;
+
+  // SPEC-PLAN-058 Task 58.2（BUG-03 / doc56 Task 56.2 §3）：真实信用点结算。
+  // 旧实现只改持股数值不扣账，形成「白嫖垄断股权」漏洞；买入按实际成交量扣款，
+  // 抛售按实际成交量回款，余额不足由 debit 失败抛 SO 错误 → 命令总线整体回滚。
+  const pf = world && world.playerFactionId;
+  const hasLedger = !!(pf && world.economy && world.economy.ledgers
+    && world.economy.ledgers[pf]);
+  if (hasLedger) {
+    if (actualDelta > 0) {
+      const cost = actualDelta * CHOAM_SHARE_CREDITS_PER_PCT;
+      if (!debit(world, pf, 'credits', cost, 'choamBuy', 's7')) {
+        throw new Error(`SO: 信用点不足 ${cost}，无法买入 ${actualDelta}% CHOAM 股份`);
+      }
+    } else {
+      const refund = Math.abs(actualDelta) * CHOAM_SHARE_CREDITS_PER_PCT;
+      credit(world, pf, 'credits', refund, 'choamSell', 's7');
+    }
+  }
+
   soState.landsraad.choamShares = next;
   emit(world, 'ChoamSharesAdjusted', {
     choamShares: next,
-    delta: d,
+    delta: actualDelta,
+    creditsDelta: hasLedger ? -actualDelta * CHOAM_SHARE_CREDITS_PER_PCT : 0,
     dividendMult: choamTradeDividendMult(world),
     embargoLeverage: hasEmbargoLeverage(world),
   }, 'diplomacy');
@@ -13964,7 +14279,11 @@ const LANDSRAAD_BILL_KINDS = Object.freeze([
   'CHARTER_SANCTION',
   'CHARTER_SUBSIDY',
   'CHARTER_MANDATE',
+  'CHARTER_STARFIRE_PACT', // SPEC-PLAN-059 Task 59.3 / doc56 赛道 D：第 4 宪章
 ]);
+/** 星火公约通过奖励（科研数据）与全银河科研速度加成（doc56 赛道 D：+20%） */
+const STARFIRE_PACT_RESEARCH_GRANT = 120;
+const STARFIRE_PACT_RESEARCH_MULT = 1.20;
 
 /** 提案门槛：兰兹拉德 standing ≥ 10 方可提案（议会发言权最低席位） */
 const LANDSRAAD_PROPOSE_MIN_STANDING = 10;
@@ -14132,6 +14451,17 @@ function settleLandsraadBillMonthly(world) {
   }
   if (!passed) {
     landsraad.standing = Math.max(0, Math.min(100, standing - LANDSRAAD_VETO_STANDING_REBOUND));
+  }
+  // SPEC-PLAN-059 Task 59.3（doc56 赛道 D）：星火科研共享公约通过效果
+  if (passed && bill.kind === 'CHARTER_STARFIRE_PACT') {
+    if (pf && world.economy) {
+      credit(world, pf, 'researchData', STARFIRE_PACT_RESEARCH_GRANT,
+        'charterStarfire', `bill_${bill.id}`, FLOW.TRANSFER);
+    }
+    landsraad.starfirePactActive = true;
+    chronicle(world, 'diplomacy',
+      `大议会已签署《星火科研共享公约》：全银河科研数据网络接入，获得 ${STARFIRE_PACT_RESEARCH_GRANT} 科研数据`,
+      { billKind: bill.kind });
   }
   if (passed && bill.kind === 'CHARTER_SUBSIDY' && pf && world.economy) {
     credit(world, pf, 'credits', COMMISSION_PAY_BASE * LANDSRAAD_SUBSIDY_CREDITS_MULT,
@@ -14968,7 +15298,1042 @@ function stepEndgameCrisisMonthly(world) {
 registerSituationMonthlyHook(stepGalacticSenateMonthly);
 registerSituationMonthlyHook(stepEndgameCrisisMonthly);
 
-Object.assign(__exports, { COMMISSION_PAY_BASE, COMMISSION_PAY_PER_FLEET, CHOAM_DIVIDEND_SHARE_THRESHOLD, CHOAM_DIVIDEND_MULT, CHOAM_EMBARGO_SHARE_THRESHOLD, PALACE_ESPIONAGE_UPGRADE_CREDITS, PALACE_ESPIONAGE_RECRUIT_MULT, SPY_NETWORK_MAX_LAYERS, SPY_LAYER_UP_INTEL_COST, DOUBLE_AGENT_INTEL_COST, ASSASSINATE_OPINION_HIT, ASSASSINATE_TRUST_HIT, ENDGAME_CRISIS_KINDS, PRETHORYN_REINFORCE_SCHEDULE, UNBIDDEN_ANCHOR_COUNT, UNBIDDEN_SHARE_GROWTH_PER_MONTH, UNBIDDEN_RIVAL_SHARE_THRESHOLD, CONTINGENCY_OUTPUT_MULT, CONTINGENCY_DEFECT_CHANCE, CONTINGENCY_CORE_COUNT, LEVIATHAN_PARADE_UNITY_CAP, PARADE_REORGANIZE_UNITY_COST, PARADE_ENCOURAGE_MONTHLY, PARADE_SUPPRESS_MONTHLY, PARADE_ENCOURAGE_HAPPINESS_MULT, ENDGAME_CRISIS_MIN_MONTH, ENDGAME_CRISIS_MIN_COLONIZED_SHARE, ENDGAME_CRISIS_MONTHLY_CHANCE, ENDGAME_CRISIS_COOLDOWN_MONTHS, ensureS7State, commissionMonthlyPay, signCommission, adjustChoamShares, adjustLandsraadStanding, choamTradeDividendMult, hasEmbargoLeverage, LANDSRAAD_BILL_KINDS, LANDSRAAD_PROPOSE_MIN_STANDING, LANDSRAAD_PLAYER_VOTE_WEIGHT, LANDSRAAD_EMBARGO_VOTE_MULT, LANDSRAAD_FACTION_BASE_WEIGHT, LANDSRAAD_FACTION_SUPPORT_P, LANDSRAAD_WAR_OPPOSE_MULT, LANDSRAAD_HOSTILE_OPPOSE_MULT, LANDSRAAD_ABSTAIN_SPY_LAYERS, LANDSRAAD_SUBSIDY_CREDITS_MULT, LANDSRAAD_MANDATE_STANDING_BONUS, LANDSRAAD_SANCTION_OPINION_HIT, LANDSRAAD_SANCTION_TRUST_HIT, LANDSRAAD_VETO_STANDING_REBOUND, getActiveLandsraadBill, proposeLandsraadBill, settleLandsraadBillMonthly, upgradePalaceEspionage, spyNetwork, layerUpSpyNetwork, plantDoubleAgent, factionLeaderOf, assassinate, startEndgameCrisis, galaxyShareOf, prethorynReinforcementsPerYear, purifyInfestedWorld, dimensionalPortalInvulnerable, removeDimensionalAnchor, contingencyMachineOutputMult, contingencyDefectionRoll, destroyContingencyCore, deployEncryptionFirewall, empireUnityMonthlyOutput, grantUnity, spendUnity, empireUnityBalance, onLeviathanDefeated, manageLeviathanParade, colonizedSystemShare, stepEndgameCrisisOrganicTrigger, stepGalacticSenateMonthly, stepEndgameCrisisMonthly });
+Object.assign(__exports, { COMMISSION_PAY_BASE, COMMISSION_PAY_PER_FLEET, CHOAM_DIVIDEND_SHARE_THRESHOLD, CHOAM_DIVIDEND_MULT, CHOAM_EMBARGO_SHARE_THRESHOLD, CHOAM_SHARE_CREDITS_PER_PCT, PALACE_ESPIONAGE_UPGRADE_CREDITS, PALACE_ESPIONAGE_RECRUIT_MULT, SPY_NETWORK_MAX_LAYERS, SPY_LAYER_UP_INTEL_COST, DOUBLE_AGENT_INTEL_COST, ASSASSINATE_OPINION_HIT, ASSASSINATE_TRUST_HIT, ENDGAME_CRISIS_KINDS, PRETHORYN_REINFORCE_SCHEDULE, UNBIDDEN_ANCHOR_COUNT, UNBIDDEN_SHARE_GROWTH_PER_MONTH, UNBIDDEN_RIVAL_SHARE_THRESHOLD, CONTINGENCY_OUTPUT_MULT, CONTINGENCY_DEFECT_CHANCE, CONTINGENCY_CORE_COUNT, LEVIATHAN_PARADE_UNITY_CAP, PARADE_REORGANIZE_UNITY_COST, PARADE_ENCOURAGE_MONTHLY, PARADE_SUPPRESS_MONTHLY, PARADE_ENCOURAGE_HAPPINESS_MULT, ENDGAME_CRISIS_MIN_MONTH, ENDGAME_CRISIS_MIN_COLONIZED_SHARE, ENDGAME_CRISIS_MONTHLY_CHANCE, ENDGAME_CRISIS_COOLDOWN_MONTHS, ensureS7State, commissionMonthlyPay, signCommission, adjustChoamShares, adjustLandsraadStanding, choamTradeDividendMult, hasEmbargoLeverage, LANDSRAAD_BILL_KINDS, STARFIRE_PACT_RESEARCH_GRANT, STARFIRE_PACT_RESEARCH_MULT, LANDSRAAD_PROPOSE_MIN_STANDING, LANDSRAAD_PLAYER_VOTE_WEIGHT, LANDSRAAD_EMBARGO_VOTE_MULT, LANDSRAAD_FACTION_BASE_WEIGHT, LANDSRAAD_FACTION_SUPPORT_P, LANDSRAAD_WAR_OPPOSE_MULT, LANDSRAAD_HOSTILE_OPPOSE_MULT, LANDSRAAD_ABSTAIN_SPY_LAYERS, LANDSRAAD_SUBSIDY_CREDITS_MULT, LANDSRAAD_MANDATE_STANDING_BONUS, LANDSRAAD_SANCTION_OPINION_HIT, LANDSRAAD_SANCTION_TRUST_HIT, LANDSRAAD_VETO_STANDING_REBOUND, getActiveLandsraadBill, proposeLandsraadBill, settleLandsraadBillMonthly, upgradePalaceEspionage, spyNetwork, layerUpSpyNetwork, plantDoubleAgent, factionLeaderOf, assassinate, startEndgameCrisis, galaxyShareOf, prethorynReinforcementsPerYear, purifyInfestedWorld, dimensionalPortalInvulnerable, removeDimensionalAnchor, contingencyMachineOutputMult, contingencyDefectionRoll, destroyContingencyCore, deployEncryptionFirewall, empireUnityMonthlyOutput, grantUnity, spendUnity, empireUnityBalance, onLeviathanDefeated, manageLeviathanParade, colonizedSystemShare, stepEndgameCrisisOrganicTrigger, stepGalacticSenateMonthly, stepEndgameCrisisMonthly });
+
+});
+__register("src/domain/diplomacy/war.js", function (__exports, __require) {
+/**
+ * domain/diplomacy/war.js — 战争状态机、条约计时与关系维护（任务书 5.1 / 5.4）
+ *
+ * 当前版本：条约到期处理、战争疲劳累积、关系维度自然回归。
+ * 宣战/和谈/占领逻辑随阶段09扩展（均通过命令总线）。
+ */
+
+const { emit: emit } = __require("src/core/eventBus.js");
+const { relationKey: relationKey } = __require("src/core/ids.js");
+const { RNG: RNG } = __require("src/core/rng.js");
+
+// ———— 战争终局：占领积分 / 和谈 / 割地吞并（doc5 TD2 / DIP-02） ————
+
+/** 占领吞并积分阈值：占领 1 个星系（30 分）即可在战争结束时主张割地 */
+const OCCUPATION_ANNEX_THRESHOLD = 30;
+const OCCUPIED_SYSTEM_SCORE = 30;
+
+/**
+ * 战争积分（确定性）：占领星系 × 30 + 敌方战争疲劳 × 0.5。
+ * 和谈接受概率与占领吞并阈值共用此口径。
+ */
+function warScore(war, factionId) {
+  const enemy = war.attackers.includes(factionId) ? war.defenders : war.attackers;
+  let occupied = 0;
+  for (const sid of Object.keys(war.occupiedSystems || {})) {
+    if (war.occupiedSystems[sid] === factionId) occupied += 1;
+  }
+  let enemyExhaust = 0;
+  for (const fid of enemy) enemyExhaust += war.exhaustion[fid] || 0;
+  return occupied * OCCUPIED_SYSTEM_SCORE + enemyExhaust * 0.5;
+}
+
+/** 标记星系被某交战方实际占领（战场结算系统调用；不转移主权） */
+function markSystemOccupied(world, warId, systemId, occupantFactionId) {
+  const war = world.entities.wars[warId];
+  if (!war || war.status !== 'active') return false;
+  if (!war.attackers.includes(occupantFactionId) && !war.defenders.includes(occupantFactionId)) return false;
+  const sys = world.entities.systems[systemId];
+  if (!sys) return false;
+  war.occupiedSystems[systemId] = occupantFactionId;
+  emit(world, 'SystemOccupied', { warId, systemId, occupantFactionId }, 'diplomacy');
+  return true;
+}
+
+/**
+ * 和谈提案（ProposePeace 执行体）：
+ * 接受概率 = 0.30 + 敌方战争疲劳/200 + 敌方对我方占领积分/120，钳制 [0.05, 0.95]。
+ * 接受 → 战争结束（occupied 星系按占领积分阈值决定割留，见 endWarPeace）；
+ * 拒绝 → 记入 war.peaceOffers 并轻微恶化关系（确定性 RNG）。
+ */
+function resolvePeaceProposal(world, proposerId, warId, terms = 'whitePeace') {
+  const war = world.entities.wars[warId];
+  if (!war || war.status !== 'active') return { ok: false, reason: '战争不存在或已结束' };
+  if (!war.attackers.includes(proposerId) && !war.defenders.includes(proposerId)) {
+    return { ok: false, reason: '非交战方' };
+  }
+  const enemy = war.attackers.includes(proposerId) ? war.defenders : war.attackers;
+  const enemyId = enemy[0];
+  let enemyExhaust = 0;
+  for (const fid of enemy) enemyExhaust += war.exhaustion[fid] || 0;
+  const p = Math.max(0.05, Math.min(0.95,
+    0.30 + enemyExhaust / 200 + warScore(war, proposerId) / 120));
+  const accepted = RNG.chance(world, p);
+  war.peaceOffers.push({ tick: world.tick, from: proposerId, terms, accepted });
+  if (!accepted) {
+    const rel = getRelation(world, proposerId, enemyId);
+    rel.opinion = Math.max(-100, rel.opinion - 2);
+    emit(world, 'PeaceRejected', { warId, from: proposerId, terms }, 'diplomacy');
+    return { ok: true, accepted: false, p };
+  }
+  endWarPeace(world, war, { peaceTerms: terms, initiator: proposerId });
+  return { ok: true, accepted: true, p };
+}
+
+/**
+ * 和平终局：占领星系按 warScore 阈值割留给占领方，其余回到原主权；
+ * 解除双方 warId 关联并发出 WarEnded 事件。
+ */
+function endWarPeace(world, war, opts = {}) {
+  war.status = 'ended';
+  war.endedTick = world.tick;
+  war.peaceTerms = opts.peaceTerms || 'whitePeace';
+
+  // 占领星系结算：占领方积分达阈值 → 主权转移（割地）；否则占领解除
+  for (const sid of Object.keys(war.occupiedSystems)) {
+    const occupant = war.occupiedSystems[sid];
+    const sys = world.entities.systems[sid];
+    if (!sys) continue;
+    if (warScore(war, occupant) >= OCCUPATION_ANNEX_THRESHOLD) {
+      const prevOwner = sys.ownerFactionId || null;
+      sys.ownerFactionId = occupant;
+      war.annexedSystems ||= [];
+      if (!war.annexedSystems.includes(sid)) war.annexedSystems.push(sid);
+      emit(world, 'SystemAnnexed', { warId: war.id, systemId: sid, from: prevOwner, to: occupant }, 'diplomacy');
+    }
+    delete war.occupiedSystems[sid];
+  }
+
+  const parties = [...war.attackers, ...war.defenders];
+  for (const fid of parties) {
+    for (const other of parties) {
+      if (fid === other) continue;
+      const rel = world.relations.diplomacy[relationKey(fid, other)];
+      if (rel && rel.warId === war.id) rel.warId = null;
+    }
+  }
+  emit(world, 'WarEnded', {
+    warId: war.id,
+    peaceTerms: war.peaceTerms,
+    initiator: opts.initiator || null,
+    attackers: war.attackers,
+    defenders: war.defenders,
+  }, 'diplomacy');
+}
+
+/**
+ * 割地吞并（AnnexOccupied 执行体）：交战方对已实际占领且积分达阈值的星系
+ * 立即完成主权转移（战争进行中即可割地；战争结束时 endWarPeace 自动结算剩余占领）。
+ */
+function annexOccupiedSystem(world, warId, systemId, actorId) {
+  const war = world.entities.wars[warId];
+  if (!war) return { ok: false, reason: '战争不存在' };
+  if (!war.attackers.includes(actorId) && !war.defenders.includes(actorId)) {
+    return { ok: false, reason: '非交战方' };
+  }
+  if (war.occupiedSystems[systemId] !== actorId) {
+    return { ok: false, reason: '该星系未被己方实际占领' };
+  }
+  if (warScore(war, actorId) < OCCUPATION_ANNEX_THRESHOLD) {
+    return { ok: false, reason: '占领积分不足，无法割地' };
+  }
+  const sys = world.entities.systems[systemId];
+  if (!sys) return { ok: false, reason: '星系不存在' };
+  const prevOwner = sys.ownerFactionId || null;
+  sys.ownerFactionId = actorId;
+  delete war.occupiedSystems[systemId];
+  war.annexedSystems ||= [];
+  if (!war.annexedSystems.includes(systemId)) war.annexedSystems.push(systemId);
+  emit(world, 'SystemAnnexed', { warId, systemId, from: prevOwner, to: actorId }, 'diplomacy');
+  return { ok: true };
+}
+
+/** 每小时计时器：条约到期、战争状态推进 */
+function runDiplomacyTimers(world) {
+  const E = world.entities;
+
+  // 条约到期
+  for (const tid of Object.keys(E.treaties).sort()) {
+    const treaty = E.treaties[tid];
+    if (treaty.status === 'active' && typeof treaty.expiryTick === 'number' && world.tick >= treaty.expiryTick) {
+      treaty.status = 'expired';
+      emit(world, 'TreatyExpired', { treatyId: tid, type: treaty.type, parties: treaty.parties }, 'diplomacy');
+      onTreatyEnd(world, treaty, 'expired');
+    }
+  }
+
+  // 战争疲劳（每小时微量累积，战斗损失在战斗结算中额外累加）
+  for (const wid of Object.keys(E.wars).sort()) {
+    const war = E.wars[wid];
+    if (war.status !== 'active') continue;
+    for (const fid of [...war.attackers, ...war.defenders]) {
+      war.exhaustion[fid] = Math.min(100, (war.exhaustion[fid] || 0) + 0.005);
+    }
+  }
+}
+
+/** 条约结束时的关系反馈（DIP-02 违约/到期差异） */
+function onTreatyEnd(world, treaty, reason) {
+  const [a, b] = treaty.parties;
+  const rel = getRelation(world, a, b);
+  if (reason === 'breached') {
+    rel.trust = Math.max(0, rel.trust - 18);
+    rel.opinion = Math.max(-100, rel.opinion - 15);
+    rel.grievances += 1;
+  } else if (reason === 'expired') {
+    rel.trust = Math.max(0, rel.trust - 2);
+  }
+}
+
+/** 取得（或惰性创建）两阵营多维关系记录 */
+function getRelation(world, a, b) {
+  if (a === b) throw new Error('关系不能指向自身');
+  const key = relationKey(a, b);
+  let rel = world.relations.diplomacy[key];
+  if (!rel) {
+    // 幂等防御（fuzz 硬化 F-04）：惰性创建仅允许真实存在的双方——悬空阵营/垃圾 id
+    // 一律抛错，由命令总线 VALIDATE_ERROR 受控拦截（validate 阶段绝不触碰状态）。
+    // 已存在记录（含阵营被吞并后的历史关系）的读取不受影响。
+    if (!world.entities.factions[a] || !world.entities.factions[b]) {
+      throw new Error(`关系派系不存在: ${String(a)} / ${String(b)}`);
+    }
+    rel = {
+      key,
+      parties: [a, b].sort(),
+      contactState: 'none', // none|signal|analyzing|contacted
+      firstContactTick: null,
+      opinion: 0,
+      trust: 10,
+      threat: 0,
+      borderTension: 0,
+      tradeInterdependence: 0,
+      grievances: 0,
+      warWeariness: 0,
+      intelConfidence: 0.2,
+      treaties: [],
+    };
+    world.relations.diplomacy[key] = rel;
+  }
+  return rel;
+}
+
+/** 宣战（由 DeclareWar 命令调用；校验在命令层） */
+function declareWar(world, attackerId, defenderId, wargoals) {
+  const rel = getRelation(world, attackerId, defenderId);
+  if (rel.warId && world.entities.wars[rel.warId]?.status === 'active') {
+    return null; // 已在战争中
+  }
+  rel.borderTension = Math.min(100, rel.borderTension + 40);
+  rel.opinion = Math.max(-100, rel.opinion - 30);
+
+  // 解除双方条约
+  for (const tid of rel.treaties.slice()) {
+    const t = world.entities.treaties[tid];
+    if (t && t.status === 'active') {
+      t.status = 'breached';
+      onTreatyEnd(world, t, 'breached');
+      emit(world, 'TreatyBreached', { treatyId: tid, reason: 'war' }, 'diplomacy');
+    }
+  }
+  rel.treaties = [];
+
+  const war = {
+    id: `war_${++world.seq}`,
+    type: 'war',
+    createdAtTick: world.tick,
+    attackers: [attackerId],
+    defenders: [defenderId],
+    startTick: world.tick,
+    wargoals: wargoals || [],
+    occupiedSystems: {},
+    exhaustion: {},
+    battles: 0,
+    status: 'active',
+    peaceOffers: [],
+  };
+  world.entities.wars[war.id] = war;
+  rel.warId = war.id;
+  emit(world, 'WarDeclared', { warId: war.id, attackerId, defenderId, wargoals: war.wargoals }, 'diplomacy');
+  return war;
+}
+
+/** 缔结条约（OfferTreaty 被接受后调用） */
+function createTreaty(world, a, b, type, durationDays = 360) {
+  const rel = getRelation(world, a, b);
+  const treaty = {
+    id: `try_${++world.seq}`,
+    type: 'treaty',
+    createdAtTick: world.tick,
+    kind: type, // nonaggression|trade|research|openBorders|mutualDefense
+    parties: [a, b].sort(),
+    startTick: world.tick,
+    expiryTick: world.tick + durationDays * 24,
+    status: 'active',
+    terms: TREATY_TERMS[type] || {},
+  };
+  world.entities.treaties[treaty.id] = treaty;
+  rel.treaties.push(treaty.id);
+  rel.trust = Math.min(100, rel.trust + 6);
+  emit(world, 'TreatySigned', { treatyId: treaty.id, kind: type, parties: treaty.parties }, 'diplomacy');
+  return treaty;
+}
+
+const TREATY_TERMS = {
+  nonaggression: { desc: '互不侵犯', tensionDecayMult: 2.0 },
+  trade: { desc: '贸易协定', tradeCapacityMult: 1.15, trustPerMonth: 1 },
+  research: { desc: '科研交流', researchOutputMult: 1.05 },
+  openBorders: { desc: '开放边境', fleetPass: true },
+  mutualDefense: { desc: '共同防御', joinWars: true },
+};
+
+/** 条约接受效用（AI 判定与 UI 预估共用，DIP-01） */
+function treatyAcceptanceScore(world, proposerId, targetId, type) {
+  const rel = getRelation(world, proposerId, targetId);
+  let score = 0;
+  score += (rel.opinion || 0) * 0.4;
+  score += (rel.trust || 0) * 0.5;
+  score -= (rel.threat || 0) * 0.3;
+  score -= (rel.borderTension || 0) * 0.2;
+  if (type === 'trade') score += (rel.tradeInterdependence || 0) * 0.5 + 15;
+  if (type === 'nonaggression') score += 10;
+  if (type === 'mutualDefense') score -= 10;
+  const fac = world.entities.factions[targetId];
+  if (fac?.personality === 'trader' && type === 'trade') score += 20;
+  if (fac?.personality === 'defensive' && type === 'nonaggression') score += 15;
+  if (fac?.personality === 'expansionist') score -= 8;
+  return Math.round(score);
+}
+
+Object.assign(__exports, { OCCUPATION_ANNEX_THRESHOLD, warScore, markSystemOccupied, resolvePeaceProposal, endWarPeace, annexOccupiedSystem, runDiplomacyTimers, onTreatyEnd, getRelation, declareWar, createTreaty, TREATY_TERMS, treatyAcceptanceScore });
+
+});
+__register("src/domain/planets/archetypeMechanics.js", function (__exports, __require) {
+/**
+ * domain/planets/archetypeMechanics.js — 16 大行星原型专属模拟钩子
+ * （SPEC-PLAN-045 阶段二 M2 Task 2.3；责任人：Eng-A）
+ *
+ * 职责（doc45 §Task 2.3 机制绑定表逐条落地）：
+ *  1. applyArchetypeProfile(planet, world)：ensureCompactPlanetState 之后按
+ *     content/planetaryArchetypes.js hooks 一次性修正行星基线 ——
+ *       #10 envVector[1] 与 envBaseline[1] = 70（超临界酸雾大气基线）；
+ *       #11 orbitalLayer.maxOrbitalDistricts = 12（顶级轨道环带基座）；
+ *       #12 subterraneanLayer.subUrbanSlots 容量 ×2（4 → 8 槽，人口工业转入地下溶洞）；
+ *       #14 envVector[6] 与 envBaseline[6] = 0（农业与水圈恒 0）；
+ *       #15 planet.habitability = 100（盖亚圣域宜居度恒定）；
+ *       #3  3 处先驱者考古地标（buildingId 48，deriveSeed 确定性选址）。
+ *     幂等（profileApplied 旗标），绝不消费 world.rng；
+ *  2. stepArchetypeMechanics(world, planet, dtDay)：SpaceOperaClock Slow 桶钩子
+ *     （经 setClockHooks 注入 slowPlanetHook 键位），周期判定全部
+ *     deriveSeed/sampleFloat01 确定性、按「已见周期游标」推进（任意 tick 跳变不漏触发）——
+ *       #0 每 90 天潮汐火山期：envVector[0] +20（clamp 100）、未护盾建筑
+ *          受损判定（buildingId 1-47、护盾 Bit 28 免疫、p=0.5 清除 + DEVASTATED）、
+ *          地热产出 +100% 旗标（tidalSurgePeriod，geothermalSurgeActive 消费）；
+ *       #1 每 240 天物质倒灌相位切换：前半（phase 0）矿井掩埋维护 +35% /
+ *          后半（phase 1）遗迹裸露 S1 速度 +60%（meta 相位旗标翻转）；
+ *       #2 未锁定每 60 天确定性重排未锁定区划（zoneSlots Fisher-Yates，
+ *          deriveSeed 逐位抽取）；锁定（quantumLocked）后停止重排且
+ *          物理科研 +120%（quantumPhysicsResearchBonus）；
+ *       #5 晨昏带建造罚：canBuildWithoutPenalty(compact, x) —— 列 x ∈ [6,9]
+ *          无惩罚，其余列建造罚（hook.terminatorColumns 权威）；
+ *       #6 envVector[0] > 80 → 复用 planetaryThreat.awakenLeviathan 惊醒幼兽；
+ *       #7 decryptBonus/detectionBonus 导出（crystallineIntelBonus）；
+ *       #15 envVector[7] > 35 → 必定刷远古净化守卫（hostileGuardians=true 棘轮），
+ *          未护盾建筑（1-47）周期受损（护盾免疫）。
+ *  3. 命令领域落点 setQuantumPhaseLock(compact, engageLock)：LockQuantumPhasePlanet
+ *     handler（M2 集成注入）写 archetypeState.quantumLocked + 反应堆维护旗标
+ *     reactorMaintenance（锁定 → 维护 +，解锁 → 双清）。
+ *
+ * 时钟接线裁决（动态 import）：本模块经动态 import SpaceOperaClock 注入
+ * slowPlanetHook —— 与 situationEngine 同构（避免静态 import 改变 HourlySystems
+ * 「space-opera 每 tick 最后注册」的阶段序不变量，见 src/simulation/HourlySystems.js:223
+ * 注释）；套件/集成层可 await ensureArchetypeHookInjected() 保证钩子就位。
+ *
+ * 纪律（doc43 §1.4 零漂移铁律）：
+ *  - import 期仅构建冻结常量 + 动态注入时钟钩子，不改任何世界状态；
+ *  - stepArchetypeMechanics 首行守卫 world.spaceOperaState（金快照世界零读取零写入），
+ *    仅处理已挂载 compactState 的行星（惰性容器守卫），绝不 ensure、绝不消费 world.rng；
+ *  - 确定性随机一律 deriveSeed/sampleFloat01 + DOMAIN_SALTS.PLANET_MASTER 盐值
+ *    （「行星静态天体原型」语义；盐值取自冻结表，无私编魔数）；零 Math.random / Date.now；
+ *  - 周期历史码使用正值段 70..72（planetStateSchema HISTORY_EVENT_CODES 注释口径：
+ *    负值段留给局势弧；70+ 为本模块私有枚举，不与既有 1..6 冲突）。
+ */
+
+const { getArchetype: getArchetype } = __require("src/content/planetaryArchetypes.js");
+const { ensureCompactPlanetState: ensureCompactPlanetState, appendHistory: appendHistory, STATUS_FLAG: STATUS_FLAG } = __require("src/domain/planets/planetStateSchema.js");
+const { DOMAIN_SALTS: DOMAIN_SALTS, deriveSeed: deriveSeed, sampleFloat01: sampleFloat01 } = __require("src/domain/world/deterministicRng.js");
+const { awakenLeviathan: awakenLeviathan } = __require("src/domain/ground/planetaryThreat.js");
+const { TICKS_PER_DAY: TICKS_PER_DAY } = __require("src/core/clock.js");
+const { emit: emit } = __require("src/core/eventBus.js");
+
+/** 原型机制确定性子流盐值（DOMAIN_SALTS 冻结表：行星静态天体原型域） */
+const ARCH_SALT = DOMAIN_SALTS.PLANET_MASTER;
+
+/** #3 考古地标选址 step 基值（deriveSeed step 段位：0x4C00 = buildingId 48 纪念） */
+const LANDMARK_STEP_BASE = 0x4c00;
+
+/** #2 量子重排 Fisher-Yates step 段位基值（periodIndex × 16 + 槽位） */
+const QUANTUM_STEP_BASE = 0x5100;
+
+/** #0 潮汐火山未护盾建筑受损判定概率（M2 裁决：单周期 50% 火力覆盖） */
+const TIDAL_DAMAGE_PROB = 0.5;
+
+/** #15 净化守卫未护盾建筑周期受损概率（M2 裁决：每次 Slow 访问 35%） */
+const PURIFIER_DAMAGE_PROB = 0.35;
+
+/** 模块私有历史码（正值段 70..；负值段留给局势弧，见 planetStateSchema.js:497 注释） */
+const HIST_ARCHETYPE_TIDAL_VOLCANO = 70; // #0 潮汐火山期喷发（impactCode = 受损建筑数）
+const HIST_ARCHETYPE_BACKFLOW_FLIP = 71; // #1 物质倒灌相位翻转（impactCode = 新相位）
+const HIST_ARCHETYPE_GUARDIAN_AWAKENED = 72; // #15 净化守卫苏醒（impactCode = env7 取整）
+
+function isPlainObject(v) {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+function clampTick(tick) {
+  return Number.isFinite(tick) ? Math.max(0, Math.trunc(tick)) : 0;
+}
+
+/** 天数 → tick（1 tick = 1 游戏小时；TICKS_PER_DAY = 24，src/core/clock.js 权威口径） */
+function ticksFromDays(days) {
+  return Math.max(1, Math.round(days * TICKS_PER_DAY));
+}
+
+/* ============================== 原型状态容器（惰性幂等） ============================== */
+
+/**
+ * 惰性挂载 compact.archetypeState（幂等；绝不消费 world.rng）。
+ * 结构：{ profileApplied, quantumLocked, reactorMaintenance, backflowPhase,
+ *        backflowMineUpkeepPenaltyActive, backflowRelicSpeedBonusActive,
+ *        hostileGuardians, purifierDamageEvents, tidalPeriodSeen, tidalSurgePeriod,
+ *        quantumPeriodSeen, lastQuantumReshufflePeriod, landmarkTiles }
+ */
+function ensureArchetypeState(compact) {
+  if (!isPlainObject(compact.archetypeState)) {
+    compact.archetypeState = {
+      profileApplied: false,
+      quantumLocked: false,
+      reactorMaintenance: false,
+      backflowPhase: 0,
+      backflowMineUpkeepPenaltyActive: false,
+      backflowRelicSpeedBonusActive: false,
+      hostileGuardians: false,
+      purifierDamageEvents: 0,
+      tidalPeriodSeen: 0,
+      tidalSurgePeriod: -1,
+      quantumPeriodSeen: 0,
+      lastQuantumReshufflePeriod: 0,
+      landmarkTiles: null,
+    };
+  }
+  return compact.archetypeState;
+}
+
+/* ============================== 建筑位段直读直写（热路径零分配） ============================== */
+
+const BUILDING_MASK = 0x3f << 16;
+const FLAGS_MASK = 0x3f << 26;
+
+/**
+ * Tile 建筑段清零 + DEVASTATED 置位（其余位段无损；与 sparseFrontierCA 熔岩烧毁同口径：
+ * withBuilding(t, 0) + withFlags(t, flags | DEVASTATED) 的内联形态）。
+ */
+function devastateBuilding(t) {
+  const cleared = t & ~BUILDING_MASK;
+  const flags = ((cleared >>> 26) & 0x3f) | STATUS_FLAG.DEVASTATED;
+  return ((cleared & ~FLAGS_MASK) | ((flags & 0x3f) << 26)) >>> 0;
+}
+
+/* ============================== applyArchetypeProfile（doc45 Task 2.3 基线修正） ============================== */
+
+/**
+ * #3 先驱者考古地标（buildingId 48，先驱者奇观段 48-63）：deriveSeed 确定性选址，
+ * 仅落建筑空置格（buildingId === 0）；不足 count 时顺序重试至 512 次（确定性上限）。
+ */
+function placeInitialLandmarks(world, compact, st, count) {
+  const seed = (typeof world.seed === 'number' && Number.isFinite(world.seed)) ? world.seed >>> 0 : 0;
+  const placed = [];
+  for (let attempt = 0; placed.length < count && attempt < 512; attempt++) {
+    const r = deriveSeed(seed, ARCH_SALT, compact.id, LANDMARK_STEP_BASE + attempt);
+    const idx = r % 256;
+    const t = compact.tiles[idx] >>> 0;
+    if (((t >>> 16) & 0x3f) !== 0) continue; // 建筑空置格才可落地标
+    compact.tiles[idx] = ((t & ~BUILDING_MASK) | (48 << 16)) >>> 0; // 48 = 先驱者奇观
+    placed.push(idx);
+  }
+  st.landmarkTiles = placed;
+  return placed;
+}
+
+/**
+ * 按原型 hooks 一次性修正行星基线（ensureCompactPlanetState 之后调用；幂等）。
+ *
+ * @param {object} planet - 行星实体
+ * @param {object} world - 世界根对象（读 world.seed，绝不读 world.rng）
+ * @returns {object} planet.compactState（幂等：重复调用同引用零重写）
+ */
+function applyArchetypeProfile(planet, world) {
+  const compact = ensureCompactPlanetState(planet, world);
+  const st = ensureArchetypeState(compact);
+  if (st.profileApplied === true) return compact;
+  st.profileApplied = true;
+
+  const arch = getArchetype(compact.archetypeId & 0x0f);
+  const hooks = arch.hooks;
+  const tick = clampTick(world && world.tick);
+
+  // —— #10 超临界硫磺毒釜：envVector[1] 基线 70（含 Slow Tick 漂移基线快照）——
+  if (Number.isFinite(hooks.initialEnv1)) {
+    compact.envVector[1] = hooks.initialEnv1;
+    if (Array.isArray(compact.envBaseline) && compact.envBaseline.length === compact.envVector.length) {
+      compact.envBaseline[1] = hooks.initialEnv1;
+    }
+  }
+  // —— #14 剥离地幔铁核星：农业与水圈恒 0（envVector[6] HydrosphereLevel 基线归零）——
+  if (hooks.agriHydroZero === true) {
+    compact.envVector[6] = 0;
+    if (Array.isArray(compact.envBaseline) && compact.envBaseline.length === compact.envVector.length) {
+      compact.envBaseline[6] = 0;
+    }
+    st.agriHydroZero = true;
+  }
+  // —— #11 断环天工界：顶级轨道环带基座 ——
+  if (Number.isFinite(hooks.maxOrbitalDistricts) && isPlainObject(compact.orbitalLayer)) {
+    compact.orbitalLayer.maxOrbitalDistricts = hooks.maxOrbitalDistricts;
+  }
+  // —— #12 蜂巢溶洞死月：地下溶洞容量翻倍（4 → 8 槽，追加空槽）——
+  if (Number.isFinite(hooks.subUrbanSlotsMultiplier)
+    && isPlainObject(compact.subterraneanLayer)
+    && Array.isArray(compact.subterraneanLayer.subUrbanSlots)) {
+    const mul = Math.max(1, Math.round(hooks.subUrbanSlotsMultiplier));
+    const slots = compact.subterraneanLayer.subUrbanSlots;
+    const target = Math.min(16, slots.length * mul);
+    while (slots.length < target) slots.push(0);
+    st.subUrbanSlotsMultiplier = mul;
+  }
+  // —— #15 盖亚圣域：宜居度恒定 100%（planet 实体字段存在才写）——
+  if (Number.isFinite(hooks.habitabilityFixed) && Number.isFinite(planet.habitability)) {
+    planet.habitability = hooks.habitabilityFixed;
+  }
+  // —— #3 先驱者机械墓园：3 处高阶考古地标（buildingId 48 确定性选址）——
+  if (Number.isFinite(hooks.initialArchaeologyLandmarks) && Array.isArray(compact.tiles)) {
+    placeInitialLandmarks(world, compact, st, hooks.initialArchaeologyLandmarks);
+  }
+  // —— #1 沙漏双星：倒灌相位按当前 tick 初始化（前半掩埋 / 后半裸露）——
+  if (Number.isFinite(hooks.backflowPeriodDays)) {
+    const phase = Math.floor(tick / ticksFromDays(hooks.backflowPeriodDays)) % 2;
+    st.backflowPhase = phase;
+    st.backflowMineUpkeepPenaltyActive = phase === 0;
+    st.backflowRelicSpeedBonusActive = phase === 1;
+  }
+  return compact;
+}
+
+/* ============================== 周期步进（#0 / #1 / #2 / #6 / #15） ============================== */
+
+/** #0 潮汐火山期（每 90 天；已见周期游标推进，任意 tick 跳变不漏触发） */
+function stepTidalVolcano(world, planet, compact, st, tick, hooks) {
+  const periodTicks = ticksFromDays(hooks.tidalVolcanoPeriodDays);
+  const periodIndex = Math.floor(tick / periodTicks);
+  if (periodIndex <= st.tidalPeriodSeen) return null;
+  st.tidalPeriodSeen = periodIndex;
+  st.tidalSurgePeriod = periodIndex; // 本周期地热产出 +100%（geothermalSurgeActive 消费）
+
+  compact.envVector[0] = Math.min(100, compact.envVector[0] + (hooks.tidalVolcanoEnv0Spike || 20));
+
+  const seed = (typeof world.seed === 'number' && Number.isFinite(world.seed)) ? world.seed >>> 0 : 0;
+  let damaged = 0;
+  for (let i = 0; i < compact.tiles.length; i++) {
+    const t = compact.tiles[i] >>> 0;
+    const bid = (t >>> 16) & 0x3f;
+    if (bid < 1 || bid > 47) continue; // 仅采集/城市/工业建筑（48-63 先驱者奇观豁免）
+    if (((t >>> 26) & 0x3f & STATUS_FLAG.SHIELDED) !== 0) continue; // 护盾 Bit 28 免疫
+    if (sampleFloat01(seed, ARCH_SALT, compact.id, periodIndex * 256 + i) >= TIDAL_DAMAGE_PROB) continue;
+    compact.tiles[i] = devastateBuilding(t);
+    damaged++;
+  }
+  appendHistory(compact, tick, HIST_ARCHETYPE_TIDAL_VOLCANO, compact.colony ? compact.colony.ownerId : -1, damaged);
+  emit(world, 'TidalVolcanoEruption', {
+    planetId: planet.id,
+    periodIndex,
+    env0: compact.envVector[0],
+    damagedBuildings: damaged,
+  }, 'world');
+  return { periodIndex, damaged };
+}
+
+/** #1 物质倒灌相位切换（每 240 天；前半掩埋维护 +35% / 后半遗迹裸露 S1 +60%） */
+function stepBackflow(world, planet, compact, st, tick, hooks) {
+  const periodTicks = ticksFromDays(hooks.backflowPeriodDays);
+  const phase = Math.floor(tick / periodTicks) % 2;
+  if (phase === st.backflowPhase) return null;
+  st.backflowPhase = phase;
+  st.backflowMineUpkeepPenaltyActive = phase === 0;
+  st.backflowRelicSpeedBonusActive = phase === 1;
+  appendHistory(compact, tick, HIST_ARCHETYPE_BACKFLOW_FLIP, compact.colony ? compact.colony.ownerId : -1, phase);
+  emit(world, 'MatterBackflowPhase', {
+    planetId: planet.id,
+    phase,
+    mineUpkeepPenaltyActive: phase === 0,
+    relicSpeedBonusActive: phase === 1,
+  }, 'world');
+  return { phase };
+}
+
+/** #2 量子相移重组（未锁定每 60 天确定性重排 zoneSlots；锁定后停止重排） */
+function stepQuantumPhase(world, planet, compact, st, tick, hooks) {
+  const periodTicks = ticksFromDays(hooks.phaseShiftPeriodDays);
+  const periodIndex = Math.floor(tick / periodTicks);
+  if (periodIndex <= st.quantumPeriodSeen) return null;
+  st.quantumPeriodSeen = periodIndex;
+  if (st.quantumLocked === true) return { locked: true }; // 观测场锁定：边界消费、绝不重排
+
+  const zoneSlots = isPlainObject(compact.urbanZones) && Array.isArray(compact.urbanZones.zoneSlots)
+    ? compact.urbanZones.zoneSlots
+    : null;
+  if (!zoneSlots || zoneSlots.length < 2) return { periodIndex, reshuffled: false };
+
+  // —— Fisher-Yates 确定性重排（逐位 deriveSeed 抽取；值集守恒仅次序变化）——
+  const seed = (typeof world.seed === 'number' && Number.isFinite(world.seed)) ? world.seed >>> 0 : 0;
+  for (let i = zoneSlots.length - 1; i > 0; i--) {
+    const r = deriveSeed(seed, ARCH_SALT, compact.id, QUANTUM_STEP_BASE + periodIndex * 16 + i);
+    const j = r % (i + 1);
+    const tmp = zoneSlots[i];
+    zoneSlots[i] = zoneSlots[j];
+    zoneSlots[j] = tmp;
+  }
+  st.lastQuantumReshufflePeriod = periodIndex;
+  emit(world, 'QuantumPhaseShift', { planetId: planet.id, periodIndex }, 'world');
+  return { periodIndex, reshuffled: true };
+}
+
+/** #6 巨兽孵化卫星：envVector[0] > 80 → 复用 awakenLeviathan 惊醒狂暴幼兽 */
+function stepLeviathanNursery(world, planet, compact, hooks) {
+  if (!(compact.envVector[0] > hooks.wakeThresholdEnv0)) return null;
+  const leviathan = awakenLeviathan(world, planet);
+  return { leviathanAwakened: !!(leviathan && leviathan.active) };
+}
+
+/** #15 盖亚圣域：envVector[7] > 35 → 必定刷远古净化守卫（棘轮）+ 未护盾建筑周期受损 */
+function stepGaiaGuardians(world, planet, compact, st, tick, hooks) {
+  const threshold = hooks.guardianThresholdEnv7;
+  const polluted = compact.envVector[7] > threshold;
+  let awakenedNow = false;
+
+  if (polluted && st.hostileGuardians !== true) {
+    st.hostileGuardians = true; // 棘轮：一旦苏醒不再回落
+    awakenedNow = true;
+    appendHistory(compact, tick, HIST_ARCHETYPE_GUARDIAN_AWAKENED, compact.colony ? compact.colony.ownerId : -1, Math.round(compact.envVector[7]));
+    emit(world, 'PurifierGuardiansAwakened', {
+      planetId: planet.id,
+      env7: compact.envVector[7],
+      threshold,
+    }, 'world');
+  }
+
+  if (!(st.hostileGuardians === true && polluted)) return awakenedNow ? { awakened: true } : null;
+
+  // —— 未护盾建筑周期受损（每次 Slow 访问 35%；护盾 Bit 28 免疫；确定性 roll）——
+  const seed = (typeof world.seed === 'number' && Number.isFinite(world.seed)) ? world.seed >>> 0 : 0;
+  let damaged = 0;
+  for (let i = 0; i < compact.tiles.length; i++) {
+    const t = compact.tiles[i] >>> 0;
+    const bid = (t >>> 16) & 0x3f;
+    if (bid < 1 || bid > 47) continue;
+    if (((t >>> 26) & 0x3f & STATUS_FLAG.SHIELDED) !== 0) continue;
+    if (sampleFloat01(seed, ARCH_SALT, compact.id, tick * 256 + i) >= PURIFIER_DAMAGE_PROB) continue;
+    compact.tiles[i] = devastateBuilding(t);
+    damaged++;
+  }
+  if (damaged > 0) st.purifierDamageEvents += damaged;
+  return { awakened: awakenedNow || undefined, damaged };
+}
+
+/* ============================== Slow 桶钩子（setClockHooks 注入） ============================== */
+
+/**
+ * 原型专属模拟步进（SpaceOperaClock Slow 桶 slowPlanetHook 注册形态）。
+ *
+ * 首行守卫 world.spaceOperaState（未挂载容器 → null 零写入）；仅处理已挂载
+ * compactState 的行星（惰性容器守卫，绝不 ensure）。周期判定按「已见周期游标」
+ * 推进：任意 tick 跳变不漏触发、重复访问不重放。
+ *
+ * @param {object} world - 世界根对象
+ * @param {object} planet - 行星实体
+ * @param {number} dtDay - 本次步进折算天数（Slow 桶 30 tick = 1.25 天；离散事件步仅契约占位）
+ * @returns {object|null} 本步原型事件摘要（无事件返回 null）
+ */
+function stepArchetypeMechanics(world, planet, dtDay) {
+  void dtDay; // 契约占位：周期判定走绝对 tick 已见游标，杜绝浮点累积误触发
+  if (!world || typeof world !== 'object' || !world.spaceOperaState) return null;
+  if (!planet || typeof planet !== 'object') return null;
+  const compact = planet.compactState; // 惰性容器守卫：未触达行星零写入零漂移
+  if (!compact || typeof compact !== 'object') return null;
+  if (!Array.isArray(compact.envVector) || compact.envVector.length < 8) return null;
+
+  const st = ensureArchetypeState(compact);
+  applyArchetypeProfile(planet, world); // 幂等：已应用则零重写
+
+  const tick = clampTick(world.tick);
+  const arch = getArchetype(compact.archetypeId & 0x0f);
+  switch (arch.id) {
+    case 0: return stepTidalVolcano(world, planet, compact, st, tick, arch.hooks);
+    case 1: return stepBackflow(world, planet, compact, st, tick, arch.hooks);
+    case 2: return stepQuantumPhase(world, planet, compact, st, tick, arch.hooks);
+    case 6: return stepLeviathanNursery(world, planet, compact, arch.hooks);
+    case 15: return stepGaiaGuardians(world, planet, compact, st, tick, arch.hooks);
+    default: return null; // #3/#4/#5/#7/#8/#9/#10/#11/#12/#13/#14 为被动钩子（无周期步进）
+  }
+}
+
+/* ============================== 原型钩子消费口（集成层/结算层读取） ============================== */
+
+/**
+ * #0 地热产出 +100% 旗标（火山期存续判定）：当前 tick 所属周期 === 最后喷发周期。
+ */
+function geothermalSurgeActive(compact, tick) {
+  if (!isPlainObject(compact) || !isPlainObject(compact.archetypeState)) return false;
+  const st = compact.archetypeState;
+  if (!Number.isFinite(st.tidalSurgePeriod) || st.tidalSurgePeriod < 0) return false;
+  const arch = getArchetype(compact.archetypeId & 0x0f);
+  if (arch.id !== 0) return false;
+  return Math.floor(clampTick(tick) / ticksFromDays(arch.hooks.tidalVolcanoPeriodDays)) === st.tidalSurgePeriod;
+}
+
+/** #1 掩埋相位（矿井维护费 +35%）旗标 */
+function backflowMineUpkeepPenaltyActive(compact) {
+  return !!(isPlainObject(compact) && isPlainObject(compact.archetypeState)
+    && compact.archetypeState.backflowMineUpkeepPenaltyActive === true);
+}
+
+/** #1 裸露相位（先驱者遗迹 S1 考古速度 +60%）旗标 */
+function backflowRelicSpeedBonusActive(compact) {
+  return !!(isPlainObject(compact) && isPlainObject(compact.archetypeState)
+    && compact.archetypeState.backflowRelicSpeedBonusActive === true);
+}
+
+/**
+ * #2 物理科研产出加成（倍率增量）：锁定（quantumLocked）→ +120%（1.2），否则 0。
+ */
+function quantumPhysicsResearchBonus(compact) {
+  if (!isPlainObject(compact) || !isPlainObject(compact.archetypeState)) return 0;
+  const arch = getArchetype(compact.archetypeId & 0x0f);
+  if (arch.id !== 2) return 0;
+  return compact.archetypeState.quantumLocked === true ? arch.hooks.lockedPhysicsBonus : 0;
+}
+
+/**
+ * #2 量子相位锁定切换（LockQuantumPhasePlanet 命令领域落点；M2 集成 handler 注入）。
+ * engageLock=true → quantumLocked=true + 反应堆维护旗标 reactorMaintenance=true；
+ * engageLock=false → 双旗标清零（观测场撤收）。
+ *
+ * @param {object} compact - 紧凑 PlanetState 容器
+ * @param {boolean} engageLock - true 张开观测场锁定 | false 撤收
+ * @returns {object} compact.archetypeState
+ */
+function setQuantumPhaseLock(compact, engageLock) {
+  const st = ensureArchetypeState(compact);
+  st.quantumLocked = engageLock === true;
+  st.reactorMaintenance = st.quantumLocked; // 反应堆维护旗标随锁定同步
+  return st;
+}
+
+/**
+ * #5 永昼永夜潮汐锁定界晨昏带建造检定：列 x ∈ hook.terminatorColumns（含端点）
+ * 无惩罚；其余列建造罚。非 #5 原型恒无惩罚（true）。
+ *
+ * @param {object} compact - 紧凑 PlanetState 容器
+ * @param {number} x - 地表列号 0..15
+ * @returns {boolean} true = 无惩罚建造
+ */
+function canBuildWithoutPenalty(compact, x) {
+  if (!isPlainObject(compact)) return true;
+  const arch = getArchetype(compact.archetypeId & 0x0f);
+  const cols = arch.hooks.terminatorColumns;
+  if (!Array.isArray(cols) || cols.length !== 2) return true;
+  const col = Number(x);
+  if (!Number.isFinite(col)) return false;
+  return col >= cols[0] && col <= cols[1];
+}
+
+/**
+ * #7 全视晶化共鸣星情报加成汇总：遍历全部已挂载 compactState 的行星，对
+ * 已殖民（colony.ownerId ≥ 0）的 archetype 7 行星逐星累计解密 +2 / 探测半径 +80%。
+ *
+ * @param {object} world - 世界根对象
+ * @returns {{decryption: number, detectionBonus: number}} 情报修正合计
+ */
+function crystallineIntelBonus(world) {
+  const bonus = { decryption: 0, detectionBonus: 0 };
+  const planets = world && world.entities && world.entities.planets ? world.entities.planets : {};
+  for (const key of Object.keys(planets).sort()) {
+    const compact = planets[key] && planets[key].compactState;
+    const colony = compact && compact.colony;
+    if (!compact || !colony || !(Number(colony.ownerId) >= 0)) continue;
+    const arch = getArchetype(compact.archetypeId & 0x0f);
+    if (arch.id !== 7) continue;
+    bonus.decryption += arch.hooks.decryptBonus;
+    bonus.detectionBonus += arch.hooks.detectionBonus;
+  }
+  return bonus;
+}
+
+/**
+ * #8 万丈冰壳暗海界轨道轰炸伤害乘数：archetype 8 → 0.25（-75%），其余 → 1.0。
+ */
+function bombardmentDamageMultiplier(compact) {
+  if (!isPlainObject(compact)) return 1.0;
+  const arch = getArchetype(compact.archetypeId & 0x0f);
+  const mult = arch.hooks.bombardmentDamageMultiplier;
+  return Number.isFinite(mult) ? mult : 1.0;
+}
+
+/* ============================== 时钟接线（动态 import，避免阶段序扰动） ============================== */
+// 静态打包产物中动态 import 相对说明符不可达（404 静默降级）——统一静态接线（SpaceOperaWiring.js）。
+const { setClockHooks: setClockHooks } = __require("src/simulation/SpaceOperaClock.js");
+
+/** Slow 桶钩子入口（setClockHooks.slowPlanetHook 注册形态；签名 (world, planet, dtDay)） */
+function slowPlanetHookEntry(world, planet, dtDay) {
+  return stepArchetypeMechanics(world, planet, dtDay);
+}
+
+let hookInjectState = 'idle'; // idle → injecting → registered | failed（注册完成以 .then 内为准）
+let hookInjectPromise = null;
+
+/** 动态 import SpaceOperaClock 并 setClockHooks 注入 slowPlanetHook（幂等） */
+function injectSlowPlanetHook() {
+  if (hookInjectState !== 'idle') return;
+  setClockHooks({ slowPlanetHook: slowPlanetHookEntry });
+  hookInjectState = 'registered';}
+
+/**
+ * 幂等预注入 Slow 桶钩子（返回注入完成的 Promise）。
+ * 同步 import 本模块后「立即同步跑 tick 循环」的调用方（套件/集成层）必须先
+ * await ensureArchetypeHookInjected()，否则该轮同步循环内 slowPlanetHook 尚未就位。
+ * 注入完成判定以 setClockHooks 实际执行（registered）为准，杜绝 .then 未落地即放行。
+ *
+ * @returns {Promise<void>} 注入完成（或已注入/已降级）信号
+ */
+function ensureArchetypeHookInjected() {
+  injectSlowPlanetHook();
+  return Promise.resolve();
+}
+
+// import 副作用：向 SpaceOperaClock 注册 slowPlanetHook（动态 import 经 setClockHooks 注入；
+// 函数体首行守卫 world.spaceOperaState，未触达世界/金快照 8be8ce2c 零漂移；
+// 注入完成判定以 hookInjectState='registered' 为准 —— 套件须 await ensureArchetypeHookInjected()）
+injectSlowPlanetHook();
+
+Object.assign(__exports, { applyArchetypeProfile, stepArchetypeMechanics, geothermalSurgeActive, backflowMineUpkeepPenaltyActive, backflowRelicSpeedBonusActive, quantumPhysicsResearchBonus, setQuantumPhaseLock, canBuildWithoutPenalty, crystallineIntelBonus, bombardmentDamageMultiplier, ensureArchetypeHookInjected });
+
+});
+__register("src/domain/ground/planetaryThreat.js", function (__exports, __require) {
+/**
+ * domain/ground/planetaryThreat.js — 开采警戒指数与阶梯威胁（doc20 v0.6 WP-3/WP-4）
+ *
+ * PTI 微分演化方程（doc20 WP-3.2，0..1000 千分比口径）：
+ *   H_t = clamp(H_{t-1} + Δmine + Δind + Δcatapult − Δrestore − Δdampener − λH_{t-1}, 0, 1000)
+ *   Δmine = +2.0 × 运行矿井数；Δind = +0.4 × 工业节点数；Δcatapult = +25.0/次发射；
+ *   Δrestore = −1.5 × (plant/RestoreTerrain) 次数；Δdampener = −6.0 × 抑制塔数；
+ *   λ = 1.5%/小时（自然阻尼——世界不会永远惩罚玩家，doc16 §11）。
+ *
+ * 阶梯响应（doc16 §4.17 / doc20 WP-3.4）：
+ *   Tier 0 潜伏（0-199）→ Tier 1 侦测（200-399，120s 侦察波）→
+ *   Tier 2 袭扰（400-649，90s 侧翼波，优先打输电塔/传送带）→
+ *   Tier 3 围攻（650-849，75s 攻城波）→ Tier 4 利维坦苏醒（850-1000）。
+ *
+ * 双派系哲学（doc20 WP-3.3）：远古哨卫（机械/极地/晶原主题）优先打击电网与
+ * 弹射井；原生异虫（自然主题）优先打击农场/矿井/居民区。
+ *
+ * 确定性红线：零 Math.random()、零 world.rng 消费（波次构成由 planetSeed 派生）。
+ */
+
+const { emit: emit, chronicle: chronicle } = __require("src/core/eventBus.js");
+const { clamp: clamp } = __require("src/core/math.js");
+const { derivePlanetSeedsExtended: derivePlanetSeedsExtended } = __require("src/domain/ground/planetSeeds.js");
+const { ensurePlanetThreat: ensurePlanetThreat } = __require("src/domain/ground/planetWeather.js");
+const { ensurePlanetInd: ensurePlanetInd } = __require("src/domain/industry/planetaryLogistics.js");
+const { onLeviathanDefeated: onLeviathanDefeated } = __require("src/domain/diplomacy/galacticSenateAndCrisisArc.js");
+
+/** 警戒阶级阈值（PTI 0..1000） */
+const PTI_THRESHOLDS = Object.freeze([0, 200, 400, 650, 850]);
+
+/** 增援波次间隔（任务秒；Tier 1/2/3） */
+const WAVE_INTERVAL_S = Object.freeze({ 1: 120, 2: 90, 3: 75 });
+
+/** 弹射单次激发（doc20 WP-3.2 契约） */
+const PTI_CATAPULT_SPIKE = 25.0;
+
+/** 利维坦原型（按行星类别确定性派生） */
+function leviathanArchetypeOf(planet) {
+  if (planet.category === 'lava') return 'lev_magma_colossus';
+  if (planet.category === 'ocean') return 'lev_abyssal_kraken';
+  return 'lev_automata_dreadnought';
+}
+
+/** 主题 → 威胁派系（doc20 WP-3.3：机械/极地/晶原 = 远古哨卫，其余 = 原生异虫） */
+function factionOf(planet) {
+  const sentinelThemes = ['ancient_megastructure', 'magnetar_aurora', 'prism_crystal', 'dry_night_polar', 'permafrost_furnace', 'glassstorm_barrens', 'fractured_moon', 'cloud_giant_atolls'];
+  return sentinelThemes.includes(planet.primaryThemeId) ? 'sentinel' : 'xeno_swarm';
+}
+
+/**
+ * 每战略小时 PTI 微分推进（HourlySystems production 后调用；O(nodes) 线性）。
+ * @returns {{pti:number, tier:number, escalated:boolean}}
+ */
+function tickPlanetaryThreatIndex(world, planet) {
+  const th = ensurePlanetThreat(planet);
+  const ind = ensurePlanetInd(planet);
+
+  // 1) 扰动增量与消减项统计（只读账本化状态，不重载地形场）
+  const colony = planet.colonyId ? world.entities.colonies[planet.colonyId] : null;
+  const buildings = (colony && colony.buildings) || [];
+  let mines = 0;
+  let dampeners = 0;
+  for (const b of buildings) {
+    if (b.state === 'active' || b.state === undefined) {
+      if (String(b.defId || '').startsWith('bld_mine')) mines++;
+      if (b.defId === 'bld_sonic_dampener') dampeners++;
+    }
+  }
+  const indNodes = (ind.nodes || []).length;
+  const edits = planet.terrainEdits && Array.isArray(planet.terrainEdits.ops)
+    ? planet.terrainEdits.ops : [];
+  let restores = 0;
+  for (const op of edits) {
+    if (op.kind === 'plant' || op.kind === 'restore') restores++;
+  }
+
+  const deltaMine = 2.0 * mines;
+  const deltaInd = 0.4 * indNodes;
+  const deltaCatapult = (planet.threat.pendingCatapultSpike || 0);
+  const deltaRestore = 1.5 * restores;
+  const deltaDampener = 6.0 * dampeners;
+  const damping = th.pti * 0.015; // λ = 1.5%/小时
+
+  th.pti = Math.round(clamp(th.pti + deltaMine + deltaInd + deltaCatapult - deltaRestore - deltaDampener - damping, 0, 1000));
+  planet.threat.pendingCatapultSpike = 0; // 单次激发消费即清
+
+  // 2) 阶梯跃迁判定
+  let newTier = 0;
+  for (let t = PTI_THRESHOLDS.length - 1; t >= 0; t--) {
+    if (th.pti >= PTI_THRESHOLDS[t]) { newTier = t; break; }
+  }
+  let escalated = false;
+  if (newTier > th.tier) {
+    th.tier = newTier;
+    escalated = true;
+    th.waveCdTicks = 2; // 2 战略小时后首波
+    emit(world, 'PlanetaryThreatEscalated', { planetId: planet.id, tier: newTier, pti: th.pti }, 'ground');
+    if (newTier >= 4 && !th.leviathan) {
+      awakenLeviathan(world, planet);
+    }
+  } else if (newTier < th.tier && (!th.leviathan || !th.leviathan.active)) {
+    th.tier = newTier; // 平降（恢复手段奏效）
+  }
+  if (th.waveCdTicks > 0) th.waveCdTicks--;
+  return { pti: th.pti, tier: th.tier, escalated };
+}
+
+/** 弹射发射瞬间的 PTI 激发（catapult.js 发射路径调用；hourly 结算时入账） */
+function spikeCatapultLaunch(planet) {
+  ensurePlanetThreat(planet);
+  planet.threat.pendingCatapultSpike = (planet.threat.pendingCatapultSpike || 0) + PTI_CATAPULT_SPIKE;
+}
+
+/**
+ * Tier 4：超巨型漫游利维坦苏醒（3600 HP / 14m 级；三阶段部位破坏由战斗层消费）。
+ * 持久化紧凑元组：{ active, archetype, hpPermille, wx, wz, phase }
+ */
+function awakenLeviathan(world, planet) {
+  const th = ensurePlanetThreat(planet);
+  if (th.leviathan && th.leviathan.active) return th.leviathan;
+  const seeds = derivePlanetSeedsExtended(world, planet.id);
+  const ang = ((seeds.faunaSeed(99) % 3600) / 3600) * Math.PI * 2;
+  th.leviathan = {
+    active: true,
+    archetype: leviathanArchetypeOf(planet),
+    hpPermille: 1000,
+    wx: Math.round(Math.cos(ang) * 190),
+    wz: Math.round(Math.sin(ang) * 190),
+    phase: 1,
+    backCoreBroken: 0,
+    toxinSacsBroken: 0,
+    staggerT: 0,
+  };
+  planet.threat.catapultLock = true; // 利维坦场锁死货运弹射井（doc20 WP-4 战略后果）
+  chronicle(world, 'crisis', `行星 ${planet.name} 采掘扰动突破临界，超巨型利维坦苏醒！`, { planetId: planet.id });
+  emit(world, 'LeviathanAwakened', { planetId: planet.id, archetype: th.leviathan.archetype }, 'ground');
+  return th.leviathan;
+}
+
+/**
+ * 利维坦部位破坏（战斗层命中回执）：背部散热晶核/双侧毒素腺囊独立判定体积，
+ * 击碎触发 6.0s stagger 瘫痪硬直并永久关闭该部位 AoE。
+ */
+function breakLeviathanPart(world, planet, part) {
+  const th = ensurePlanetThreat(planet);
+  const lev = th.leviathan;
+  if (!lev || !lev.active) return { ok: false, reason: 'NoLeviathan' };
+  if (part !== 'back_core' && part !== 'toxin_sacs') return { ok: false, reason: 'BadPart' };
+  if (part === 'back_core' && !lev.backCoreBroken) {
+    lev.backCoreBroken = 1;
+    lev.staggerT = 6.0;
+  } else if (part === 'toxin_sacs' && !lev.toxinSacsBroken) {
+    lev.toxinSacsBroken = 1;
+    lev.staggerT = 6.0;
+  } else {
+    return { ok: true, already: true };
+  }
+  emit(world, 'LeviathanPartBroken', { planetId: planet.id, part, staggerS: 6.0 }, 'ground');
+  return { ok: true, staggerS: 6.0 };
+}
+
+/**
+ * 利维坦讨伐战果（战斗层上报）：PTI 归零、弹射井解锁、传奇战利品入账。
+ * @returns {{ok:boolean, loot?:object}}
+ */
+function reportLeviathanDefeated(world, planet) {
+  const th = ensurePlanetThreat(planet);
+  const lev = th.leviathan;
+  if (!lev || !lev.active) return { ok: false, reason: 'NoLeviathan' };
+  lev.active = false;
+  lev.phase = 0;
+  th.pti = 0;
+  th.tier = 0;
+  th.catapultLock = false;
+  const fid = world.playerFactionId;
+  const loot = { exoticMatter: 5, leviathanGene: 1 };
+  if (fid && world.economy.ledgers[fid]) {
+    const led = world.economy.ledgers[fid];
+    led.balances.exoticMatter = (led.balances.exoticMatter || 0) + loot.exoticMatter;
+  }
+  chronicle(world, 'crisis', `行星 ${planet.name} 利维坦讨伐成功：PTI 归零，先驱者奇异物质 ×5 入账`, { planetId: planet.id });
+  emit(world, 'LeviathanDefeated', { planetId: planet.id, loot }, 'ground');
+  // —— 42 号总纲 §二.7 第四幕「巨兽凯旋大游行局势」实战可达整改：巨兽击杀结算处
+  //    直连 LEVIATHAN_PARADE 局势唯一生成口（域内幂等：同星系已有游行复用现有局势；
+  //    金快照/未挂 spaceOperaState 世界首行守卫返回 null 零写入零漂移；
+  //    eventBus 'LeviathanDefeated' 监听器路径保留，双路径经 onLeviathanDefeated 幂等收敛）——
+  onLeviathanDefeated(world, planet.systemId);
+  return { ok: true, loot };
+}
+
+/**
+ * 阶梯增援波次构成（纯函数；GroundMission/GroundView 刷怪消费）。
+ * 编制随 Tier 与派系哲学差异化（哨卫打电网/异虫打农场——目标偏好由调用方消费）。
+ */
+function composeWave(world, planet, tier) {
+  const seeds = derivePlanetSeedsExtended(world, planet.id);
+  const s = seeds.faunaSeed(50 + tier * 7 + (planet.threat ? planet.threat.wavesSpawned || 0 : 0));
+  const fac = factionOf(planet);
+  if (tier <= 1) {
+    return { faction: fac, units: [{ kind: 'grunt', count: 2 + (s % 2) }], targetPref: 'probe' };
+  }
+  if (tier === 2) {
+    return { faction: fac, units: [{ kind: 'grunt', count: 4 }, { kind: 'heavy', count: 1 }], targetPref: fac === 'sentinel' ? 'power_grid' : 'mines_farms', flank: true };
+  }
+  if (tier === 3) {
+    return { faction: fac, units: [{ kind: 'grunt', count: 6 }, { kind: 'heavy', count: 2 }, { kind: 'mortar', count: 1 }], targetPref: 'power_core', flank: true };
+  }
+  return { faction: fac, units: [{ kind: 'leviathan', count: 1 }], targetPref: 'all' };
+}
+
+Object.assign(__exports, { PTI_THRESHOLDS, WAVE_INTERVAL_S, PTI_CATAPULT_SPIKE, leviathanArchetypeOf, factionOf, tickPlanetaryThreatIndex, spikeCatapultLaunch, awakenLeviathan, breakLeviathanPart, reportLeviathanDefeated, composeWave });
 
 });
 __register("src/domain/industry/planetaryLogistics.js", function (__exports, __require) {
@@ -17764,1918 +19129,6 @@ function assignTheme(world, planet, star, takenThemes) {
 Object.assign(__exports, { THEME_ASSIGNMENT_VERSION, srgbToLinear, PLANET_THEMES, getTheme, themesForCategory, SECONDARY_MODIFIERS, assignTheme });
 
 });
-__register("src/content/hulls.js", function (__exports, __require) {
-/**
- * content/hulls.js — 舰船船体定义（任务书 13.2：首发不少于 12 种原型）
- *
- * 12 种定位互异的船体：侦察、截击、护卫、驱逐、炮击巡洋、防空巡洋、
- * 战列、航母、工业、矿业、科学、补给。
- * baseStats.power 为船体集成反应堆的基础发电量；模块耗电与其叠加结算。
- * 数值为首发平衡基线，按标准场景批量模拟调参（任务书 13.5）。
- */
-
-const HULLS = [
-  {
-    id: 'hull_scout',
-    nameZh: '侦察艇',
-    nameEn: 'Scout Craft',
-    descZh: '轻型侦察艇体，为深空扫描与航线测绘优化，传感器功率远超同级，武装仅够自卫。',
-    descEn: 'Light recon hull tuned for deep-space survey and lane mapping; sensor output far exceeds its class, armament is self-defense only.',
-    category: 'support',
-    techReq: null,
-    cost: { credits: 900, alloy: 60, polymer: 10 },
-    buildHours: 72,
-    baseStats: {
-      structure: 80, armor: 8, shield: 12, power: 30, cpu: 40,
-      strategicSpeed: 4.4, fuelCap: 200, cargo: 30, crew: 4,
-      sensor: 95, signature: 10, lockons: 1, hangar: 0,
-    },
-    slots: { high: 1, mid: 1, low: 1 },
-  },
-  {
-    id: 'hull_interceptor',
-    nameZh: '截击艇',
-    nameEn: 'Interceptor',
-    descZh: '高速突击艇体，凭借低信号特征与高航速抢占有利阵位，结构脆弱，不宜持久作战。',
-    descEn: 'Fast strike hull that uses low signature and high speed to seize firing positions; fragile and unsuited to prolonged engagements.',
-    category: 'combat',
-    techReq: 'tech_kinetic_1',
-    cost: { credits: 1400, alloy: 90, polymer: 20 },
-    buildHours: 96,
-    baseStats: {
-      structure: 140, armor: 15, shield: 25, power: 45, cpu: 30,
-      strategicSpeed: 4.8, fuelCap: 140, cargo: 15, crew: 5,
-      sensor: 55, signature: 16, lockons: 2, hangar: 0,
-    },
-    slots: { high: 2, mid: 1, low: 1 },
-  },
-  {
-    id: 'hull_frigate',
-    nameZh: '护卫舰',
-    nameEn: 'Frigate',
-    descZh: '均衡的多用途护卫舰体，护航与巡逻的主力，火力和防护在同级中最稳定，造价低廉可批量列装。',
-    descEn: 'Balanced multirole escort hull, the backbone of patrol and convoy duty; dependable firepower and protection at low cost for mass fielding.',
-    category: 'combat',
-    techReq: null,
-    cost: { credits: 2200, alloy: 130, polymer: 25 },
-    buildHours: 120,
-    baseStats: {
-      structure: 260, armor: 30, shield: 40, power: 70, cpu: 45,
-      strategicSpeed: 3.8, fuelCap: 220, cargo: 60, crew: 12,
-      sensor: 50, signature: 28, lockons: 2, hangar: 0,
-    },
-    slots: { high: 2, mid: 2, low: 2 },
-  },
-  {
-    id: 'hull_destroyer',
-    nameZh: '驱逐舰',
-    nameEn: 'Destroyer',
-    descZh: '强调火力密度的驱逐舰体，多个武器槽位支持复合打击方案，为舰队提供中距离压制火力。',
-    descEn: 'Firepower-focused hull whose multiple weapon slots support combined strike loadouts, delivering mid-range suppression for the fleet.',
-    category: 'combat',
-    techReq: 'tech_missile_1',
-    cost: { credits: 4200, alloy: 240, polymer: 40 },
-    buildHours: 180,
-    baseStats: {
-      structure: 520, armor: 55, shield: 70, power: 120, cpu: 55,
-      strategicSpeed: 3.4, fuelCap: 260, cargo: 80, crew: 24,
-      sensor: 60, signature: 46, lockons: 3, hangar: 0,
-    },
-    slots: { high: 4, mid: 3, low: 2 },
-  },
-  {
-    id: 'hull_gun_cruiser',
-    nameZh: '炮击巡洋舰',
-    nameEn: 'Gun Cruiser',
-    descZh: '大动能火力平台，宽裕的电力与散热余量支持重炮列装，擅长正面战线对轰与要塞压制。',
-    descEn: 'Heavy kinetic fire platform with generous power and heat margins for massed cannon, built for line engagements and fortress suppression.',
-    category: 'combat',
-    techReq: 'tech_kinetic_2',
-    cost: { credits: 7000, alloy: 380, polymer: 60 },
-    buildHours: 264,
-    baseStats: {
-      structure: 980, armor: 130, shield: 90, power: 200, cpu: 70,
-      strategicSpeed: 2.9, fuelCap: 300, cargo: 90, crew: 45,
-      sensor: 55, signature: 78, lockons: 3, hangar: 0,
-    },
-    slots: { high: 5, mid: 3, low: 3 },
-  },
-  {
-    id: 'hull_aa_cruiser',
-    nameZh: '防空巡洋舰',
-    nameEn: 'Point-Defense Cruiser',
-    descZh: '舰队防空核心，多近防槽位与高锁定通道专司拦截导弹和舰载机，是航母编队必备的护卫幕。',
-    descEn: 'Fleet air-defense core; dense point-defense slots and high lock channels intercept missiles and craft, the mandatory escort screen of carrier groups.',
-    category: 'combat',
-    techReq: 'tech_pd_1',
-    cost: { credits: 6600, alloy: 350, polymer: 60 },
-    buildHours: 252,
-    baseStats: {
-      structure: 900, armor: 105, shield: 125, power: 190, cpu: 85,
-      strategicSpeed: 3.0, fuelCap: 300, cargo: 70, crew: 42,
-      sensor: 78, signature: 72, lockons: 4, hangar: 0,
-    },
-    slots: { high: 4, mid: 4, low: 3 },
-  },
-  {
-    id: 'hull_battleship',
-    nameZh: '战列舰',
-    nameEn: 'Battleship',
-    descZh: '巨型装甲战列平台，重甲重炮低速推进，作为舰队核心投入决战，建造与维护代价高昂。',
-    descEn: 'Massive armored battleship platform; heavy plating and heavy guns at low speed, committed as fleet core in decisive battle at extreme cost.',
-    category: 'combat',
-    techReq: 'tech_armor_2',
-    cost: { credits: 16000, alloy: 900, polymer: 150 },
-    buildHours: 600,
-    baseStats: {
-      structure: 2600, armor: 420, shield: 260, power: 520, cpu: 180,
-      strategicSpeed: 2.0, fuelCap: 420, cargo: 140, crew: 120,
-      sensor: 70, signature: 195, lockons: 6, hangar: 0,
-    },
-    slots: { high: 8, mid: 6, low: 6 },
-  },
-  {
-    id: 'hull_carrier',
-    nameZh: '航母',
-    nameEn: 'Carrier',
-    descZh: '舰载机投放平台，巨型机库搭载无人机与舰载机联队，自身武装薄弱，须依赖护航舰群。',
-    descEn: 'Drone and craft deployment platform with an enormous hangar wing; lightly armed and dependent on its escort group.',
-    category: 'carrier',
-    techReq: 'tech_carrier_1',
-    cost: { credits: 12000, alloy: 650, polymer: 120 },
-    buildHours: 480,
-    baseStats: {
-      structure: 1500, armor: 190, shield: 190, power: 280, cpu: 110,
-      strategicSpeed: 2.4, fuelCap: 380, cargo: 160, crew: 80,
-      sensor: 80, signature: 140, lockons: 4, hangar: 60,
-    },
-    slots: { high: 3, mid: 4, low: 4 },
-  },
-  {
-    id: 'hull_industrial',
-    nameZh: '工业舰',
-    nameEn: 'Industrial Freighter',
-    descZh: '移动工业平台，超大货舱与前哨建造模块使其成为殖民与设施部署的骨干运力。',
-    descEn: 'Mobile industrial platform; the oversized hold and outpost fabrication role make it the backbone of colonization and facility deployment.',
-    category: 'industrial',
-    techReq: 'tech_colonization_1',
-    cost: { credits: 5000, alloy: 280, polymer: 50 },
-    buildHours: 200,
-    baseStats: {
-      structure: 700, armor: 45, shield: 30, power: 110, cpu: 60,
-      strategicSpeed: 2.6, fuelCap: 280, cargo: 420, crew: 20,
-      sensor: 40, signature: 62, lockons: 1, hangar: 0,
-    },
-    slots: { high: 1, mid: 2, low: 3 },
-  },
-  {
-    id: 'hull_miner',
-    nameZh: '矿业舰',
-    nameEn: 'Mining Vessel',
-    descZh: '采掘作业舰体，配备采矿器槽位与大容量矿舱，是小行星带与矿脉星系的经济支柱。',
-    descEn: 'Extraction hull with mining rig slots and a high-volume ore hold; the economic pillar of asteroid belts and rich systems.',
-    category: 'industrial',
-    techReq: 'tech_mining_1',
-    cost: { credits: 3600, alloy: 200, polymer: 35 },
-    buildHours: 160,
-    baseStats: {
-      structure: 480, armor: 40, shield: 25, power: 90, cpu: 40,
-      strategicSpeed: 2.7, fuelCap: 260, cargo: 330, crew: 14,
-      sensor: 48, signature: 52, lockons: 1, hangar: 0,
-    },
-    slots: { high: 2, mid: 1, low: 3 },
-  },
-  {
-    id: 'hull_science',
-    nameZh: '科学船',
-    nameEn: 'Science Vessel',
-    descZh: '科研考察舰体，高算力与高灵敏度传感阵列专用于异常调查、扫描测绘与实验室作业。',
-    descEn: 'Research hull with high computing and sensitive sensor arrays dedicated to anomaly investigation, survey and laboratory work.',
-    category: 'science',
-    techReq: 'tech_science_1',
-    cost: { credits: 3000, alloy: 160, polymer: 40 },
-    buildHours: 144,
-    baseStats: {
-      structure: 320, armor: 22, shield: 45, power: 85, cpu: 90,
-      strategicSpeed: 3.6, fuelCap: 300, cargo: 80, crew: 16,
-      sensor: 115, signature: 34, lockons: 1, hangar: 0,
-    },
-    slots: { high: 1, mid: 2, low: 2 },
-  },
-  {
-    id: 'hull_supply',
-    nameZh: '补给舰',
-    nameEn: 'Fleet Tender',
-    descZh: '舰队后勤舰体，巨型燃料舱与再补给系统可在战区为编队续注燃料与弹药，是远程作战的前提。',
-    descEn: 'Fleet logistics hull; enormous fuel tanks and resupply systems refuel and rearm task forces in theater, the prerequisite of deep operations.',
-    category: 'support',
-    techReq: 'tech_logistics_1',
-    cost: { credits: 4400, alloy: 240, polymer: 45 },
-    buildHours: 192,
-    baseStats: {
-      structure: 560, armor: 45, shield: 40, power: 100, cpu: 40,
-      strategicSpeed: 2.8, fuelCap: 900, cargo: 260, crew: 18,
-      sensor: 35, signature: 55, lockons: 1, hangar: 0,
-    },
-    slots: { high: 1, mid: 2, low: 2 },
-  },
-  {
-    id: 'hull_titan',
-    nameZh: '泰坦级无畏巨舰',
-    nameEn: 'Titan Dreadnought',
-    descZh: '终局旗舰：仅能由行星货运弹射供应链（20 装甲模块舱 + 5 量子核心舱）合拢龙骨的超旗舰体，集舰队火力与指挥中枢于一身。',
-    descEn: 'Endgame flagship: keel laid only by the planetary freight-catapult supply chain (20 armor module pods + 5 quantum core pods).',
-    category: 'capital',
-    techReq: 'tech_precursor_mass_catapult',
-    cost: { credits: 20000, alloy: 1200 },
-    buildHours: 480,
-    baseStats: {
-      structure: 2600, armor: 160, shield: 120, power: 420, cpu: 160,
-      strategicSpeed: 2.0, fuelCap: 800, cargo: 600, crew: 90,
-      sensor: 90, signature: 120, lockons: 6, hangar: 2,
-    },
-    slots: { high: 6, mid: 5, low: 6 },
-  },
-];
-
-Object.assign(__exports, { HULLS });
-
-});
-__register("src/domain/research/research.js", function (__exports, __require) {
-/**
- * domain/research/research.js — 科技树与科研队列（任务书 4.7 / TECH-01..03）
- *
- * 科研点按类别（统一单池简化模型 + 项目优先级）累积；
- * 完成 → effectIndex 重建（modifiers 即时生效）→ 领域事件解锁。
- */
-
-const { TECHNOLOGIES: TECHNOLOGIES } = __require("src/content/technologies.js");
-const { emit: emit } = __require("src/core/eventBus.js");
-const { createEntity: createEntity } = __require("src/domain/entities/registry.js");
-
-const techIndex = new Map(TECHNOLOGIES.map((t) => [t.id, t]));
-function techDef(id) {
-  return techIndex.get(id);
-}
-function allTechs() {
-  return TECHNOLOGIES;
-}
-
-/** 校验 DAG 无环 + prereq 存在（启动与测试调用） */
-function validateTechGraph() {
-  const problems = [];
-  const state = new Map(); // 0 unvisited 1 visiting 2 done
-  const visit = (id) => {
-    const st = state.get(id);
-    if (st === 1) {
-      problems.push(`科技环依赖: ${id}`);
-      return;
-    }
-    if (st === 2) return;
-    state.set(id, 1);
-    const t = techIndex.get(id);
-    if (!t) {
-      problems.push(`未知科技引用: ${id}`);
-      return;
-    }
-    for (const p of t.prereqs || []) visit(p);
-    state.set(id, 2);
-  };
-  for (const t of TECHNOLOGIES) visit(t.id);
-  return problems;
-}
-
-/** 初始化阵营科研状态 */
-function initResearch(world, factionId) {
-  world.research[factionId] = {
-    completed: [],
-    active: [],   // [{ projectId, techId, progress }]
-    queue: [],    // [techId...]
-    points: 0,    // 当前科研点池
-    effectIndex: {},
-  };
-}
-
-/** 前置检查（TECH-01） */
-function canStart(world, factionId, techId) {
-  const rs = world.research[factionId];
-  const tech = techIndex.get(techId);
-  if (!tech) return { ok: false, reason: '未知科技' };
-  // doc18 WP-3：先驱者遗落科技仅能由五阶段巨石遗迹核心破译解锁，常规科研拒启动
-  if (tech.special === 'precursor') return { ok: false, reason: '先驱者遗落科技：需在地表破译先驱者巨石核心' };
-  if (!rs) return { ok: false, reason: '科研状态未初始化' };
-  if (rs.completed.includes(techId)) return { ok: false, reason: '已研究完成' };
-  if (rs.active.some((a) => a.techId === techId)) return { ok: false, reason: '已在研究中' };
-  for (const p of tech.prereqs || []) {
-    if (!rs.completed.includes(p)) {
-      return { ok: false, reason: `缺少前置: ${techIndex.get(p)?.nameZh || p}` };
-    }
-  }
-  return { ok: true };
-}
-
-/** 启动项目（StartResearch 命令执行体） */
-function startResearch(world, factionId, techId) {
-  const rs = world.research[factionId];
-  const tech = techIndex.get(techId);
-  const project = createEntity(world, 'buildQueues', {
-    kind: 'research',
-    factionId,
-    techId,
-    progress: 0,
-    cost: tech.cost,
-  });
-  rs.active.push({ projectId: project.id, techId, progress: 0 });
-  return project;
-}
-
-/** 每小时科研推进（实验室产出已折算为 points 注入） */
-function tickResearch(world, factionId, pointsPerHour) {
-  const rs = world.research[factionId];
-  if (!rs || rs.active.length === 0) return;
-  // 多项目抢占：按队列顺序分配（TECH-03：分配之和 ≤ 实际产出）
-  let budget = pointsPerHour;
-  for (const a of rs.active) {
-    if (budget <= 0) break;
-    const tech = techIndex.get(a.techId);
-    const give = Math.min(budget, tech.cost - a.progress);
-    a.progress += give;
-    budget -= give;
-    if (a.progress >= tech.cost) {
-      completeTech(world, factionId, a.techId);
-    }
-  }
-  rs.active = rs.active.filter((a) => {
-    const tech = techIndex.get(a.techId);
-    return a.progress < tech.cost;
-  });
-  // 队列自动补充
-  while (rs.active.length < 1 && rs.queue.length > 0) {
-    const nextId = rs.queue.shift();
-    const chk = canStart(world, factionId, nextId);
-    if (chk.ok) {
-      const tech = techIndex.get(nextId);
-      rs.active.push({ projectId: `auto_${nextId}`, techId: nextId, progress: 0 });
-    } else {
-      break; // 前置未满足，停止（不静默跳过）
-    }
-  }
-}
-
-/** 完成科技：重建 effectIndex 并广播 */
-function completeTech(world, factionId, techId) {
-  const rs = world.research[factionId];
-  if (rs.completed.includes(techId)) return; // 幂等（EVENT-01 思路）
-  rs.completed.push(techId);
-  rs.active = rs.active.filter((a) => a.techId !== techId);
-  rebuildEffectIndex(world, factionId);
-  const tech = techIndex.get(techId);
-  emit(world, 'TechCompleted', { factionId, techId, unlocks: tech.unlocks || [] }, 'research');
-}
-
-/** 重建科技效果索引（modifiers.getMod 消费） */
-function rebuildEffectIndex(world, factionId) {
-  const rs = world.research[factionId];
-  if (!rs) return;
-  const idx = {};
-  for (const techId of rs.completed) {
-    const tech = techIndex.get(techId);
-    if (!tech || !tech.effects) continue;
-    for (const e of tech.effects) {
-      (idx[e.stat] ||= []).push({ value: e.value, mode: e.mode, techId });
-    }
-  }
-  rs.effectIndex = idx;
-}
-
-/** 科技可用状态（UI 树着色） */
-function techStatus(world, factionId, techId) {
-  const rs = world.research[factionId];
-  const tech = techIndex.get(techId);
-  if (!rs || !tech) return 'hidden';
-  if (rs.completed.includes(techId)) return 'done';
-  if (rs.active.some((a) => a.techId === techId)) return 'active';
-  const prereqMet = (tech.prereqs || []).every((p) => rs.completed.includes(p));
-  return prereqMet ? 'available' : 'locked';
-}
-
-Object.assign(__exports, { techDef, allTechs, validateTechGraph, initResearch, canStart, startResearch, tickResearch, completeTech, rebuildEffectIndex, techStatus });
-
-});
-__register("src/content/technologies.js", function (__exports, __require) {
-/**
- * content/technologies.js — 科技树定义（任务书 13.3：不少于 60 项，7 类主路线）
- *
- * 七类：propulsion / industry / energy / bio / computing / space / society。
- * cost 为科研点（tier1 80-140 → tier4 900-1600）；prereqs 构成无环依赖图，
- * tier n 的前置 tier ≤ n；unlocks 引用 hulls/modules/buildings 的内容 id。
- * special: 'story' 为主线特殊项目，'crisis' 为危机线项目。
- */
-
-const TECHNOLOGIES = [
-  // ── propulsion 推进与航行 ──
-  {
-    id: 'tech_propulsion_1',
-    nameZh: '离子推进',
-    nameEn: 'Ion Propulsion',
-    descZh: '实用化离子推进器设计，为舰船提供可靠的基础战略机动与燃效改善。',
-    descEn: 'Practical ion thruster design giving ships dependable baseline strategic mobility and modest fuel gains.',
-    category: 'propulsion', tier: 1, cost: 100, prereqs: [],
-    effects: [{ stat: 'fuelEfficiency', mode: 'add', value: 0.03 }],
-    unlocks: ['mod_ion_thruster'], special: null,
-  },
-  {
-    id: 'tech_propulsion_2',
-    nameZh: '聚变推进',
-    nameEn: 'Fusion Propulsion',
-    descZh: '聚变喷流推进工程，显著提升推力上限，是中型舰艇高速机动的技术门槛。',
-    descEn: 'Fusion-jet propulsion engineering raising the thrust ceiling; the technical gate for high-speed mid-size hulls.',
-    category: 'propulsion', tier: 2, cost: 260, prereqs: ['tech_propulsion_1'],
-    effects: [{ stat: 'fuelEfficiency', mode: 'mult', value: 1.08 }],
-    unlocks: ['mod_fusion_thruster'], special: null,
-  },
-  {
-    id: 'tech_propulsion_3',
-    nameZh: '磁约束聚变推进',
-    nameEn: 'Confined-Fusion Propulsion',
-    descZh: '磁约束喷管与能量回收技术，将推进效率推至现役极限。',
-    descEn: 'Magnetically confined nozzles with energy recovery push propulsion efficiency to the service limit.',
-    category: 'propulsion', tier: 3, cost: 620, prereqs: ['tech_propulsion_2'],
-    effects: [
-      { stat: 'strategicSpeed', mode: 'mult', value: 1.05 },
-      { stat: 'fuelEfficiency', mode: 'mult', value: 1.08 },
-    ],
-    unlocks: ['mod_advanced_fusion_thruster'], special: null,
-  },
-  {
-    id: 'tech_warpdrive_1',
-    nameZh: '跃迁引擎',
-    nameEn: 'Warp Drive',
-    descZh: '首批实用化跃迁场发生器，压缩航路航行时间，是远航殖民与舰队投送的前提。',
-    descEn: 'First practical warp-field generator compressing lane transit time; the prerequisite of deep-range colonization and force projection.',
-    category: 'propulsion', tier: 2, cost: 300, prereqs: ['tech_propulsion_1', 'tech_energy_1'],
-    effects: [{ stat: 'strategicSpeed', mode: 'mult', value: 1.1 }],
-    unlocks: ['mod_warp_core'], special: null,
-  },
-  {
-    id: 'tech_warpdrive_2',
-    nameZh: '长距跃迁',
-    nameEn: 'Long-Range Warp',
-    descZh: '跃迁场稳定性改进，延长单次跃迁距离并降低燃耗，缩短战役级机动周期。',
-    descEn: 'Warp-field stability refinements extend per-jump range, cut fuel burn and shorten campaign-level maneuvers.',
-    category: 'propulsion', tier: 3, cost: 700, prereqs: ['tech_warpdrive_1'],
-    effects: [
-      { stat: 'strategicSpeed', mode: 'mult', value: 1.15 },
-      { stat: 'fuelEfficiency', mode: 'mult', value: 1.1 },
-    ],
-    unlocks: [], special: null,
-  },
-  {
-    id: 'tech_fuel_1',
-    nameZh: '燃料循环',
-    nameEn: 'Fuel Cycling',
-    descZh: '标准化燃料储存与转运规程，降低舰队远航损耗，并解锁氘精炼产能。',
-    descEn: 'Standardized fuel storage and transfer doctrine cutting fleet burn while unlocking deuterium refining capacity.',
-    category: 'propulsion', tier: 1, cost: 90, prereqs: [],
-    effects: [{ stat: 'fuelEfficiency', mode: 'mult', value: 1.1 }],
-    unlocks: ['mod_fuel_scoop', 'bld_deuterium_plant'], special: null,
-  },
-  {
-    id: 'tech_fuel_2',
-    nameZh: '深冷燃料工程',
-    nameEn: 'Cryo-Fuel Engineering',
-    descZh: '深冷储存与高密度装填工艺，同步改善舰队燃效与机动半径。',
-    descEn: 'Cryogenic storage and high-density loading improve fleet fuel economy and operational radius together.',
-    category: 'propulsion', tier: 3, cost: 560, prereqs: ['tech_fuel_1', 'tech_propulsion_2'],
-    effects: [
-      { stat: 'fuelEfficiency', mode: 'mult', value: 1.12 },
-      { stat: 'strategicSpeed', mode: 'mult', value: 1.05 },
-    ],
-    unlocks: [], special: null,
-  },
-  {
-    id: 'tech_navigation_1',
-    nameZh: '航路规划',
-    nameEn: 'Lane Navigation',
-    descZh: '航路引力图与批量航线规划算法，提升全舰队战略航行速度。',
-    descEn: 'Gravitational lane charts and batch routing algorithms raise strategic cruise speed fleet-wide.',
-    category: 'propulsion', tier: 2, cost: 240, prereqs: ['tech_warpdrive_1'],
-    effects: [{ stat: 'strategicSpeed', mode: 'mult', value: 1.08 }],
-    unlocks: [], special: null,
-  },
-  {
-    id: 'tech_logistics_1',
-    nameZh: '舰队后勤',
-    nameEn: 'Fleet Logistics',
-    descZh: '舰队级后勤组织学，统一货柜标准并建立战区再补给体系，解锁补给舰体。',
-    descEn: 'Fleet-level logistics organization unifying cargo standards and theater resupply; unlocks the tender hull.',
-    category: 'propulsion', tier: 2, cost: 220, prereqs: ['tech_warpdrive_1'],
-    effects: [{ stat: 'cargoCapacity', mode: 'mult', value: 1.1 }],
-    unlocks: ['mod_cargo_ext', 'mod_supply_pod', 'hull_supply'], special: null,
-  },
-
-  // ── industry 工业与采掘 ──
-  {
-    id: 'tech_mining_1',
-    nameZh: '采掘作业',
-    nameEn: 'Extraction Operations',
-    descZh: '机械化采掘规程与矿业舰设计，是资源产业链与矿业舰体的起点。',
-    descEn: 'Mechanized extraction doctrine and mining hull design; the start of the resource chain.',
-    category: 'industry', tier: 1, cost: 100, prereqs: [],
-    effects: [{ stat: 'mineOutput', mode: 'mult', value: 1.1 }],
-    unlocks: ['bld_mine_heavy', 'bld_volatile_well', 'bld_gas_harvester', 'mod_miner_std', 'hull_miner'], special: null,
-  },
-  {
-    id: 'tech_mining_2',
-    nameZh: '深层采掘',
-    nameEn: 'Deep-Core Extraction',
-    descZh: '深井与高压矿脉开采技术，解锁稀土深采与深层采矿器。',
-    descEn: 'Deep-shaft and pressurized-vein mining technology unlocking rare-earth deep mines and deep-core rigs.',
-    category: 'industry', tier: 2, cost: 300, prereqs: ['tech_mining_1'],
-    effects: [{ stat: 'mineOutput', mode: 'mult', value: 1.12 }],
-    unlocks: ['bld_mine_rare', 'mod_miner_deep'], special: null,
-  },
-  {
-    id: 'tech_mining_3',
-    nameZh: '大规模采掘',
-    nameEn: 'Mass Extraction',
-    descZh: '连续作业面与自动化矿队管理，将采掘效率提升至工业规模。',
-    descEn: 'Continuous working faces and automated mining-train management raise extraction to industrial scale.',
-    category: 'industry', tier: 3, cost: 640, prereqs: ['tech_mining_2'],
-    effects: [
-      { stat: 'mineOutput', mode: 'mult', value: 1.15 },
-      { stat: 'anomalyChanceBonus', mode: 'add', value: 0.02 },
-    ],
-    unlocks: [], special: null,
-  },
-  {
-    id: 'tech_alloy_1',
-    nameZh: '结构冶金学',
-    nameEn: 'Structural Metallurgy',
-    descZh: '铁族-硅质原矿冶炼工艺，建立合金量产线，是一切造舰与建设的基础。',
-    descEn: 'Ferro-silicate smelting establishing mass alloy production; the basis of all shipbuilding and construction.',
-    category: 'industry', tier: 1, cost: 120, prereqs: [],
-    effects: [{ stat: 'alloyOutput', mode: 'mult', value: 1.1 }],
-    unlocks: ['bld_alloy_plant'], special: null,
-  },
-  {
-    id: 'tech_alloy_2',
-    nameZh: '高强度合金',
-    nameEn: 'High-Strength Alloys',
-    descZh: '晶粒控制与真空浇铸工艺，提高合金强度与冶金产出效率。',
-    descEn: 'Grain control and vacuum casting raise alloy strength and metallurgical yield.',
-    category: 'industry', tier: 2, cost: 320, prereqs: ['tech_alloy_1'],
-    effects: [{ stat: 'alloyOutput', mode: 'mult', value: 1.12 }],
-    unlocks: [], special: null,
-  },
-  {
-    id: 'tech_polymer_1',
-    nameZh: '高分子化学',
-    nameEn: 'Polymer Chemistry',
-    descZh: '高分子合成路线设计，建立化学试剂与聚合物的工业产能。',
-    descEn: 'Synthetic polymer routes establishing industrial output of reagents and polymers.',
-    category: 'industry', tier: 1, cost: 110, prereqs: [],
-    effects: [{ stat: 'factoryOutput', mode: 'mult', value: 1.05 }],
-    unlocks: ['bld_chem_plant', 'bld_polymer_plant'], special: null,
-  },
-  {
-    id: 'tech_industry_1',
-    nameZh: '标准化制造',
-    nameEn: 'Standardized Manufacturing',
-    descZh: '统一规格与流水线组织，降低建筑与模块制造成本，解锁模块工厂。',
-    descEn: 'Unified specifications and line organization cut construction costs and unlock the module factory.',
-    category: 'industry', tier: 1, cost: 130, prereqs: ['tech_alloy_1'],
-    effects: [
-      { stat: 'factoryOutput', mode: 'mult', value: 1.08 },
-      { stat: 'buildSpeed', mode: 'mult', value: 1.05 },
-    ],
-    unlocks: ['bld_module_factory'], special: null,
-  },
-  {
-    id: 'tech_industry_2',
-    nameZh: '精密工业',
-    nameEn: 'Precision Industry',
-    descZh: '微电子装配与精密烧结工艺，解锁电子元件厂与陶瓷窑。',
-    descEn: 'Microelectronic assembly and precision sintering unlock the electronics plant and ceramic kiln.',
-    category: 'industry', tier: 2, cost: 340, prereqs: ['tech_industry_1'],
-    effects: [{ stat: 'factoryOutput', mode: 'mult', value: 1.1 }],
-    unlocks: ['bld_electronics_plant', 'bld_ceramic_kiln'], special: null,
-  },
-  {
-    id: 'tech_industry_3',
-    nameZh: '大规模生产',
-    nameEn: 'Mass Production',
-    descZh: '全流程自动化产线，同步提升工业产出与建设速度。',
-    descEn: 'End-to-end automated lines raise industrial output and construction speed together.',
-    category: 'industry', tier: 3, cost: 680, prereqs: ['tech_industry_2'],
-    effects: [
-      { stat: 'factoryOutput', mode: 'mult', value: 1.1 },
-      { stat: 'buildSpeed', mode: 'mult', value: 1.1 },
-    ],
-    unlocks: [], special: null,
-  },
-  {
-    id: 'tech_shipyard_1',
-    nameZh: '轨道船坞',
-    nameEn: 'Orbital Shipyard',
-    descZh: '轨道建造平台与舾装工艺，建立舰队规模化建造能力。',
-    descEn: 'Orbital construction platforms and fitting-out doctrine establish fleet-scale shipbuilding.',
-    category: 'industry', tier: 1, cost: 140, prereqs: ['tech_industry_1'],
-    effects: [{ stat: 'shipBuildSpeed', mode: 'mult', value: 1.1 }],
-    unlocks: ['bld_shipyard'], special: null,
-  },
-  {
-    id: 'tech_shipyard_2',
-    nameZh: '舰船流水线',
-    nameEn: 'Ship Production Line',
-    descZh: '模块化分段建造法，缩短舰船工期并降低建造成本。',
-    descEn: 'Modular section construction shortens ship build times and lowers costs.',
-    category: 'industry', tier: 2, cost: 320, prereqs: ['tech_shipyard_1'],
-    effects: [
-      { stat: 'shipBuildSpeed', mode: 'mult', value: 1.15 },
-      { stat: 'shipBuildCostReduction', mode: 'add', value: 0.05 },
-    ],
-    unlocks: [], special: null,
-  },
-
-  // ── energy 能源与防护系统 ──
-  {
-    id: 'tech_energy_1',
-    nameZh: '电网工程',
-    nameEn: 'Grid Engineering',
-    descZh: '殖民地区域电网设计规范，减少输配损耗，提升整体供电效率。',
-    descEn: 'Regional grid design standards for colonies, cutting transmission losses and raising supply efficiency.',
-    category: 'energy', tier: 1, cost: 90, prereqs: [],
-    effects: [{ stat: 'powerOutput', mode: 'mult', value: 1.08 }],
-    unlocks: [], special: null,
-  },
-  {
-    id: 'tech_energy_2',
-    nameZh: '高压电网',
-    nameEn: 'High-Capacity Grid',
-    descZh: '高压输配电与储能调度算法，支撑大规模工业与军事设施的用电峰值。',
-    descEn: 'High-tension transmission and storage scheduling sustain peak demand of large industrial and military sites.',
-    category: 'energy', tier: 2, cost: 240, prereqs: ['tech_energy_1'],
-    effects: [{ stat: 'powerOutput', mode: 'mult', value: 1.1 }],
-    unlocks: [], special: null,
-  },
-  {
-    id: 'tech_reactor_1',
-    nameZh: '裂变反应堆',
-    nameEn: 'Fission Reactor',
-    descZh: '紧凑裂变堆芯设计，为舰载模块提供第一代高功率电源。',
-    descEn: 'Compact fission core design providing the first generation of high-output shipboard power.',
-    category: 'energy', tier: 1, cost: 110, prereqs: [],
-    effects: [{ stat: 'powerOutput', mode: 'mult', value: 1.05 }],
-    unlocks: ['mod_reactor_fission'], special: null,
-  },
-  {
-    id: 'tech_reactor_2',
-    nameZh: '聚变反应堆',
-    nameEn: 'Fusion Reactor',
-    descZh: '可控聚变堆工程化，功率密度与安全性大幅优于裂变方案。',
-    descEn: 'Engineered controlled fusion, a major step up in power density and safety over fission.',
-    category: 'energy', tier: 2, cost: 280, prereqs: ['tech_reactor_1'],
-    effects: [{ stat: 'powerOutput', mode: 'mult', value: 1.08 }],
-    unlocks: ['mod_reactor_fusion', 'bld_fusion_plant'], special: null,
-  },
-  {
-    id: 'tech_reactor_3',
-    nameZh: '反物质堆芯',
-    nameEn: 'Antimatter Core',
-    descZh: '受控湮灭堆芯，单机功率冠绝现役装备，需配套严格的储存与屏蔽体系。',
-    descEn: 'Controlled annihilation core with unmatched single-unit output, demanding strict storage and shielding systems.',
-    category: 'energy', tier: 3, cost: 720, prereqs: ['tech_reactor_2'],
-    effects: [{ stat: 'powerOutput', mode: 'mult', value: 1.1 }],
-    unlocks: ['mod_reactor_antimatter'], special: null,
-  },
-  {
-    id: 'tech_fuelcell_1',
-    nameZh: '储能单元',
-    nameEn: 'Energy Cell Storage',
-    descZh: '高密度储能单元制造工艺，建立储能组产能以支撑建筑与地面任务。',
-    descEn: 'High-density cell manufacturing establishing power cell output for buildings and ground missions.',
-    category: 'energy', tier: 2, cost: 260, prereqs: ['tech_energy_1', 'tech_industry_1'],
-    effects: [{ stat: 'moduleOutput', mode: 'mult', value: 1.05 }],
-    unlocks: ['bld_storage_plant'], special: null,
-  },
-  {
-    id: 'tech_shield_1',
-    nameZh: '偏导护盾',
-    nameEn: 'Deflector Shield',
-    descZh: '第一代偏导护盾发生器，为舰船提供可再生的能量防护层。',
-    descEn: 'First-generation deflector shields give ships a regenerating energy barrier.',
-    category: 'energy', tier: 2, cost: 240, prereqs: ['tech_reactor_1'],
-    effects: [{ stat: 'maxShield', mode: 'mult', value: 1.05 }],
-    unlocks: ['mod_shield_std'], special: null,
-  },
-  {
-    id: 'tech_shield_2',
-    nameZh: '相移护盾',
-    nameEn: 'Phase-Shift Shield',
-    descZh: '多层相移护盾调制技术，大幅提高护盾容量与再生速率。',
-    descEn: 'Multi-layer phase-shift modulation greatly raises shield capacity and regeneration.',
-    category: 'energy', tier: 3, cost: 560, prereqs: ['tech_shield_1'],
-    effects: [
-      { stat: 'maxShield', mode: 'mult', value: 1.08 },
-      { stat: 'shieldRegen', mode: 'mult', value: 1.1 },
-    ],
-    unlocks: ['mod_shield_adv'], special: null,
-  },
-  {
-    id: 'tech_shield_3',
-    nameZh: '再生护盾矩阵',
-    nameEn: 'Regenerative Shield Matrix',
-    descZh: '自适应护盾矩阵，受击后即时回充，将持续作战能力推至新高度。',
-    descEn: 'Adaptive shield matrix recharging on impact, pushing sustained combat endurance to a new level.',
-    category: 'energy', tier: 4, cost: 1100, prereqs: ['tech_shield_2', 'tech_ai_1'],
-    effects: [
-      { stat: 'maxShield', mode: 'mult', value: 1.1 },
-      { stat: 'shieldRegen', mode: 'mult', value: 1.15 },
-    ],
-    unlocks: ['mod_shield_regen'], special: null,
-  },
-  {
-    id: 'tech_heat_1',
-    nameZh: '热管理',
-    nameEn: 'Thermal Management',
-    descZh: '舰载散热回路与辐射板优化，提升全舰散热能力与持续火力。',
-    descEn: 'Optimized coolant loops and radiator panels raise shipwide heat dissipation and sustained firepower.',
-    category: 'energy', tier: 2, cost: 220, prereqs: ['tech_reactor_1'],
-    effects: [{ stat: 'heatDissipation', mode: 'mult', value: 1.15 }],
-    unlocks: [], special: null,
-  },
-  {
-    id: 'tech_exotic_matter',
-    nameZh: '奇异物质工程',
-    nameEn: 'Exotic Matter Engineering',
-    descZh: '主线特殊项目：稳定封存并应用奇异物质样本，为动力与武器系统开辟全新能级。',
-    descEn: 'Story project: stabilizing and applying exotic matter samples, opening an entirely new energy tier for drives and weapons.',
-    category: 'energy', tier: 4, cost: 1500, prereqs: ['tech_quantum_1', 'tech_reactor_3'],
-    effects: [
-      { stat: 'powerOutput', mode: 'mult', value: 1.15 },
-      { stat: 'weaponDamage', mode: 'mult', value: 1.05 },
-    ],
-    unlocks: [], special: 'story',
-  },
-
-  // ── bio 生态与生命科学 ──
-  {
-    id: 'tech_bio_1',
-    nameZh: '封闭生态',
-    nameEn: 'Closed Ecology',
-    descZh: '封闭生态循环工程，建立藻类反应与民品生物合成产能。',
-    descEn: 'Closed ecological cycling establishing algal reactors and bio-based consumer production.',
-    category: 'bio', tier: 1, cost: 100, prereqs: [],
-    effects: [{ stat: 'farmOutput', mode: 'mult', value: 1.1 }],
-    unlocks: ['bld_algae_reactor', 'bld_consumer_plant'], special: null,
-  },
-  {
-    id: 'tech_bio_2',
-    nameZh: '生态优化',
-    nameEn: 'Ecology Optimization',
-    descZh: '循环回路与种群调控模型，提高农业产出并小幅促进人口增长。',
-    descEn: 'Cycle tuning and population modeling raise farm output and modestly boost growth.',
-    category: 'bio', tier: 2, cost: 280, prereqs: ['tech_bio_1'],
-    effects: [
-      { stat: 'farmOutput', mode: 'mult', value: 1.1 },
-      { stat: 'popGrowth', mode: 'mult', value: 1.04 },
-    ],
-    unlocks: [], special: null,
-  },
-  {
-    id: 'tech_bio_3',
-    nameZh: '人口生理学',
-    nameEn: 'Population Physiology',
-    descZh: '极端环境生理适应研究，系统提升人口健康水平与增长上限。',
-    descEn: 'Physiological adaptation studies for extreme environments, systematically raising population health and growth ceiling.',
-    category: 'bio', tier: 3, cost: 600, prereqs: ['tech_bio_2', 'tech_med_1'],
-    effects: [
-      { stat: 'popGrowth', mode: 'mult', value: 1.06 },
-      { stat: 'farmOutput', mode: 'mult', value: 1.1 },
-    ],
-    unlocks: [], special: null,
-  },
-  {
-    id: 'tech_med_1',
-    nameZh: '临床医学',
-    nameEn: 'Clinical Medicine',
-    descZh: '标准化临床医疗体系，降低死亡率并改善殖民地稳定度。',
-    descEn: 'Standardized clinical care lowering mortality and improving colonial stability.',
-    category: 'bio', tier: 2, cost: 260, prereqs: ['tech_bio_1'],
-    effects: [
-      { stat: 'stabilityBonus', mode: 'add', value: 3 },
-      { stat: 'popGrowth', mode: 'mult', value: 1.04 },
-    ],
-    unlocks: ['bld_medical_center'], special: null,
-  },
-  {
-    id: 'tech_terraform_1',
-    nameZh: '环境改造',
-    nameEn: 'Terraforming',
-    descZh: '大气调节与水循环恢复工程，开启不宜居行星的分阶段改造能力。',
-    descEn: 'Atmospheric conditioning and water-cycle restoration, opening staged transformation of hostile worlds.',
-    category: 'bio', tier: 3, cost: 700, prereqs: ['tech_colonization_1', 'tech_bio_2'],
-    effects: [
-      { stat: 'terraformSpeed', mode: 'mult', value: 1.15 },
-      { stat: 'habitabilityBonus', mode: 'add', value: 3 },
-    ],
-    unlocks: [], special: null,
-  },
-  {
-    id: 'tech_terraform_2',
-    nameZh: '星球工程',
-    nameEn: 'Planetary Engineering',
-    descZh: '全尺度星球工程学，加速改造进程并进一步放宽极端环境的殖民门槛。',
-    descEn: 'Full-scale planetary engineering accelerating terraforming and further relaxing extreme-world colonization thresholds.',
-    category: 'bio', tier: 4, cost: 1300, prereqs: ['tech_terraform_1'],
-    effects: [
-      { stat: 'terraformSpeed', mode: 'mult', value: 1.2 },
-      { stat: 'habitabilityBonus', mode: 'add', value: 4 },
-    ],
-    unlocks: [], special: null,
-  },
-
-  // ── computing 计算与科研 ──
-  {
-    id: 'tech_computing_1',
-    nameZh: '计算架构',
-    nameEn: 'Computing Architecture',
-    descZh: '新一代分布式计算架构，全面提升科研数据处理能力。',
-    descEn: 'A new distributed computing architecture raising research data throughput across the board.',
-    category: 'computing', tier: 1, cost: 90, prereqs: [],
-    effects: [{ stat: 'researchOutput', mode: 'mult', value: 1.08 }],
-    unlocks: [], special: null,
-  },
-  {
-    id: 'tech_science_1',
-    nameZh: '系统科研法',
-    nameEn: 'Systematic Research',
-    descZh: '标准化科研流程与考察舰设计规范，解锁科学船并提升研究效率。',
-    descEn: 'Standardized research process and survey hull design; unlocks the science vessel and raises research efficiency.',
-    category: 'computing', tier: 1, cost: 110, prereqs: [],
-    effects: [
-      { stat: 'researchOutput', mode: 'mult', value: 1.1 },
-      { stat: 'scanSpeed', mode: 'mult', value: 1.05 },
-    ],
-    unlocks: ['hull_science'], special: null,
-  },
-  {
-    id: 'tech_science_2',
-    nameZh: '深空分析',
-    nameEn: 'Deep-Space Analysis',
-    descZh: '深空观测数据处理体系，解锁深空分析中心与晶体提纯工艺。',
-    descEn: 'Deep-space observation data processing; unlocks the analytics center and crystal refining.',
-    category: 'computing', tier: 2, cost: 300, prereqs: ['tech_science_1', 'tech_computing_1'],
-    effects: [
-      { stat: 'scanSpeed', mode: 'mult', value: 1.12 },
-      { stat: 'scanPrecision', mode: 'mult', value: 1.1 },
-    ],
-    unlocks: ['bld_deepspace_analytics', 'bld_crystal_plant'], special: null,
-  },
-  {
-    id: 'tech_science_3',
-    nameZh: '理论大综合',
-    nameEn: 'Grand Synthesis',
-    descZh: '跨学科理论大综合，显著提高科研产出与异常现象的识别概率。',
-    descEn: 'Cross-disciplinary theoretical synthesis markedly lifting research output and anomaly identification odds.',
-    category: 'computing', tier: 3, cost: 640, prereqs: ['tech_science_2'],
-    effects: [
-      { stat: 'researchOutput', mode: 'mult', value: 1.12 },
-      { stat: 'anomalyChanceBonus', mode: 'add', value: 0.03 },
-    ],
-    unlocks: [], special: null,
-  },
-  {
-    id: 'tech_sensors_1',
-    nameZh: '传感阵列',
-    nameEn: 'Sensor Arrays',
-    descZh: '相控传感阵列标准，提升全部舰船的探测能力。',
-    descEn: 'Phased sensor array standards improving detection strength for all ships.',
-    category: 'computing', tier: 1, cost: 100, prereqs: [],
-    effects: [{ stat: 'sensorStrength', mode: 'mult', value: 1.1 }],
-    unlocks: ['mod_sensor_std'], special: null,
-  },
-  {
-    id: 'tech_sensors_2',
-    nameZh: '深空扫描',
-    nameEn: 'Deep-Space Scanning',
-    descZh: '长基线干涉扫描技术，大幅扩展探测距离与识别精度。',
-    descEn: 'Long-baseline interferometric scanning greatly extending detection range and identification precision.',
-    category: 'computing', tier: 2, cost: 260, prereqs: ['tech_sensors_1'],
-    effects: [
-      { stat: 'sensorStrength', mode: 'mult', value: 1.12 },
-      { stat: 'scanPrecision', mode: 'mult', value: 1.1 },
-    ],
-    unlocks: ['mod_sensor_deepspace'], special: null,
-  },
-  {
-    id: 'tech_ai_1',
-    nameZh: '舰载智能',
-    nameEn: 'Shipboard Intelligence',
-    descZh: '受限舰载智能系统，接管无人机调度与行政辅助，是无人作战体系的前提。',
-    descEn: 'Constrained shipboard intelligence taking over drone control and administrative assistance; the gate to unmanned combat systems.',
-    category: 'computing', tier: 2, cost: 320, prereqs: ['tech_computing_1'],
-    effects: [
-      { stat: 'researchOutput', mode: 'mult', value: 1.06 },
-      { stat: 'adminCapacity', mode: 'add', value: 3 },
-    ],
-    unlocks: ['mod_drone_bay', 'mod_drone_weapon'], special: null,
-  },
-  {
-    id: 'tech_ai_2',
-    nameZh: '自主系统',
-    nameEn: 'Autonomous Systems',
-    descZh: '大规模自主系统集群管理，减轻治理负荷并提升工业调度效率。',
-    descEn: 'Large-scale autonomous swarm management easing governance load and improving industrial scheduling.',
-    category: 'computing', tier: 3, cost: 700, prereqs: ['tech_ai_1'],
-    effects: [
-      { stat: 'adminCapacity', mode: 'add', value: 5 },
-      { stat: 'factoryOutput', mode: 'mult', value: 1.08 },
-    ],
-    unlocks: [], special: null,
-  },
-  {
-    id: 'tech_ewar_1',
-    nameZh: '电子战基础',
-    nameEn: 'Electronic Warfare',
-    descZh: '电子对抗作战条令与制式干扰装备，建立舰队电子战能力。',
-    descEn: 'Electronic warfare doctrine and standard jamming equipment establishing fleet EW capability.',
-    category: 'computing', tier: 2, cost: 260, prereqs: ['tech_sensors_1'],
-    effects: [{ stat: 'ewarStrength', mode: 'mult', value: 1.12 }],
-    unlocks: ['mod_jammer', 'mod_target_illuminator'], special: null,
-  },
-  {
-    id: 'tech_ewar_2',
-    nameZh: '定向压制',
-    nameEn: 'Directional Suppression',
-    descZh: '定向能压制与诱饵回波技术，强化电子战强度并改善本舰命中率修正。',
-    descEn: 'Directed-energy suppression and decoy returns, strengthening EW power and friendly hit correction.',
-    category: 'computing', tier: 3, cost: 580, prereqs: ['tech_ewar_1'],
-    effects: [
-      { stat: 'ewarStrength', mode: 'mult', value: 1.15 },
-      { stat: 'hitChanceBonus', mode: 'add', value: 0.03 },
-    ],
-    unlocks: ['mod_sensor_damper'], special: null,
-  },
-  {
-    id: 'tech_quantum_1',
-    nameZh: '量子计算',
-    nameEn: 'Quantum Computing',
-    descZh: '量子级计算平台，为高端科研与特殊项目提供必需的算力底座。',
-    descEn: 'Quantum-grade computing platforms providing the compute floor for top-end research and special projects.',
-    category: 'computing', tier: 4, cost: 1200, prereqs: ['tech_ai_2', 'tech_science_3'],
-    effects: [{ stat: 'researchOutput', mode: 'mult', value: 1.15 }],
-    unlocks: [], special: null,
-  },
-  {
-    id: 'tech_signal_decipher',
-    nameZh: '异常信号破译',
-    nameEn: 'Anomalous Signal Deciphering',
-    descZh: '主线特殊项目：针对未知信号的破译框架，大幅提升异常发现与扫描效率。',
-    descEn: 'Story project: a deciphering framework for unknown signals, sharply improving anomaly discovery and scan efficiency.',
-    category: 'computing', tier: 2, cost: 450, prereqs: ['tech_sensors_2'],
-    effects: [
-      { stat: 'anomalyChanceBonus', mode: 'add', value: 0.05 },
-      { stat: 'scanSpeed', mode: 'mult', value: 1.1 },
-    ],
-    unlocks: [], special: 'story',
-  },
-
-  // ── space 舰船与军事 ──
-  {
-    id: 'tech_survey_1',
-    nameZh: '星域测绘',
-    nameEn: 'Stellar Cartography',
-    descZh: '标准化星域测绘规程，加快扫描速度并提高异常现象的发现概率。',
-    descEn: 'Standardized survey doctrine speeding scans and raising anomaly discovery odds.',
-    category: 'space', tier: 1, cost: 100, prereqs: [],
-    effects: [
-      { stat: 'scanSpeed', mode: 'mult', value: 1.1 },
-      { stat: 'anomalyChanceBonus', mode: 'add', value: 0.03 },
-    ],
-    unlocks: [], special: null,
-  },
-  {
-    id: 'tech_kinetic_1',
-    nameZh: '动能武器',
-    nameEn: 'Kinetic Weapons',
-    descZh: '制式动能武器族谱，提供廉价可靠的直射火力，并解锁截击艇体。',
-    descEn: 'Standard kinetic weapon family providing cheap, dependable direct fire; unlocks the interceptor hull.',
-    category: 'space', tier: 1, cost: 100, prereqs: [],
-    effects: [{ stat: 'weaponDamage', mode: 'mult', value: 1.05 }],
-    unlocks: ['mod_kinetic_cannon', 'hull_interceptor'], special: null,
-  },
-  {
-    id: 'tech_kinetic_2',
-    nameZh: '电磁轨道炮',
-    nameEn: 'Electromagnetic Railgun',
-    descZh: '长导轨电磁加速技术，将动能武器的穿透力提升一个等级，并解锁炮击巡洋舰。',
-    descEn: 'Long-rail electromagnetic acceleration lifting kinetic penetration a full tier; unlocks the gun cruiser.',
-    category: 'space', tier: 2, cost: 280, prereqs: ['tech_kinetic_1'],
-    effects: [{ stat: 'weaponDamage', mode: 'mult', value: 1.08 }],
-    unlocks: ['mod_railgun', 'hull_gun_cruiser'], special: null,
-  },
-  {
-    id: 'tech_siege_1',
-    nameZh: '攻城火炮',
-    nameEn: 'Siege Artillery',
-    descZh: '要塞压制用重炮工程，为舰队提供对固定目标的高爆毁伤手段。',
-    descEn: 'Heavy artillery for fortress suppression, giving fleets high-explosive means against fixed targets.',
-    category: 'space', tier: 3, cost: 600, prereqs: ['tech_kinetic_2', 'tech_armor_1'],
-    effects: [{ stat: 'weaponDamage', mode: 'mult', value: 1.1 }],
-    unlocks: ['mod_siege_cannon'], special: null,
-  },
-  {
-    id: 'tech_laser_1',
-    nameZh: '激光武器',
-    nameEn: 'Laser Weapons',
-    descZh: '实用化高能激光武器，光速命中免予预判，是能束武器路线的起点。',
-    descEn: 'Practical high-energy lasers hitting at lightspeed without lead; the start of the beam line.',
-    category: 'space', tier: 1, cost: 110, prereqs: [],
-    effects: [{ stat: 'weaponDamage', mode: 'mult', value: 1.05 }],
-    unlocks: ['mod_laser_array'], special: null,
-  },
-  {
-    id: 'tech_laser_2',
-    nameZh: '脉冲激光',
-    nameEn: 'Pulse Lasers',
-    descZh: '高频脉冲调制技术，压缩单发能耗并提高对小型目标的毁伤效率。',
-    descEn: 'High-frequency pulse modulation trimming per-shot energy while raising lethality against small targets.',
-    category: 'space', tier: 3, cost: 520, prereqs: ['tech_laser_1', 'tech_energy_2'],
-    effects: [{ stat: 'weaponDamage', mode: 'mult', value: 1.08 }],
-    unlocks: ['mod_pulse_laser'], special: null,
-  },
-  {
-    id: 'tech_particle_1',
-    nameZh: '粒子束武器',
-    nameEn: 'Particle Beam Weapons',
-    descZh: '高能粒子加速与束流聚焦，无视常规装甲表层的复合毁伤武器。',
-    descEn: 'High-energy acceleration and beam focusing yielding composite damage that ignores surface plating.',
-    category: 'space', tier: 3, cost: 600, prereqs: ['tech_laser_1', 'tech_reactor_2'],
-    effects: [
-      { stat: 'weaponDamage', mode: 'mult', value: 1.08 },
-      { stat: 'weaponRange', mode: 'mult', value: 1.05 },
-    ],
-    unlocks: ['mod_particle_lance'], special: null,
-  },
-  {
-    id: 'tech_plasma_1',
-    nameZh: '等离子武器',
-    nameEn: 'Plasma Weapons',
-    descZh: '磁约束等离子团投射技术，在近距离造成毁灭性的持续灼烧毁伤。',
-    descEn: 'Magnetically confined plasma bolt projection delivering devastating sustained burns at close range.',
-    category: 'space', tier: 3, cost: 620, prereqs: ['tech_laser_2'],
-    effects: [{ stat: 'weaponDamage', mode: 'mult', value: 1.1 }],
-    unlocks: ['mod_plasma_thrower'], special: null,
-  },
-  {
-    id: 'tech_missile_1',
-    nameZh: '导弹技术',
-    nameEn: 'Missile Technology',
-    descZh: '制导导弹武器族谱与发射架标准，提供超视距打击能力，并解锁驱逐舰体。',
-    descEn: 'Guided missile family and rack standards providing beyond-visual-range strikes; unlocks the destroyer hull.',
-    category: 'space', tier: 1, cost: 110, prereqs: [],
-    effects: [{ stat: 'weaponDamage', mode: 'mult', value: 1.05 }],
-    unlocks: ['mod_missile_rack', 'hull_destroyer'], special: null,
-  },
-  {
-    id: 'tech_missile_2',
-    nameZh: '重型鱼雷',
-    nameEn: 'Heavy Torpedoes',
-    descZh: '重装甲远程鱼雷与突防引导头，专用于对大型目标的首轮齐射打击。',
-    descEn: 'Heavy armored long-range torpedoes with penetration seekers, built for opening salvos against capitals.',
-    category: 'space', tier: 3, cost: 560, prereqs: ['tech_missile_1', 'tech_computing_1'],
-    effects: [
-      { stat: 'weaponDamage', mode: 'mult', value: 1.08 },
-      { stat: 'trackingBonus', mode: 'add', value: 0.1 },
-    ],
-    unlocks: ['mod_torpedo_launcher'], special: null,
-  },
-  {
-    id: 'tech_pd_1',
-    nameZh: '近防系统',
-    nameEn: 'Point-Defense Systems',
-    descZh: '近防火力与火控分发体系，显著提升对导弹与舰载机的拦截效率，并解锁防空巡洋舰。',
-    descEn: 'Point-defense fire and distributed fire control sharply improving missile and craft interception; unlocks the PD cruiser.',
-    category: 'space', tier: 2, cost: 240, prereqs: ['tech_laser_1'],
-    effects: [
-      { stat: 'pdEfficiency', mode: 'mult', value: 1.2 },
-      { stat: 'trackingBonus', mode: 'add', value: 0.1 },
-    ],
-    unlocks: ['mod_pd_turret', 'bld_defense_grid', 'hull_aa_cruiser'], special: null,
-  },
-  {
-    id: 'tech_armor_1',
-    nameZh: '复合装甲',
-    nameEn: 'Composite Armor',
-    descZh: '多层复合装甲工艺，全面增强舰体物理防护能力。',
-    descEn: 'Multi-layer composite plating comprehensively enhancing hull physical protection.',
-    category: 'space', tier: 2, cost: 240, prereqs: ['tech_alloy_1'],
-    effects: [{ stat: 'armor', mode: 'mult', value: 1.1 }],
-    unlocks: ['mod_armor_composite'], special: null,
-  },
-  {
-    id: 'tech_armor_2',
-    nameZh: '烧蚀装甲',
-    nameEn: 'Ablative Armor',
-    descZh: '烧蚀耗散装甲体系，在持续火力下维持有效减伤，并解锁战列舰体。',
-    descEn: 'Ablative dissipative armor sustaining damage reduction under sustained fire; unlocks the battleship hull.',
-    category: 'space', tier: 3, cost: 560, prereqs: ['tech_armor_1'],
-    effects: [
-      { stat: 'armor', mode: 'mult', value: 1.12 },
-      { stat: 'damageReduction', mode: 'add', value: 0.03 },
-    ],
-    unlocks: ['mod_armor_ablative', 'hull_battleship'], special: null,
-  },
-  {
-    id: 'tech_carrier_1',
-    nameZh: '舰载机作战',
-    nameEn: 'Carrier Operations',
-    descZh: '舰载机联队作战条令与大型机库工程，解锁航母体与舰载机库。',
-    descEn: 'Carrier wing doctrine and large hangar engineering; unlocks the carrier hull and fighter bay.',
-    category: 'space', tier: 3, cost: 640, prereqs: ['tech_ai_1', 'tech_shipyard_1'],
-    effects: [{ stat: 'hangarCapacity', mode: 'mult', value: 1.15 }],
-    unlocks: ['mod_fighter_bay', 'hull_carrier'], special: null,
-  },
-  {
-    id: 'tech_repair_1',
-    nameZh: '纳米维修',
-    nameEn: 'Nanorepair Systems',
-    descZh: '纳米级原位维修技术，提升舰船战损修复速度并解锁维修厂区。',
-    descEn: 'Nanoscale in-situ repair technology speeding battle-damage restoration; unlocks the repair yard.',
-    category: 'space', tier: 2, cost: 220, prereqs: ['tech_industry_1'],
-    effects: [{ stat: 'repairRate', mode: 'mult', value: 1.15 }],
-    unlocks: ['mod_repair_system', 'bld_repair_yard'], special: null,
-  },
-  {
-    id: 'tech_dark_matter',
-    nameZh: '暗物质研究',
-    nameEn: 'Dark Matter Research',
-    descZh: '主线特殊项目：解析暗物质样本的结构特征，其成果将重塑动力与武器设计范式。',
-    descEn: 'Story project: deciphering the structure of dark matter samples, reshaping the paradigms of drive and weapon design.',
-    category: 'space', tier: 4, cost: 1600, prereqs: ['tech_exotic_matter', 'tech_science_3'],
-    effects: [
-      { stat: 'researchOutput', mode: 'mult', value: 1.1 },
-      { stat: 'weaponDamage', mode: 'mult', value: 1.08 },
-    ],
-    unlocks: [], special: 'story',
-  },
-
-  // ── society 治理与社会 ──
-  {
-    id: 'tech_colonization_1',
-    nameZh: '殖民学',
-    nameEn: 'Colonization Doctrine',
-    descZh: '殖民地选址与初期建设规程，提升宜居度评估并解锁工业舰体与水循环设施。',
-    descEn: 'Site selection and initial buildout doctrine; raises habitability assessment and unlocks the industrial hull and water reclamation.',
-    category: 'society', tier: 1, cost: 120, prereqs: [],
-    effects: [{ stat: 'habitabilityBonus', mode: 'add', value: 2 }],
-    unlocks: ['hull_industrial', 'bld_water_recycler'], special: null,
-  },
-  {
-    id: 'tech_admin_1',
-    nameZh: '行政管理',
-    nameEn: 'Public Administration',
-    descZh: '现代行政管理体系，扩充行政容量，是多星系治理的第一步。',
-    descEn: 'Modern public administration expanding administrative capacity; the first step of multi-system governance.',
-    category: 'society', tier: 1, cost: 100, prereqs: [],
-    effects: [{ stat: 'adminCapacity', mode: 'add', value: 5 }],
-    unlocks: ['bld_admin_center'], special: null,
-  },
-  {
-    id: 'tech_trade_1',
-    nameZh: '商路网络',
-    nameEn: 'Trade Networks',
-    descZh: '商路规划与护航体系，大幅扩充贸易容量并解锁轨道港口。',
-    descEn: 'Route planning and convoy systems greatly expanding trade capacity; unlocks the orbital port.',
-    category: 'society', tier: 1, cost: 120, prereqs: [],
-    effects: [{ stat: 'tradeCapacity', mode: 'mult', value: 1.15 }],
-    unlocks: ['bld_orbital_port'], special: null,
-  },
-  {
-    id: 'tech_trade_2',
-    nameZh: '市场调控',
-    nameEn: 'Market Regulation',
-    descZh: '价格干预与储备调度机制，改善交易价格并小幅提升税收。',
-    descEn: 'Price intervention and reserve management improving trade prices with a small tax gain.',
-    category: 'society', tier: 2, cost: 300, prereqs: ['tech_trade_1'],
-    effects: [
-      { stat: 'tradeCapacity', mode: 'mult', value: 1.1 },
-      { stat: 'marketPriceBonus', mode: 'add', value: 0.04 },
-      { stat: 'taxRateBonus', mode: 'add', value: 0.02 },
-    ],
-    unlocks: ['bld_exchange'], special: null,
-  },
-  {
-    id: 'tech_diplomacy_1',
-    nameZh: '星际外交',
-    nameEn: 'Interstellar Diplomacy',
-    descZh: '跨文明外交礼仪与谈判框架，提升外交信任积累与影响力获取。',
-    descEn: 'Cross-civilization protocol and negotiation frameworks raising diplomatic trust gain and influence income.',
-    category: 'society', tier: 2, cost: 240, prereqs: [],
-    effects: [
-      { stat: 'diplomacyTrustGain', mode: 'mult', value: 1.15 },
-      { stat: 'influenceGain', mode: 'mult', value: 1.08 },
-    ],
-    unlocks: [], special: null,
-  },
-  {
-    id: 'tech_diplomacy_2',
-    nameZh: '联合谈判',
-    nameEn: 'Coalition Negotiation',
-    descZh: '多边谈判与联合声明机制，在复杂局势下维持外交主动权。',
-    descEn: 'Multilateral negotiation and joint-statement mechanisms preserving diplomatic initiative in complex situations.',
-    category: 'society', tier: 3, cost: 540, prereqs: ['tech_diplomacy_1'],
-    effects: [
-      { stat: 'diplomacyTrustGain', mode: 'mult', value: 1.1 },
-      { stat: 'influenceGain', mode: 'mult', value: 1.1 },
-    ],
-    unlocks: [], special: null,
-  },
-  {
-    id: 'tech_colony_admin_1',
-    nameZh: '殖民治理',
-    nameEn: 'Colonial Governance',
-    descZh: '殖民地社会治理体系，提升稳定度与行政容量，并解锁服务类设施扩建。',
-    descEn: 'Colonial social governance raising stability and administrative capacity; unlocks expanded service facilities.',
-    category: 'society', tier: 2, cost: 260, prereqs: ['tech_admin_1', 'tech_colonization_1'],
-    effects: [
-      { stat: 'stabilityBonus', mode: 'add', value: 4 },
-      { stat: 'adminCapacity', mode: 'add', value: 3 },
-    ],
-    unlocks: ['bld_education_center', 'bld_entertainment_center'], special: null,
-  },
-  {
-    id: 'tech_law_1',
-    nameZh: '法令体系',
-    nameEn: 'Legal Doctrine',
-    descZh: '战时法令与治安条例，稳固殖民地秩序并降低战争疲劳的影响。',
-    descEn: 'Wartime decrees and security ordinances steadying colonial order and damping war exhaustion.',
-    category: 'society', tier: 3, cost: 520, prereqs: ['tech_colony_admin_1'],
-    effects: [
-      { stat: 'stabilityBonus', mode: 'add', value: 5 },
-      { stat: 'governanceLoad', mode: 'add', value: -2 },
-      { stat: 'warExhaustionResistance', mode: 'add', value: 0.08 },
-    ],
-    unlocks: [], special: null,
-  },
-  {
-    id: 'tech_intel_1',
-    nameZh: '情报体系',
-    nameEn: 'Intelligence Doctrine',
-    descZh: '系统化情报采集与分析流程，显著提升情报效能。',
-    descEn: 'Systematic collection and analysis pipelines markedly raising intelligence effectiveness.',
-    category: 'society', tier: 2, cost: 260, prereqs: ['tech_admin_1'],
-    effects: [{ stat: 'intelEffectiveness', mode: 'mult', value: 1.15 }],
-    unlocks: [], special: null,
-  },
-  {
-    id: 'tech_ancient_data',
-    nameZh: '古代数据解析',
-    nameEn: 'Ancient Data Analysis',
-    descZh: '主线特殊项目：解析古代数据样本中的结构与语义，触及某个早已消亡文明的知识残响。',
-    descEn: 'Story project: parsing structure and semantics in ancient data samples, touching the lingering knowledge of a long-dead civilization.',
-    category: 'society', tier: 3, cost: 800, prereqs: ['tech_science_2', 'tech_signal_decipher'],
-    effects: [
-      { stat: 'researchOutput', mode: 'mult', value: 1.1 },
-      { stat: 'anomalyChanceBonus', mode: 'add', value: 0.03 },
-    ],
-    unlocks: [], special: 'story',
-  },
-  {
-    id: 'tech_crisis_theory',
-    nameZh: '危机预警理论',
-    nameEn: 'Crisis Prediction Doctrine',
-    descZh: '危机线特殊项目：建立银河级威胁的预警模型，强化情报效能与战争承受力。',
-    descEn: 'Crisis-line project: a warning model for galaxy-scale threats, hardening intelligence effectiveness and war resilience.',
-    category: 'society', tier: 4, cost: 1400, prereqs: ['tech_ancient_data'],
-    effects: [
-      { stat: 'intelEffectiveness', mode: 'mult', value: 1.2 },
-      { stat: 'warExhaustionResistance', mode: 'add', value: 0.1 },
-    ],
-    unlocks: [], special: 'crisis',
-  },
-  // ── doc20 v0.6 WP-2：特种外骨骼环境抗性模块（风暴庇护三重判定的第三重） ──
-  {
-    id: 'exo_mod_thermal_shield',
-    nameZh: '外骨骼耐热盾模块',
-    nameEn: 'Exo Thermal Shield',
-    descZh: '特种外骨骼插件：热浪与极寒风暴中完全免除环境扣血与喷气散热惩罚。',
-    descEn: 'Exosuit module granting full environmental immunity in thermal and cryo storms.',
-    category: 'bio', tier: 3, cost: 420, prereqs: ['tech_bio_2'],
-    effects: [{ stat: 'stormResist', mode: 'add', value: 1 }],
-    unlocks: [], special: 'exo_mod',
-  },
-  {
-    id: 'exo_mod_acid_carapace',
-    nameZh: '外骨骼防酸甲壳',
-    nameEn: 'Exo Acid Carapace',
-    descZh: '特种外骨骼插件：酸雹风暴中完全免除 4.5 HP/s 腐蚀扣盾。',
-    descEn: 'Exosuit carapace nullifying corrosive acid-hail damage on exposed operators.',
-    category: 'bio', tier: 3, cost: 420, prereqs: ['tech_bio_2'],
-    effects: [{ stat: 'stormResistAcid', mode: 'add', value: 1 }],
-    unlocks: [], special: 'exo_mod',
-  },
-  // ── 先驱者遗落科技（doc18 WP-3：仅能由五阶段巨石遗迹核心破译解锁，常规科研不可研发） ──
-  {
-    id: 'tech_precursor_shield_harmonics',
-    nameZh: '先驱者谐振护盾',
-    nameEn: 'Precursor Shield Harmonics',
-    descZh: '先驱者遗落科技：逆向先驱者核心的谐振波形，为全体舰船叠加一层相位护盾谐振。',
-    descEn: 'Precursor tech: reverse-engineering resonant waveforms from a Precursor core to phase-harmonize all ship shields.',
-    category: 'society', tier: 4, cost: 0, prereqs: [],
-    effects: [{ stat: 'damageReduction', mode: 'add', value: 0.05 }],
-    unlocks: [], special: 'precursor',
-  },
-  {
-    id: 'tech_precursor_mass_catapult',
-    nameZh: '先驱者零点能质量弹射器',
-    nameEn: 'Precursor Mass Catapult',
-    descZh: '先驱者遗落科技：零点能场驱动的质量弹射结构，大幅降低舰队推进燃料损耗。',
-    descEn: 'Precursor tech: zero-point mass catapult structures slashing fleet propulsion fuel losses.',
-    category: 'propulsion', tier: 4, cost: 0, prereqs: [],
-    effects: [{ stat: 'fuelEfficiency', mode: 'mult', value: 1.15 }],
-    unlocks: [], special: 'precursor',
-  },
-];
-
-Object.assign(__exports, { TECHNOLOGIES });
-
-});
-__register("src/simulation/dramaDirector.js", function (__exports, __require) {
-/**
- * simulation/dramaDirector.js — 自适应太空歌剧戏剧导演（Adaptive Space Opera Drama Director）
- * （SPEC-PLAN-046 阶段三 M3 Task 3.5；责任人：Eng-C，M3 集成落位 simulation/ 层）
- *
- * 职责（doc46 §Task 3.5 + doc42 总纲 §五.4 逐条契约）：
- *  1. 双核心状态变量（权威容器 world.spaceOperaState.dramaDirector，六键冻结契约见
- *     worldMigration.js / CHK-00-04）：宏观戏剧张力 T ∈ [0,100]、创伤适应系数 A ∈ [0.75,1.35]
- *     （由 adaptDays ∈ [-50,100] 驱动）。
- *  2. adaptDays 日演进（registerDaily 'space-opera-drama-adapt'，函数体首行守卫
- *     world.spaceOperaState）：adaptDays<0 → +3.0/天；0..60 → +1.0/天；>60 → +0.5/天；
- *     封顶 100.0、下限 −50.0；步进后 adaptationFactor = clamp(1+0.0035×adaptDays, 0.75, 1.35)，
- *     恢复宽限期（recoveryGraceUntilTick ≥ tick）期间 A 锁 0.75。
- *  3. 伤亡折算：reportDowned(world,n) → adaptDays −4.0×n；reportKilled(world,n) →
- *     adaptDays −20.0×n（1 Killed = 5 Downed 精确折算比）；扣减后同步重算 A。
- *  4. 戏剧预算：W_base = min(10000, 0.5×popAndFleetScore + 0.5×industrialWealthScore)，
- *     W_effective = min(10000, W_base×G(c)×A)；G(c)：c=floor(tick/720)（0 基月周期序），
- *     c≤10 → 0.70；10<c<40 → 0.70+0.30×(c−10)/30；c≥40 → 1.00。
- *  5. 张力 T 月度推进（月末收口；注册序恒在 'space-opera-jacobian' 之后，见文件尾接线裁决）：
- *     T += 1.0 × (0.4×mean(|S_i−eq_i|) + 2×活跃危机局势数 + 近 30 天战役烈度) × A，clamp [0,100]。
- *  6. 高潮宣泄：T ≥ 75 且无活跃 GRAND_CLIMAX → spawnSituation('GRAND_CLIMAX'，meta 记录
- *     tensionTop2 弧线 + W_effective)；局势收束（climax 或 defused）→ resolveGrandClimax：
- *     T 强制 25.0、A 强制 0.75、adaptDays=−50.0、recoveryGraceUntilTick=tick+2160、
- *     climaxCount+1、injectOpportunityBeacons(world,18)（OPPORTUNITY_BEACON 精确 18 个）。
- *
- * A=0.75 与公式 0.825 的裁决（doc46 §Task 3.5 §2/§4 内部张力）：
- *  climax 复位时 adaptDays=−50.0，按公式 1+0.0035×(−50)=0.825 ≠ 0.75。裁决：reset 显式置
- *  A=0.75 并在 2160 tick 宽限期内锁定 0.75（黄金喘息重建期语义，doc42 §五.4「将适应因子下调
- *  至 0.75 的创伤恢复期」为权威）；宽限期过后恢复公式推导（adaptDays=−50 → 0.825，随后每日
- *  +3 天数爬升）。CHK-M3-06 两段断言分别覆盖「结算瞬间 A===0.75」与「宽限期满公式恢复 0.825」。
- *
- * 月度收口接线裁决（doc46 §Task 3.5(d)「在雅可比步进之后」）：
- *  月度阶段注册统一收敛到 src/simulation/SpaceOperaWiring.js 的同步显式接线
- *  （monthly → jacobian → drama 按注册序执行）。原「动态 import('./jacobianCoupling.js')
- *  .then(...) 链式注册」方案在静态打包产物（build-static-bundle IIFE）中相对说明符
- *  不可达（404 → catch 降级 → 收口永不注册），且存在同步 import 后立即跨月推演的
- *  时序洞，已废除。
- */
-
-const { registerDaily: registerDaily, registerMonthly: registerMonthly } = __require("src/simulation/TickPipeline.js");
-const { registerSituationArc: registerSituationArc, spawnSituation: spawnSituation, listActiveSituations: listActiveSituations } = __require("src/domain/events/situationEngine.js");
-const { injectOpportunityBeacons: injectOpportunityBeacons } = __require("src/domain/world/subspaceBeaconStream.js");
-const { ensureSpaceOperaState: ensureSpaceOperaState } = __require("src/domain/world/worldMigration.js");
-const { emit: emit, chronicle: chronicle } = __require("src/core/eventBus.js");
-const { TICKS_PER_DAY: TICKS_PER_DAY, TICKS_PER_MONTH: TICKS_PER_MONTH } = __require("src/core/clock.js");
-
-/* ============================== 冻结常量（doc46 §Task 3.5 精确值） ============================== */
-
-/**
- * 七大系统平衡点向量 S_eq（与 jacobianCoupling.SYSTEM_EQUILIBRIUM 同源常量的本地复制；
- * 刻意不静态 import 该模块 —— 见文件头「月度收口接线裁决」。M3 套件 CHK-M3-06 逐位互证）。
- */
-const EQUILIBRIUM_S = Object.freeze([15.0, 15.0, 20.0, 15.0, 15.0, 10.0, 10.0]);
-
-/** 张力阈值与宣泄落点（doc46 精确值） */
-const CLIMAX_TENSION_THRESHOLD = 75.0;
-const CATHARSIS_TENSION = 25.0;
-const CATHARSIS_ADAPTATION = 0.75;
-const CATHARSIS_ADAPT_DAYS = -50.0;
-const RECOVERY_GRACE_TICKS = 2160; // 90 游戏日黄金喘息重建期
-const CATHARSIS_OPPORTUNITY_BEACONS = 18;
-
-/** adaptDays 三段日增速与值域（doc46 精确值） */
-const ADAPT_RECOVER_PER_DAY = 3.0; // adaptDays < 0
-const ADAPT_GROW_PER_DAY = 1.0; // 0 ≤ adaptDays ≤ 60
-const ADAPT_SLOW_PER_DAY = 0.5; // adaptDays > 60
-const ADAPT_SLOW_THRESHOLD = 60.0;
-const ADAPT_DAYS_MIN = -50.0;
-const ADAPT_DAYS_MAX = 100.0;
-
-/** 适应系数映射（A = clamp(1 + 0.0035×adaptDays, 0.75, 1.35)） */
-const ADAPT_SLOPE = 0.0035;
-const ADAPT_FACTOR_MIN = 0.75;
-const ADAPT_FACTOR_MAX = 1.35;
-
-/** 伤亡折算（doc46 精确值：1 Killed = 5 Downed） */
-const DOWNED_ADAPT_COST = 4.0;
-const KILLED_ADAPT_COST = 20.0;
-
-/** 早期宽限斜坡 G(c)（doc46 精确式） */
-const GRACE_RAMP_START_CYCLE = 10;
-const GRACE_RAMP_END_CYCLE = 40;
-const GRACE_RAMP_BASE = 0.70;
-
-/** 预算双因子权重与硬上限（doc46 精确值 50/50 与 10000） */
-const BUDGET_POP_WEIGHT = 0.5;
-const BUDGET_WEALTH_WEIGHT = 0.5;
-const BUDGET_CAP = 10000;
-
-/** 评分口径常数（doc46 给结构不给常数 → M3 落地裁决，写入 notes） */
-const POP_SCORE_PER_POP = 10;
-const FLEET_SCORE_PER_SHIP = 40;
-const BUILDING_SCORE_PER_TILE = 15;
-const STOCKPILE_SCORE_DIVISOR = 10;
-
-/** 张力月度推进系数（doc46 精确值 0.4 / 2；dt=1.0 月/收口） */
-const TENSION_MEAN_DEV_COEF = 0.4;
-const TENSION_PER_CRISIS = 2.0;
-const TENSION_DT_PER_CLOSE = 1.0;
-const TENSION_MIN = 0.0;
-const TENSION_MAX = 100.0;
-
-/** 战役烈度统计窗口：30 游戏日 = 720 tick */
-const BATTLE_INTENSITY_WINDOW_TICKS = 30 * TICKS_PER_DAY;
-
-/** 庆典/机遇弧（不计入「活跃危机局势数」） */
-const CELEBRATION_ARCS = Object.freeze({ GRAND_CLIMAX: true, LEVIATHAN_PARADE: true });
-
-const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
-const round4 = (v) => Number(v.toFixed(4));
-
-function tickOf(world) {
-  return Number.isFinite(world && world.tick) ? Math.max(0, Math.trunc(world.tick)) : 0;
-}
-
-/** 戏剧导演状态只读守卫（容器/子容器缺失 → null；绝不 ensure、绝不重建） */
-function dramaStateOf(world) {
-  const so = world && world.spaceOperaState;
-  const dd = so && so.dramaDirector;
-  return dd && typeof dd === 'object' ? dd : null;
-}
-
-/* ============================== Task 3.5 §2 adaptDays 演进与伤亡折算 ============================== */
-
-/** 恢复宽限期判定（recoveryGraceUntilTick ≥ tick 视为在期内；边界含） */
-function inRecoveryGrace(world, dd = null) {
-  const state = dd || dramaStateOf(world);
-  if (!state) return false;
-  const until = Number.isFinite(state.recoveryGraceUntilTick) ? state.recoveryGraceUntilTick : -1;
-  return until >= tickOf(world);
-}
-
-/**
- * 创伤适应系数推导（纯函数）：宽限期内锁定 0.75（裁决见文件头），
- * 期外 A = clamp(1 + 0.0035×adaptDays, 0.75, 1.35)。
- */
-function deriveAdaptationFactor(adaptDays, graceLocked) {
-  if (graceLocked === true) return CATHARSIS_ADAPTATION;
-  const d = Number.isFinite(adaptDays) ? adaptDays : 0;
-  return clamp(1 + ADAPT_SLOPE * d, ADAPT_FACTOR_MIN, ADAPT_FACTOR_MAX);
-}
-
-/**
- * adaptDays 日演进（registerDaily 'space-opera-drama-adapt' 注册形态）。
- * 三段增速：<0 → +3.0；0..60 → +1.0；>60 → +0.5；clamp [−50, 100]。
- * 步进后重算 adaptationFactor（宽限期锁 0.75）。
- * 首行守卫 world.spaceOperaState（金快照世界零读取零写入）。
- *
- * @returns {object|null} {adaptDays, adaptationFactor, graceLocked}（容器缺失返回 null）
- */
-function stepDramaAdaptationDaily(world) {
-  const dd = dramaStateOf(world);
-  if (!dd) return null;
-  const cur = Number.isFinite(dd.adaptDays) ? dd.adaptDays : 0;
-  const rate = cur < 0 ? ADAPT_RECOVER_PER_DAY : (cur <= ADAPT_SLOW_THRESHOLD ? ADAPT_GROW_PER_DAY : ADAPT_SLOW_PER_DAY);
-  const next = clamp(cur + rate, ADAPT_DAYS_MIN, ADAPT_DAYS_MAX);
-  dd.adaptDays = next;
-  const grace = inRecoveryGrace(world, dd);
-  dd.adaptationFactor = deriveAdaptationFactor(next, grace);
-  return { adaptDays: next, adaptationFactor: dd.adaptationFactor, graceLocked: grace };
-}
-
-/** 伤亡折算内核（Downed −4.0/单位；Killed −20.0/单位；下限 −50；同步重算 A） */
-function reportTrauma(world, count, perUnitCost, kind) {
-  const dd = dramaStateOf(world);
-  if (!dd) return null;
-  const n = Math.max(0, Math.trunc(Number.isFinite(count) ? count : 0));
-  if (n <= 0) return null; // 零伤亡零写入
-  const before = Number.isFinite(dd.adaptDays) ? dd.adaptDays : 0;
-  const next = Math.max(ADAPT_DAYS_MIN, before - perUnitCost * n);
-  dd.adaptDays = next;
-  dd.adaptationFactor = deriveAdaptationFactor(next, inRecoveryGrace(world, dd));
-  emit(world, 'DramaTraumaReported', {
-    kind,
-    count: n,
-    adaptCostPerUnit: perUnitCost,
-    deducted: perUnitCost * n,
-    adaptDays: next,
-    adaptationFactor: dd.adaptationFactor,
-  }, 'world');
-  return { kind, count: n, deducted: perUnitCost * n, adaptDays: next, adaptationFactor: dd.adaptationFactor };
-}
-
-/**
- * 上报瘫痪/重伤单位（Storyteller Trauma Reduction）：每单位 adaptDays −4.0。
- * 守卫式读取（容器缺失返回 null）；n ≤ 0 零写入。
- */
-function reportDowned(world, n) {
-  return reportTrauma(world, n, DOWNED_ADAPT_COST, 'downed');
-}
-
-/**
- * 上报阵亡/沦陷/主力舰击毁：每单位 adaptDays −20.0（1 Killed = 5 Downed 精确折算比）。
- */
-function reportKilled(world, n) {
-  return reportTrauma(world, n, KILLED_ADAPT_COST, 'killed');
-}
-
-// —— import 副作用：adaptDays 日演进阶段注册（函数体首行守卫 world.spaceOperaState）——
-registerDaily('space-opera-drama-adapt', (world) => {
-  stepDramaAdaptationDaily(world);
-});
-
-/* ============================== Task 3.5 §3 宽限斜坡与戏剧预算 ============================== */
-
-/**
- * 早期宽限斜坡 G(c)（纯函数）：c = floor(tick/720)（0 基月周期序）。
- * c ≤ 10 → 0.70；10 < c < 40 → 0.70 + 0.30×(c−10)/30；c ≥ 40 → 1.00。
- */
-function graceSlopeG(c) {
-  const cycle = Number.isFinite(c) ? c : 0;
-  if (cycle <= GRACE_RAMP_START_CYCLE) return GRACE_RAMP_BASE;
-  if (cycle >= GRACE_RAMP_END_CYCLE) return 1.00;
-  return GRACE_RAMP_BASE + 0.30 * ((cycle - GRACE_RAMP_START_CYCLE) / (GRACE_RAMP_END_CYCLE - GRACE_RAMP_START_CYCLE));
-}
-
-/**
- * 基础帝国规模预算（纯读，零写入；评分口径见文件头 notes 裁决）：
- *  popAndFleetScore       = Σ(compact.colony.popTotal)×10 + Σ(world.entities.fleets 舰船数)×40
- *                           （dissolved 舰队不计；仅统计已挂 compactState 的行星，绝不 ensure）
- *  industrialWealthScore  = Σ(compact tiles buildingId≠0 格数)×15 + Σ(stockpile 总值)/10
- *  W_base                 = min(10000, 0.5×popAndFleetScore + 0.5×industrialWealthScore)
- *  W_effective            = min(10000, W_base × G(c) × A)
- *
- * @returns {object|null} 预算档案（容器缺失返回 null）
- */
-function computeDramaBudget(world) {
-  if (!world || !world.spaceOperaState) return null;
-  const dd = dramaStateOf(world);
-  const tick = tickOf(world);
-  const cycle = Math.floor(tick / TICKS_PER_MONTH);
-  const g = graceSlopeG(cycle);
-  const grace = inRecoveryGrace(world, dd);
-  const adaptDays = dd && Number.isFinite(dd.adaptDays) ? dd.adaptDays : 0;
-  const a = deriveAdaptationFactor(adaptDays, grace);
-
-  const planets = world.entities && world.entities.planets ? world.entities.planets : {};
-  let popTotal = 0;
-  let buildingTiles = 0;
-  let stockpileValue = 0;
-  for (const key of Object.keys(planets).sort()) {
-    const planet = planets[key];
-    const compact = planet && planet.compactState;
-    const colony = compact && compact.colony;
-    if (colony && Number.isFinite(colony.popTotal) && colony.popTotal > 0) {
-      popTotal += colony.popTotal;
-    }
-    if (compact && Array.isArray(compact.tiles)) {
-      for (let i = 0; i < compact.tiles.length; i++) {
-        if (((compact.tiles[i] >>> 16) & 0x3f) !== 0) buildingTiles += 1;
-      }
-    }
-    if (colony && Array.isArray(colony.stockpile)) {
-      for (let i = 0; i < colony.stockpile.length; i++) {
-        const v = Number(colony.stockpile[i]);
-        if (Number.isFinite(v) && v > 0) stockpileValue += v;
-      }
-    }
-  }
-  const fleets = world.entities && world.entities.fleets ? world.entities.fleets : {};
-  let shipCount = 0;
-  for (const key of Object.keys(fleets).sort()) {
-    const fleet = fleets[key];
-    if (!fleet || fleet.status === 'dissolved') continue;
-    if (Array.isArray(fleet.shipIds)) shipCount += fleet.shipIds.length;
-  }
-
-  const popAndFleetScore = popTotal * POP_SCORE_PER_POP + shipCount * FLEET_SCORE_PER_SHIP;
-  const industrialWealthScore = buildingTiles * BUILDING_SCORE_PER_TILE + stockpileValue / STOCKPILE_SCORE_DIVISOR;
-  const wBase = Math.min(BUDGET_CAP, BUDGET_POP_WEIGHT * popAndFleetScore + BUDGET_WEALTH_WEIGHT * industrialWealthScore);
-  const wEffective = Math.min(BUDGET_CAP, wBase * g * a);
-  return {
-    cycle,
-    g,
-    a,
-    graceLocked: grace,
-    adaptDays,
-    popTotal,
-    shipCount,
-    buildingTiles,
-    stockpileValue,
-    popAndFleetScore,
-    industrialWealthScore,
-    wBase,
-    wEffective,
-  };
-}
-
-/* ============================== 战役烈度与危机计数（纯读） ============================== */
-
-/** 近 30 天战役烈度：Σ(1 + 双方战损舰数)（endedTick ∈ [tick−720, tick] 的战报） */
-function battleIntensityLast30Days(world, tick) {
-  const battles = world && world.battles;
-  const history = battles && Array.isArray(battles.history) ? battles.history : [];
-  const cutoff = tick - BATTLE_INTENSITY_WINDOW_TICKS;
-  let intensity = 0;
-  for (let i = 0; i < history.length; i++) {
-    const report = history[i];
-    if (!report || typeof report !== 'object') continue;
-    const ended = Number.isFinite(report.endedTick) ? report.endedTick : 0;
-    if (ended < cutoff) continue;
-    const losses = report.losses && typeof report.losses === 'object' ? report.losses : {};
-    const a = Number(losses.a);
-    const b = Number(losses.b);
-    intensity += 1 + (Number.isFinite(a) && a > 0 ? a : 0) + (Number.isFinite(b) && b > 0 ? b : 0);
-  }
-  return intensity;
-}
-
-/** 活跃危机局势数：除庆典/机遇弧（GRAND_CLIMAX / LEVIATHAN_PARADE）外的活跃局势总数 */
-function activeCrisisCount(world) {
-  return listActiveSituations(world).filter((s) => s && CELEBRATION_ARCS[s.systemArcId] !== true).length;
-}
-
-/* ============================== Task 3.5 §4 高潮宣泄（Climax Catharsis） ============================== */
-
-/**
- * 史诗高潮宣泄结算（GRAND_CLIMAX 弧 climax 钩子与显式结算入口）：
- *  1. T 强制回落 25.0；2. A 强制重置 0.75（adaptDays = −50.0）；3. 开启 2160 tick
- *  黄金喘息重建期（recoveryGraceUntilTick = tick + 2160）；4. climaxCount +1、
- *  lastClimaxTick 记账；5. injectOpportunityBeacons(world, 18) 注入 18 个机遇信标。
- *  幂等：同一局势 meta.catharsisApplied 已置位 → 零重复结算。
- * 首行守卫 world.spaceOperaState。
- *
- * @param {object} world - 世界根对象
- * @param {object|null} situation - GRAND_CLIMAX 局势实例（可为 null 直接结算）
- * @param {string} [outcome] - 'climax' | 'defused'（平定或度过皆触发宣泄）
- * @returns {object|null} 宣泄结算档案（容器缺失/重复结算返回 null）
- */
-function resolveGrandClimax(world, situation, outcome = 'climax') {
-  if (!world || !world.spaceOperaState) return null;
-  const dd = dramaStateOf(world);
-  if (!dd) return null;
-  const sit = situation && typeof situation === 'object' ? situation : null;
-  if (sit && sit.meta && sit.meta.catharsisApplied === true) return null; // 幂等防重入
-  const tick = tickOf(world);
-
-  if (sit) {
-    if (!sit.meta || typeof sit.meta !== 'object') sit.meta = {};
-    sit.meta.catharsisApplied = true;
-    sit.meta.catharsisOutcome = outcome === 'defused' ? 'defused' : 'climax';
-  }
-  dd.tension = CATHARSIS_TENSION;
-  dd.adaptDays = CATHARSIS_ADAPT_DAYS;
-  dd.adaptationFactor = CATHARSIS_ADAPTATION;
-  dd.recoveryGraceUntilTick = tick + RECOVERY_GRACE_TICKS;
-  dd.climaxCount = (Number.isFinite(dd.climaxCount) ? dd.climaxCount : 0) + 1;
-  dd.lastClimaxTick = tick;
-
-  const injected = injectOpportunityBeacons(world, CATHARSIS_OPPORTUNITY_BEACONS);
-  emit(world, 'GrandClimaxResolved', {
-    situationId: sit ? sit.id : null,
-    outcome: sit && sit.meta ? sit.meta.catharsisOutcome : outcome,
-    tension: dd.tension,
-    adaptationFactor: dd.adaptationFactor,
-    adaptDays: dd.adaptDays,
-    recoveryGraceUntilTick: dd.recoveryGraceUntilTick,
-    climaxCount: dd.climaxCount,
-    opportunityBeacons: injected,
-  }, 'world');
-  chronicle(world, 'world', '史诗高潮落幕：张力宣泄回落 25.0，帝国步入 90 日黄金喘息重建期，星区涌现 18 个战后机遇信标', {
-    situationId: sit ? sit.id : null,
-    climaxCount: dd.climaxCount,
-  });
-  return {
-    tension: dd.tension,
-    adaptationFactor: dd.adaptationFactor,
-    adaptDays: dd.adaptDays,
-    recoveryGraceUntilTick: dd.recoveryGraceUntilTick,
-    climaxCount: dd.climaxCount,
-    opportunityBeacons: injected,
-  };
-}
-
-/** tensionTop2 弧线裁决：按 |S_i−eq_i| 降序取前二（tie 取系统下标较小者） */
-function top2Arcs(deviations) {
-  const ranked = deviations.map((d, i) => ({ system: i, arc: `S${i + 1}`, deviation: round4(d) }));
-  ranked.sort((a, b) => (b.deviation - a.deviation) || (a.system - b.system));
-  return ranked.slice(0, 2);
-}
-
-/** 生成 GRAND_CLIMAX 四幕史诗高潮局势（meta 记录 tensionTop2 弧线 + W_effective） */
-function spawnGrandClimax(world, deviations, budget, tension) {
-  const top2 = top2Arcs(deviations);
-  const sit = spawnSituation(world, {
-    arcId: 'GRAND_CLIMAX',
-    targetEntityId: null,
-    progress: 0,
-    meta: {
-      tensionAtTrigger: round4(tension),
-      tensionTop2: top2,
-      wEffective: round4(budget.wEffective),
-      cycle: budget.cycle,
-      adaptationFactor: budget.a,
-    },
-  });
-  emit(world, 'GrandClimaxTriggered', {
-    situationId: sit.id,
-    tension: round4(tension),
-    tensionTop2: top2,
-    wEffective: round4(budget.wEffective),
-    cycle: budget.cycle,
-  }, 'world');
-  chronicle(world, 'world', `戏剧导演：宏观张力突破 ${CLIMAX_TENSION_THRESHOLD.toFixed(1)}，最尖锐的两条系统弧线（${top2.map((t) => t.arc).join(' / ')}）合并升格为四幕史诗高潮大事件`, {
-    situationId: sit.id,
-  });
-  return sit;
-}
-
-/**
- * 戏剧导演月末收口（registerMonthly 'space-opera-drama' 注册形态；注册序恒在
- * 'space-opera-jacobian' 之后 —— 张力推进消费雅可比步进后的 S 快照，接线裁决见文件头）：
- *  1. A 刷新（宽限期锁 0.75 / 期外公式）；
- *  2. T += 1.0 × (0.4×mean(|S_i−eq_i|) + 2×活跃危机局势数 + 近 30 天战役烈度) × A，clamp [0,100]；
- *  3. T ≥ 75 且无活跃 GRAND_CLIMAX → spawnSituation('GRAND_CLIMAX')。
- *
- * @returns {object|null} {tension, gained, adaptationFactor, wEffective, spawnedClimax, climaxId}
- */
-function stepSpaceOperaDramaMonthly(world) {
-  const dd = dramaStateOf(world);
-  if (!dd) return null;
-  const so = world.spaceOperaState;
-  if (!Array.isArray(so.systemVector) || so.systemVector.length !== 7) return null; // 防御手造容器（与 jacobian 同口径）
-  const tick = tickOf(world);
-
-  const budget = computeDramaBudget(world);
-  dd.adaptationFactor = budget.a;
-
-  const deviations = so.systemVector.map((v, i) => Math.abs((Number.isFinite(v) ? v : 0) - EQUILIBRIUM_S[i]));
-  const meanDev = deviations.reduce((s, v) => s + v, 0) / deviations.length;
-  const crisisCount = activeCrisisCount(world);
-  const intensity = battleIntensityLast30Days(world, tick);
-  const gain = TENSION_DT_PER_CLOSE
-    * (TENSION_MEAN_DEV_COEF * meanDev + TENSION_PER_CRISIS * crisisCount + intensity)
-    * budget.a;
-  const prev = Number.isFinite(dd.tension) ? dd.tension : TENSION_MIN;
-  const next = clamp(prev + gain, TENSION_MIN, TENSION_MAX);
-  dd.tension = next;
-
-  let spawned = null;
-  const hasActiveClimax = listActiveSituations(world).some((s) => s && s.systemArcId === 'GRAND_CLIMAX');
-  if (next >= CLIMAX_TENSION_THRESHOLD && !hasActiveClimax) {
-    spawned = spawnGrandClimax(world, deviations, budget, next);
-  }
-  return {
-    tension: next,
-    gained: gain,
-    adaptationFactor: budget.a,
-    wEffective: budget.wEffective,
-    spawnedClimax: !!spawned,
-    climaxId: spawned ? spawned.id : null,
-  };
-}
-
-/* ============================== GRAND_CLIMAX 弧定义（import 期注册） ============================== */
-
-/**
- * 四幕史诗高潮大事件弧（doc46 §Task 3.5 §4）：
- *  - 未干预时 baseMonthlyDelta +25/月（四幕每幕一个月，四个月自然演满 → climax）；
- *  - 玩家平定（defused）或度过（climax）皆触发 resolveGrandClimax 宣泄结算；
- *  - 同一时刻至多一场活跃（月度收口 spawn 前置检定）。
- */
-registerSituationArc('GRAND_CLIMAX', {
-  progressMax: 100,
-  baseMonthlyDelta: 25,
-  actBounds: [
-    [0, 25],
-    [25, 50],
-    [50, 75],
-    [75, 100],
-  ],
-  approaches: {},
-  climax(world, situation, outcome) {
-    resolveGrandClimax(world, situation, outcome);
-  },
-});
-
-/* ============================== 月末收口接线（静态显式注册） ============================== */
-
-let dramaMonthlyRegistered = false;
-
-/**
- * 幂等注册戏剧导演月度收口（由 SpaceOperaWiring 在 'space-opera-jacobian' 之后显式调用）。
- * 原动态 import('./jacobianCoupling.js').then(...) 链式注册在静态打包产物（build-static-bundle
- * IIFE）中相对说明符不可达（404），且异步注册存在「同步 import 后立即跨月推演」的时序洞——
- * 统一改为 SpaceOperaWiring 的同步显式接线，注册序恒为 monthly → jacobian → drama。
- */
-function registerDramaMonthlyClose() {
-  if (dramaMonthlyRegistered) return;
-  dramaMonthlyRegistered = true;
-  registerMonthly('space-opera-drama', stepSpaceOperaDramaMonthly);
-}
-
-/**
- * 幂等预等待月度收口注册完成（返回完成的 Promise；保留套件兼容签名）。
- * 注册已改为 SpaceOperaWiring 的同步显式接线，本函数现为同步注册 + 立即 resolve。
- */
-function ensureDramaMonthlyRegistered() {
-  registerDramaMonthlyClose();
-  return Promise.resolve();
-}
-
-Object.assign(__exports, { EQUILIBRIUM_S, CLIMAX_TENSION_THRESHOLD, CATHARSIS_TENSION, CATHARSIS_ADAPTATION, CATHARSIS_ADAPT_DAYS, RECOVERY_GRACE_TICKS, CATHARSIS_OPPORTUNITY_BEACONS, ADAPT_RECOVER_PER_DAY, ADAPT_GROW_PER_DAY, ADAPT_SLOW_PER_DAY, ADAPT_SLOW_THRESHOLD, ADAPT_DAYS_MIN, ADAPT_DAYS_MAX, ADAPT_SLOPE, ADAPT_FACTOR_MIN, ADAPT_FACTOR_MAX, DOWNED_ADAPT_COST, KILLED_ADAPT_COST, GRACE_RAMP_START_CYCLE, GRACE_RAMP_END_CYCLE, GRACE_RAMP_BASE, BUDGET_POP_WEIGHT, BUDGET_WEALTH_WEIGHT, BUDGET_CAP, POP_SCORE_PER_POP, FLEET_SCORE_PER_SHIP, BUILDING_SCORE_PER_TILE, STOCKPILE_SCORE_DIVISOR, TENSION_MEAN_DEV_COEF, TENSION_PER_CRISIS, TENSION_DT_PER_CLOSE, TENSION_MIN, TENSION_MAX, BATTLE_INTENSITY_WINDOW_TICKS, inRecoveryGrace, deriveAdaptationFactor, stepDramaAdaptationDaily, reportDowned, reportKilled, graceSlopeG, computeDramaBudget, resolveGrandClimax, stepSpaceOperaDramaMonthly, registerDramaMonthlyClose, ensureDramaMonthlyRegistered });
-
-});
-__register("src/simulation/TickPipeline.js", function (__exports, __require) {
-/**
- * simulation/TickPipeline.js — 领域更新阶段注册与执行（任务书 4.10）
- *
- * 每个战略 tick 按稳定顺序运行已注册阶段；阶段顺序由 WorldSimulation.js
- * 中的 import 顺序显式决定，杜绝插入次序依赖。
- * 阶段输入/输出契约：每个阶段只读上一阶段产物并只写自己负责的字段。
- */
-
-const hourlyPhases = [];
-const dailyCloses = [];
-const monthlyCloses = [];
-const yearlyCloses = [];
-
-/** 注册每 tick 阶段（顺序敏感，注册即锁定） */
-function registerHourly(name, fn) {
-  hourlyPhases.push({ name, fn });
-}
-
-/** 注册日结回调（每天 00:00 tick 触发，按注册顺序） */
-function registerDaily(name, fn) {
-  dailyCloses.push({ name, fn });
-}
-
-function registerMonthly(name, fn) {
-  monthlyCloses.push({ name, fn });
-}
-
-function registerYearly(name, fn) {
-  yearlyCloses.push({ name, fn });
-}
-
-function runHourly(world) {
-  for (const p of hourlyPhases) {
-    try {
-      p.fn(world);
-    } catch (e) {
-      // 阶段定位（诊断与错误边界）；原样上抛由调用方决定回滚
-      e.phaseName = p.name;
-      throw e;
-    }
-  }
-}
-
-function runDaily(world) {
-  for (const p of dailyCloses) p.fn(world);
-}
-
-function runMonthly(world) {
-  for (const p of monthlyCloses) p.fn(world);
-}
-
-function runYearly(world) {
-  for (const p of yearlyCloses) p.fn(world);
-}
-
-function phaseNames() {
-  return hourlyPhases.map((p) => p.name);
-}
-
-/** 月度收口阶段名清单（注册序；SPEC-PLAN-049 CHK-49-04 月度序断言消费） */
-function monthlyNames() {
-  return monthlyCloses.map((p) => p.name);
-}
-
-Object.assign(__exports, { registerHourly, registerDaily, registerMonthly, registerYearly, runHourly, runDaily, runMonthly, runYearly, phaseNames, monthlyNames });
-
-});
 __register("src/domain/economy/shadowSyndicateArc.js", function (__exports, __require) {
 /**
  * domain/economy/shadowSyndicateArc.js — S6 黑市网络、走私暗流与激进分子渗透弧
@@ -20223,7 +19676,7 @@ function heirWeightBonusFor(world, factionId) {
 }
 
 /* —— SPEC-PLAN-049 Task 49.3 别名导出（doc49 导入名 ≙ M2 权威实现；零行为增量）—— */
-Object.assign(__exports, { stepShadowSyndicateArc: stepShadowSyndicateMonthly });
+Object.assign(__exports, { stepShadowSyndicateMonthly: stepShadowSyndicateArc });
 
 Object.assign(__exports, { SMUGGLER_RUNNER_SHIELDED_CARGO, smugglerShieldedCapacity, seizureProbability, BRANCH_MIN_CRIME, INTEL_PER_BRANCH, establishSyndicateBranch, intelBonus, ATTENTION_WEIGHTS, ARTIFACT_MOD_ATTENTION, recomputeIndustrialAttention, RADICAL_ACTIVATION_THRESHOLD, ACTIVE_STABILITY_DRAIN, SABOTAGE_INTERVAL_MONTHS, AGENT_PURGE_LATENCY_MONTHS, CELL_DEFENSE_THRESHOLD, SHIP_POWER_FALLBACK, DECIVILIZED_MONTHS, stepShadowSyndicateArc, purgeRadicalCell, LETTERS_OF_MARQUE_HEIR_WEIGHT_BONUS, heirWeightBonusFor });
 
@@ -20831,7 +20284,7 @@ function setCrackDown(world, situationId, variant = 'CRACK_DOWN') {
 }
 
 /* —— SPEC-PLAN-049 Task 49.3 别名导出（doc49 导入名 ≙ M2 权威实现；零行为增量）—— */
-Object.assign(__exports, { stepColonySocialArc: stepColonySocialMonthly });
+Object.assign(__exports, { stepColonySocialMonthly: stepColonySocialArc });
 
 Object.assign(__exports, { STRATA_LABELS, STRATA_POLITICAL_WEIGHTS, AMENITIES_COST_PER_POP, STRATA_COST_CLASSES, computeAmenitiesNet, STABILITY_OUTPUT_CAP_PCT, STABILITY_OUTPUT_FLOOR_PCT, IMMIGRATION_ATTRACTION_CAP_PCT, computeStabilityOutputMultiplier, computeImmigrationAttraction, REVOLT_STABILITY_THRESHOLD, REVOLT_TRIGGER_MONTHS, REVOLT_SPAWN_PROGRESS, REVOLT_BASE_MONTHLY_DELTA, S3_APPROACH_MONTHLY_DELTA, S3_PROPAGANDA_OUTPUT_MULT, S3_COMPROMISE_OUTPUT_MULT, S3_PURGE_ENERGY_UNITY_MULT, S3_PURGE_HAPPINESS_MULT, S3_COMPROMISE_STABILITY_COST, S3_CRACKDOWN_STABILITY_COST, S3_NEGOTIATIONS_EXTRA_DELTA, MARTIAL_LAW_UNLOCK_MONTHS, MARTIAL_LAW_DURATION_TICKS, MARTIAL_LAW_L1_STABILITY_RESTORE, MARTIAL_LAW_L1_HAPPINESS_COST, GARRISON_POWER_PER_FORTRESS, MARTIAL_LAW_MIN_GARRISON, REVOLT_SHOCK, S3_REVOLT_ENDOGENOUS_PUSH, computeGarrisonPower, colonySocialOutputModifiers, setNegotiationsActive, stepColonySocialArc, enactMartialLaw, setCrackDown });
 
@@ -21202,7 +20655,7 @@ registerSituationArc('S4', {
 });
 
 /* —— SPEC-PLAN-049 Task 49.3 别名导出（doc49 导入名 ≙ M1 权威实现；零行为增量）—— */
-Object.assign(__exports, { watchStrategicStockpiles: stepStrategicShortageMonthly });
+Object.assign(__exports, { stepStrategicShortageMonthly: watchStrategicStockpiles });
 
 Object.assign(__exports, { ACCESS_BASE, ACCESS_PER_FRIENDLY_COLONY, ACCESS_RADIUS_LY, LY_PER_GALAXY_UNIT, computeAccessibility, systemPosOf, INDUSTRY_MOD_DEFS, installIndustryMod, S4_INITIAL_PROGRESS, S4_DELTA_MAX_PER_MONTH, S4_REGRESS_PER_MONTH, S4_STAGE_SIZE, shortageStageOf, shortagePenaltyMultiplier, watchStrategicStockpiles, S4_CUT_ARTISAN_OUTPUT_MULT, S4_CUT_METALLURGIST_OUTPUT_MULT, S4_CUT_MAINTENANCE_MULT, setCutInvestments, productionModifier, EMPIRE_DEFAULT_DURATION_TICKS, EMPIRE_DEFAULT_PENALTIES, EMPIRE_DEFAULT_CLEARED_BUILDINGS, isEmpireDefaulted, clearHighMaintenanceBuildings });
 
@@ -21434,6 +20887,32 @@ const SCHEMA_BY_TYPE = new Map(SPACE_OPERA_COMMANDS.map((def) => [def.type, def]
  * @param {{type: string, params?: object}} cmd - 命令信封
  * @returns {{ok: boolean, reason: string|null}} ok=false 时 reason 指明首个违规字段
  */
+/**
+ * SPEC-PLAN-057 Task 57.3（BUG-04 / doc56 Task 56.1 §3）：实体 ID 双模判定。
+ * 运行时 ID 形如 'plt_101' / 'fac_553' / 'flt_563' / 'shp_12' / 'chr_7'，
+ * 契约表层声明为 number；外部探针与 UI 直接派发字符串 ID 时必须兼容放行。
+ * 严格匹配「可选小写字母前缀 + 下划线 + 数字」或「纯数字」，拒绝任意脏字符串。
+ */
+function isCoercibleEntityId(val) {
+  if (typeof val === 'number') return Number.isInteger(val) && val >= 0;
+  if (typeof val !== 'string') return false;
+  return normalizeEntityIdValue(val) !== val;
+}
+
+/** 字段名是否为实体 ID（以 'Id' 结尾；如 planetId / targetPlanetId / situationId） */
+function isEntityIdField(name) {
+  return typeof name === 'string' && name.endsWith('Id');
+}
+
+/** 字符串实体 ID → 有限整数键；不可解析时原样返回（由调用方拒绝） */
+function normalizeEntityIdValue(val) {
+  if (typeof val !== 'string') return val;
+  const m = /^(?:[a-z]+_)?(\d+)$/i.exec(String(val).trim());
+  if (!m) return val;
+  const num = Number.parseInt(m[1], 10);
+  return Number.isInteger(num) && num >= 0 ? num : val;
+}
+
 function validateSpaceOperaCommandPayload(cmd) {
   if (!cmd || typeof cmd !== 'object' || Array.isArray(cmd)) {
     return { ok: false, reason: 'SO: 命令信封必须为对象 {type, params}' };
@@ -21453,7 +20932,12 @@ function validateSpaceOperaCommandPayload(cmd) {
       return { ok: false, reason: `SO: ${cmd.type} 缺少必填字段 ${f.name}（${f.type}）` };
     }
     if (f.type === 'number') {
-      if (typeof v !== 'number' || !Number.isFinite(v) || !Number.isInteger(v)) {
+      // SPEC-PLAN-057 Task 57.3：以 'Id' 结尾的实体 ID 字段允许可归一化字符串 ID
+      if (isEntityIdField(f.name) && typeof v === 'string') {
+        if (!isCoercibleEntityId(v)) {
+          return { ok: false, reason: `SO: ${cmd.type}.${f.name} 字符串实体 ID 不可解析（实测 ${String(v)}）` };
+        }
+      } else if (typeof v !== 'number' || !Number.isFinite(v) || !Number.isInteger(v)) {
         return { ok: false, reason: `SO: ${cmd.type}.${f.name} 必须为有限整数（实测 ${String(v)}）` };
       }
     } else if (f.type === 'string') {
@@ -21474,7 +20958,7 @@ function validateSpaceOperaCommandPayload(cmd) {
   return { ok: true, reason: null };
 }
 
-Object.assign(__exports, { SPACE_OPERA_COMMANDS, validateSpaceOperaCommandPayload });
+Object.assign(__exports, { SPACE_OPERA_COMMANDS, isCoercibleEntityId, isEntityIdField, normalizeEntityIdValue, validateSpaceOperaCommandPayload });
 
 });
 __register("src/core/commandBus.js", function (__exports, __require) {
@@ -23125,6 +22609,28 @@ function laneHours(world, fleet, fromSystem, toSystem) {
   return Math.max(1, Math.ceil(hours));
 }
 
+/**
+ * SPEC-PLAN-059 Task 59.2（doc56 赛道 C）：玩家帝国招募「缄默制图师·赛拉」后，
+ * 全帝国舰队享受折叠航道直连：燃料消耗 ×0.60（−40%）、战略航速 ×1.25（+25%）。
+ * 纯读、零写入；无 spaceOperaState / 无赛拉档案时恒返回 1（REG-01 零漂移）。
+ */
+function seraFleetModifiers(world, fleet) {
+  const neutral = { fuelMultiplier: 1, speedMultiplier: 1 };
+  const so = world && world.spaceOperaState;
+  if (!so) return neutral;
+  const pf = world.playerFactionId;
+  if (!pf || !fleet || (fleet.factionId && fleet.factionId !== pf)) return neutral;
+  const chars = (world.entities && world.entities.characters) || {};
+  for (const key of Object.keys(chars).sort()) {
+    const ch = chars[key];
+    const pg = ch && ch.paragon;
+    if (!pg || pg.paragonId !== 'SERA_CARTOGRAPHER') continue;
+    if (ch.factionId && ch.factionId !== pf) continue;
+    return { fuelMultiplier: 0.60, speedMultiplier: 1.25 };
+  }
+  return neutral;
+}
+
 /** 舰队战略速度（最慢船决定 —— 任务书 3.3） */
 function fleetSpeed(fleet, world) {
   let min = Infinity;
@@ -23134,7 +22640,7 @@ function fleetSpeed(fleet, world) {
     const stats = ship.stats || {};
     min = Math.min(min, stats.strategicSpeed ?? 1.0);
   }
-  return Number.isFinite(min) ? min : 1.0;
+  return (Number.isFinite(min) ? min : 1.0) * seraFleetModifiers(world, fleet).speedMultiplier;
 }
 
 
@@ -23317,7 +22823,7 @@ function fleetFuelMult(fleet, world) {
     mult += ship.stats?.fuelEfficiency ?? 1.0;
     n++;
   }
-  return n > 0 ? mult / n : 1;
+  return (n > 0 ? mult / n : 1) * seraFleetModifiers(world, fleet).fuelMultiplier;
 }
 
 /** 从舰队随行补给船/货舱扣燃料；返回是否还有燃料 */
@@ -23418,7 +22924,7 @@ function isHostile(world, a, b) {
   return !!(rel && rel.warId);
 }
 
-Object.assign(__exports, { laneHours, fleetSpeed, beginTransit, advanceFleets, refuelFleet, fleetSystem, fleetFuelTotal, planRoute, beginPlannedTransit });
+Object.assign(__exports, { laneHours, seraFleetModifiers, fleetSpeed, beginTransit, advanceFleets, refuelFleet, fleetSystem, fleetFuelTotal, planRoute, beginPlannedTransit });
 
 });
 __register("src/domain/strategic/megastructures.js", function (__exports, __require) {
@@ -25011,6 +24517,14 @@ const { emit: emit } = __require("src/core/eventBus.js");
 const { RNG: RNG } = __require("src/core/rng.js");
 const { credit: credit } = __require("src/domain/economy/ledger.js");
 const { ANOMALY_TEMPLATES: ANOMALY_TEMPLATES } = __require("src/content/anomalies.js");
+
+/**
+ * SPEC-PLAN-059 Task 59.5 / doc56 CHK-M5-05 零漂移红线：共创异常模板追加到
+ * ANOMALY_TEMPLATES 末尾后，RNG.pick 的采样域必须锁定为 M5 前的 20 条基线模板。
+ * 否则 arr.length 变化会改变 int(world, n) 的取模结果，令 REG-01 4,320 Ticks
+ * 金快照哈希漂移。共创异常经 activateSpaceOperaCampaign 独立播种，不进本采样域。
+ */
+const BASELINE_ANOMALY_TEMPLATES = ANOMALY_TEMPLATES.slice(0, 20);
 const { createEntity: createEntity, getEntity: getEntity } = __require("src/domain/entities/registry.js");
 const { getMod: getMod } = __require("src/domain/factions/modifiers.js");
 const { getRelation: getRelation } = __require("src/domain/diplomacy/war.js");
@@ -25150,7 +24664,7 @@ function findScanningFleet(world, factionId, systemId) {
 function spawnAnomaliesForSystem(world, sys, factionId) {
   if (!sys.flags?.hasAnomalySlot) return;
   if ((sys.anomalyIds || []).length > 0) return; // 幂等
-  const template = RNG.pick(world, ANOMALY_TEMPLATES);
+  const template = RNG.pick(world, BASELINE_ANOMALY_TEMPLATES);
   const anomaly = createEntity(world, 'anomalies', {
     systemId: sys.id,
     templateId: template.id,
@@ -26020,6 +25534,17 @@ const ANOMALY_TEMPLATES = [
     rewards: [{ resId: 'ancientData', amount: 5 }, { resId: 'exoticMatter', amount: 1 }, { resId: 'researchData', amount: 18 }],
     risks: ['读数湮灭'],
     storyTag: 'crisis_rift',
+  },
+
+  // —— 外网实测共创精选（SPEC-PLAN-059 Task 59.5 / doc56 赛道 A）——
+  {
+    id: 'ano_echo_mirror',
+    nameZh: '镜渊回声 / 记忆尘埃场', nameEn: 'Echo Mirror Anomaly',
+    descZh: '悬浮在引力井中的高维记忆尘埃场，不断折射反射过去的航迹电波。提升全星区情报解密 +2，深核勘探掉落双倍奇异物质。',
+    category: 'spatial', difficultyMod: 3,
+    rewards: [{ resId: 'researchData', amount: 50 }, { resId: 'exoticMatter', amount: 4 }],
+    risks: ['镜像守卫共振', '时空相位扰动'],
+    storyTag: 'co_echo_mirror',
   },
 ];
 
@@ -39590,6 +39115,8 @@ const { BUILDINGS: BUILDINGS } = __require("src/content/buildings.js");
 const { BAL: BAL } = __require("src/content/constants.js");
 // SPEC-PLAN-052 Task 52.1/52.2（M4 工位 D）：16 大天体原型名称投影（content 只读表，零环）
 const { PLANETARY_ARCHETYPES: PLANETARY_ARCHETYPES } = __require("src/content/planetaryArchetypes.js");
+// SPEC-PLAN-056 Task 56.2 §4 / 058 Task 58.3：频段颜色简写权威映射
+const { BEACON_FREQ_BAND: BEACON_FREQ_BAND } = __require("src/content/spaceOperaBeacons.js");
 
 /** 殖民地详情 */
 function colonyDetail(world, colonyId) {
@@ -39990,17 +39517,21 @@ function governmentView(world, factionId) {
  */
 function paragonsProjection(world) {
   const characters = (world.entities && world.entities.characters) || {};
+  const pf = world.playerFactionId;
   const out = [];
   for (const key of Object.keys(characters).sort()) {
     const ch = characters[key];
     const pg = ch && ch.paragon;
     if (!ch || !pg || ch.health === 'dead') continue;
+    // SPEC-PLAN-058 Task 58.1（BUG-02）：投影层严格隔离非玩家派系领袖
+    if (pf && ch.factionId && ch.factionId !== pf) continue;
     const lvl = Number.isFinite(ch.level) ? ch.level : 1;
     const xp = Number.isFinite(ch.xp) ? ch.xp : 0;
     // 在编口径与 leaderCapStats 同源：职业内、非 capExempt、存活
     const sameProf = Object.keys(characters).filter((k2) => {
       const c2 = characters[k2];
       return c2 && c2.paragon && c2.health !== 'dead'
+        && (!pf || !c2.factionId || c2.factionId === pf)
         && c2.paragon.profession === pg.profession && c2.paragon.capExempt !== true;
     }).length;
     const cap = (world.spaceOperaState && world.spaceOperaState.leaderCaps
@@ -40331,7 +39862,7 @@ function spaceOperaBeaconsList(world, so) {
     out.push({
       id: b.id,
       kind: b.kind || 'NARRATIVE',
-      band: b.freqClass || null,
+      band: BEACON_FREQ_BAND[b.freqClass] || b.band || 'gold',
       frequencyName: meta.nameZh,
       color: meta.color,
       position: sys && Number.isFinite(sys.x) ? { x: sys.x, y: sys.y } : null,
@@ -40346,6 +39877,39 @@ function spaceOperaBeaconsList(world, so) {
     });
   }
   return out;
+}
+
+/** 信标奖励资源中文名（Toast 回执显示用） */
+const BEACON_RES_ZH = Object.freeze({
+  credits: '信用点', researchData: '科研数据', intelPoints: '情报点',
+  influence: '影响力', ancientData: '先驱者数据', exoticMatter: '奇异物质',
+  alloy: '合金', medicine: '医药', powerCell: '动力电池', food: '食物',
+});
+
+/**
+ * SPEC-PLAN-058 Task 58.4（BUG-08.1 / doc56 Task 56.2 §5）：把
+ * world.spaceOperaState.lastBeaconResponse 的机读结算结果格式化为中文收益回执。
+ * 纯函数、零世界态改动；未知效果回退到 outcome.summaryZh / 选项提示。
+ */
+function beaconOutcomeSummaryZh(outcome, option) {
+  const o = outcome && typeof outcome === 'object' ? outcome : {};
+  const parts = [];
+  const addRes = (r) => {
+    if (!r || !Number.isFinite(Number(r.amount))) return;
+    parts.push(`获得 +${r.amount} ${BEACON_RES_ZH[r.resId] || r.resId}`);
+  };
+  addRes(o.credited);
+  addRes(o.fallbackCredit);
+  if (o.unityGranted != null && Number.isFinite(Number(o.unityGranted))) {
+    parts.push(`帝国凝聚力 +${o.unityGranted}`);
+  }
+  if (o.blackMarket && Number.isFinite(Number(o.blackMarket.qty))) {
+    parts.push(`黑市窗口 ${o.blackMarket.contrabandId} ×${o.blackMarket.qty}`);
+  }
+  if (o.refugees != null && Number.isFinite(Number(o.refugees))) parts.push(`难民入殖 +${o.refugees}`);
+  if (o.tempBuff) parts.push('临时增益窗口已激活');
+  if (parts.length) return parts.join('、');
+  return o.summaryZh || (option && (option.effectHint || option.label)) || '信标响应已执行';
 }
 
 /**
@@ -40379,7 +39943,7 @@ function spaceOperaAutonomousFleetsList(world, so) {
   return out;
 }
 
-Object.assign(__exports, { colonyDetail, fleetDetail, shipSummary, researchView, marketView, diplomacyView, treatySummary, warSummary, governmentView, designerView, fitPreview, shipyardView, explorationView, chronicleView, battleView, intelView, spaceOperaView });
+Object.assign(__exports, { colonyDetail, fleetDetail, shipSummary, researchView, marketView, diplomacyView, treatySummary, warSummary, governmentView, designerView, fitPreview, shipyardView, explorationView, chronicleView, battleView, intelView, spaceOperaView, beaconOutcomeSummaryZh });
 
 });
 __register("src/devtools/glGateTest.js", function (__exports, __require) {
@@ -42578,11 +42142,75 @@ class GalaxyRenderer {
   /** 更新渲染用的最新快照引用（不复制、不修改） */
   setSnapshot(snap) {
     this._snapshot = snap || null;
+    // SPEC-PLAN-058 Task 58.4（BUG-06）：视图未精确居中时的首帧质心兜底
+    if (!this._viewCentered && snap && Array.isArray(snap.systems) && snap.systems.length) {
+      let sx = 0; let sy = 0; let n = 0;
+      for (const s of snap.systems) {
+        if (s && Number.isFinite(s.x) && Number.isFinite(s.y)) { sx += s.x; sy += s.y; n += 1; }
+      }
+      if (n > 0 && this.centerOnCoordinates(sx / n, sy / n)) this._viewCentered = true;
+    }
   }
 
   /** 更新悬停星系 id */
   setHover(id) {
     this._hoverId = id || null;
+  }
+
+  /**
+   * SPEC-PLAN-058 Task 58.4（BUG-06）：把视角中心对准指定策略坐标。
+   * 递增 _camVersion 并置脏投影缓存，强制下一帧重建相机矩阵（GL/2D 同口径）。
+   */
+  centerOnCoordinates(x, y) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+    this.view.x = x;
+    this.view.y = y;
+    this._camVersion += 1;
+    this._projValid = false;
+    return true;
+  }
+
+  /** 母星系（玩家首座殖民地所在星系）→ 全星系质心 两级自适配 */
+  centerOnHomeSystem(world) {
+    this._homeWorld = world || null;
+    const systems = world && world.entities && world.entities.systems ? world.entities.systems : {};
+    const keys = Object.keys(systems).sort();
+    if (keys.length === 0) return false;
+    const pf = world.playerFactionId;
+    const planets = (world.entities && world.entities.planets) || {};
+    const colonies = (world.entities && world.entities.colonies) || {};
+    let home = null;
+    for (const key of Object.keys(colonies).sort()) {
+      const col = colonies[key];
+      if (!col || (pf && col.factionId && col.factionId !== pf)) continue;
+      const planet = planets[col.planetId];
+      const sys = planet && systems[planet.systemId];
+      if (sys && Number.isFinite(sys.x) && Number.isFinite(sys.y)) { home = sys; break; }
+    }
+    let cx; let cy;
+    if (home) {
+      cx = home.x; cy = home.y;
+    } else {
+      let sx = 0; let sy = 0; let n = 0;
+      for (const key of keys) {
+        const s = systems[key];
+        if (s && Number.isFinite(s.x) && Number.isFinite(s.y)) { sx += s.x; sy += s.y; n += 1; }
+      }
+      if (n === 0) return false;
+      cx = sx / n; cy = sy / n;
+    }
+    const ok = this.centerOnCoordinates(cx, cy);
+    if (ok) this._viewCentered = true;
+    return ok;
+  }
+
+  /** 【🎯 复位视角】：zoom 归 1× 并重新对准母星系/质心 */
+  resetView() {
+    this.view.zoom = 1;
+    this._camVersion += 1;
+    this._projValid = false;
+    if (this._homeWorld) return this.centerOnHomeSystem(this._homeWorld);
+    return this.centerOnCoordinates(WORLD / 2, WORLD / 2);
   }
 
   // —— 路径判定 ——————————————————————————————————
@@ -43861,20 +43489,25 @@ __register("src/render/gl/Galaxy3D.js", function (__exports, __require) {
  *   galaxy3d.shell   超新星球壳（视图空间射线-球求交 imposter，limb 增亮）
  */
 
-// —— 并行模块探测（非阻塞动态 import） ——
-// 交付模块在场（http 直连模式）即优先采用其导出；缺席/加载失败静默回退本文件内的
-// 本地确定性实现（接口不变）。刻意不用顶层 await：R1 单文件打包器把模块体封装进
-// 同步工厂函数（tests/tools/build-static-bundle.mjs），await 会使 dist 构建失效；
-// 动态 import 不进入其静态依赖图，file:// 单文件模式下探测 404 后同样回退本地。
-let _extParticles = null;
-let _extNebula = null;
-function _probeExternal(spec, assign) {
-  try {
-    import(spec).then(assign, () => { /* 缺席：保持 null → 本地回退 */ });
-  } catch (_) { /* 极老环境无动态 import：仅用本地回退 */ }
-}
-_probeExternal('./GalaxyParticles.js', (m) => { _extParticles = m || null; });
-_probeExternal('../shaders/NebulaShader.js', (m) => { _extNebula = m || null; });
+// —— 并行模块静态接线（SPEC-PLAN-057 Task 57.4 / BUG-05 配套） ——
+// 两个「并行交付模块」现已真实入库。旧实现用 `import('./GalaxyParticles.js')` 非阻塞
+// 探测：ESM 模式基准为 src/render/gl/ → 200；切换为单文件 Bundle 优先后基准变为
+// dist/ → /dist/GalaxyParticles.js 404，触发 CDP「Network 0 404」门禁失败，并回退到
+// 本地近似实现（与 ESM 行为不一致）。改为静态 import：产物内含真实实现、零网络请求、
+// ESM 与 Bundle 两条路径行为逐位一致。包装层与本地回退保留（接口不变）。
+const { generateGalaxyParticles: generateGalaxyParticlesExt, generateSupernovaSeeds: generateSupernovaSeedsExt } = __require("src/render/gl/GalaxyParticles.js");
+const { NEBULA_VERT: EXT_NEBULA_VERT, NEBULA_FRAG: EXT_NEBULA_FRAG, SUPERNOVA_VERT: EXT_SUPERNOVA_VERT, SUPERNOVA_FRAG: EXT_SUPERNOVA_FRAG } = __require("src/render/shaders/NebulaShader.js");
+
+const _extParticles = {
+  generateGalaxyParticles: generateGalaxyParticlesExt,
+  generateSupernovaSeeds: generateSupernovaSeedsExt,
+};
+const _extNebula = {
+  NEBULA_VERT: EXT_NEBULA_VERT,
+  NEBULA_FRAG: EXT_NEBULA_FRAG,
+  SUPERNOVA_VERT: EXT_SUPERNOVA_VERT,
+  SUPERNOVA_FRAG: EXT_SUPERNOVA_FRAG,
+};
 
 /** 策略坐标 (0..1000) → 世界坐标的缩放系数（±10 世界单位银盘） */
 const WORLD_SCALE = 0.02;
@@ -44683,6 +44316,1035 @@ class Galaxy3D {
 }
 
 Object.assign(__exports, { WORLD_SCALE, hashString01, systemWorldPos, generateGalaxyParticles, generateSupernovaSeeds, Galaxy3D });
+
+});
+__register("src/render/shaders/NebulaShader.js", function (__exports, __require) {
+/**
+ * render/shaders/NebulaShader.js — 体积星云 / 超新星遗迹激波壳层着色器
+ * （GLSL ES 3.0 字符串，`#version 300 es` 由调用方拼接，模块内不写版本头）
+ *
+ * 导出四段字符串：
+ *  - NEBULA_VERT + NEBULA_FRAG：全屏/大四边形体积星云。
+ *      顶点输入 = { aPos: vec2（NDC 角点 [-1,1]²，TRIANGLE_STRIP） }，直接透传裁剪空间；
+ *      varying = { vUV ∈ [-1,1]（NDC，用于逆投影重建射线，不做纵横校正） }
+ *      片元 uniforms = { uTime: float, uCamPos: vec3, uInvViewProj: mat4,
+ *                        uOrigin: vec3（星云中心，世界坐标）, uScale: float,
+ *                        uHue: float, uSteps: int }
+ *      约定：uCamPos 与 uInvViewProj 必须来自同一相机；uScale 为星云世界半径基准
+ *      （包围球半径取 1.35·uScale）；uSteps 为步进数 LOD（未设置/≤0 时默认 24，
+ *      有效范围 clamp 到 8..48）。uHue 为色相微调弧度。
+ *      实现：射线步进采样世界空间 3D fBm（5 八度）+ 域扭曲
+ *      （warp = 0.6·vec3(fbm,fbm,fbm)），H-II 粉紫 vec3(2.4,0.5,1.6) 与青蓝电离区
+ *      混色的发射加性累积；暗星云尘埃带独立通道以比尔-朗伯消光 exp(-density·k)
+ *      遮蔽背景；输出预乘 alpha（建议 gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)）。
+ *  - SUPERNOVA_VERT + SUPERNOVA_FRAG：球面超新星遗迹激波壳层（单位球网格）。
+ *      顶点 uniforms = { uMVP: mat4, uNormalMatrix: mat3 }（约定同恒星模块）
+ *      顶点输入 = { aPos: vec3 }（aNormal 可不绑定，未使用）
+ *      varying = { vLocalPos, vViewDir, vRayLocal }
+ *      片元 uniforms = { uTime: float, uSeed: float }
+ *      实现：vLocalPos 单位球入射点、远场平行视线沿弦步进；激波薄壳
+ *      shell = exp(-((r-0.78)/0.16)²)；fbmFilaments 脊状丝状结构；
+ *      [O III] 青蓝 vec3(0.25,2.8,3.6) 与 H-Alpha 品红 vec3(4.2,0.45,1.35) 双色交织；
+ *      菲涅尔 rim 增亮；中心致密残骸随时间闪烁。建议加性混合 gl.ONE, gl.ONE。
+ *
+ * 约束：顶层无副作用、不触碰 DOM；噪声工具来自 ../gl/NoiseGLSL.js。
+ */
+
+const { GLSL_HASH: GLSL_HASH, GLSL_NOISE: GLSL_NOISE, GLSL_FBM: GLSL_FBM } = __require("src/render/gl/NoiseGLSL.js");
+
+/** 片元统一精度头（模块内常量） */
+const PRECISION_HEAD = `
+precision highp float;
+precision highp int;
+`;
+
+/* ========================= 体积星云（NEBULA） ========================= */
+
+const NEBULA_VERT = `
+// ============ 体积星云：全屏/大四边形顶点着色器 ============
+in vec2 aPos;             // NDC 角点 [-1,1]^2（TRIANGLE_STRIP）
+out vec2 vUV;             // NDC 坐标（逆投影用，不做纵横校正）
+
+void main() {
+  vUV = aPos;
+  gl_Position = vec4(aPos, 0.0, 1.0);
+}
+`;
+
+const NEBULA_FRAG = PRECISION_HEAD + GLSL_HASH + GLSL_NOISE + GLSL_FBM + `
+// ============ 体积星云片元着色器 ============
+uniform float uTime;
+uniform vec3 uCamPos;
+uniform mat4 uInvViewProj;
+uniform vec3 uOrigin;     // 星云中心（世界坐标）
+uniform float uScale;     // 星云世界半径基准
+uniform float uHue;       // 色相微调（弧度）
+uniform int uSteps;       // 步进数 LOD（默认 24，clamp 8..48）
+
+in vec2 vUV;
+out vec4 fragColor;
+
+// 3 八度轻量 fBm（域扭曲专用，复用 NGL_R3 旋转去网格痕）
+float nebFbm3(vec3 p) {
+  float sum = 0.0;
+  float amp = 0.5;
+  for (int i = 0; i < 3; i++) {
+    sum += amp * simplex3D(p);
+    p = NGL_R3 * p * 2.02;
+    amp *= 0.5;
+  }
+  return sum * 1.14;
+}
+
+// YIQ 色相旋转（uHue 弧度）
+vec3 nebHueShift(vec3 c, float a) {
+  const vec3 Yk = vec3(0.299, 0.587, 0.114);
+  const vec3 Ik = vec3(0.596, -0.274, -0.322);
+  const vec3 Qk = vec3(0.211, -0.523, 0.312);
+  float y = dot(c, Yk);
+  float ci = dot(c, Ik);
+  float cq = dot(c, Qk);
+  float cs = cos(a);
+  float sn = sin(a);
+  float i2 = ci * cs - cq * sn;
+  float q2 = ci * sn + cq * cs;
+  return y * Yk + i2 * Ik + q2 * Qk;
+}
+
+void main() {
+  // 由逆视图投影矩阵重建世界射线（近/远平面两点各一次 w 除）
+  vec4 q0 = uInvViewProj * vec4(vUV, -1.0, 1.0);
+  vec4 q1 = uInvViewProj * vec4(vUV, 1.0, 1.0);
+  vec3 ro = uCamPos;
+  vec3 rd = normalize((q1.xyz / q1.w) - (q0.xyz / q0.w));
+
+  // 包围球（半径 1.35·uScale）求交
+  float R = uScale * 1.35;
+  vec3 oc = ro - uOrigin;
+  float b = dot(oc, rd);
+  float cc = dot(oc, oc) - R * R;
+  float disc = b * b - cc;
+  if (disc <= 0.0) {
+    fragColor = vec4(0.0);
+    return;
+  }
+  float sq = sqrt(disc);
+  float tN = max(-b - sq, 0.0);
+  float tF = -b + sq;
+  if (tF <= tN) {
+    fragColor = vec4(0.0);
+    return;
+  }
+
+  int steps = uSteps > 0 ? min(uSteps, 48) : 24;   // LOD：uSteps 可降档
+  if (steps < 8) {
+    steps = 8;
+  }
+  float dt = (tF - tN) / float(steps);
+  float t = tN + dt * hash21(gl_FragCoord.xy);     // 抖动起始相位去条带
+
+  vec3 col = vec3(0.0);
+  float trans = 1.0;                               // 比尔-朗伯透过率
+  float stepQ = dt / max(uScale, 0.0001);          // 归一化空间步长（尺度无关）
+
+  for (int k = 0; k < 48; k++) {
+    if (k >= steps || trans < 0.015) {
+      break;
+    }
+    vec3 wp = ro + rd * t;
+    vec3 q = (wp - uOrigin) / uScale;              // 归一化星云空间
+    float rr = length(q);
+
+    // 域扭曲：p += 0.6·vec3(fbm(p+off1), fbm(p+off2), fbm(p+off3))
+    vec3 wq = q * 1.7 + vec3(0.0, uTime * 0.010, 0.0);
+    vec3 warp = 0.6 * vec3(
+      nebFbm3(wq + vec3(0.0, 1.7, 3.1)),
+      nebFbm3(wq + vec3(5.2, 0.3, 8.4)),
+      nebFbm3(wq + vec3(9.1, 7.7, 0.5))
+    );
+    float base = fbm3D(q * 2.1 + warp);            // 5 八度主密度
+    float dens = smoothstep(0.02, 0.58, base) * (1.0 - smoothstep(0.55, 1.05, rr));
+
+    // 暗星云尘埃带（独立通道，消光更强）
+    float dust = smoothstep(0.15, 0.62,
+      nebFbm3(q * 3.3 + warp * 0.5 + vec3(13.7, 4.2, 9.9)));
+
+    if (dens > 0.002 || dust > 0.002) {
+      // H-II 粉紫 与 青蓝电离区 混色（扭曲场驱动），再按 uHue 微调色相
+      float mixF = 0.5 + 0.5 * nebFbm3(q * 1.3 + warp * 0.35 + vec3(21.0, 3.0, 7.0));
+      vec3 emit = mix(vec3(2.4, 0.5, 1.6), vec3(0.35, 1.05, 2.60), mixF);
+      emit = nebHueShift(emit, uHue);
+      float eK = dens * 0.9 + dust * 0.10;
+      col += emit * eK * stepQ * trans * 3.0;      // 发射加性累积（前向加权）
+      trans *= exp(-(dens * 1.35 + dust * 3.1) * stepQ * 6.0);   // 比尔-朗伯消光
+    }
+    t += dt;
+  }
+
+  float alpha = 1.0 - trans;
+  fragColor = vec4(col, alpha);                    // col 已前向加权 ≈ 预乘 alpha
+}
+`;
+
+/* ========================= 超新星遗迹（SUPERNOVA） ========================= */
+
+const SUPERNOVA_VERT = `
+// ============ 超新星遗迹：单位球包络顶点着色器 ============
+uniform mat4 uMVP;            // 调用方约定命名 uMVP = Projection·View·Model
+uniform mat3 uNormalMatrix;   // 模型视图法线矩阵（模型仅旋转+均匀缩放）
+in vec3 aPos;                 // 局部单位球顶点（aNormal 可不绑定，未使用）
+out vec3 vLocalPos;           // 单位球表面点（可见半球 = 射线入射点）
+out vec3 vViewDir;            // 视空间球面方向（菲涅尔 rim 用，远场近似）
+out vec3 vRayLocal;           // 局部空间视线方向（远场平行投影近似，指向球内）
+
+void main() {
+  vLocalPos = aPos;
+  vViewDir = uNormalMatrix * normalize(aPos);
+  // uNormalMatrix 为纯旋转（局部→视空间），其转置把视空间视线变换回局部空间
+  vRayLocal = transpose(uNormalMatrix) * vec3(0.0, 0.0, -1.0);
+  gl_Position = uMVP * vec4(aPos, 1.0);
+}
+`;
+
+const SUPERNOVA_FRAG = PRECISION_HEAD + GLSL_HASH + GLSL_NOISE + GLSL_FBM + `
+// ============ 超新星遗迹激波壳层片元着色器 ============
+uniform float uTime;
+uniform float uSeed;
+
+in vec3 vLocalPos;
+in vec3 vViewDir;
+in vec3 vRayLocal;
+out vec4 fragColor;
+
+void main() {
+  vec3 entry = normalize(vLocalPos);
+  vec3 dir = normalize(vRayLocal);
+  // 单位球穿弦长度：入射点在球面、方向向内时出口满足 |entry + t·dir| = 1 → t = -2·(entry·dir)
+  float chord = -2.0 * dot(entry, dir);
+  if (chord <= 0.0) {                 // 背面片元（或方向异常）不发光
+    fragColor = vec4(0.0);
+    return;
+  }
+
+  // 菲涅尔 rim：切向视线掠过壳层边缘时增亮
+  float rim = pow(1.0 - abs(normalize(vViewDir).z), 2.0);
+  float dither = hash21(gl_FragCoord.xy);
+
+  const int NSTEP = 14;
+  float stepLen = chord / float(NSTEP);
+  vec3 col = vec3(0.0);
+  float minR = 1.5;
+
+  for (int k = 0; k < NSTEP; k++) {
+    vec3 p = entry + dir * (stepLen * (float(k) + dither));
+    float r = length(p);
+    minR = min(minR, r);
+    // 激波薄壳：r≈0.78、厚度 0.16 的高斯剖面
+    float sd = (r - 0.78) / 0.16;
+    float shell = exp(-sd * sd);
+    if (shell > 0.004) {
+      // 脊状丝状结构（seed 偏移 + 随时间缓慢演化）
+      vec3 fp = p * 2.6 + vec3(uSeed * 7.3, uSeed * 3.1, -uSeed * 5.7)
+        + vec3(0.0, uTime * 0.02, 0.0);
+      float f1 = fbmFilaments(fp);
+      float f2 = fbmFilaments(fp * 1.7 + vec3(31.4, 17.9, 8.8));
+      float fil = pow(clamp(f1, 0.0, 1.0), 1.8);
+      // [O III] 青蓝 与 H-Alpha 品红 双色交织
+      vec3 cOIII = vec3(0.25, 2.80, 3.60);
+      vec3 cHA = vec3(4.20, 0.45, 1.35);
+      vec3 emit = mix(cOIII, cHA, smoothstep(0.30, 0.72, f2));
+      col += emit * (shell * fil * stepLen * (0.7 + 1.1 * rim) * 1.6);
+    }
+  }
+
+  // 中心致密残骸：射线近心通过时点亮并闪烁
+  float flick = 0.55 + 0.75
+    * (0.5 + 0.5 * sin(uTime * 11.0 + uSeed * 51.0))
+    * (0.5 + 0.5 * sin(uTime * 4.7 + uSeed * 13.0));
+  float md = minR / 0.16;
+  float remnant = exp(-md * md) * flick;
+  col += vec3(3.6, 3.3, 2.9) * remnant;
+
+  float alpha = clamp(dot(col, vec3(0.333)), 0.0, 1.0);
+  fragColor = vec4(col, alpha);       // 建议加性混合 gl.ONE, gl.ONE
+}
+`;
+
+Object.assign(__exports, { NEBULA_VERT, NEBULA_FRAG, SUPERNOVA_VERT, SUPERNOVA_FRAG });
+
+});
+__register("src/render/gl/NoiseGLSL.js", function (__exports, __require) {
+/**
+ * render/gl/NoiseGLSL.js — 可拼接的 GLSL ES 3.0 噪声/工具片段库（全部原创手写）
+ *
+ * 用途：
+ *  - 供 src/render/shaders/ 下的着色器模块按需拼接，组成完整片元着色器源码；
+ *  - `#version 300 es` 由调用方在最前拼接（本模块不含版本头，也不含 precision 声明，
+ *    precision highp float; 由各着色器模块的统一头常量负责）。
+ *
+ * 拼接顺序约定（被依赖的片段必须先出现）：
+ *   GLSL_HASH → GLSL_NOISE → GLSL_SIMPLEX4D → GLSL_FBM → GLSL_BLACKBODY
+ *   - GLSL_NOISE / GLSL_SIMPLEX4D 依赖 GLSL_HASH 的 hash21/hash31/hash41；
+ *   - GLSL_FBM 依赖 GLSL_NOISE 的 simplex2D/simplex3D 与常量 NGL_R2/NGL_R3；
+ *   - GLSL_BLACKBODY 无依赖，可单独拼接。
+ *
+ * 命名约束：所有导出片段之间、以及与各着色器模块内部助手之间无重名冲突；
+ *   片段内部私有助手统一使用 ngl / s4 前缀（nglHashU、nglQuintic、nglGrad2、
+ *   nglGrad3、s4Grad），常量使用 NGL_ 前缀，可安全地同时拼接多个片段。
+ *
+ * 数值约定：hash* 返回 [0,1)；noise* 与 simplex* 返回约 [-1,1]；
+ *   worley* 返回 [0,1]（最近特征点归一化距离）；fbm* 返回约 [-1,1]；
+ *   fbmFilaments（脊状）返回 [0,1]；blackbodyRGB 返回 HDR RGB（允许 >1）。
+ */
+
+/**
+ * GLSL_HASH — 32 位整型 avalanche 哈希与晶格哈希（PCG 风格，原创实现）。
+ * 导出函数：hash21(vec2)、hash31(vec3)、hash41(vec4)，输入先 floor 到整数晶格。
+ * 依赖：无。
+ */
+const GLSL_HASH = `
+// ------------------------------------------------------------------
+// GLSL_HASH — 晶格哈希库（原创手写，无外部来源）
+// ------------------------------------------------------------------
+uint nglHashU(uint x) {
+  x ^= x >> 16u;
+  x *= 0x7feb352du;
+  x ^= x >> 15u;
+  x *= 0x846ca68bu;
+  x ^= x >> 16u;
+  return x;
+}
+
+// 2D 晶格哈希：返回 [0,1)
+float hash21(vec2 p) {
+  ivec2 ip = ivec2(floor(p));
+  uint h = uint(ip.x) * 0x9e3779b9u;
+  h ^= uint(ip.y) * 0x85ebca77u;
+  return float(nglHashU(h)) / 4294967296.0;
+}
+
+// 3D 晶格哈希：返回 [0,1)（双重 avalanche 增强去相关）
+float hash31(vec3 p) {
+  ivec3 ip = ivec3(floor(p));
+  uint h = uint(ip.x) * 0x9e3779b9u;
+  h ^= uint(ip.y) * 0xc2b2ae3du;
+  h ^= uint(ip.z) * 0x27d4eb2fu;
+  return float(nglHashU(nglHashU(h))) / 4294967296.0;
+}
+
+// 4D 晶格哈希：返回 [0,1)（双重 avalanche）
+float hash41(vec4 p) {
+  ivec4 ip = ivec4(floor(p));
+  uint h = uint(ip.x) * 0x9e3779b9u;
+  h ^= uint(ip.y) * 0x85ebca77u;
+  h ^= uint(ip.z) * 0xc2b2ae3du;
+  h ^= uint(ip.w) * 0x27d4eb2fu;
+  return float(nglHashU(nglHashU(h))) / 4294967296.0;
+}
+`;
+
+/**
+ * GLSL_NOISE — 值噪声 / 单纯形噪声 / Worley 胞腔噪声 / 4D Simplex-Worley 混合。
+ * 导出函数：noise2D/noise3D（值噪声）、simplex2D/simplex3D（单纯形梯度噪声）、
+ *   worley2D/worley3D/worley4D（F1 胞腔距离）、noise4D（4D Simplex-Worley 混合：
+ *   值噪声骨架 + worley4D 胞腔调制；真 4D 单纯形见 GLSL_SIMPLEX4D 的 simplex4D）。
+ * 依赖：GLSL_HASH。
+ */
+const GLSL_NOISE = `
+// ------------------------------------------------------------------
+// GLSL_NOISE — 值噪声 / 单纯形 / Worley（原创手写）
+// ------------------------------------------------------------------
+// 五次平滑曲线（C2 连续）
+float nglQuintic(float t) {
+  return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+// 2D 值噪声 [-1,1]
+float noise2D(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = p - i;
+  vec2 u = vec2(nglQuintic(f.x), nglQuintic(f.y));
+  float a = hash21(i);
+  float b = hash21(i + vec2(1.0, 0.0));
+  float c = hash21(i + vec2(0.0, 1.0));
+  float d = hash21(i + vec2(1.0, 1.0));
+  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y) * 2.0 - 1.0;
+}
+
+// 3D 值噪声 [-1,1]
+float noise3D(vec3 p) {
+  vec3 i = floor(p);
+  vec3 f = p - i;
+  vec3 u = vec3(nglQuintic(f.x), nglQuintic(f.y), nglQuintic(f.z));
+  float n000 = hash31(i);
+  float n100 = hash31(i + vec3(1.0, 0.0, 0.0));
+  float n010 = hash31(i + vec3(0.0, 1.0, 0.0));
+  float n110 = hash31(i + vec3(1.0, 1.0, 0.0));
+  float n001 = hash31(i + vec3(0.0, 0.0, 1.0));
+  float n101 = hash31(i + vec3(1.0, 0.0, 1.0));
+  float n011 = hash31(i + vec3(0.0, 1.0, 1.0));
+  float n111 = hash31(i + vec3(1.0, 1.0, 1.0));
+  float a = mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y);
+  float b = mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y);
+  return mix(a, b, u.z) * 2.0 - 1.0;
+}
+
+// 由 [0,1) 哈希生成单位梯度向量（圆周均匀，避免查表与三角函数开销过高问题）
+vec2 nglGrad2(float h) {
+  float a = h * 6.28318530718;
+  return vec2(cos(a), sin(a));
+}
+
+// 由 [0,1) 哈希生成单位梯度向量（球面参数化）
+vec3 nglGrad3(float h) {
+  float a = h * 6.28318530718;
+  float z = h * 2.0 - 1.0;
+  float r = sqrt(max(1.0 - z * z, 0.0));
+  return vec3(r * cos(a), r * sin(a), z);
+}
+
+// 2D 单纯形梯度噪声（原创实现：斜切框架 + 哈希梯度），输出约 [-1,1]
+float simplex2D(vec2 p) {
+  const float F2 = 0.36602540378;   // (sqrt(3)-1)/2
+  const float G2 = 0.21132486541;   // (3-sqrt(3))/6
+  float s = (p.x + p.y) * F2;
+  vec2 ic = floor(p + vec2(s));
+  float t = (ic.x + ic.y) * G2;
+  vec2 x0 = p - (ic - vec2(t));
+  // 三角形单纯形顶点顺序
+  vec2 o1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+  vec2 x1 = x0 - o1 + vec2(G2);
+  vec2 x2 = x0 - vec2(1.0) + vec2(2.0 * G2);
+  vec3 w = max(vec3(0.5) - vec3(dot(x0, x0), dot(x1, x1), dot(x2, x2)), vec3(0.0));
+  vec3 w4 = w * w;
+  w4 = w4 * w4;
+  vec2 g0 = nglGrad2(hash21(ic));
+  vec2 g1 = nglGrad2(hash21(ic + o1));
+  vec2 g2 = nglGrad2(hash21(ic + vec2(1.0)));
+  float n = dot(w4, vec3(dot(g0, x0), dot(g1, x1), dot(g2, x2)));
+  return n * 85.0;   // 经验归一化常数
+}
+
+// 3D 单纯形梯度噪声（原创实现），输出约 [-1,1]
+float simplex3D(vec3 p) {
+  const float F3 = 0.33333333333;   // 1/3
+  const float G3 = 0.16666666667;   // 1/6
+  float s = (p.x + p.y + p.z) * F3;
+  vec3 ic = floor(p + vec3(s));
+  float t = (ic.x + ic.y + ic.z) * G3;
+  vec3 x0 = p - (ic - vec3(t));
+  // 立体单纯形顶点顺序（分量排序）
+  vec3 o1;
+  vec3 o2;
+  if (x0.x >= x0.y) {
+    if (x0.y >= x0.z)      { o1 = vec3(1.0, 0.0, 0.0); o2 = vec3(1.0, 1.0, 0.0); }
+    else if (x0.x >= x0.z) { o1 = vec3(1.0, 0.0, 0.0); o2 = vec3(1.0, 0.0, 1.0); }
+    else                   { o1 = vec3(0.0, 0.0, 1.0); o2 = vec3(1.0, 0.0, 1.0); }
+  } else {
+    if (x0.y < x0.z)       { o1 = vec3(0.0, 0.0, 1.0); o2 = vec3(0.0, 1.0, 1.0); }
+    else if (x0.x < x0.z)  { o1 = vec3(0.0, 1.0, 0.0); o2 = vec3(0.0, 1.0, 1.0); }
+    else                   { o1 = vec3(0.0, 1.0, 0.0); o2 = vec3(1.0, 1.0, 0.0); }
+  }
+  vec3 x1 = x0 - o1 + vec3(G3);
+  vec3 x2 = x0 - o2 + vec3(2.0 * G3);
+  vec3 x3 = x0 - vec3(1.0) + vec3(3.0 * G3);
+  vec4 w = max(vec4(0.6) - vec4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), vec4(0.0));
+  vec4 w4 = w * w;
+  w4 = w4 * w4;
+  vec3 g0 = nglGrad3(hash31(ic));
+  vec3 g1 = nglGrad3(hash31(ic + o1));
+  vec3 g2 = nglGrad3(hash31(ic + o2));
+  vec3 g3 = nglGrad3(hash31(ic + vec3(1.0)));
+  float n = dot(w4, vec4(dot(g0, x0), dot(g1, x1), dot(g2, x2), dot(g3, x3)));
+  return n * 32.0;   // 经验归一化常数
+}
+
+// 2D Worley（F1 最近特征距离，[0,1]）
+float worley2D(vec2 p) {
+  vec2 ic = floor(p);
+  vec2 fq = p - ic;
+  float d = 2.0;
+  for (int j = -1; j <= 1; j++) {
+    for (int i = -1; i <= 1; i++) {
+      vec2 g = vec2(float(i), float(j));
+      vec2 cl = ic + g;
+      vec2 o = vec2(hash21(cl), hash21(cl + vec2(311.0, 197.0)));
+      d = min(d, length(g + o - fq));
+    }
+  }
+  return clamp(d, 0.0, 1.0);
+}
+
+// 3D Worley（F1，[0,1]）
+float worley3D(vec3 p) {
+  vec3 ic = floor(p);
+  vec3 fq = p - ic;
+  float d = 2.0;
+  for (int k = -1; k <= 1; k++) {
+    for (int j = -1; j <= 1; j++) {
+      for (int i = -1; i <= 1; i++) {
+        vec3 g = vec3(float(i), float(j), float(k));
+        vec3 cl = ic + g;
+        vec3 o = vec3(
+          hash31(cl),
+          hash31(cl + vec3(311.0, 197.0, 113.0)),
+          hash31(cl + vec3(23.0, 71.0, 7.0))
+        );
+        d = min(d, length(g + o - fq));
+      }
+    }
+  }
+  return clamp(d, 0.0, 1.0);
+}
+
+// 4D Worley（F1，[0,1]，3^4 = 81 邻域，成本较高，仅作工具函数使用）
+float worley4D(vec4 p) {
+  vec4 ic = floor(p);
+  vec4 fq = p - ic;
+  float d = 2.0;
+  for (int a = -1; a <= 1; a++) {
+    for (int b = -1; b <= 1; b++) {
+      for (int c = -1; c <= 1; c++) {
+        for (int e = -1; e <= 1; e++) {
+          vec4 g = vec4(float(a), float(b), float(c), float(e));
+          vec4 cl = ic + g;
+          vec4 o = vec4(
+            hash41(cl),
+            hash41(cl + vec4(101.0, 57.0, 31.0, 7.0)),
+            hash41(cl + vec4(233.0, 151.0, 89.0, 13.0)),
+            hash41(cl + vec4(379.0, 271.0, 131.0, 17.0))
+          );
+          d = min(d, length(g + o - fq));
+        }
+      }
+    }
+  }
+  return clamp(d, 0.0, 1.0);
+}
+
+// 4D Simplex-Worley 混合噪声（约 [-1,1]）：
+// 值噪声骨架（16 角五次插值）与 worley4D 胞腔特征按 0.65/0.35 加权；
+// 恒星表面等需要真 4D 单纯形时使用 GLSL_SIMPLEX4D 的 simplex4D。
+float noise4D(vec4 p) {
+  vec4 i = floor(p);
+  vec4 f = p - i;
+  vec4 u = vec4(nglQuintic(f.x), nglQuintic(f.y), nglQuintic(f.z), nglQuintic(f.w));
+  float n0000 = hash41(i);
+  float n1000 = hash41(i + vec4(1.0, 0.0, 0.0, 0.0));
+  float n0100 = hash41(i + vec4(0.0, 1.0, 0.0, 0.0));
+  float n1100 = hash41(i + vec4(1.0, 1.0, 0.0, 0.0));
+  float n0010 = hash41(i + vec4(0.0, 0.0, 1.0, 0.0));
+  float n1010 = hash41(i + vec4(1.0, 0.0, 1.0, 0.0));
+  float n0110 = hash41(i + vec4(0.0, 1.0, 1.0, 0.0));
+  float n1110 = hash41(i + vec4(1.0, 1.0, 1.0, 0.0));
+  float n0001 = hash41(i + vec4(0.0, 0.0, 0.0, 1.0));
+  float n1001 = hash41(i + vec4(1.0, 0.0, 0.0, 1.0));
+  float n0101 = hash41(i + vec4(0.0, 1.0, 0.0, 1.0));
+  float n1101 = hash41(i + vec4(1.0, 1.0, 0.0, 1.0));
+  float n0011 = hash41(i + vec4(0.0, 0.0, 1.0, 1.0));
+  float n1011 = hash41(i + vec4(1.0, 0.0, 1.0, 1.0));
+  float n0111 = hash41(i + vec4(0.0, 1.0, 1.0, 1.0));
+  float n1111 = hash41(i + vec4(1.0, 1.0, 1.0, 1.0));
+  float a = mix(mix(n0000, n1000, u.x), mix(n0100, n1100, u.x), u.y);
+  float b = mix(mix(n0010, n1010, u.x), mix(n0110, n1110, u.x), u.y);
+  float c = mix(mix(n0001, n1001, u.x), mix(n0101, n1101, u.x), u.y);
+  float d = mix(mix(n0011, n1011, u.x), mix(n0111, n1111, u.x), u.y);
+  float v = mix(mix(a, b, u.z), mix(c, d, u.z), u.w);   // [0,1]
+  float w = worley4D(p);
+  return mix(v * 2.0 - 1.0, 1.0 - 2.0 * w, 0.35);
+}
+`;
+
+/**
+ * GLSL_SIMPLEX4D — 真 4D 单纯形梯度噪声 simplex4D(vec4)（原创实现：
+ * 斜切框架 + 4 元素排序网络确定单纯形顶点轴序 + 4D 单位梯度哈希）。
+ * 用于恒星表面米粒组织等需要时间维度平滑演化的场合。
+ * 依赖：GLSL_HASH（hash41）。
+ */
+const GLSL_SIMPLEX4D = `
+// ------------------------------------------------------------------
+// GLSL_SIMPLEX4D — 4D 单纯形梯度噪声（原创手写）
+// ------------------------------------------------------------------
+// 由 [0,1) 哈希构造 4D 单位梯度（双角参数化，模长恒为 1）
+vec4 s4Grad(float h) {
+  float t1 = 6.28318530718 * h;
+  float t2 = 6.28318530718 * fract(h * 127.113);
+  float t3 = 6.28318530718 * fract(h * 269.517);
+  float s1 = sin(t1);
+  float c1 = cos(t1);
+  float s2 = sin(t2);
+  float c2 = cos(t2);
+  float s3 = sin(t3);
+  float c3 = cos(t3);
+  return vec4(c1, s1 * c2, s1 * s2 * c3, s1 * s2 * s3);
+}
+
+// 4D 单纯形梯度噪声，输出约 [-1,1]
+float simplex4D(vec4 p) {
+  const float F4 = 0.30901699437;   // (sqrt(5)-1)/4
+  const float G4 = 0.13819660112;   // (5-sqrt(5))/20
+  float s = (p.x + p.y + p.z + p.w) * F4;
+  vec4 ic = floor(p + vec4(s));
+  float t = (ic.x + ic.y + ic.z + ic.w) * G4;
+  vec4 x0 = p - (ic - vec4(t));
+
+  // 对 x0 四个分量做降序排序网络（5 比较器），同时追踪原始轴号；
+  // 相等分量不交换（严格小于），保证角点集合在平局处仍然一致 → 连续。
+  float v0 = x0.x;
+  float v1 = x0.y;
+  float v2 = x0.z;
+  float v3 = x0.w;
+  int a0 = 0;
+  int a1 = 1;
+  int a2 = 2;
+  int a3 = 3;
+  if (v0 < v1) { float tv = v0; v0 = v1; v1 = tv; int ta = a0; a0 = a1; a1 = ta; }
+  if (v2 < v3) { float tv = v2; v2 = v3; v3 = tv; int ta = a2; a2 = a3; a3 = ta; }
+  if (v0 < v2) { float tv = v0; v0 = v2; v2 = tv; int ta = a0; a0 = a2; a2 = ta; }
+  if (v1 < v3) { float tv = v1; v1 = v3; v3 = tv; int ta = a1; a1 = a3; a3 = ta; }
+  if (v1 < v2) { float tv = v1; v1 = v2; v2 = tv; int ta = a1; a1 = a2; a2 = ta; }
+
+  // 单纯形 5 顶点（斜空间内按轴序累加单位步，再整体平移 k*G4）
+  vec4 o1 = vec4(0.0);
+  vec4 o2 = vec4(0.0);
+  vec4 o3 = vec4(0.0);
+  if (a0 == 0)      { o1.x = 1.0; }
+  else if (a0 == 1) { o1.y = 1.0; }
+  else if (a0 == 2) { o1.z = 1.0; }
+  else              { o1.w = 1.0; }
+  o2 = o1;
+  if (a1 == 0)      { o2.x += 1.0; }
+  else if (a1 == 1) { o2.y += 1.0; }
+  else if (a1 == 2) { o2.z += 1.0; }
+  else              { o2.w += 1.0; }
+  o3 = o2;
+  if (a2 == 0)      { o3.x += 1.0; }
+  else if (a2 == 1) { o3.y += 1.0; }
+  else if (a2 == 2) { o3.z += 1.0; }
+  else              { o3.w += 1.0; }
+
+  vec4 x1 = x0 - o1 + vec4(G4);
+  vec4 x2 = x0 - o2 + vec4(2.0 * G4);
+  vec4 x3 = x0 - o3 + vec4(3.0 * G4);
+  vec4 x4 = x0 - vec4(1.0) + vec4(4.0 * G4);
+
+  vec4 w = max(vec4(0.6) - vec4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), vec4(0.0));
+  float w4 = max(0.6 - dot(x4, x4), 0.0);
+  vec4 ww = w * w;
+  ww = ww * ww;
+  w4 = w4 * w4 * w4 * w4;
+
+  vec4 g0 = s4Grad(hash41(ic));
+  vec4 g1 = s4Grad(hash41(ic + o1));
+  vec4 g2 = s4Grad(hash41(ic + o2));
+  vec4 g3 = s4Grad(hash41(ic + o3));
+  vec4 g4 = s4Grad(hash41(ic + vec4(1.0)));
+
+  float n = dot(ww, vec4(dot(g0, x0), dot(g1, x1), dot(g2, x2), dot(g3, x3)));
+  n += w4 * dot(g4, x4);
+  return n * 27.0;   // 经验归一化常数
+}
+`;
+
+/**
+ * GLSL_FBM — 分形布朗运动叠加。
+ * 导出函数：fbm2D/fbm3D（5 八度，约 [-1,1]）、fbmFilaments（脊状/丝状 multifractal，
+ *   返回 [0,1]，用于吸积盘丝缕、超新星激波丝状结构）。
+ * 导出常量：NGL_R2/NGL_R3（每八度旋转矩阵，去除轴对齐网格痕）。
+ * 依赖：GLSL_NOISE（simplex2D/simplex3D）。
+ */
+const GLSL_FBM = `
+// ------------------------------------------------------------------
+// GLSL_FBM — 分形叠加（原创手写）
+// ------------------------------------------------------------------
+const mat2 NGL_R2 = mat2(0.80, -0.60, 0.60, 0.80);
+const mat3 NGL_R3 = mat3(0.36, 0.48, -0.80, -0.80, 0.60, 0.0, 0.48, 0.64, 0.60);
+
+// 2D fBm：5 八度 simplex，输出约 [-1,1]（按幅度和归一化）
+float fbm2D(vec2 p) {
+  float sum = 0.0;
+  float amp = 0.5;
+  for (int i = 0; i < 5; i++) {
+    sum += amp * simplex2D(p);
+    p = NGL_R2 * p * 2.02;
+    amp *= 0.5;
+  }
+  return sum / 0.96875;
+}
+
+// 3D fBm：5 八度 simplex，输出约 [-1,1]
+float fbm3D(vec3 p) {
+  float sum = 0.0;
+  float amp = 0.5;
+  for (int i = 0; i < 5; i++) {
+    sum += amp * simplex3D(p);
+    p = NGL_R3 * p * 2.02;
+    amp *= 0.5;
+  }
+  return sum / 0.96875;
+}
+
+// 脊状（ridged）丝状 fBm：|simplex| 反相平方 + 谱权重，输出约 [0,1]
+float fbmFilaments(vec3 p) {
+  float sum = 0.0;
+  float amp = 0.55;
+  float weight = 1.0;
+  for (int i = 0; i < 5; i++) {
+    float n = 1.0 - abs(simplex3D(p));
+    n *= n;
+    sum += n * amp * weight;
+    weight = clamp(n * 2.0, 0.0, 1.0);
+    p = NGL_R3 * p * 2.13;
+    amp *= 0.5;
+  }
+  return clamp(sum, 0.0, 1.0);
+}
+`;
+
+/**
+ * GLSL_BLACKBODY — 黑体辐射近似色温梯度（HDR RGB，无依赖可独立拼接）。
+ * 导出函数：blackbodyRGB(t)，t ∈ [0,1]：
+ *   0 → 深暗红 → 0.3 炽橙红 → 0.55 亮金橙 → 0.8 炽白 → 1 电光蓝白。
+ */
+const GLSL_BLACKBODY = `
+// ------------------------------------------------------------------
+// GLSL_BLACKBODY — 黑体色温近似梯度（原创手写，关键帧平滑混合）
+// ------------------------------------------------------------------
+vec3 blackbodyRGB(float t) {
+  t = clamp(t, 0.0, 1.0);
+  vec3 c;
+  if (t < 0.30) {
+    c = mix(vec3(0.30, 0.03, 0.01), vec3(1.25, 0.30, 0.05), smoothstep(0.0, 0.30, t));
+  } else if (t < 0.58) {
+    c = mix(vec3(1.25, 0.30, 0.05), vec3(2.30, 1.45, 0.50), smoothstep(0.30, 0.58, t));
+  } else if (t < 0.82) {
+    c = mix(vec3(2.30, 1.45, 0.50), vec3(2.65, 2.50, 2.30), smoothstep(0.58, 0.82, t));
+  } else {
+    c = mix(vec3(2.65, 2.50, 2.30), vec3(1.95, 2.50, 3.70), smoothstep(0.82, 1.0, t));
+  }
+  return c;
+}
+`;
+
+Object.assign(__exports, { GLSL_HASH, GLSL_NOISE, GLSL_SIMPLEX4D, GLSL_FBM, GLSL_BLACKBODY });
+
+});
+__register("src/render/gl/GalaxyParticles.js", function (__exports, __require) {
+/**
+ * render/gl/GalaxyParticles.js — 确定性银河旋臂微粒数据生成器（纯 JS，无 DOM）
+ *
+ * 返工 Phase R3 资产层：为实例化银河渲染提供 40,000 粒子的确定性数据集。
+ *
+ * 导出：
+ *  - generateGalaxyParticles({ count = 40000, seed = 20260101, worldScale = 1.0 })
+ *      → { positions: Float32Array(count*3),   // 世界坐标（已乘 worldScale）
+ *          colors:    Float32Array(count*3),   // HDR 线性 RGB（允许 >1）
+ *          sizes:     Float32Array(count),     // 世界空间点半径（已乘 worldScale）
+ *          seeds:     Float32Array(count) }    // 每粒子 [0,1) 随机相位（闪烁等）
+ *    内置 mulberry32 风格确定性 PRNG（seed 派生），严禁 Math.random；
+ *    同一 seed 两次生成的输出逐字节一致。
+ *  - generateSupernovaSeeds(systems, worldScale = 1.0)
+ *      → [{ x, y, z, seed, dangerRating, typeId }]
+ *    给定星系实体数组（{ x, y, dangerRating, star: { typeId } }，策略坐标 0..1000），
+ *    返回需要渲染超新星激波壳层的星系：dangerRating > 6 或
+ *    star.typeId ∈ { pulsar, neutronStar, blackHole }；
+ *    策略坐标映射为世界坐标：world = (strategy/1000·2 - 1)·worldScale（z=0 盘面）。
+ *
+ * 分布约定（世界半径归一 0..1，再乘 worldScale）：
+ *  - 4 条对数旋臂 r = a·e^(b·θ)（a≈0.18, b≈0.32），沿臂高斯横截面散布
+ *    （σ 随 r 增大），并叠加沿臂纵向抖动；
+ *  - 核球区 r < 0.18 高密度球状分布（高斯球方向 × 幂律半径，轻微压扁）；
+ *  - 银晕区 r > 0.75 稀疏球状分布；
+ *  - 垂直厚度 z = gauss × H(r)，H(r) = H0·exp(-r/Rd) + 0.02（核球厚、盘面薄）；
+ *  - 颜色：核球暖金 vec3(2.8,2.1,1.3)；旋臂区蓝巨星簇 vec3(0.8,1.6,3.5) 与
+ *    H-II 粉紫 vec3(2.4,0.5,1.6) 沿臂周期性团块交错；银晕暗红矮星与冷蓝星尘；
+ *    brightness 随密度（径向衰减）变化。
+ *
+ * 约束：顶层无副作用、不触碰 DOM；无任何随机源 Math.random。
+ */
+
+/** 区域配比：核球 / 旋臂 / 盘面弥散 / 银晕（和为 1） */
+const REGION_BULGE = 0.26;
+const REGION_ARM = 0.57;
+const REGION_INTERARM = 0.10;
+
+/** 对数旋臂参数：r = ARM_A·e^(ARM_B·θ) */
+const ARM_COUNT = 4;
+const ARM_A = 0.18;
+const ARM_B = 0.32;
+const GALAXY_R = 1.0;
+const BULGE_R = 0.18;
+const HALO_R0 = 0.75;
+
+/** 盘面垂直标高参数：H(r) = H0·exp(-r/Rd) + 0.02 */
+const H0 = 0.10;
+const RD = 0.35;
+
+/** 旋臂最大角：r=1 时 θ = ln(1/a)/b ≈ 5.36 rad（臂跨度略收短，为横截面散布留出余量） */
+const THETA_MAX = Math.log(GALAXY_R / ARM_A) / ARM_B * 0.94;
+const TAU = Math.PI * 2;
+
+/** 高斯散布截断（±3σ）：防止极端离群点把粒子甩出归一化世界半径 */
+const GAUSS_CLIP = 3.0;
+
+/** 需要渲染超新星激波壳层的恒星类型 */
+const SN_TYPE_IDS = ['pulsar', 'neutronStar', 'blackHole'];
+
+/**
+ * mulberry32 风格 32 位确定性 PRNG：返回 [0,1) 浮点序列。
+ * 闭包内推进状态，不依赖任何全局随机源。
+ * @param {number} seed 任意 32 位种子
+ * @returns {() => number}
+ */
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function next() {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** 标准正态采样（Box-Muller，两次确定性采样；u 防零重采样） */
+function gauss(rand) {
+  let u = rand();
+  while (u <= 1e-12) {
+    u = rand();
+  }
+  const v = rand();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(TAU * v);
+}
+
+/** 盘面垂直标高：核球厚、盘面薄 */
+function scaleHeight(r) {
+  return H0 * Math.exp(-r / RD) + 0.02;
+}
+
+/** 归一化世界尺度参数（非法值回退 1.0） */
+function normScale(worldScale) {
+  return Number.isFinite(worldScale) && worldScale > 0 ? worldScale : 1.0;
+}
+
+/**
+ * 生成确定性银河旋臂微粒数据。
+ * @param {{count?: number, seed?: number, worldScale?: number}} [opts]
+ * @returns {{positions: Float32Array, colors: Float32Array, sizes: Float32Array, seeds: Float32Array}}
+ */
+function generateGalaxyParticles(opts = {}) {
+  const count = Number(opts.count != null ? opts.count : 40000);
+  const n = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
+  const seed = Number(opts.seed != null ? opts.seed : 20260101);
+  const ws = normScale(opts.worldScale);
+
+  const positions = new Float32Array(n * 3);
+  const colors = new Float32Array(n * 3);
+  const sizes = new Float32Array(n);
+  const seeds = new Float32Array(n);
+  if (n === 0) {
+    return { positions, colors, sizes, seeds };
+  }
+
+  const rand = mulberry32(Number.isFinite(seed) ? Math.floor(seed) >>> 0 : 0);
+
+  for (let idx = 0; idx < n; idx++) {
+    // —— 区域抽取（确定性调用顺序：区域 → 形态 → 垂直 → 颜色 → 尺寸 → seed） ——
+    const regionRoll = rand();
+    let x = 0;
+    let y = 0;
+    let z = 0;
+    let region = 'arm';
+    let armIdx = 0;
+    let theta = 0;
+
+    if (regionRoll < REGION_BULGE) {
+      // 核球：r<0.18 高密度球状（高斯球方向 × 幂律半径，轻微压扁）
+      region = 'bulge';
+      const gx = gauss(rand);
+      const gy = gauss(rand);
+      const gz = gauss(rand);
+      const len = Math.hypot(gx, gy, gz) || 1;
+      const rb = BULGE_R * Math.pow(rand(), 1.7);
+      x = (gx / len) * rb;
+      y = (gy / len) * rb;
+      z = (gz / len) * rb * 0.85;
+    } else if (regionRoll < REGION_BULGE + REGION_ARM) {
+      // 旋臂：对数螺线 + 沿臂高斯横截面（σ 随 r 增大）+ 纵向抖动
+      region = 'arm';
+      armIdx = Math.floor(rand() * ARM_COUNT) % ARM_COUNT;
+      theta = rand() * THETA_MAX;
+      const armPhase = armIdx * (TAU / ARM_COUNT);
+      const rArm = ARM_A * Math.exp(ARM_B * theta);
+      const sigma = 0.018 + 0.055 * rArm;
+      // 臂切向 ∝ dP/dθ = b·r·(cosθ,sinθ) + r·(-sinθ,cosθ)，取单位法向散布
+      const cx = Math.cos(theta + armPhase);
+      const sx = Math.sin(theta + armPhase);
+      const tx = ARM_B * cx - sx;
+      const ty = ARM_B * sx + cx;
+      const tl = Math.hypot(tx, ty) || 1;
+      const nx = -ty / tl;
+      const ny = tx / tl;
+      const off = Math.max(-GAUSS_CLIP * sigma, Math.min(GAUSS_CLIP * sigma, gauss(rand) * sigma));
+      const th2 = theta + gauss(rand) * 0.02;
+      const r2 = ARM_A * Math.exp(ARM_B * th2);
+      x = r2 * Math.cos(th2 + armPhase) + nx * off;
+      y = r2 * Math.sin(th2 + armPhase) + ny * off;
+    } else if (regionRoll < REGION_BULGE + REGION_ARM + REGION_INTERARM) {
+      // 盘面弥散：臂间老年星（面积均匀采样）
+      region = 'interarm';
+      const rMin = BULGE_R;
+      const rMax = 0.92;
+      const rr = Math.sqrt(rMin * rMin + (rMax * rMax - rMin * rMin) * rand());
+      const th = rand() * TAU;
+      x = rr * Math.cos(th);
+      y = rr * Math.sin(th);
+    } else {
+      // 银晕：r>0.75 稀疏球状（三维半径直接落在 0.75..1.0）
+      region = 'halo';
+      const gx = gauss(rand);
+      const gy = gauss(rand);
+      const gz = gauss(rand);
+      const len = Math.hypot(gx, gy, gz) || 1;
+      const rh = HALO_R0 + (GALAXY_R - HALO_R0) * Math.pow(rand(), 1.4);
+      x = (gx / len) * rh;
+      y = (gy / len) * rh;
+      z = (gz / len) * rh;
+    }
+
+    // —— 垂直厚度：z = gauss × H(r)（核球/银晕已在各自分支给出三维坐标） ——
+    if (region === 'arm' || region === 'interarm') {
+      const rr = Math.hypot(x, y);
+      z = gauss(rand) * scaleHeight(rr) * (region === 'interarm' ? 1.15 : 1.0);
+    }
+
+    // —— 颜色（HDR 线性，允许 >1）与亮度（随密度变化） ——
+    const rF = Math.hypot(x, y);
+    let cr = 0;
+    let cg = 0;
+    let cb = 0;
+    let size = 1.0;
+    let bright = 1.0;
+
+    if (region === 'bulge') {
+      // 核球暖金
+      const v = 0.75 + 0.5 * rand();
+      cr = 2.8 * v;
+      cg = 2.1 * v;
+      cb = 1.3 * v;
+      size = 1.6 + 1.4 * rand();
+      bright = 1.05 * Math.exp(-rF * 1.4) + 0.35;
+    } else if (region === 'arm') {
+      // 沿臂周期性团块：蓝巨星簇 与 H-II 粉紫 交错
+      const chunk = Math.sin(theta * 2.6 + armIdx * 1.9)
+        + 0.6 * Math.sin(theta * 6.1 + armIdx * 4.2);
+      const cluster = 0.5 + 0.5 * Math.sin(chunk * 2.2);   // 0..1 团块相位
+      if (cluster > 0.62) {
+        // H-II 粉紫电离氢区团块
+        const v = 0.9 + 0.7 * rand();
+        cr = 2.4 * v;
+        cg = 0.5 * v;
+        cb = 1.6 * v;
+        size = 1.8 + 1.8 * rand();
+        bright = 1.25 + (cluster - 0.62) * 1.3;
+      } else {
+        // 蓝巨星簇 / 亮蓝星
+        const v = 0.65 + 0.55 * rand();
+        cr = 0.8 * v;
+        cg = 1.6 * v;
+        cb = 3.5 * v;
+        size = 1.1 + 1.5 * rand();
+        bright = 0.85 + 0.35 * cluster + 0.3 * rand();
+      }
+    } else if (region === 'interarm') {
+      // 臂间弥散：暗黄白老年星
+      const v = 0.4 + 0.35 * rand();
+      cr = 1.6 * v;
+      cg = 1.35 * v;
+      cb = 0.95 * v;
+      size = 0.8 + 0.9 * rand();
+      bright = 0.45 + 0.2 * Math.exp(-rF * 2.0);
+    } else {
+      // 银晕：暗红矮星 与 冷蓝星尘
+      if (rand() < 0.6) {
+        const v = 0.35 + 0.3 * rand();
+        cr = 1.1 * v;
+        cg = 0.42 * v;
+        cb = 0.25 * v;
+      } else {
+        const v = 0.4 + 0.35 * rand();
+        cr = 0.5 * v;
+        cg = 0.72 * v;
+        cb = 1.25 * v;
+      }
+      size = 0.6 + 0.8 * rand();
+      bright = 0.4 + 0.25 * rand();
+    }
+
+    // brightness 随密度变化：径向衰减加权
+    const b = bright * (Math.exp(-rF * 1.1) * 0.5 + 0.5);
+
+    positions[idx * 3] = x * ws;
+    positions[idx * 3 + 1] = y * ws;
+    positions[idx * 3 + 2] = z * ws;
+    colors[idx * 3] = cr * b;
+    colors[idx * 3 + 1] = cg * b;
+    colors[idx * 3 + 2] = cb * b;
+    sizes[idx] = size * 0.006 * ws;   // 世界空间点半径
+    seeds[idx] = rand();
+  }
+
+  return { positions, colors, sizes, seeds };
+}
+
+/**
+ * 挑选需要渲染超新星激波壳层的星系并给出确定性种子。
+ * @param {Array<{x:number, y:number, dangerRating?:number, star?:{typeId?:string}}>} systems
+ * @param {number} [worldScale=1.0]
+ * @returns {Array<{x:number, y:number, z:number, seed:number, dangerRating:number, typeId:string|null}>}
+ */
+function generateSupernovaSeeds(systems, worldScale = 1.0) {
+  const list = Array.isArray(systems) ? systems : [];
+  const ws = normScale(worldScale);
+  const out = [];
+  for (let i = 0; i < list.length; i++) {
+    const s = list[i];
+    if (!s || typeof s !== 'object') {
+      continue;
+    }
+    const typeId = s.star && typeof s.star === 'object' ? s.star.typeId : undefined;
+    const danger = Number(s.dangerRating);
+    const byDanger = Number.isFinite(danger) && danger > 6;
+    const byType = typeof typeId === 'string' && SN_TYPE_IDS.indexOf(typeId) >= 0;
+    if (!byDanger && !byType) {
+      continue;
+    }
+    const sx = Number(s.x);
+    const sy = Number(s.y);
+    if (!Number.isFinite(sx) || !Number.isFinite(sy)) {
+      continue;
+    }
+    // 策略坐标 0..1000 → 世界坐标 [-ws, +ws]（z=0 盘面）
+    const x = ((sx / 1000) * 2 - 1) * ws;
+    const y = ((sy / 1000) * 2 - 1) * ws;
+    // 确定性种子：由策略坐标与索引派生（mulberry32 首个输出），同输入必同种子
+    const base = (Math.imul(Math.round(sx * 64) | 0, 0x27220a95)
+      ^ Math.imul(Math.round(sy * 64) | 0, 0x85ebca77)
+      ^ Math.imul(i + 1, 0x9e3779b9)) >>> 0;
+    const seed = mulberry32(base)();
+    out.push({
+      x,
+      y,
+      z: 0,
+      seed,
+      dangerRating: Number.isFinite(danger) ? danger : 0,
+      typeId: typeof typeId === 'string' ? typeId : null,
+    });
+  }
+  return out;
+}
+
+Object.assign(__exports, { generateGalaxyParticles, generateSupernovaSeeds });
 
 });
 __register("src/render/CanvasManager.js", function (__exports, __require) {
@@ -48020,6 +48682,17 @@ const { el: el } = __require("src/ui/components/dom.js");
 const { panel: panel } = __require("src/ui/components/panels.js");
 const { showModal: showModal, toast: toast } = __require("src/ui/components/index.js");
 const { L: L } = __require("src/core/i18n.js");
+
+/**
+ * SPEC-PLAN-057 Task 57.1（BUG-07 / BUG-12 / doc56 Task 56.1 §2）：外骨骼满状态单一真源。
+ * 逐字段：hpMax=100 / hp=100 / shieldMax=60 / shield=60 / staminaMax=100 /
+ * stamina=100 / fuel=100 / flash=0。构造与 _setupScene 场景重建共用同一冻结常量，
+ * 保证「任务阵亡后进入自由探索」不再残留 0 HP / 残盾，且门禁可动态断言而非伪绿。
+ */
+const GROUND_CHAR_FULL_STATE = Object.freeze({
+  hpMax: 100, hp: 100, shieldMax: 60, shield: 60,
+  staminaMax: 100, stamina: 100, fuel: 100, flash: 0,
+});
 const { CanvasManager: CanvasManager } = __require("src/render/CanvasManager.js");
 const { PlanetSurface3D: PlanetSurface3D } = __require("src/render/gl/PlanetSurface3D.js");
 const { PlanetSurfaceScene: PlanetSurfaceScene } = __require("src/render/gl/PlanetSurfaceScene.js");
@@ -48590,8 +49263,8 @@ const GroundView = {
     this.char3d = {                    // 第三人称角色状态（视图侧竖直物理 + 自由模式 XZ）
       x: 0, y: 0, z: 0, vy: 0, onGround: true,
       yaw: 0, state: 'idle', animT: 0, attackT: 0, attackKind: null, struckFx: false,
-      hp: 100, hpMax: 100, shield: 30, shieldMax: 30, stamina: 100, staminaMax: 100,
-      fuel: 100, dodgeT: 0, dodgeX: 0, dodgeZ: 0, atkCd: 0, blockT: 0,
+      ...GROUND_CHAR_FULL_STATE,
+      dodgeT: 0, dodgeX: 0, dodgeZ: 0, atkCd: 0, blockT: 0,
     };
     this._fx = { slashes: [], beams: [], dig: [] };  // 瞬时视觉特效（每帧消费）
     this._strikeSeen = new Map();      // 单位打击拍检测（unitId → 上一帧 struck）
@@ -48693,10 +49366,41 @@ const GroundView = {
     this._buildBriefing(mission);
   },
 
+  /**
+   * SPEC-PLAN-057 Task 57.1（BUG-01）：行星灵魂徽标芯片实例方法闭环。
+   * M4 工位 D 把实现落地为文件末尾的独立导出函数 refreshGroundOperaChip(view)，
+   * 却未在 GroundView 对象上挂载同名实例方法，导致 _setHead 调用抛 TypeError，
+   * 又被 App 的静默路由回退吞掉 —— 3D 地表入口闪回主菜单。
+   */
+  _refreshOperaChip() {
+    refreshGroundOperaChip(this);
+  },
+
+  /** SPEC-PLAN-059 Task 59.6（赛道 F）：当前是否处于深核共振弱点暴露态 */
+  _isCoreResonanceActive() {
+    return coreResonanceDamageMultiplier(this.planet) === CORE_RESONANCE_DAMAGE_MULT;
+  },
+
+  /** 玩家对巨兽/守卫的单发伤害倍率（触发时给出一次性 Toast 回执） */
+  _coreDamageMult() {
+    const mult = coreResonanceDamageMultiplier(this.planet);
+    if (mult > 1) this._notifyCoreResonance();
+    return mult;
+  },
+
+  /** 每场景仅弹一次共振破甲提示，避免逐帧刷屏 */
+  _notifyCoreResonance() {
+    if (this._resonanceToastShown) return;
+    this._resonanceToastShown = true;
+    try {
+      toast('⚡ 深核共振破甲触发：巨兽晶核过载，造成双倍伤害！', { kind: 'ok' });
+    } catch (_) { /* 无 DOM 的诊断/门禁宿主：旗标已置位，回执降级不致命 */ }
+  },
+
   /** 头部信息与按钮组 */
   _setHead(infoText, btnDefs) {
     if (this.headInfo) this.headInfo.textContent = infoText || '';
-    this._refreshOperaChip();
+    refreshGroundOperaChip(this);
     if (!this.headBtns) return;
     this.headBtns.innerHTML = '';
     for (const b of btnDefs) {
@@ -49045,6 +49749,7 @@ const GroundView = {
     this._pylonShield = 0;          // 充能桩护盾存量（0..100，HUD 展示）
     this._pendingMastery = [];       // 采样后基因逆向延时队列 [{speciesIdx, t}]
     this._warden = null;             // 阶段 4 机偶守卫（视图侧遭遇战，域侧仅存战果位）
+    this._resonanceToastShown = false; // SPEC-PLAN-059 赛道 F：共振破甲提示每场景仅一次
     // doc20：气象锋面状态 + Tier 4 利维坦遭遇战（视图侧 3600HP，域侧仅存战果位）
     ensurePlanetThreat(planet);
     this._stormState = null;
@@ -49077,7 +49782,10 @@ const GroundView = {
     c.vy = 0;
     c.onGround = true;
     c.state = 'idle';
-    c.fuel = 100;
+    // SPEC-PLAN-057 Task 57.1（BUG-07 / BUG-12）：场景重建必须整组复位角色生存状态，
+    // 否则上一场任务阵亡后的 0 HP / 残盾会沿用到自由探索（左下角显示 0/100）。
+    // 外骨骼初始护盾由 30 提升至 60，提升熔岩星等极端大气环境的生存容错。
+    Object.assign(c, GROUND_CHAR_FULL_STATE);
     this._missionGroundSynced = true;
     this._lastActiveUnitId = null;
     // 相机置于角色背后；首屏构图（doc7 §5.2）：任务模式且存在站点蓝图时，
@@ -49385,6 +50093,10 @@ const GroundView = {
         // doc18 WP-4：科考分析面罩开关（60m 目击 / 25m 光谱识别锁定）
         this._visorOn = !this._visorOn;
         this._visorLockT = 0;
+        // SPEC-PLAN-057 Task 57.1 / doc56 Task 56.1 §2：面罩切换零静默即时回执
+        toast(this._visorOn
+          ? '已开启三模态科考面罩（按 Tab 切换：生态光谱 / 电磁测向 / 地质穿透）'
+          : '已关闭科考分析面罩', { kind: 'info' });
         break;
       case 'KeyR':
         this._tryRestoreTerrain();
@@ -49416,7 +50128,7 @@ const GroundView = {
       case 'Digit9':
       case 'Digit0': {
         // [SPEC-39 S3] 野战部署物快捷栏（7=探地雷达 8=充能桩 9=哨兵塔 0=诱饵弹）
-        if (this.mode === 'free' && this.planet) {
+        if ((this.mode === 'free' || this.mode === 'mission') && this.planet) {
           const KINDS = ['dep_gpr_radar', 'dep_thermal_pylon', 'dep_sentry_turret', 'dep_decoy_emitter'];
           const kindId = KINDS[({ Digit7: 0, Digit8: 1, Digit9: 2, Digit0: 3 })[code]];
           const res = this.app.dispatch('DeployFieldTool', {
@@ -49424,18 +50136,22 @@ const GroundView = {
           });
           this._deployNote = res && res.ok ? `已部署 ${kindId}` : `部署失败：${(res && res.reason) || '未知'}`;
           this._deployNoteT = this._clock;
+          // SPEC-PLAN-056 Wave 1（BUG-08 / BUG-11）：地表部署零静默 —— 即时 Toast 回执与前置原因
+          try { toast(this._deployNote, { kind: res && res.ok ? 'ok' : 'warn' }); } catch (_) { /* 无 DOM 宿主降级 HUD */ }
         }
         break;
       }
       case 'KeyX': {
         // [SPEC-39 S3] 深核矿脉采掘：脚下启动钻机（+180‰ 热度 / 600s / +4.5s 噪音）
-        if (this.mode === 'free' && this.planet) {
+        if ((this.mode === 'free' || this.mode === 'mission') && this.planet) {
           const res = this.app.dispatch('StartDeepCoreExtraction', {
             planetId: this.planet.id, x: this.char3d.x, z: this.char3d.z,
           });
           this._deepCoreT = this._clock;
           this._deployNote = res && res.ok ? '深核钻机已启动（噪音将引来增援）' : `钻机启动失败：${(res && res.reason) || '未知'}`;
           this._deployNoteT = this._clock;
+          // SPEC-PLAN-056 Wave 1：深核钻机启动/失败同样即时回执
+          try { toast(this._deployNote, { kind: res && res.ok ? 'ok' : 'warn' }); } catch (_) { /* 无 DOM 宿主降级 HUD */ }
         }
         break;
       }
@@ -50086,7 +50802,9 @@ const GroundView = {
       this._oneShot.attack = null;
       const reach = kind === 'ranged' ? 14 : 4.2;
       if (d <= reach) {
-        const dmg = kind === 'light' ? 25 : kind === 'heavy' ? 45 : 30;
+        const baseDmg = kind === 'light' ? 25 : kind === 'heavy' ? 45 : 30;
+        // SPEC-PLAN-059 Task 59.6（赛道 F）：深核钻机运转 + ★3 警戒 → 对机偶守卫 ×2.0
+        const dmg = baseDmg * this._coreDamageMult();
         wd.hp -= dmg;
         wd.flash = 1;
         if (wd.hp <= 0) {
@@ -50346,7 +51064,9 @@ const GroundView = {
       const reach = kind === 'ranged' ? 16 : 5.0;
       const d3 = Math.hypot(lv.x - c3.x, lv.z - c3.z);
       if (d3 <= reach) {
-        const dmg = kind === 'light' ? 30 : kind === 'heavy' ? 55 : 40;
+        const baseDmg = kind === 'light' ? 30 : kind === 'heavy' ? 55 : 40;
+        // SPEC-PLAN-059 Task 59.6（赛道 F）：深核钻机运转 + ★3 警戒 → 对利维坦 ×2.0
+        const dmg = baseDmg * this._coreDamageMult();
         lv.hp -= dmg;
         lv.flash = 1;
         lv.dmgSincePart += dmg;
@@ -50477,6 +51197,13 @@ const GroundView = {
 
   /** 任务模式帧：输入 → 固定步长模拟 → 竖直物理 → 渲染 */
   _missionFrame(dt) {
+    // SPEC-PLAN-057 Task 57.1（BUG-11 / doc56 BUG-09）：模态弹窗或显式暂停期间
+    // 冻结地表任务时钟，避免玩家阅读信标/叙事弹窗时小队被环境伤害或增援团灭。
+    if (this._isPaused
+      || (typeof document !== 'undefined' && typeof document.querySelector === 'function'
+        && document.querySelector('.vf-modal-backdrop'))) {
+      return;
+    }
     const w = this.app.world;
     const m = w.entities.groundMissions[this.missionId];
     if (!m || m.status !== 'active') {
@@ -52523,6 +53250,32 @@ const GROUND_EPOCH_ZH = ['蛮荒', '勘探', '工业', '觉醒', '遗产'];
  * 当前行星的 16 原型徽标 + 五纪元徽记 + 工业关注度警示灯（0..6 翠绿 / ≥7 高危红色）。
  * world.spaceOperaState 未激活或行星未挂载 compactState → 芯片清空（零侵入）。
  */
+/* ==================== SPEC-PLAN-059 Task 59.6 / doc56 赛道 F：深核共振破甲 ==================== */
+
+/** 共振破甲伤害倍率（doc56 标定值 ×2.0） */
+const CORE_RESONANCE_DAMAGE_MULT = 2.0;
+
+/**
+ * 深核钻机共振破甲判定（纯函数，Node/浏览器双端可测）：
+ *  - 钻机运行：planet.surfaceDelta.extraction[0] === 1（surfaceEvents.js 权威元组）；
+ *  - 警戒星级 ≥ 3：planet.surfaceDelta.heat[1]（实际运行时结构，planetaryThreat 星级）；
+ *    兼容 spec59 书写的 planet.threat.heat.stars / star 形态。
+ * 二者同时成立 → 玩家对利维坦与先驱者机偶守卫伤害 ×2.0。
+ */
+function coreResonanceDamageMultiplier(planet) {
+  const sd = planet && planet.surfaceDelta;
+  const ext = sd && sd.extraction;
+  if (!ext || ext[0] !== 1) return 1.0;
+  let star = 0;
+  if (sd && Array.isArray(sd.heat) && Number.isFinite(Number(sd.heat[1]))) {
+    star = Number(sd.heat[1]);
+  } else if (planet && planet.threat && planet.threat.heat) {
+    const h = planet.threat.heat;
+    star = Number(h.stars != null ? h.stars : (h.star != null ? h.star : 0)) || 0;
+  }
+  return star >= 3 ? CORE_RESONANCE_DAMAGE_MULT : 1.0;
+}
+
 function refreshGroundOperaChip(view) {
   const chip = view.headOperaChip;
   if (!chip) return;
@@ -52547,7 +53300,7 @@ function refreshGroundOperaChip(view) {
   }));
 }
 
-Object.assign(__exports, { stepCharacterVertical, computeSpringArm, GroundView, refreshGroundOperaChip });
+Object.assign(__exports, { GROUND_CHAR_FULL_STATE, stepCharacterVertical, computeSpringArm, GroundView, CORE_RESONANCE_DAMAGE_MULT, coreResonanceDamageMultiplier, refreshGroundOperaChip });
 
 });
 __register("src/render/gl/BioFloraPass.js", function (__exports, __require) {
@@ -60168,9 +60921,55 @@ function renderSpaceOperaGovernmentPanel(view) {
   /* —— 1. 领袖群像名录 —— */
   const p = panelSO({ title: '星海群像英雄（Galactic Paragons）', open: true, dense: true });
   const characters = (w.entities && w.entities.characters) || {};
+  const pf = w.playerFactionId;
+  // SPEC-PLAN-058 Task 58.1（BUG-02 / doc56 Task 56.2 §1）：政府视图只展示本国在编领袖
   const roster = Object.keys(characters).sort()
     .map((k) => characters[k])
-    .filter((ch) => ch && ch.paragon && ch.health !== 'dead');
+    .filter((ch) => ch && ch.paragon && ch.health !== 'dead'
+      && (!pf || !ch.factionId || ch.factionId === pf));
+
+  // SPEC-PLAN-058 Task 58.1（BUG-10 / CHK-58-03）：保底唤醒专属通道常驻。
+  // 新战役由 activateSpaceOperaCampaign 预置 THE_BEHOLDER → 显示「已唤醒」状态卡；
+  // 旧存档/未激活世界显示唤醒按钮，经 AwakeLegendaryBeholder 命令幂等补齐。
+  const hasBeholder = roster.some((ch) => ch.paragon && ch.paragon.paragonId === 'THE_BEHOLDER');
+  const awakeChildren = [
+    elSO('div', {
+      class: 'vf-bold', style: { color: '#00e5ff' },
+      text: hasBeholder ? '◈ 先驱者灵能共鸣：全视凝视者已在编（双形态可切换）'
+        : '◈ 先驱者灵能共鸣：检测到沉睡的核心方尖碑',
+    }),
+    elSO('div', {
+      class: 'vf-small vf-faint',
+      text: hasBeholder
+        ? '「低语方尖碑总督 ⟷ 战舰旗舰统帅」双形态已在下方名录开放切换（capExempt，不占在编容量）。'
+        : '先驱者「全视凝视者」正在亚空间沉睡，可即刻建立引力谐振唤醒（不占在编领袖容量）。',
+    }),
+  ];
+  if (!hasBeholder) {
+    awakeChildren.push(elSO('button', {
+      class: 'vf-btn primary small',
+      style: { marginTop: '4px' },
+      text: '👁 唤醒先驱者：全视凝视者（The Beholder）',
+      title: 'AwakeLegendaryBeholder → 为玩家派系生成待命态传奇档案（capExempt）',
+      on: { click: () => { app.dispatch('AwakeLegendaryBeholder', {}); view._rebuild(); } },
+    }));
+  }
+  p.appendChild(elSO('div', {
+    class: 'vf-card', style: { marginBottom: '8px', border: '1px dashed #00e5ff', padding: '6px' },
+  }, awakeChildren));
+
+  // SPEC-PLAN-059 Task 59.2（doc56 赛道 C）：第 3 位传奇群像主动招募入口
+  const hasSera = roster.some((ch) => ch.paragon && ch.paragon.paragonId === 'SERA_CARTOGRAPHER');
+  if (!hasSera) {
+    p.appendChild(elSO('button', {
+      class: 'vf-btn small',
+      style: { marginBottom: '6px' },
+      text: '✧ 招募缄默制图师·赛拉（虚空裁缝）',
+      title: 'RecruitSeraCartographer：舰队燃料 −40% / 航速 +25%，capExempt 不占容量',
+      on: { click: () => { app.dispatch('RecruitSeraCartographer', {}); view._rebuild(); } },
+    }));
+  }
+
   if (roster.length === 0) {
     p.appendChild(elSO('div', { class: 'vf-faint vf-small', text: '暂无在编群像领袖（战役开局后由群像引擎逐步扩充）。' }));
   }
@@ -60305,6 +61104,7 @@ __register("src/ui/screens/DiplomacyView.js", function (__exports, __require) {
  */
 
 const { el: el, clearEl: clearEl } = __require("src/ui/components/dom.js");
+const { toast: toast } = __require("src/ui/components/index.js");
 const { panel: panel, kvList: kvList } = __require("src/ui/components/panels.js");
 const { gauge: gauge } = __require("src/ui/charts/index.js");
 const { L: L } = __require("src/core/i18n.js");
@@ -60657,7 +61457,7 @@ const DiplomacyView = {
 
 const { el: elSO } = __require("src/ui/components/dom.js");
 const { panel: panelSO } = __require("src/ui/components/panels.js");
-const { LANDSRAAD_BILL_KINDS: LANDSRAAD_BILL_KINDS, ENDGAME_CRISIS_KINDS: ENDGAME_CRISIS_KINDS } = __require("src/domain/diplomacy/galacticSenateAndCrisisArc.js");
+const { LANDSRAAD_BILL_KINDS: LANDSRAAD_BILL_KINDS, ENDGAME_CRISIS_KINDS: ENDGAME_CRISIS_KINDS, SPY_LAYER_UP_INTEL_COST: SPY_LAYER_UP_INTEL_COST } = __require("src/domain/diplomacy/galacticSenateAndCrisisArc.js");
 
 /** 法案种类中文 */
 const BILL_ZH = {
@@ -60699,6 +61499,11 @@ function renderSpaceOperaDiplomacyPanel(view) {
   const choam = Number.isFinite(landsraad.choamShares) ? landsraad.choamShares : 0;
   const spy = so.palaceEspionage && typeof so.palaceEspionage === 'object' ? so.palaceEspionage : {};
   const spyNets = spy.spyNetworks && typeof spy.spyNetworks === 'object' ? spy.spyNetworks : {};
+  // SPEC-PLAN-058 Task 58.4（BUG-08.3）：情报点前置门控，根除 0 点点击静默失败
+  const pfLedger = (w.economy && w.economy.ledgers && w.economy.ledgers[w.playerFactionId]) || null;
+  const intelPoints = (pfLedger && pfLedger.balances && Number.isFinite(pfLedger.balances.intelPoints))
+    ? pfLedger.balances.intelPoints : 0;
+  const SPY_INTEL_HINT_THRESHOLD = 25; // doc58 §Task 58.4 §3：储备偏低提示线
   const otherFactions = Object.keys((w.entities && w.entities.factions) || {})
     .sort()
     .filter((fid) => fid !== w.playerFactionId);
@@ -60793,11 +61598,27 @@ function renderSpaceOperaDiplomacyPanel(view) {
     row.appendChild(elSO('span', { class: 'vf-grow vf-small', text: factionLabel(w, fid)
       + ' · 渗透深度 Tier ' + (net.layers || 0) + '/3'
       + (net.doubleAgent === true ? ' · 双面间谍已植入' : '') }));
+    const shortIntel = intelPoints < SPY_LAYER_UP_INTEL_COST;
     row.appendChild(elSO('button', {
       class: 'vf-btn small', text: '深度渗透',
-      disabled: (net.layers || 0) >= 3,
-      title: 'LayerUpSpyNetwork（每层扣 10 情报点；≥2 层使目标派系表决弃权）',
-      on: { click: () => { app.dispatch('LayerUpSpyNetwork', { targetFactionId: fid }); view._rebuild(); } },
+      disabled: (net.layers || 0) >= 3 || shortIntel,
+      title: shortIntel
+        ? `情报点不足（当前 ${intelPoints}/需 ${SPY_LAYER_UP_INTEL_COST} 点），请先派遣侦察巡航舰或等待解密`
+        : `LayerUpSpyNetwork（每层扣 ${SPY_LAYER_UP_INTEL_COST} 情报点；≥2 层使目标派系表决弃权）`
+          + (intelPoints < SPY_INTEL_HINT_THRESHOLD ? ` · 当前储备 ${intelPoints} 点偏低` : ''),
+      on: {
+        click: () => {
+          if (shortIntel) {
+            toast(`情报点不足（当前 ${intelPoints}/需 ${SPY_LAYER_UP_INTEL_COST} 点），请先派遣侦察巡航舰或等待解密`, { kind: 'warn' });
+            return;
+          }
+          if (intelPoints < SPY_INTEL_HINT_THRESHOLD) {
+            toast(`情报储备偏低（${intelPoints} 点），建议先部署监听`, { kind: 'info' });
+          }
+          app.dispatch('LayerUpSpyNetwork', { targetFactionId: fid });
+          view._rebuild();
+        },
+      },
     }));
     row.appendChild(elSO('button', {
       class: 'vf-btn small', text: '植入双面间谍',
@@ -63893,7 +64714,7 @@ __register("src/ui/screens/ColonyView.js", function (__exports, __require) {
  */
 
 const { el: el, clearEl: clearEl } = __require("src/ui/components/dom.js");
-const { dataTable: dataTable, panel: panel, kvList: kvList, statBar: statBar, progressBar: progressBar } = __require("src/ui/components/index.js");
+const { dataTable: dataTable, panel: panel, kvList: kvList, statBar: statBar, progressBar: progressBar, toast: toast } = __require("src/ui/components/index.js");
 const { gauge: gauge, stackBar: stackBar } = __require("src/ui/charts/index.js");
 const { L: L } = __require("src/core/i18n.js");
 const { dateStr: dateStr } = __require("src/core/clock.js");
@@ -64507,7 +65328,11 @@ const ColonyView = {
           title: def.blocked || '排入建造队列（开工时支付资源）',
           on: {
             click: () => {
-              this.app.dispatch('BuildOnColony', { colonyId: detail.id, defId: def.defId });
+              // SPEC-PLAN-058 Task 58.4（BUG-08.2）：入队即时回执 + 缺合金采购指引
+              const res = this.app.dispatch('BuildOnColony', { colonyId: detail.id, defId: def.defId });
+              if (res && res.ok) {
+                toast(`已排入建造队列：${def.name}（缺合金时可在【市场】采购）`, { kind: 'ok' });
+              }
               this._forceRefresh();
             },
           },
@@ -65879,7 +66704,7 @@ const SystemView = {
 
 /* ==================== SPEC-PLAN-052 Task 52.1：星系内信标脉冲、自主舰队与响应卡片（M4 工位 D） ==================== */
 
-const { spaceOperaView: spaceOperaView } = __require("src/simulation/ViewModels.js");
+const { spaceOperaView: spaceOperaView, beaconOutcomeSummaryZh: beaconOutcomeSummaryZh } = __require("src/simulation/ViewModels.js");
 const { showModal: showModal } = __require("src/ui/components/modal.js");
 
 /**
@@ -65989,7 +66814,12 @@ function buildSystemSpaceOperaPanel(view) {
         title: 'RespondSubspaceBeacon → ' + opt.id + (opt.effectHint ? '（' + opt.effectHint + '）' : ''),
         on: {
           click: () => {
-            view.app.dispatch('RespondSubspaceBeacon', { beaconId: b.id, responseOptionId: opt.id });
+            // SPEC-PLAN-058 Task 58.4（BUG-08.1）：信标响应即时收益回执
+            const res = view.app.dispatch('RespondSubspaceBeacon', { beaconId: b.id, responseOptionId: opt.id });
+            if (res && res.ok) {
+              const outcome = (world.spaceOperaState && world.spaceOperaState.lastBeaconResponse) || {};
+              toast(`◈ 信标响应完成：${beaconOutcomeSummaryZh(outcome, opt)}`, { kind: 'ok' });
+            }
             view._refreshDossier && view._refreshDossier();
           },
         },
@@ -66037,7 +66867,11 @@ function openSystemBeaconModal(view, beacon) {
     btn.className = 'vf-btn small primary';
     btn.textContent = opt.label || opt.id;
     btn.addEventListener('click', () => {
-      app.dispatch('RespondSubspaceBeacon', { beaconId: beacon.id, responseOptionId: opt.id });
+      const res = app.dispatch('RespondSubspaceBeacon', { beaconId: beacon.id, responseOptionId: opt.id });
+      if (res && res.ok) {
+        const outcome = (w.spaceOperaState && w.spaceOperaState.lastBeaconResponse) || {};
+        toast(`◈ 信标响应完成：${beaconOutcomeSummaryZh(outcome, opt)}`, { kind: 'ok' });
+      }
       if (modalHandle && typeof modalHandle.close === 'function') modalHandle.close();
     });
     body.appendChild(btn);
@@ -68598,462 +69432,6 @@ class System3D {
 Object.assign(__exports, { orbitalUniformsFor, System3D });
 
 });
-__register("src/render/gl/NoiseGLSL.js", function (__exports, __require) {
-/**
- * render/gl/NoiseGLSL.js — 可拼接的 GLSL ES 3.0 噪声/工具片段库（全部原创手写）
- *
- * 用途：
- *  - 供 src/render/shaders/ 下的着色器模块按需拼接，组成完整片元着色器源码；
- *  - `#version 300 es` 由调用方在最前拼接（本模块不含版本头，也不含 precision 声明，
- *    precision highp float; 由各着色器模块的统一头常量负责）。
- *
- * 拼接顺序约定（被依赖的片段必须先出现）：
- *   GLSL_HASH → GLSL_NOISE → GLSL_SIMPLEX4D → GLSL_FBM → GLSL_BLACKBODY
- *   - GLSL_NOISE / GLSL_SIMPLEX4D 依赖 GLSL_HASH 的 hash21/hash31/hash41；
- *   - GLSL_FBM 依赖 GLSL_NOISE 的 simplex2D/simplex3D 与常量 NGL_R2/NGL_R3；
- *   - GLSL_BLACKBODY 无依赖，可单独拼接。
- *
- * 命名约束：所有导出片段之间、以及与各着色器模块内部助手之间无重名冲突；
- *   片段内部私有助手统一使用 ngl / s4 前缀（nglHashU、nglQuintic、nglGrad2、
- *   nglGrad3、s4Grad），常量使用 NGL_ 前缀，可安全地同时拼接多个片段。
- *
- * 数值约定：hash* 返回 [0,1)；noise* 与 simplex* 返回约 [-1,1]；
- *   worley* 返回 [0,1]（最近特征点归一化距离）；fbm* 返回约 [-1,1]；
- *   fbmFilaments（脊状）返回 [0,1]；blackbodyRGB 返回 HDR RGB（允许 >1）。
- */
-
-/**
- * GLSL_HASH — 32 位整型 avalanche 哈希与晶格哈希（PCG 风格，原创实现）。
- * 导出函数：hash21(vec2)、hash31(vec3)、hash41(vec4)，输入先 floor 到整数晶格。
- * 依赖：无。
- */
-const GLSL_HASH = `
-// ------------------------------------------------------------------
-// GLSL_HASH — 晶格哈希库（原创手写，无外部来源）
-// ------------------------------------------------------------------
-uint nglHashU(uint x) {
-  x ^= x >> 16u;
-  x *= 0x7feb352du;
-  x ^= x >> 15u;
-  x *= 0x846ca68bu;
-  x ^= x >> 16u;
-  return x;
-}
-
-// 2D 晶格哈希：返回 [0,1)
-float hash21(vec2 p) {
-  ivec2 ip = ivec2(floor(p));
-  uint h = uint(ip.x) * 0x9e3779b9u;
-  h ^= uint(ip.y) * 0x85ebca77u;
-  return float(nglHashU(h)) / 4294967296.0;
-}
-
-// 3D 晶格哈希：返回 [0,1)（双重 avalanche 增强去相关）
-float hash31(vec3 p) {
-  ivec3 ip = ivec3(floor(p));
-  uint h = uint(ip.x) * 0x9e3779b9u;
-  h ^= uint(ip.y) * 0xc2b2ae3du;
-  h ^= uint(ip.z) * 0x27d4eb2fu;
-  return float(nglHashU(nglHashU(h))) / 4294967296.0;
-}
-
-// 4D 晶格哈希：返回 [0,1)（双重 avalanche）
-float hash41(vec4 p) {
-  ivec4 ip = ivec4(floor(p));
-  uint h = uint(ip.x) * 0x9e3779b9u;
-  h ^= uint(ip.y) * 0x85ebca77u;
-  h ^= uint(ip.z) * 0xc2b2ae3du;
-  h ^= uint(ip.w) * 0x27d4eb2fu;
-  return float(nglHashU(nglHashU(h))) / 4294967296.0;
-}
-`;
-
-/**
- * GLSL_NOISE — 值噪声 / 单纯形噪声 / Worley 胞腔噪声 / 4D Simplex-Worley 混合。
- * 导出函数：noise2D/noise3D（值噪声）、simplex2D/simplex3D（单纯形梯度噪声）、
- *   worley2D/worley3D/worley4D（F1 胞腔距离）、noise4D（4D Simplex-Worley 混合：
- *   值噪声骨架 + worley4D 胞腔调制；真 4D 单纯形见 GLSL_SIMPLEX4D 的 simplex4D）。
- * 依赖：GLSL_HASH。
- */
-const GLSL_NOISE = `
-// ------------------------------------------------------------------
-// GLSL_NOISE — 值噪声 / 单纯形 / Worley（原创手写）
-// ------------------------------------------------------------------
-// 五次平滑曲线（C2 连续）
-float nglQuintic(float t) {
-  return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
-}
-
-// 2D 值噪声 [-1,1]
-float noise2D(vec2 p) {
-  vec2 i = floor(p);
-  vec2 f = p - i;
-  vec2 u = vec2(nglQuintic(f.x), nglQuintic(f.y));
-  float a = hash21(i);
-  float b = hash21(i + vec2(1.0, 0.0));
-  float c = hash21(i + vec2(0.0, 1.0));
-  float d = hash21(i + vec2(1.0, 1.0));
-  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y) * 2.0 - 1.0;
-}
-
-// 3D 值噪声 [-1,1]
-float noise3D(vec3 p) {
-  vec3 i = floor(p);
-  vec3 f = p - i;
-  vec3 u = vec3(nglQuintic(f.x), nglQuintic(f.y), nglQuintic(f.z));
-  float n000 = hash31(i);
-  float n100 = hash31(i + vec3(1.0, 0.0, 0.0));
-  float n010 = hash31(i + vec3(0.0, 1.0, 0.0));
-  float n110 = hash31(i + vec3(1.0, 1.0, 0.0));
-  float n001 = hash31(i + vec3(0.0, 0.0, 1.0));
-  float n101 = hash31(i + vec3(1.0, 0.0, 1.0));
-  float n011 = hash31(i + vec3(0.0, 1.0, 1.0));
-  float n111 = hash31(i + vec3(1.0, 1.0, 1.0));
-  float a = mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y);
-  float b = mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y);
-  return mix(a, b, u.z) * 2.0 - 1.0;
-}
-
-// 由 [0,1) 哈希生成单位梯度向量（圆周均匀，避免查表与三角函数开销过高问题）
-vec2 nglGrad2(float h) {
-  float a = h * 6.28318530718;
-  return vec2(cos(a), sin(a));
-}
-
-// 由 [0,1) 哈希生成单位梯度向量（球面参数化）
-vec3 nglGrad3(float h) {
-  float a = h * 6.28318530718;
-  float z = h * 2.0 - 1.0;
-  float r = sqrt(max(1.0 - z * z, 0.0));
-  return vec3(r * cos(a), r * sin(a), z);
-}
-
-// 2D 单纯形梯度噪声（原创实现：斜切框架 + 哈希梯度），输出约 [-1,1]
-float simplex2D(vec2 p) {
-  const float F2 = 0.36602540378;   // (sqrt(3)-1)/2
-  const float G2 = 0.21132486541;   // (3-sqrt(3))/6
-  float s = (p.x + p.y) * F2;
-  vec2 ic = floor(p + vec2(s));
-  float t = (ic.x + ic.y) * G2;
-  vec2 x0 = p - (ic - vec2(t));
-  // 三角形单纯形顶点顺序
-  vec2 o1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
-  vec2 x1 = x0 - o1 + vec2(G2);
-  vec2 x2 = x0 - vec2(1.0) + vec2(2.0 * G2);
-  vec3 w = max(vec3(0.5) - vec3(dot(x0, x0), dot(x1, x1), dot(x2, x2)), vec3(0.0));
-  vec3 w4 = w * w;
-  w4 = w4 * w4;
-  vec2 g0 = nglGrad2(hash21(ic));
-  vec2 g1 = nglGrad2(hash21(ic + o1));
-  vec2 g2 = nglGrad2(hash21(ic + vec2(1.0)));
-  float n = dot(w4, vec3(dot(g0, x0), dot(g1, x1), dot(g2, x2)));
-  return n * 85.0;   // 经验归一化常数
-}
-
-// 3D 单纯形梯度噪声（原创实现），输出约 [-1,1]
-float simplex3D(vec3 p) {
-  const float F3 = 0.33333333333;   // 1/3
-  const float G3 = 0.16666666667;   // 1/6
-  float s = (p.x + p.y + p.z) * F3;
-  vec3 ic = floor(p + vec3(s));
-  float t = (ic.x + ic.y + ic.z) * G3;
-  vec3 x0 = p - (ic - vec3(t));
-  // 立体单纯形顶点顺序（分量排序）
-  vec3 o1;
-  vec3 o2;
-  if (x0.x >= x0.y) {
-    if (x0.y >= x0.z)      { o1 = vec3(1.0, 0.0, 0.0); o2 = vec3(1.0, 1.0, 0.0); }
-    else if (x0.x >= x0.z) { o1 = vec3(1.0, 0.0, 0.0); o2 = vec3(1.0, 0.0, 1.0); }
-    else                   { o1 = vec3(0.0, 0.0, 1.0); o2 = vec3(1.0, 0.0, 1.0); }
-  } else {
-    if (x0.y < x0.z)       { o1 = vec3(0.0, 0.0, 1.0); o2 = vec3(0.0, 1.0, 1.0); }
-    else if (x0.x < x0.z)  { o1 = vec3(0.0, 1.0, 0.0); o2 = vec3(0.0, 1.0, 1.0); }
-    else                   { o1 = vec3(0.0, 1.0, 0.0); o2 = vec3(1.0, 1.0, 0.0); }
-  }
-  vec3 x1 = x0 - o1 + vec3(G3);
-  vec3 x2 = x0 - o2 + vec3(2.0 * G3);
-  vec3 x3 = x0 - vec3(1.0) + vec3(3.0 * G3);
-  vec4 w = max(vec4(0.6) - vec4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), vec4(0.0));
-  vec4 w4 = w * w;
-  w4 = w4 * w4;
-  vec3 g0 = nglGrad3(hash31(ic));
-  vec3 g1 = nglGrad3(hash31(ic + o1));
-  vec3 g2 = nglGrad3(hash31(ic + o2));
-  vec3 g3 = nglGrad3(hash31(ic + vec3(1.0)));
-  float n = dot(w4, vec4(dot(g0, x0), dot(g1, x1), dot(g2, x2), dot(g3, x3)));
-  return n * 32.0;   // 经验归一化常数
-}
-
-// 2D Worley（F1 最近特征距离，[0,1]）
-float worley2D(vec2 p) {
-  vec2 ic = floor(p);
-  vec2 fq = p - ic;
-  float d = 2.0;
-  for (int j = -1; j <= 1; j++) {
-    for (int i = -1; i <= 1; i++) {
-      vec2 g = vec2(float(i), float(j));
-      vec2 cl = ic + g;
-      vec2 o = vec2(hash21(cl), hash21(cl + vec2(311.0, 197.0)));
-      d = min(d, length(g + o - fq));
-    }
-  }
-  return clamp(d, 0.0, 1.0);
-}
-
-// 3D Worley（F1，[0,1]）
-float worley3D(vec3 p) {
-  vec3 ic = floor(p);
-  vec3 fq = p - ic;
-  float d = 2.0;
-  for (int k = -1; k <= 1; k++) {
-    for (int j = -1; j <= 1; j++) {
-      for (int i = -1; i <= 1; i++) {
-        vec3 g = vec3(float(i), float(j), float(k));
-        vec3 cl = ic + g;
-        vec3 o = vec3(
-          hash31(cl),
-          hash31(cl + vec3(311.0, 197.0, 113.0)),
-          hash31(cl + vec3(23.0, 71.0, 7.0))
-        );
-        d = min(d, length(g + o - fq));
-      }
-    }
-  }
-  return clamp(d, 0.0, 1.0);
-}
-
-// 4D Worley（F1，[0,1]，3^4 = 81 邻域，成本较高，仅作工具函数使用）
-float worley4D(vec4 p) {
-  vec4 ic = floor(p);
-  vec4 fq = p - ic;
-  float d = 2.0;
-  for (int a = -1; a <= 1; a++) {
-    for (int b = -1; b <= 1; b++) {
-      for (int c = -1; c <= 1; c++) {
-        for (int e = -1; e <= 1; e++) {
-          vec4 g = vec4(float(a), float(b), float(c), float(e));
-          vec4 cl = ic + g;
-          vec4 o = vec4(
-            hash41(cl),
-            hash41(cl + vec4(101.0, 57.0, 31.0, 7.0)),
-            hash41(cl + vec4(233.0, 151.0, 89.0, 13.0)),
-            hash41(cl + vec4(379.0, 271.0, 131.0, 17.0))
-          );
-          d = min(d, length(g + o - fq));
-        }
-      }
-    }
-  }
-  return clamp(d, 0.0, 1.0);
-}
-
-// 4D Simplex-Worley 混合噪声（约 [-1,1]）：
-// 值噪声骨架（16 角五次插值）与 worley4D 胞腔特征按 0.65/0.35 加权；
-// 恒星表面等需要真 4D 单纯形时使用 GLSL_SIMPLEX4D 的 simplex4D。
-float noise4D(vec4 p) {
-  vec4 i = floor(p);
-  vec4 f = p - i;
-  vec4 u = vec4(nglQuintic(f.x), nglQuintic(f.y), nglQuintic(f.z), nglQuintic(f.w));
-  float n0000 = hash41(i);
-  float n1000 = hash41(i + vec4(1.0, 0.0, 0.0, 0.0));
-  float n0100 = hash41(i + vec4(0.0, 1.0, 0.0, 0.0));
-  float n1100 = hash41(i + vec4(1.0, 1.0, 0.0, 0.0));
-  float n0010 = hash41(i + vec4(0.0, 0.0, 1.0, 0.0));
-  float n1010 = hash41(i + vec4(1.0, 0.0, 1.0, 0.0));
-  float n0110 = hash41(i + vec4(0.0, 1.0, 1.0, 0.0));
-  float n1110 = hash41(i + vec4(1.0, 1.0, 1.0, 0.0));
-  float n0001 = hash41(i + vec4(0.0, 0.0, 0.0, 1.0));
-  float n1001 = hash41(i + vec4(1.0, 0.0, 0.0, 1.0));
-  float n0101 = hash41(i + vec4(0.0, 1.0, 0.0, 1.0));
-  float n1101 = hash41(i + vec4(1.0, 1.0, 0.0, 1.0));
-  float n0011 = hash41(i + vec4(0.0, 0.0, 1.0, 1.0));
-  float n1011 = hash41(i + vec4(1.0, 0.0, 1.0, 1.0));
-  float n0111 = hash41(i + vec4(0.0, 1.0, 1.0, 1.0));
-  float n1111 = hash41(i + vec4(1.0, 1.0, 1.0, 1.0));
-  float a = mix(mix(n0000, n1000, u.x), mix(n0100, n1100, u.x), u.y);
-  float b = mix(mix(n0010, n1010, u.x), mix(n0110, n1110, u.x), u.y);
-  float c = mix(mix(n0001, n1001, u.x), mix(n0101, n1101, u.x), u.y);
-  float d = mix(mix(n0011, n1011, u.x), mix(n0111, n1111, u.x), u.y);
-  float v = mix(mix(a, b, u.z), mix(c, d, u.z), u.w);   // [0,1]
-  float w = worley4D(p);
-  return mix(v * 2.0 - 1.0, 1.0 - 2.0 * w, 0.35);
-}
-`;
-
-/**
- * GLSL_SIMPLEX4D — 真 4D 单纯形梯度噪声 simplex4D(vec4)（原创实现：
- * 斜切框架 + 4 元素排序网络确定单纯形顶点轴序 + 4D 单位梯度哈希）。
- * 用于恒星表面米粒组织等需要时间维度平滑演化的场合。
- * 依赖：GLSL_HASH（hash41）。
- */
-const GLSL_SIMPLEX4D = `
-// ------------------------------------------------------------------
-// GLSL_SIMPLEX4D — 4D 单纯形梯度噪声（原创手写）
-// ------------------------------------------------------------------
-// 由 [0,1) 哈希构造 4D 单位梯度（双角参数化，模长恒为 1）
-vec4 s4Grad(float h) {
-  float t1 = 6.28318530718 * h;
-  float t2 = 6.28318530718 * fract(h * 127.113);
-  float t3 = 6.28318530718 * fract(h * 269.517);
-  float s1 = sin(t1);
-  float c1 = cos(t1);
-  float s2 = sin(t2);
-  float c2 = cos(t2);
-  float s3 = sin(t3);
-  float c3 = cos(t3);
-  return vec4(c1, s1 * c2, s1 * s2 * c3, s1 * s2 * s3);
-}
-
-// 4D 单纯形梯度噪声，输出约 [-1,1]
-float simplex4D(vec4 p) {
-  const float F4 = 0.30901699437;   // (sqrt(5)-1)/4
-  const float G4 = 0.13819660112;   // (5-sqrt(5))/20
-  float s = (p.x + p.y + p.z + p.w) * F4;
-  vec4 ic = floor(p + vec4(s));
-  float t = (ic.x + ic.y + ic.z + ic.w) * G4;
-  vec4 x0 = p - (ic - vec4(t));
-
-  // 对 x0 四个分量做降序排序网络（5 比较器），同时追踪原始轴号；
-  // 相等分量不交换（严格小于），保证角点集合在平局处仍然一致 → 连续。
-  float v0 = x0.x;
-  float v1 = x0.y;
-  float v2 = x0.z;
-  float v3 = x0.w;
-  int a0 = 0;
-  int a1 = 1;
-  int a2 = 2;
-  int a3 = 3;
-  if (v0 < v1) { float tv = v0; v0 = v1; v1 = tv; int ta = a0; a0 = a1; a1 = ta; }
-  if (v2 < v3) { float tv = v2; v2 = v3; v3 = tv; int ta = a2; a2 = a3; a3 = ta; }
-  if (v0 < v2) { float tv = v0; v0 = v2; v2 = tv; int ta = a0; a0 = a2; a2 = ta; }
-  if (v1 < v3) { float tv = v1; v1 = v3; v3 = tv; int ta = a1; a1 = a3; a3 = ta; }
-  if (v1 < v2) { float tv = v1; v1 = v2; v2 = tv; int ta = a1; a1 = a2; a2 = ta; }
-
-  // 单纯形 5 顶点（斜空间内按轴序累加单位步，再整体平移 k*G4）
-  vec4 o1 = vec4(0.0);
-  vec4 o2 = vec4(0.0);
-  vec4 o3 = vec4(0.0);
-  if (a0 == 0)      { o1.x = 1.0; }
-  else if (a0 == 1) { o1.y = 1.0; }
-  else if (a0 == 2) { o1.z = 1.0; }
-  else              { o1.w = 1.0; }
-  o2 = o1;
-  if (a1 == 0)      { o2.x += 1.0; }
-  else if (a1 == 1) { o2.y += 1.0; }
-  else if (a1 == 2) { o2.z += 1.0; }
-  else              { o2.w += 1.0; }
-  o3 = o2;
-  if (a2 == 0)      { o3.x += 1.0; }
-  else if (a2 == 1) { o3.y += 1.0; }
-  else if (a2 == 2) { o3.z += 1.0; }
-  else              { o3.w += 1.0; }
-
-  vec4 x1 = x0 - o1 + vec4(G4);
-  vec4 x2 = x0 - o2 + vec4(2.0 * G4);
-  vec4 x3 = x0 - o3 + vec4(3.0 * G4);
-  vec4 x4 = x0 - vec4(1.0) + vec4(4.0 * G4);
-
-  vec4 w = max(vec4(0.6) - vec4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), vec4(0.0));
-  float w4 = max(0.6 - dot(x4, x4), 0.0);
-  vec4 ww = w * w;
-  ww = ww * ww;
-  w4 = w4 * w4 * w4 * w4;
-
-  vec4 g0 = s4Grad(hash41(ic));
-  vec4 g1 = s4Grad(hash41(ic + o1));
-  vec4 g2 = s4Grad(hash41(ic + o2));
-  vec4 g3 = s4Grad(hash41(ic + o3));
-  vec4 g4 = s4Grad(hash41(ic + vec4(1.0)));
-
-  float n = dot(ww, vec4(dot(g0, x0), dot(g1, x1), dot(g2, x2), dot(g3, x3)));
-  n += w4 * dot(g4, x4);
-  return n * 27.0;   // 经验归一化常数
-}
-`;
-
-/**
- * GLSL_FBM — 分形布朗运动叠加。
- * 导出函数：fbm2D/fbm3D（5 八度，约 [-1,1]）、fbmFilaments（脊状/丝状 multifractal，
- *   返回 [0,1]，用于吸积盘丝缕、超新星激波丝状结构）。
- * 导出常量：NGL_R2/NGL_R3（每八度旋转矩阵，去除轴对齐网格痕）。
- * 依赖：GLSL_NOISE（simplex2D/simplex3D）。
- */
-const GLSL_FBM = `
-// ------------------------------------------------------------------
-// GLSL_FBM — 分形叠加（原创手写）
-// ------------------------------------------------------------------
-const mat2 NGL_R2 = mat2(0.80, -0.60, 0.60, 0.80);
-const mat3 NGL_R3 = mat3(0.36, 0.48, -0.80, -0.80, 0.60, 0.0, 0.48, 0.64, 0.60);
-
-// 2D fBm：5 八度 simplex，输出约 [-1,1]（按幅度和归一化）
-float fbm2D(vec2 p) {
-  float sum = 0.0;
-  float amp = 0.5;
-  for (int i = 0; i < 5; i++) {
-    sum += amp * simplex2D(p);
-    p = NGL_R2 * p * 2.02;
-    amp *= 0.5;
-  }
-  return sum / 0.96875;
-}
-
-// 3D fBm：5 八度 simplex，输出约 [-1,1]
-float fbm3D(vec3 p) {
-  float sum = 0.0;
-  float amp = 0.5;
-  for (int i = 0; i < 5; i++) {
-    sum += amp * simplex3D(p);
-    p = NGL_R3 * p * 2.02;
-    amp *= 0.5;
-  }
-  return sum / 0.96875;
-}
-
-// 脊状（ridged）丝状 fBm：|simplex| 反相平方 + 谱权重，输出约 [0,1]
-float fbmFilaments(vec3 p) {
-  float sum = 0.0;
-  float amp = 0.55;
-  float weight = 1.0;
-  for (int i = 0; i < 5; i++) {
-    float n = 1.0 - abs(simplex3D(p));
-    n *= n;
-    sum += n * amp * weight;
-    weight = clamp(n * 2.0, 0.0, 1.0);
-    p = NGL_R3 * p * 2.13;
-    amp *= 0.5;
-  }
-  return clamp(sum, 0.0, 1.0);
-}
-`;
-
-/**
- * GLSL_BLACKBODY — 黑体辐射近似色温梯度（HDR RGB，无依赖可独立拼接）。
- * 导出函数：blackbodyRGB(t)，t ∈ [0,1]：
- *   0 → 深暗红 → 0.3 炽橙红 → 0.55 亮金橙 → 0.8 炽白 → 1 电光蓝白。
- */
-const GLSL_BLACKBODY = `
-// ------------------------------------------------------------------
-// GLSL_BLACKBODY — 黑体色温近似梯度（原创手写，关键帧平滑混合）
-// ------------------------------------------------------------------
-vec3 blackbodyRGB(float t) {
-  t = clamp(t, 0.0, 1.0);
-  vec3 c;
-  if (t < 0.30) {
-    c = mix(vec3(0.30, 0.03, 0.01), vec3(1.25, 0.30, 0.05), smoothstep(0.0, 0.30, t));
-  } else if (t < 0.58) {
-    c = mix(vec3(1.25, 0.30, 0.05), vec3(2.30, 1.45, 0.50), smoothstep(0.30, 0.58, t));
-  } else if (t < 0.82) {
-    c = mix(vec3(2.30, 1.45, 0.50), vec3(2.65, 2.50, 2.30), smoothstep(0.58, 0.82, t));
-  } else {
-    c = mix(vec3(2.65, 2.50, 2.30), vec3(1.95, 2.50, 3.70), smoothstep(0.82, 1.0, t));
-  }
-  return c;
-}
-`;
-
-Object.assign(__exports, { GLSL_HASH, GLSL_NOISE, GLSL_SIMPLEX4D, GLSL_FBM, GLSL_BLACKBODY });
-
-});
 __register("src/render/shaders/BlackHoleShader.js", function (__exports, __require) {
 /**
  * render/shaders/BlackHoleShader.js — 史瓦西黑洞光线步进着色器（GLSL ES 3.0 字符串）
@@ -69589,6 +69967,7 @@ const { el: el, clearEl: clearEl } = __require("src/ui/components/dom.js");
 const { CanvasManager: CanvasManager } = __require("src/render/CanvasManager.js");
 const { GalaxyRenderer: GalaxyRenderer } = __require("src/render/GalaxyRenderer.js");
 const { L: L } = __require("src/core/i18n.js");
+const { toast: toast } = __require("src/ui/components/index.js");
 
 /** 图层复选框定义（10 键，标签取 zh-CN 词典 ui.layer.*） */
 const LAYER_DEFS = [
@@ -69642,6 +70021,19 @@ const GalaxyView = {
     head.appendChild(this._timeHint);
     head.appendChild(el('span', { class: 'vf-grow' }));
     this._quickBar = el('div', { class: 'vf-row', style: { gap: '6px' } });
+    // SPEC-PLAN-058 Task 58.4（BUG-06）：一键复位视角（顶栏常驻）
+    head.appendChild(el('button', {
+      class: 'vf-btn small',
+      text: '🎯 复位视角',
+      title: '将星图视角复位至母星系/星区质心（zoom 1×）',
+      on: {
+        click: () => {
+          if (this._renderer && typeof this._renderer.resetView === 'function') {
+            this._renderer.resetView();
+          }
+        },
+      },
+    }));
     head.appendChild(this._quickBar);
 
     // —— 主体：画布 + 图层面板 ——
@@ -69650,6 +70042,8 @@ const GalaxyView = {
     this._bodyEl = body;
     this._renderer = new GalaxyRenderer();
     this._renderer.init(this._cm);
+    // SPEC-PLAN-058 Task 58.4（BUG-06）：首帧对准玩家母星系，消除星团挤在画布底部 1/4
+    this._renderer.centerOnHomeSystem(this.app.world);
     if (this._snap) this._renderer.setSnapshot(this._snap);
 
     // 图层复选框组（.vf-layers 由 styles.css 定位在左上角）
@@ -69943,7 +70337,7 @@ function tutorialApi() {
 /* ==================== SPEC-PLAN-052 Task 52.1：星图信标流脉冲与自主舰队轨迹（M4 工位 D） ==================== */
 
 const { showModal: showModal } = __require("src/ui/components/modal.js");
-const { spaceOperaView: spaceOperaView } = __require("src/simulation/ViewModels.js");
+const { spaceOperaView: spaceOperaView, beaconOutcomeSummaryZh: beaconOutcomeSummaryZh } = __require("src/simulation/ViewModels.js");
 
 /** 信标脉冲呼吸半径（canvas 逻辑像素；命中半径 = PULSE_MAX + 6） */
 const PULSE_MIN = 6;
@@ -70104,7 +70498,12 @@ function openBeaconModal(view, beacon) {
     btn.textContent = opt.label || opt.id;
     btn.title = 'RespondSubspaceBeacon → ' + opt.id + (opt.effectHint ? '（' + opt.effectHint + '）' : '');
     btn.addEventListener('click', () => {
-      app.dispatch('RespondSubspaceBeacon', { beaconId: beacon.id, responseOptionId: opt.id });
+      // SPEC-PLAN-058 Task 58.4（BUG-08.1）：读取 lastBeaconResponse 明示收益
+      const res = app.dispatch('RespondSubspaceBeacon', { beaconId: beacon.id, responseOptionId: opt.id });
+      if (res && res.ok) {
+        const outcome = (w.spaceOperaState && w.spaceOperaState.lastBeaconResponse) || {};
+        toast(`◈ 信标响应完成：${beaconOutcomeSummaryZh(outcome, opt)}`, { kind: 'ok' });
+      }
       if (modalHandle && typeof modalHandle.close === 'function') modalHandle.close();
       view._renderQuickBar && view._renderQuickBar();
       view._forceRebuild && view._forceRebuild();
@@ -73629,6 +74028,15 @@ function syncColonyToSpaceOpera(colony, world) {
       compact.envVector[7] = Math.min(100.0, compact.envVector[7] + heavyCount * HEAVY_ENV_MONTHLY_PER_BUILDING);
     }
   }
+  // SPEC-PLAN-058 Task 58.3（BUG-09.1 / doc56 Task 56.2 §4）：紧凑底座计算结果
+  // 回写主游戏殖民地实体，供 UI/门禁直接读取（此前仅存在于 planet.compactState.colony）。
+  // radicalCell 权威容器是 compact.radicalCell（shadowSyndicateArc.ensureRadicalCell），
+  // 兼容 cColony.radicalCell 的旧形态。
+  const cell = (compact.radicalCell && typeof compact.radicalCell === 'object')
+    ? compact.radicalCell
+    : (cColony.radicalCell && typeof cColony.radicalCell === 'object' ? cColony.radicalCell : null);
+  colony.industrialAttention = Number.isFinite(cColony.industrialAttention) ? cColony.industrialAttention : 0;
+  colony.radicalCellActive = Boolean(cell && cell.state === 'ACTIVE');
   return true;
 }
 
@@ -73827,6 +74235,11 @@ function getSpaceOperaModifiers(colony, world) {
   if (!world || !world.spaceOperaState) return base;
 
   const soState = world.spaceOperaState;
+  // SPEC-PLAN-059 Task 59.3（doc56 赛道 D）：公约生效 → 全银河科研速度 +20%。
+  // HourlySystems research 阶段消费 researchMultiplier（金快照世界零触达）。
+  if (soState.landsraad && soState.landsraad.starfirePactActive === true) {
+    base.researchMultiplier *= 1.20;
+  }
   const planets = world.entities && world.entities.planets;
   const planet = colony && planets ? planets[colony.planetId] : null;
   const compact = planet && planet.compactState;
@@ -74716,6 +75129,14 @@ function finishBattle(world, battle, winnerSide) {
   //    （首行守卫 world.spaceOperaState —— 金快照/默认流程世界零读取零写入零漂移）——
   grantSpaceBattleParagonXp(world, battle);
 
+  // SPEC-PLAN-059 Task 59.4（赛道 E）：纳米寄生修复群战后自动修复 5% 结构
+  const ships = world.entities && world.entities.ships ? world.entities.ships : {};
+  for (const u of (battle.units || [])) {
+    const ship = ships[u.shipId];
+    if (!ship || u.destroyed) continue;
+    naniteSymbiontRepair(ship);
+  }
+
   delete world.battles.active[battle.id];
 }
 
@@ -74725,6 +75146,7 @@ installCombatBehaviors(unitBehaviors, projectileBehaviors);
 
 // 42 号总纲 §五.2：太空战役群像 XP 结算接线（galacticParagons 不反读本模块，无环）
 const { grantSpaceBattleParagonXp: grantSpaceBattleParagonXp } = __require("src/domain/characters/galacticParagons.js");
+const { naniteSymbiontRepair: naniteSymbiontRepair } = __require("src/domain/fleets/fleetDoctrineAndScars.js");
 
 Object.assign(__exports, { POOL_CAPACITY, createRingPool, stepBattles, stepOneBattle, unitBehaviors, projectileBehaviors, finishBattle });
 
@@ -74744,6 +75166,7 @@ const { BAL: BAL } = __require("src/content/constants.js");
 const { layerResist: layerResist } = __require("src/content/weapons.js");
 const { applyDamage: applyDamage, destroyShip: destroyShip } = __require("src/domain/ships/ship.js");
 const { emit: emit } = __require("src/core/eventBus.js");
+const { unsinkableDamageMultiplier: unsinkableDamageMultiplier } = __require("src/domain/fleets/fleetDoctrineAndScars.js");
 // doc35 WP-P0-2：战术 v2（world.combatV2 门控；金快照零漂移）
 const { subsystemModifiers: subsystemModifiers, stepFlux: stepFlux, applyHitV2: applyHitV2, tryLayeredInterception: tryLayeredInterception, FLUX_HEAT_GAIN: FLUX_HEAT_GAIN } = __require("src/domain/combat/subsystemsAndEw.js");
 
@@ -75078,7 +75501,12 @@ function tryIntercept(world, battle, missile, target, dt) {
 // ———— 伤害管线（COMBAT-01：护盾 → 装甲 → 结构，逐层抗性） ————
 
 function applyHit(world, battle, attacker, target, baseDamage, damageType) {
-  const tShip = world.entities.ships[target.shipId];
+  // SPEC-PLAN-059 Task 59.4（赛道 E）：不沉勋章 —— 攻击方结构 <25% 时全武器伤害 +30%
+  const ships = world.entities && world.entities.ships ? world.entities.ships : {};
+  const aShip = attacker ? ships[attacker.shipId] : null;
+  const sModMult = unsinkableDamageMultiplier(aShip);
+  if (sModMult !== 1) baseDamage *= sModMult;
+  const tShip = ships[target.shipId];
   if (!tShip || tShip.status === 'destroyed') return;
   // doc35 WP-P0-2：v2 伤害管线（方向性穿甲 + 分部损伤 + 热幅能；world.combatV2 门控）
   if (world.combatV2 === true) {
@@ -75313,6 +75741,810 @@ function registerSpaceOperaPhases() {
 }
 
 Object.assign(__exports, { registerSpaceOperaPhases });
+
+});
+__register("src/domain/world/autonomousSectorLife.js", function (__exports, __require) {
+/**
+ * domain/world/autonomousSectorLife.js — 5 类自主星区生态舰队（反孤独活体星区仿真）
+ * （SPEC-PLAN-046 阶段三 M3 Task 3.3；责任人：Eng-C）
+ *
+ * 职责（doc46 §Task 3.3 §1 + doc42 总纲 §五.1 逐条契约）：
+ *  舰队实例存 world.spaceOperaState.autonomousFleets，元素契约：
+ *    { id, type, factionId, originSystemId, destSystemId,
+ *      cargo: { resourceId, qty } | null, transitProgress, spawnedTick, interdicted,
+ *      travelTicks, formationClass?, homePlanetId? }（后三者为 M3 派生附加字段，施工 notes 记录）。
+ *  5 类派生规则（月度周期末 tick%720===0 确定性派生；deriveSeed(SECTOR_AUTONOMOUS,…)）：
+ *   1. TRADE_CONVOY：净流>0 星 → 净流<0 同资源星（跨星系套利）；到港交付
+ *      目的星 stockpile +qty 且源头 netFlow 扣减 -qty；途中同系统有敌对/海盗舰队 →
+ *      interdicted：货物损失 + 目的星短缺进度推升（活跃 S4 局势 progress +3，
+ *      否则 pendingSystemShocks['S4'] += 3）；
+ *   2. SMUGGLER_RUNNER：向高关税（tariffRate ≥ 0.35）/ 叛乱前夕（活跃 PLANETARY_REVOLT）/
+ *      高犯罪（crime ≥ 15）星运违禁品；到港入黑市库存；
+ *   3. PATROL_FLOTILLA：有 patrolHQ 的星按 computeDoctrineTemplate 派生轻/中/重编队
+ *      （每司令部常驻一支）；同系统反走私扫描（确定性查获，0.5 概率档）；
+ *   4. MARKET_EXPEDITION：玩家某商品市场份额 > 40% → 霸权派系生成远征军指向玩家产区；
+ *      玩家歼灭 → getRelation 调整 opinion −5 而绝不 declareWar（war.js 关系口径）；
+ *   5. BOUNTY_HUNTER：响应赏金公会悬赏（world.economy.bounties / lettersOfMarque 在场）
+ *      向敌对舰队所在星系游猎。
+ *
+ * 时钟接线裁决（与 Task 3.1 stepFleetReadiness 同款，见该文件头注释）：
+ *  registerHourly('space-opera-autonomous-fleets', …) 由 SpaceOperaWiring.js 注册为每 tick 阶段，
+ *  舰队桶按 numericEntityKey(fleet.id) % 10 === tick % 10 轮询（每支舰队每 10 tick 访问
+ *  一次，访问即 transitProgress += 10 游戏小时 ≈ 1h/tick 摊销）——不经
+ *  setClockHooks.fleetTick（该钩子按 world.entities.fleets 实体数每 tick 多调 12 次
+ *  且零实体世界永不触发，直接注入会双重步进或失步，施工 notes 记录裁决）。
+ *
+ * 纪律（doc43 §1.4 零漂移铁律）：
+ *  - import 期仅注册时钟阶段与冻结常量；stepAutonomousFleets 首行守卫
+ *    world.spaceOperaState（金快照世界零读取零写入）；
+ *  - 确定性随机一律 deriveSeed/sampleFloat01/sampleWeightedIndex +
+ *    DOMAIN_SALTS.SECTOR_AUTONOMOUS（0xD401）；零 Math.random / Date.now / world.rng；
+ *  - ensureAutonomousFleets 幂等惰性挂载，仅供显式生命周期入口调用。
+ */
+
+const { DOMAIN_SALTS: DOMAIN_SALTS, deriveSeed: deriveSeed, sampleFloat01: sampleFloat01, sampleWeightedIndex: sampleWeightedIndex } = __require("src/domain/world/deterministicRng.js");
+const { ensureSpaceOperaState: ensureSpaceOperaState } = __require("src/domain/world/spaceOperaState.js");
+const { OPERA_RESOURCE_KEYS: OPERA_RESOURCE_KEYS, numericEntityKey: numericEntityKey } = __require("src/domain/planets/planetStateSchema.js");
+const { computeDoctrineTemplate: computeDoctrineTemplate } = __require("src/domain/fleets/fleetDoctrineAndScars.js");
+const { ensureBlackMarket: ensureBlackMarket, CONTRABAND_IDS: CONTRABAND_IDS } = __require("src/domain/economy/blackMarket.js");
+const { listActiveSituations: listActiveSituations } = __require("src/domain/events/situationEngine.js");
+const { getRelation: getRelation } = __require("src/domain/diplomacy/war.js");
+const { emit: emit, chronicle: chronicle } = __require("src/core/eventBus.js");
+
+/** 自主生态舰队确定性子流盐值（DOMAIN_SALTS 冻结表：自主舰队路由域） */
+const SALT = DOMAIN_SALTS.SECTOR_AUTONOMOUS;
+
+/** 5 类自主舰队类型枚举（冻结；顺序即派生优先序） */
+const AUTONOMOUS_FLEET_TYPES = Object.freeze([
+  'TRADE_CONVOY',
+  'SMUGGLER_RUNNER',
+  'PATROL_FLOTILLA',
+  'MARKET_EXPEDITION',
+  'BOUNTY_HUNTER',
+]);
+
+/** 中立自主派系哨兵 ID（未注册派系默认视作海盗敌对；此二者豁免） */
+const AUTONOMOUS_NEUTRAL_FACTIONS = Object.freeze({
+  fac_syndicate: true,
+  fac_bounty_hunters: true,
+});
+
+/** 并存上限：全类型总数 / 单类型数（防长线膨胀，M3 裁决值） */
+const AUTONOMOUS_FLEET_CAP = 24;
+const AUTONOMOUS_FLEET_CAP_PER_TYPE = 6;
+
+/** 舰队 10 桶轮询：每桶访问推进的 transit 游戏小时数（10 tick 周期 ≈ 1h/tick 摊销） */
+const FLEET_BUCKET_COUNT = 10;
+const TRANSIT_HOURS_PER_VISIT = 10;
+
+/** 跨星系航程折算：1 星系坐标单位（=1LY，doc44 S4 裁决口径）× 2 小时，钳 [24,720] */
+const TRAVEL_TICKS_PER_LY = 2;
+const TRAVEL_MIN_TICKS = 24;
+const TRAVEL_MAX_TICKS = 720;
+
+/** 商队货量（80–120 t 区间，M3 裁决） */
+const TRADE_CARGO_QTY_BASE = 80;
+const TRADE_CARGO_QTY_SPAN = 41;
+
+/** 走私单次运量（24 单位违禁品，M3 裁决） */
+const SMUGGLER_CARGO_QTY = 24;
+
+/** 巡逻反走私确定性查获概率档（0.5；deriveSeed 采样 < p 判查获） */
+const PATROL_BUST_PROBABILITY = 0.5;
+
+/** 高关税走私目的地阈值（market.tariffRate ≥ 0.35，doc34 §4.2.1 黑市生成同源档） */
+const SMUGGLER_TARIFF_THRESHOLD = 0.35;
+
+/** 高犯罪走私目的地阈值（colony.crime ≥ 15） */
+const SMUGGLER_CRIME_THRESHOLD = 15;
+
+/** 市场份额远征阈值：玩家单一商品份额 > 40%（doc46 精确值） */
+const MARKET_SHARE_EXPEDITION_THRESHOLD = 0.4;
+
+/** 玩家歼灭远征军的关系折价（−5，doc42 §五.1「每摧毁一支远征军关系降低 5 点」；绝不宣战） */
+const MARKET_EXPEDITION_RELATION_HIT = 5;
+
+/** 截击推升目的星短缺局势进度的精确值（doc46 Task 3.3：progress +3） */
+const INTERDICT_SHORTAGE_PUSH = 3;
+
+/** 每月度周期末派生的巡逻司令部数量上限（M3 裁决：防超大规模世界事件风暴） */
+const PATROL_DERIVE_CAP_PER_MONTH = 4;
+
+/** 自主舰队派生起始月界（首个真实月末 tick=720 起；开局宽限，防 tick0 立即远征） */
+const DERIVE_START_TICK = 720;
+
+/* ============================== 惰性容器与基础查询 ============================== */
+
+/**
+ * 显式生命周期入口：幂等挂载自主舰队容器（ensureSpaceOperaState + ID 游标）。
+ * 绝不消费 world.rng；重复调用同引用。默认 tick 流程不调用本函数。
+ */
+function ensureAutonomousFleets(world) {
+  const soState = ensureSpaceOperaState(world);
+  if (!Number.isFinite(soState.nextAutonomousFleetId)) soState.nextAutonomousFleetId = 1;
+  if (!Array.isArray(soState.autonomousFleets)) soState.autonomousFleets = [];
+  return soState;
+}
+
+/** 自主舰队列表只读（容器缺失返回 []，绝不 ensure） */
+function listAutonomousFleets(world) {
+  const soState = world && world.spaceOperaState;
+  return soState && Array.isArray(soState.autonomousFleets) ? soState.autonomousFleets : [];
+}
+
+/** world.seed 归一（与 fleetDoctrineAndScars / planetStateSchema 同款守卫） */
+function worldSeedOf(world) {
+  return (typeof world.seed === 'number' && Number.isFinite(world.seed)) ? world.seed >>> 0 : 0;
+}
+
+/** tick 归一 */
+function tickOf(world) {
+  return Number.isFinite(world.tick) ? Math.max(0, Math.trunc(world.tick)) : 0;
+}
+
+/**
+ * 派系身份桥接（opera 层 colony.ownerId 数字键 / 外交层字符串 id，双口径同型匹配；
+ * 与 shadowSyndicateArc.hasTradeAgreement 的 String 同值口径一致）。
+ */
+function matchesFaction(ownerId, factionId) {
+  if (ownerId === factionId) return true;
+  if (String(ownerId) === String(factionId)) return true;
+  return numericEntityKey(ownerId) === numericEntityKey(factionId);
+}
+
+/** 派系注册解析：返回 entities.factions 的真实键（未注册返回 null） */
+function resolveFactionKey(world, factionId) {
+  const factions = world && world.entities && world.entities.factions ? world.entities.factions : {};
+  for (const k of Object.keys(factions)) {
+    if (matchesFaction(k, factionId)) return k;
+  }
+  return null;
+}
+
+/**
+ * 两派系敌对判定（截击/游猎目标共用口径）：
+ *  - 同派系 → 不敌对；
+ *  - 危机派系（fac_crisis）敌视一切；
+ *  - 未注册派系（海盗/天灾集群）敌对，唯 AUTONOMOUS_NEUTRAL_FACTIONS 哨兵豁免；
+ *  - 注册派系间：存在 active 战争（relations.diplomacy[relationKey].warId）才敌对。
+ */
+function factionHostile(world, a, b) {
+  if (a == null || b == null || matchesFaction(a, b)) return false;
+  if (a === 'fac_crisis' || b === 'fac_crisis') return true;
+  const keyA = resolveFactionKey(world, a);
+  const keyB = resolveFactionKey(world, b);
+  if (!keyA || !keyB) {
+    // 至少一方未注册：中立哨兵豁免，其余（海盗等）敌对
+    const neutralA = !keyA && AUTONOMOUS_NEUTRAL_FACTIONS[a] === true;
+    const neutralB = !keyB && AUTONOMOUS_NEUTRAL_FACTIONS[b] === true;
+    return !(neutralA || neutralB);
+  }
+  const rel = world.relations && world.relations.diplomacy
+    ? world.relations.diplomacy[relationKey(keyA, keyB)]
+    : null;
+  if (!rel || !rel.warId) return false;
+  const war = world.entities && world.entities.wars ? world.entities.wars[rel.warId] : null;
+  return !!war && war.status === 'active';
+}
+
+/** 星系坐标（缺省 null；1 坐标单位 = 1 LY，doc44 S4 裁决） */
+function systemPos(world, systemId) {
+  const sys = world && world.entities && world.entities.systems
+    ? world.entities.systems[systemId] : null;
+  return sys && Number.isFinite(sys.x) && Number.isFinite(sys.y) ? { x: sys.x, y: sys.y } : null;
+}
+
+/** 跨星系航程折算 tick（TRAVEL_TICKS_PER_LY × LY，钳 [24,720]；无坐标回退下限） */
+function travelTicksFor(world, originSystemId, destSystemId) {
+  const a = systemPos(world, originSystemId);
+  const b = systemPos(world, destSystemId);
+  if (!a || !b) return TRAVEL_MIN_TICKS;
+  const ly = Math.hypot(a.x - b.x, a.y - b.y) * 1.0;
+  const t = Math.round(ly * TRAVEL_TICKS_PER_LY);
+  return Math.max(TRAVEL_MIN_TICKS, Math.min(TRAVEL_MAX_TICKS, t));
+}
+
+/** 舰队当前位置：半程前在起点星系、半程后算抵达星系（截击判定口径） */
+function currentSystemIdOf(fleet) {
+  if (!fleet) return null;
+  const half = (Number.isFinite(fleet.travelTicks) ? fleet.travelTicks : 0) / 2;
+  return (Number.isFinite(fleet.transitProgress) && fleet.transitProgress < half)
+    ? fleet.originSystemId
+    : fleet.destSystemId;
+}
+
+/** 已殖民行星确定性收集（含 compactState + colony + 8 维数组；键序升序） */
+function colonizedPlanets(world) {
+  const planets = world && world.entities && world.entities.planets ? world.entities.planets : {};
+  const out = [];
+  for (const key of Object.keys(planets).sort()) {
+    const p = planets[key];
+    const compact = p && p.compactState;
+    const colony = compact && compact.colony;
+    if (compact && colony && Array.isArray(colony.stockpile) && Array.isArray(colony.netFlow)) {
+      out.push(p);
+    }
+  }
+  return out;
+}
+
+/** 星系内第一颗已殖民行星（数值键升序；无则 null） */
+function firstColonizedPlanetInSystem(world, systemId) {
+  const planets = world && world.entities && world.entities.planets ? world.entities.planets : {};
+  const found = [];
+  for (const key of Object.keys(planets)) {
+    const p = planets[key];
+    if (p && p.systemId === systemId && p.compactState && p.compactState.colony) {
+      found.push({ num: numericEntityKey(p.id), p });
+    }
+  }
+  found.sort((a, b) => a.num - b.num);
+  return found.length > 0 ? found[0].p : null;
+}
+
+/** 待决系统冲击写入（jacobianCoupling.consumePendingShocks 消费契约；同键累加） */
+function pushSystemShock(world, key, delta) {
+  const soState = world && world.spaceOperaState;
+  if (!soState) return;
+  if (!soState.pendingSystemShocks || typeof soState.pendingSystemShocks !== 'object') {
+    soState.pendingSystemShocks = {};
+  }
+  soState.pendingSystemShocks[key] = (Number(soState.pendingSystemShocks[key]) || 0) + delta;
+}
+
+/* ============================== 派生与登记 ============================== */
+
+/**
+ * 登记一支自主舰队（容量护栏：全类型 24 / 单类型 6，超限返回 null）。
+ * @param {object} spec - { type, factionId, originSystemId, destSystemId, cargo?, travelTicks?, formationClass?, homePlanetId? }
+ */
+function spawnAutonomousFleet(world, spec) {
+  if (!world || !world.spaceOperaState) return null;
+  const soState = ensureAutonomousFleets(world);
+  const fleets = soState.autonomousFleets;
+  if (fleets.length >= AUTONOMOUS_FLEET_CAP) return null;
+  if (!AUTONOMOUS_FLEET_TYPES.includes(spec.type)) return null;
+  if (fleets.filter((f) => f.type === spec.type).length >= AUTONOMOUS_FLEET_CAP_PER_TYPE) return null;
+  const fleet = {
+    id: soState.nextAutonomousFleetId++,
+    type: spec.type,
+    factionId: spec.factionId != null ? spec.factionId : null,
+    originSystemId: spec.originSystemId != null ? spec.originSystemId : null,
+    destSystemId: spec.destSystemId != null ? spec.destSystemId : spec.originSystemId,
+    cargo: spec.cargo ? { resourceId: spec.cargo.resourceId, qty: spec.cargo.qty } : null,
+    transitProgress: 0,
+    spawnedTick: tickOf(world),
+    interdicted: false,
+    travelTicks: Number.isFinite(spec.travelTicks) ? spec.travelTicks : travelTicksFor(world, spec.originSystemId, spec.destSystemId),
+  };
+  if (spec.formationClass) fleet.formationClass = spec.formationClass;
+  if (spec.homePlanetId != null) fleet.homePlanetId = spec.homePlanetId;
+  fleets.push(fleet);
+  return fleet;
+}
+
+/** 单类型/总量计数（派生护栏） */
+function countByType(fleets, type) {
+  return fleets.filter((f) => f && f.type === type).length;
+}
+
+/**
+ * 月度周期末派生（tick%720===0 且 tick ≥ DERIVE_START_TICK；stepAutonomousFleets 内联调用，
+ * 亦可被套件直调）。5 类规则逐一按 deriveSeed(SECTOR_AUTONOMOUS,…) 确定性执行。
+ *
+ * @returns {{derived: number, byType: Object<string, number>}}
+ */
+function deriveAutonomousFleets(world) {
+  const stats = { derived: 0, byType: {} };
+  if (!world || !world.spaceOperaState) return stats;
+  const tick = tickOf(world);
+  if (tick < DERIVE_START_TICK) return stats; // 开局宽限：首个真实月末（720）起派生
+  const seed = worldSeedOf(world);
+  const soState = world.spaceOperaState;
+  const fleets = Array.isArray(soState.autonomousFleets) ? soState.autonomousFleets : [];
+  const planets = colonizedPlanets(world);
+  if (planets.length === 0) return stats;
+
+  // —— 1) TRADE_CONVOY：净流>0 星 → 净流<0 同资源星（跨星系套利）——
+  {
+    const srcs = [];
+    const dsts = [];
+    const weights = [];
+    for (let i = 0; i < OPERA_RESOURCE_KEYS.length; i++) {
+      const s = planets.filter((p) => Number(p.compactState.colony.netFlow[i]) > 0);
+      const d = planets.filter((p) => Number(p.compactState.colony.netFlow[i]) < 0);
+      srcs.push(s);
+      dsts.push(d);
+      weights.push(s.length * d.length);
+    }
+    const idx = sampleWeightedIndex(seed, SALT, tick, 11, weights);
+    if (weights[idx] > 0 && srcs[idx].length > 0 && dsts[idx].length > 0) {
+      const src = srcs[idx][deriveSeed(seed, SALT, tick, 21 + idx) % srcs[idx].length];
+      const dst = dsts[idx][deriveSeed(seed, SALT, tick, 31 + idx) % dsts[idx].length];
+      if (src.systemId !== dst.systemId && countByType(fleets, 'TRADE_CONVOY') < AUTONOMOUS_FLEET_CAP_PER_TYPE) {
+        const qty = TRADE_CARGO_QTY_BASE + (deriveSeed(seed, SALT, tick, 41 + idx) % TRADE_CARGO_QTY_SPAN);
+        const fleet = spawnAutonomousFleet(world, {
+          type: 'TRADE_CONVOY',
+          factionId: src.compactState.colony.ownerId,
+          originSystemId: src.systemId,
+          destSystemId: dst.systemId,
+          cargo: { resourceId: OPERA_RESOURCE_KEYS[idx], qty },
+        });
+        if (fleet) bump(stats, 'TRADE_CONVOY');
+      }
+    }
+  }
+
+  // —— 2) SMUGGLER_RUNNER：高关税 / 叛乱前夕 / 高犯罪星 ——
+  {
+    const revoltTargets = new Set(
+      listActiveSituations(world)
+        .filter((s) => s.systemArcId === 'PLANETARY_REVOLT' && s.resolvedTick == null)
+        .map((s) => String(s.targetEntityId)),
+    );
+    const dsts = planets.filter((p) => {
+      const market = world.economy && world.economy.markets
+        ? world.economy.markets[p.systemId] : null;
+      const tariff = market && Number.isFinite(market.tariffRate) ? market.tariffRate : 0;
+      const crime = Number(p.compactState.colony.crime);
+      return tariff >= SMUGGLER_TARIFF_THRESHOLD
+        || (Number.isFinite(crime) && crime >= SMUGGLER_CRIME_THRESHOLD)
+        || revoltTargets.has(String(p.id));
+    });
+    if (dsts.length > 0 && countByType(fleets, 'SMUGGLER_RUNNER') < AUTONOMOUS_FLEET_CAP_PER_TYPE) {
+      const sysKeys = Object.keys(world.entities.systems || {}).sort();
+      if (sysKeys.length > 0) {
+        const dst = dsts[deriveSeed(seed, SALT, tick, 51) % dsts.length];
+        const origins = sysKeys.filter((k) => k !== dst.systemId);
+        const origin = origins.length > 0
+          ? origins[deriveSeed(seed, SALT, tick, 52) % origins.length]
+          : dst.systemId;
+        const resIdx = deriveSeed(seed, SALT, tick, 53) % CONTRABAND_IDS.length;
+        const fleet = spawnAutonomousFleet(world, {
+          type: 'SMUGGLER_RUNNER',
+          factionId: 'fac_syndicate',
+          originSystemId: origin,
+          destSystemId: dst.systemId,
+          cargo: { resourceId: CONTRABAND_IDS[resIdx], qty: SMUGGLER_CARGO_QTY },
+        });
+        if (fleet) bump(stats, 'SMUGGLER_RUNNER');
+      }
+    }
+  }
+
+  // —— 3) PATROL_FLOTILLA：patrolHQ 星按 computeDoctrineTemplate 派生轻/中/重编队 ——
+  {
+    const hqPlanets = planets
+      .filter((p) => p.patrolHQ && p.patrolHQ.doctrine)
+      .slice(0, PATROL_DERIVE_CAP_PER_MONTH);
+    for (const p of hqPlanets) {
+      const already = fleets.some((f) => f.type === 'PATROL_FLOTILLA' && f.homePlanetId === p.id);
+      if (already) continue; // 每司令部常驻一支巡逻编队
+      const tpl = computeDoctrineTemplate(p.patrolHQ.doctrine);
+      const clsIdx = sampleWeightedIndex(
+        seed, SALT, numericEntityKey(p.id), 61,
+        [tpl.light, tpl.mid, tpl.heavy],
+      );
+      const formationClass = ['light', 'mid', 'heavy'][clsIdx] || 'light';
+      const fleet = spawnAutonomousFleet(world, {
+        type: 'PATROL_FLOTILLA',
+        factionId: p.patrolHQ.factionId,
+        originSystemId: p.systemId,
+        destSystemId: p.systemId,
+        cargo: null,
+        travelTicks: TRAVEL_MIN_TICKS,
+        formationClass,
+        homePlanetId: p.id,
+      });
+      if (fleet) bump(stats, 'PATROL_FLOTILLA');
+    }
+  }
+
+  // —— 4) MARKET_EXPEDITION：玩家单一商品份额 > 40% → 霸权派系远征军指向玩家产区 ——
+  {
+    const pf = world.playerFactionId;
+    if (pf) {
+      const totals = new Array(OPERA_RESOURCE_KEYS.length).fill(0);
+      const playerTotals = new Array(OPERA_RESOURCE_KEYS.length).fill(0);
+      for (const p of planets) {
+        const stock = p.compactState.colony.stockpile;
+        const isPlayer = matchesFaction(p.compactState.colony.ownerId, pf);
+        for (let i = 0; i < totals.length; i++) {
+          const v = Number.isFinite(Number(stock[i])) ? Math.max(0, Number(stock[i])) : 0;
+          totals[i] += v;
+          if (isPlayer) playerTotals[i] += v;
+        }
+      }
+      let bestIdx = -1;
+      let bestShare = 0;
+      for (let i = 0; i < totals.length; i++) {
+        if (totals[i] <= 0) continue;
+        const share = playerTotals[i] / totals[i];
+        if (share > MARKET_SHARE_EXPEDITION_THRESHOLD && share > bestShare) {
+          bestShare = share;
+          bestIdx = i;
+        }
+      }
+      if (bestIdx >= 0 && countByType(fleets, 'MARKET_EXPEDITION') < AUTONOMOUS_FLEET_CAP_PER_TYPE) {
+        // 霸权派系：键序首个非玩家注册派系（确定性）
+        const factions = world.entities.factions || {};
+        let hegemon = null;
+        for (const k of Object.keys(factions).sort()) {
+          if (!matchesFaction(k, pf)) { hegemon = k; break; }
+        }
+        if (hegemon) {
+          // 玩家产区：该商品库存最高的玩家殖民星（tie 数值键升序）
+          let dest = null;
+          let destNum = Infinity;
+          let destStock = -1;
+          for (const p of planets) {
+            if (!matchesFaction(p.compactState.colony.ownerId, pf)) continue;
+            const v = Math.max(0, Number(p.compactState.colony.stockpile[bestIdx]) || 0);
+            const num = numericEntityKey(p.id);
+            if (v > destStock || (v === destStock && num < destNum)) {
+              destStock = v;
+              destNum = num;
+              dest = p;
+            }
+          }
+          if (dest) {
+            const hegFac = factions[hegemon];
+            const originSystemId = (hegFac && hegFac.homePlanetId
+              && world.entities.planets[hegFac.homePlanetId])
+              ? world.entities.planets[hegFac.homePlanetId].systemId
+              : dest.systemId;
+            const fleet = spawnAutonomousFleet(world, {
+              type: 'MARKET_EXPEDITION',
+              factionId: hegemon,
+              originSystemId,
+              destSystemId: dest.systemId,
+              cargo: { resourceId: OPERA_RESOURCE_KEYS[bestIdx], qty: 60 },
+            });
+            if (fleet) bump(stats, 'MARKET_EXPEDITION');
+          }
+        }
+      }
+    }
+  }
+
+  // —— 5) BOUNTY_HUNTER：赏金公会悬赏在场 → 向敌对舰队星系游猎 ——
+  {
+    const hasBounty = !!(world.economy && world.economy.bounties)
+      || !!(world.economy && world.economy.lettersOfMarque
+        && Object.keys(world.economy.lettersOfMarque).length > 0);
+    if (hasBounty && countByType(fleets, 'BOUNTY_HUNTER') < AUTONOMOUS_FLEET_CAP_PER_TYPE) {
+      const pf = world.playerFactionId;
+      const hostileSystems = [];
+      const seen = new Set();
+      const fleetsAll = world.entities && world.entities.fleets ? world.entities.fleets : {};
+      for (const key of Object.keys(fleetsAll).sort()) {
+        const f = fleetsAll[key];
+        if (!f || f.role !== 'combat' || f.status === 'dissolved' || f.systemId == null) continue;
+        if (seen.has(f.systemId)) continue;
+        if (factionHostile(world, pf, f.factionId)) {
+          hostileSystems.push(f.systemId);
+          seen.add(f.systemId);
+        }
+      }
+      if (hostileSystems.length > 0) {
+        hostileSystems.sort((a, b) => String(a).localeCompare(String(b)));
+        const dest = hostileSystems[deriveSeed(seed, SALT, tick, 71) % hostileSystems.length];
+        const sysKeys = Object.keys(world.entities.systems || {}).sort().filter((k) => k !== dest);
+        const origin = sysKeys.length > 0 ? sysKeys[deriveSeed(seed, SALT, tick, 72) % sysKeys.length] : dest;
+        const fleet = spawnAutonomousFleet(world, {
+          type: 'BOUNTY_HUNTER',
+          factionId: 'fac_bounty_hunters',
+          originSystemId: origin,
+          destSystemId: dest,
+          cargo: null,
+        });
+        if (fleet) bump(stats, 'BOUNTY_HUNTER');
+      }
+    }
+  }
+
+  return stats;
+}
+
+/** 派生统计累加（内部） */
+function bump(stats, type) {
+  stats.derived++;
+  stats.byType[type] = (stats.byType[type] || 0) + 1;
+}
+
+/* ============================== 截击与到港结算 ============================== */
+
+/** 同系统敌方战斗舰队存在判定（截击口径；见 factionHostile） */
+function hostileFleetInSystem(world, fleet, systemId) {
+  const fleets = world.entities && world.entities.fleets ? world.entities.fleets : {};
+  for (const key of Object.keys(fleets).sort()) {
+    const f = fleets[key];
+    if (!f || f.systemId !== systemId) continue;
+    if (f.status === 'dissolved') continue;
+    if ((f.role || 'combat') !== 'combat') continue;
+    if (factionHostile(world, fleet.factionId, f.factionId)) return f;
+  }
+  return null;
+}
+
+/**
+ * 截击结算（TRADE_CONVOY / SMUGGLER_RUNNER 途中检定）：
+ * 货物损失 + 目的星短缺进度推升（活跃 S4 局势 progress +3，否则 pendingSystemShocks['S4'] += 3）。
+ * 舰队置 interdicted=true 后于下次桶访问移除（世界态可观测窗口）。
+ */
+function settleInterdiction(world, fleet, tick) {
+  fleet.interdicted = true;
+  emit(world, 'AutonomousFleetInterdicted', {
+    fleetId: fleet.id,
+    type: fleet.type,
+    factionId: fleet.factionId,
+    systemId: currentSystemIdOf(fleet),
+    cargoLost: fleet.cargo ? { ...fleet.cargo } : null,
+  }, 'fleet');
+  chronicle(world, 'fleet', `自主${fleetTypeName(fleet.type)}在途遭截击，货物尽失`, { fleetId: fleet.id });
+
+  // —— 目的星短缺进度推升（断供后果，doc46 §Task 3.3 §1）——
+  const dstPlanet = firstColonizedPlanetInSystem(world, fleet.destSystemId);
+  if (dstPlanet) {
+    const sit = listActiveSituations(world).find((s) => s.systemArcId === 'S4'
+      && (s.targetEntityId === dstPlanet.id || String(s.targetEntityId) === String(dstPlanet.id)));
+    if (sit) {
+      sit.progress = Math.min(
+        Number.isFinite(sit.progressMax) ? sit.progressMax : 100,
+        (Number.isFinite(sit.progress) ? sit.progress : 0) + INTERDICT_SHORTAGE_PUSH,
+      );
+      emit(world, 'ConvoyInterdictShortagePushed', {
+        fleetId: fleet.id,
+        planetId: dstPlanet.id,
+        situationId: sit.id,
+        pushed: INTERDICT_SHORTAGE_PUSH,
+      }, 'economy');
+    } else {
+      pushSystemShock(world, 'S4', INTERDICT_SHORTAGE_PUSH);
+    }
+  }
+}
+
+/** 中文类型名（事件文案） */
+function fleetTypeName(type) {
+  return {
+    TRADE_CONVOY: '套利商队',
+    SMUGGLER_RUNNER: '走私快船',
+    PATROL_FLOTILLA: '治安巡逻队',
+    MARKET_EXPEDITION: '市场份额远征军',
+    BOUNTY_HUNTER: '赏金猎人',
+  }[type] || type;
+}
+
+/** 巡逻队同系统反走私扫描（确定性查获：sampleFloat01 < PATROL_BUST_PROBABILITY） */
+function patrolAntiSmugglingScan(world, patrol, tick) {
+  const seed = worldSeedOf(world);
+  const fleets = listAutonomousFleets(world);
+  const patrolSystem = currentSystemIdOf(patrol);
+  let busted = 0;
+  for (const s of fleets) {
+    if (!s || s.type !== 'SMUGGLER_RUNNER' || s.interdicted) continue;
+    if (currentSystemIdOf(s) !== patrolSystem) continue;
+    const roll = sampleFloat01(seed, SALT, numericEntityKey(s.id), tick * 13 + 7);
+    if (roll < PATROL_BUST_PROBABILITY) {
+      s.interdicted = true;
+      busted++;
+      emit(world, 'SmugglerBustedByPatrol', {
+        smugglerId: s.id,
+        patrolId: patrol.id,
+        systemId: patrolSystem,
+        cargoSeized: s.cargo ? { ...s.cargo } : null,
+      }, 'fleet');
+    }
+  }
+  return busted;
+}
+
+/** 到港结算（按类型分派；返回 true = 舰队已移除） */
+function settleArrival(world, fleet, tick) {
+  const planets = world.entities && world.entities.planets ? world.entities.planets : {};
+  const idx = fleet.cargo ? OPERA_RESOURCE_KEYS.indexOf(fleet.cargo.resourceId) : -1;
+
+  switch (fleet.type) {
+    case 'TRADE_CONVOY': {
+      const dstPlanet = firstColonizedPlanetInSystem(world, fleet.destSystemId);
+      const srcPlanet = firstColonizedPlanetInSystem(world, fleet.originSystemId);
+      if (dstPlanet && idx >= 0) {
+        dstPlanet.compactState.colony.stockpile[idx] += fleet.cargo.qty; // 到港交付
+      }
+      if (srcPlanet && idx >= 0) {
+        srcPlanet.compactState.colony.netFlow[idx] -= fleet.cargo.qty; // 源头净流扣减
+      }
+      emit(world, 'TradeConvoyDelivered', {
+        fleetId: fleet.id,
+        originSystemId: fleet.originSystemId,
+        destSystemId: fleet.destSystemId,
+        cargo: fleet.cargo ? { ...fleet.cargo } : null,
+        delivered: !!dstPlanet && idx >= 0,
+      }, 'economy');
+      return true;
+    }
+    case 'SMUGGLER_RUNNER': {
+      const bm = ensureBlackMarket(world, fleet.destSystemId);
+      if (bm && fleet.cargo) {
+        bm.stock[fleet.cargo.resourceId] = (bm.stock[fleet.cargo.resourceId] || 0) + fleet.cargo.qty;
+      }
+      emit(world, 'SmugglerRunDelivered', {
+        fleetId: fleet.id,
+        destSystemId: fleet.destSystemId,
+        cargo: fleet.cargo ? { ...fleet.cargo } : null,
+        marketPresent: !!bm,
+      }, 'economy');
+      return true;
+    }
+    case 'PATROL_FLOTILLA': {
+      patrolAntiSmugglingScan(world, fleet, tick);
+      const home = fleet.homePlanetId != null ? planets[fleet.homePlanetId] || planets[`plt_${fleet.homePlanetId}`] : null;
+      if (!home || !home.patrolHQ) return true; // 司令部撤编 → 巡逻队解散
+      fleet.transitProgress = 0; // 常驻编队：重置航程继续巡逻
+      return false;
+    }
+    case 'MARKET_EXPEDITION': {
+      const dstPlanet = firstColonizedPlanetInSystem(world, fleet.destSystemId);
+      if (dstPlanet && idx >= 0) {
+        const stock = dstPlanet.compactState.colony.stockpile;
+        stock[idx] = Math.max(0, stock[idx] - fleet.cargo.qty); // 袭击产区掠获
+      }
+      emit(world, 'MarketExpeditionRaided', {
+        fleetId: fleet.id,
+        factionId: fleet.factionId,
+        destSystemId: fleet.destSystemId,
+        cargo: fleet.cargo ? { ...fleet.cargo } : null,
+      }, 'economy');
+      chronicle(world, 'politics', `霸权市场份额远征军袭击玩家产区（${fleetTypeName(fleet.type)}）`, { fleetId: fleet.id });
+      return true;
+    }
+    case 'BOUNTY_HUNTER': {
+      emit(world, 'BountyHuntSettled', {
+        fleetId: fleet.id,
+        destSystemId: fleet.destSystemId,
+      }, 'fleet');
+      return true;
+    }
+    default:
+      return true;
+  }
+}
+
+/* ============================== 每 tick 桶步进 ============================== */
+
+/**
+ * 自主生态舰队每 tick 步进（registerHourly 'space-opera-autonomous-fleets' 注册形态）。
+ * 首行守卫 world.spaceOperaState（未挂载容器 → 金快照世界零读取零写入）；
+ * 舰队桶：numericEntityKey(fleet.id) % 10 === tick % 10；月度周期末（tick%720===0 且
+ * tick ≥ 720）触发 5 类派生规则。
+ *
+ * @returns {{visited: number, arrived: number, interdicted: number, derived: number}}
+ */
+function stepAutonomousFleets(world) {
+  const stats = { visited: 0, arrived: 0, interdicted: 0, derived: 0 };
+  if (!world || !world.spaceOperaState) return stats;
+  const soState = world.spaceOperaState;
+  if (!Array.isArray(soState.autonomousFleets)) soState.autonomousFleets = [];
+  if (!Number.isFinite(soState.nextAutonomousFleetId)) soState.nextAutonomousFleetId = 1;
+  const tick = tickOf(world);
+
+  // —— 月度周期末：5 类派生规则 ——
+  if (tick > 0 && tick % 720 === 0) {
+    const d = deriveAutonomousFleets(world);
+    stats.derived = d.derived;
+  }
+
+  const fleets = soState.autonomousFleets;
+  const bucket = tick % FLEET_BUCKET_COUNT;
+  for (let i = fleets.length - 1; i >= 0; i--) {
+    const fleet = fleets[i];
+    if (!fleet || typeof fleet !== 'object') {
+      fleets.splice(i, 1);
+      continue;
+    }
+    if (numericEntityKey(fleet.id) % FLEET_BUCKET_COUNT !== bucket) continue;
+    stats.visited++;
+
+    // —— 截击善后：上轮置 interdicted 的舰队本轮移除（世界态可观测窗口 10 tick）——
+    if (fleet.interdicted) {
+      fleets.splice(i, 1);
+      stats.interdicted++;
+      continue;
+    }
+
+    // —— 截击检定（商队/走私船在途；同系统出现敌对/海盗战斗舰队）——
+    if (fleet.type === 'TRADE_CONVOY' || fleet.type === 'SMUGGLER_RUNNER') {
+      const cur = currentSystemIdOf(fleet);
+      if (cur != null && hostileFleetInSystem(world, fleet, cur)) {
+        settleInterdiction(world, fleet, tick);
+        continue;
+      }
+    }
+
+    // —— 航线推进（每桶访问 +10 游戏小时）——
+    fleet.transitProgress = (Number.isFinite(fleet.transitProgress) ? fleet.transitProgress : 0)
+      + TRANSIT_HOURS_PER_VISIT;
+
+    // —— 到港结算 ——
+    if (fleet.transitProgress >= (Number.isFinite(fleet.travelTicks) ? fleet.travelTicks : TRAVEL_MIN_TICKS)) {
+      const removed = settleArrival(world, fleet, tick);
+      if (removed) {
+        fleets.splice(i, 1);
+        stats.arrived++;
+      }
+    }
+  }
+  return stats;
+}
+
+// —— 时钟阶段注册已收拢至 src/simulation/SpaceOperaWiring.js（SPEC-PLAN-049 §Task 49.3
+//    唯一注册点：registerHourly('space-opera-autonomous-fleets', …)）。原 import 期副作用
+//    注册拆除；stepAutonomousFleets 首行自守卫 world.spaceOperaState（金快照世界零读取零写入）。——
+
+/* ============================== 玩家歼灭结算（远征军关系折价） ============================== */
+
+/**
+ * 自主舰队被玩家歼灭（战斗层/命令路径上报的领域落点）：
+ *  - MARKET_EXPEDITION：getRelation 调整 opinion −5（MARKET_EXPEDITION_RELATION_HIT），
+ *    **绝不调用 declareWar**（doc42 §五.1：摧毁远征军仅关系降低 5 点，不触发全面宣战）；
+ *  - 其余类型：仅移除并记账。
+ * 目标不存在返回 { ok:false, reason }；成功返回歼灭记录（同时落 soState.lastAutonomousFleetKill）。
+ *
+ * @param {object} world - 世界根对象
+ * @param {number|string} fleetId - 自主舰队 ID
+ * @param {string|number} [byFactionId] - 动手方派系（缺省按玩家派系）
+ */
+function onAutonomousFleetDestroyed(world, fleetId, byFactionId) {
+  if (!world || !world.spaceOperaState) return { ok: false, reason: 'SO: 自主舰队容器未挂载' };
+  const soState = world.spaceOperaState;
+  const fleets = Array.isArray(soState.autonomousFleets) ? soState.autonomousFleets : [];
+  const pos = fleets.findIndex((f) => f && (f.id === fleetId || String(f.id) === String(fleetId)));
+  if (pos < 0) return { ok: false, reason: `SO: 自主舰队不存在 ${String(fleetId)}` };
+  const fleet = fleets[pos];
+  fleets.splice(pos, 1);
+
+  const actor = byFactionId != null ? byFactionId : world.playerFactionId;
+  const record = {
+    fleetId: fleet.id,
+    type: fleet.type,
+    factionId: fleet.factionId,
+    byFactionId: actor != null ? actor : null,
+    relationHit: 0,
+    tick: tickOf(world),
+  };
+
+  if (fleet.type === 'MARKET_EXPEDITION' && actor != null) {
+    const keyA = resolveFactionKey(world, actor);
+    const keyB = resolveFactionKey(world, fleet.factionId);
+    if (keyA && keyB && keyA !== keyB) {
+      // war.js getRelation 惰性取关系并震荡 −5；
+      // 刻意绕开 war.declareWar —— 商业远征摩擦不构成宣战理由（doc42 §五.1）
+      const rel = getRelation(world, keyA, keyB);
+      rel.opinion = Math.max(-100, (Number.isFinite(rel.opinion) ? rel.opinion : 0) - MARKET_EXPEDITION_RELATION_HIT);
+      record.relationHit = -MARKET_EXPEDITION_RELATION_HIT;
+    }
+    emit(world, 'MarketExpeditionDestroyed', {
+      fleetId: fleet.id,
+      hegemonFactionId: fleet.factionId,
+      byFactionId: record.byFactionId,
+      opinionDelta: record.relationHit,
+      warDeclared: false,
+    }, 'diplomacy');
+    chronicle(world, 'diplomacy', '市场份额远征军遭伏击歼灭——商业摩擦仅折损关系 5 点，未构成宣战', { fleetId: fleet.id });
+  } else {
+    emit(world, 'AutonomousFleetDestroyed', {
+      fleetId: fleet.id,
+      type: fleet.type,
+      byFactionId: record.byFactionId,
+    }, 'fleet');
+  }
+
+  soState.lastAutonomousFleetKill = record;
+  return { ok: true, record };
+}
+
+Object.assign(__exports, { AUTONOMOUS_FLEET_TYPES, AUTONOMOUS_NEUTRAL_FACTIONS, AUTONOMOUS_FLEET_CAP, AUTONOMOUS_FLEET_CAP_PER_TYPE, FLEET_BUCKET_COUNT, TRANSIT_HOURS_PER_VISIT, TRAVEL_TICKS_PER_LY, TRAVEL_MIN_TICKS, TRAVEL_MAX_TICKS, TRADE_CARGO_QTY_BASE, TRADE_CARGO_QTY_SPAN, SMUGGLER_CARGO_QTY, PATROL_BUST_PROBABILITY, SMUGGLER_TARIFF_THRESHOLD, SMUGGLER_CRIME_THRESHOLD, MARKET_SHARE_EXPEDITION_THRESHOLD, MARKET_EXPEDITION_RELATION_HIT, INTERDICT_SHORTAGE_PUSH, PATROL_DERIVE_CAP_PER_MONTH, DERIVE_START_TICK, ensureAutonomousFleets, listAutonomousFleets, travelTicksFor, currentSystemIdOf, spawnAutonomousFleet, deriveAutonomousFleets, stepAutonomousFleets, onAutonomousFleetDestroyed });
 
 });
 __register("src/simulation/jacobianCoupling.js", function (__exports, __require) {
@@ -75696,6 +76928,160 @@ function registerJacobianMonthlyClose() {
 }
 
 Object.assign(__exports, { JACOBIAN_7X7, SYSTEM_EQUILIBRIUM, SOFT_KNEE, softSaturate100, stepJacobianCoupling, recordButterflyRipple, consumePendingShocks, ENDOGENOUS_PUSH_DEFAULTS, stepSpaceOperaJacobian, registerJacobianMonthlyClose });
+
+});
+__register("src/domain/world/worldMigration.js", function (__exports, __require) {
+/**
+ * domain/world/worldMigration.js — 存档平滑迁移器与 world.spaceOperaState 根容器
+ * （SPEC-PLAN-043 总控卷 Task 0.3；责任人：Eng-A）
+ * （SPEC-PLAN-049 阶段四 M4 工位 A Task 49.1 增补：activateSpaceOperaCampaign 活体战役激活器）
+ *
+ * 职责：在 world 根对象下挂载向后兼容的惰性初始化容器 world.spaceOperaState。
+ * 旧版存档（容器缺失）加载后由 ensureSpaceOperaState(world) 无损补齐默认值。
+ *
+ * M4 模块图裁决（SPEC-PLAN-049 工位 A 施工 notes）：
+ *  - ensureSpaceOperaState 实现下沉至零依赖叶子模块 ./spaceOperaState.js（situationEngine
+ *    改 import 叶子，环断裂；缘由见该文件头裁决注释）；
+ *  - 本文件以 re-export 保全 doc43 冻结契约（全部既有导入方零改动）；
+ *  - activateSpaceOperaCampaign 仍在本文件（doc48 §Task 4.1 指定落点）。
+ *
+ * 纪律（doc43 §1.4.2 金快照零漂移铁律）：
+ *  - 幂等早返：容器已存在时直接返回同一引用，绝不重建；
+ *  - 零 world.rng 消费：默认值全部为常量字面量，不触碰任何随机流；
+ *  - 惰性挂载：仅在阶段入口/命令 execute 显式调用时才写入 world —— 默认 tick
+ *    流程与默认世界创建不调用本函数，金快照 8be8ce2c 保持逐位零漂移；
+ *  - SPACE_OPERA_SCHEMA_VERSION=200 是本容器自身的版本号，与 world.schemaVersion
+ *    （core/World.js 的存档 v2）正交，不升存档 SCHEMA_VERSION。
+ */
+
+const { ensureSpaceOperaState: ensureSpaceOperaState } = __require("src/domain/world/spaceOperaState.js");
+const { ensureCompactPlanetState: ensureCompactPlanetState, seedCompactTiles: seedCompactTiles } = __require("src/domain/planets/planetStateSchema.js");
+const { applyArchetypeProfile: applyArchetypeProfile } = __require("src/domain/planets/archetypeMechanics.js");
+const { ensureBeaconStream: ensureBeaconStream, stepBeaconStream: stepBeaconStream } = __require("src/domain/world/subspaceBeaconStream.js");
+const { ensureAutonomousFleets: ensureAutonomousFleets } = __require("src/domain/world/autonomousSectorLife.js");
+const { ensureParagonProfile: ensureParagonProfile, awakeLegendaryBeholder: awakeLegendaryBeholder } = __require("src/domain/characters/galacticParagons.js");
+const { ANOMALY_TEMPLATES: ANOMALY_TEMPLATES } = __require("src/content/anomalies.js");
+const { createEntity: createEntity } = __require("src/domain/entities/registry.js");
+const { emit: emit } = __require("src/core/eventBus.js");
+
+/**
+ * SPEC-PLAN-059 Task 59.5（doc56 赛道 A）：镜渊回声 / 记忆尘埃场在活体战役中可达。
+ * 确定性挑选首个具备异常槽且未占用的星系，直接落一条共创异常实体（零 world.rng 消费）。
+ * 幂等：soState.echoMirrorAnomalyId 记账。REG-01 不调用 activateSpaceOperaCampaign。
+ */
+function seedEchoMirrorAnomaly(world) {
+  const soState = world.spaceOperaState;
+  if (!soState || soState.echoMirrorAnomalyId) return null;
+  const tpl = ANOMALY_TEMPLATES.find((t) => t.id === 'ano_echo_mirror');
+  if (!tpl) return null;
+  const systems = (world.entities && world.entities.systems) || {};
+  let sys = null;
+  for (const key of Object.keys(systems).sort()) {
+    const s = systems[key];
+    if (s && s.flags && s.flags.hasAnomalySlot && !(s.anomalyIds || []).length) { sys = s; break; }
+  }
+  if (!sys) return null;
+  const anomaly = createEntity(world, 'anomalies', {
+    systemId: sys.id,
+    templateId: tpl.id,
+    category: tpl.category,
+    nameZh: tpl.nameZh,
+    nameEn: tpl.nameEn,
+    descZh: tpl.descZh,
+    state: 'detected',
+    progress: 0,
+    difficulty: Number.isFinite(sys.dangerRating) ? Math.round(sys.dangerRating + tpl.difficultyMod) : tpl.difficultyMod,
+    rewards: tpl.rewards.map((r) => ({ ...r })),
+    risks: tpl.risks.slice(),
+    discoveredBy: world.playerFactionId || null,
+    resolvedBy: null,
+    storyTag: tpl.storyTag || null,
+  });
+  if (!Array.isArray(sys.anomalyIds)) sys.anomalyIds = [];
+  sys.anomalyIds.push(anomaly.id);
+  soState.echoMirrorAnomalyId = anomaly.id;
+  emit(world, 'AnomalyDetected', {
+    anomalyId: anomaly.id, systemId: sys.id, factionId: world.playerFactionId,
+  }, 'exploration');
+  return anomaly;
+}
+
+/** spaceOperaState 容器版本（冻结契约值；实现在 ./spaceOperaState.js 叶子模块） */
+Object.assign(__exports, (function(){ const __m = __require("src/domain/world/spaceOperaState.js"); return { SPACE_OPERA_SCHEMA_VERSION: __m.SPACE_OPERA_SCHEMA_VERSION, ensureSpaceOperaState: __m.ensureSpaceOperaState }; })());
+
+/* ===================== M4 工位 A（SPEC-PLAN-049 Task 49.1）：活体战役激活器 ===================== */
+
+/**
+ * 将一个已完成基础实体构建的 world 实例深度激活为太空歌剧活体战役
+ * （SPEC-PLAN-048 §Task 4.1 / SPEC-PLAN-049 §Task 49.1；调用点：App.startNewGame）。
+ *
+ * 施工细则（doc49 §Task 49.1 逐条契约）：
+ *  1. 根容器初始化：幂等 ensureSpaceOperaState + ensureBeaconStream + ensureAutonomousFleets；
+ *  2. 全星系行星深度底座铺设：确定性键序（Object.keys(...).sort()）遍历 planets，
+ *     依次 ensureCompactPlanetState（紧凑容器）→ applyArchetypeProfile
+ *     （16 大天体物理原型法则与 8D envVector）→ seedCompactTiles（256-Tile uint32
+ *     位编码地形与初始覆盖层）；
+ *  3. 全局群像领袖档案初始化：确定性键序遍历 characters，ensureParagonProfile 挂载
+ *     character.paragon 档案（galacticParagons.js:111 权威落点；
+ *     doc49 文案「paragonProfile」≙ 代码世界 character.paragon，不重命名字段）；
+ *  4. 首帧信标池预热：立即 stepBeaconStream 一次，非帝国叙事信标（kind='NARRATIVE'）
+ *     密度铁律即刻补齐至 ≥ 15（BEACON_MIN_NARRATIVE，subspaceBeaconStream.js:58）。
+ *
+ * 红线（doc49 §1.3 不变量）：
+ *  - 严禁调用 world.rng：全链路仅消费 ensure/deriveSeed 派生盐子流
+ *    （ensureCompactPlanetState/seedCompactTiles/applyArchetypeProfile/spawnNarrativeBeacon
+ *    均为 deterministicRng 派生流，无 world.rng 消费点）；
+ *  - 全键稳定排序遍历：planets/characters 一律 Object.keys(...).sort()；
+ *  - 幂等性：全部 ensure 函数幂等（同引用直返），重复调用不破坏既有数据；
+ *  - 金快照纯洁性：本函数仅在 App.startNewGame 显式启用太空歌剧时调用；
+ *    REG-01 无参 createStarterCampaign() 永不触达，金快照 8be8ce2c 零漂移。
+ *
+ * @param {object} world - 主游戏世界状态（Plain Data）
+ * @returns {Object|null} world.spaceOperaState 实例（world 非法时返回 null）
+ */
+function activateSpaceOperaCampaign(world) {
+  if (!world || typeof world !== 'object') return null;
+
+  // —— 1. 根容器初始化（幂等；零 world.rng 消费）——
+  const soState = ensureSpaceOperaState(world);
+  ensureBeaconStream(world);
+  ensureAutonomousFleets(world);
+
+  // —— 2. 全星系行星深度底座铺设（确定性键序）——
+  const planets = (world.entities && world.entities.planets) || {};
+  const planetIds = Object.keys(planets).sort();
+  for (let i = 0; i < planetIds.length; i++) {
+    const pid = planetIds[i];
+    const planet = planets[pid];
+    if (!planet) continue;
+    // 挂载紧凑 PlanetState（幂等）
+    ensureCompactPlanetState(planet, world);
+    // 注入 16 大天体物理原型法则与 8D envVector（幂等）
+    applyArchetypeProfile(planet, world);
+    // 播种 256-Tile uint32 位编码地形与初始覆盖层（幂等；只覆盖地形三字段）
+    seedCompactTiles(planet, world);
+  }
+
+  // —— 3. 全局群像领袖档案初始化（确定性键序）——
+  const characters = (world.entities && world.entities.characters) || {};
+  const charIds = Object.keys(characters).sort();
+  for (let i = 0; i < charIds.length; i++) {
+    const ch = characters[charIds[i]];
+    if (ch) ensureParagonProfile(ch, world);
+  }
+
+  // —— 3.5 SPEC-PLAN-058 Task 58.1（BUG-10）：开局保底唤醒 The Beholder ——
+  // 仅在活体战役链路触达；REG-01 无参 createStarterCampaign() 不经过此路径（零漂移）。
+  awakeLegendaryBeholder(world);
+  seedEchoMirrorAnomaly(world); // 赛道 A：共创空间异常入库
+
+  // —— 4. 首帧信标池预热（立即补齐至 >= 15 条非帝国叙事信标）——
+  stepBeaconStream(world);
+
+  return soState;
+}
+
+Object.assign(__exports, { activateSpaceOperaCampaign });
 
 });
 __register("src/devtools/scenarioFactory.js", function (__exports, __require) {

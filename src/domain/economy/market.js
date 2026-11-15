@@ -9,6 +9,23 @@ import { BAL } from '../../content/constants.js';
 import { tradeableResourceIds, resourceDef } from '../../content/resources.js';
 import { clamp, lerp } from '../../core/math.js';
 import { emit } from '../../core/eventBus.js';
+import { relationKey } from '../../core/ids.js';
+
+/**
+ * SPEC-PLAN-056 Wave2 赛道 D：星火公约生效期间，对玩家宣战的违约方承受
+ * +25% 市场交易税（买入加价 / 卖出入账折减）。纯读、无副作用。
+ */
+export const STARFIRE_PACT_VIOLATOR_TAX_MULT = 1.25;
+export function starfirePactTradeTaxMult(world, factionId) {
+  const lan = world && world.spaceOperaState && world.spaceOperaState.landsraad;
+  if (!lan || lan.starfirePactActive !== true) return 1.0;
+  const pf = world.playerFactionId;
+  if (!pf || factionId === pf) return 1.0;
+  const dip = world.relations && world.relations.diplomacy ? world.relations.diplomacy : null;
+  if (!dip) return 1.0;
+  const rel = dip[relationKey(pf, factionId)];
+  return rel && rel.warId ? STARFIRE_PACT_VIOLATOR_TAX_MULT : 1.0;
+}
 
 /** 确保星系市场存在 */
 export function ensureMarket(world, systemId) {
@@ -72,7 +89,7 @@ export function marketBuy(world, factionId, systemId, resId, amount, ledgerApi) 
   const embargo = m.embargo[factionId];
   if (embargo) return { ok: false, reason: '禁运中' };
   const unit = marketUnitPrice(m, resId, qty, 'buy');
-  const cost = Math.ceil(unit * qty);
+  const cost = Math.ceil(unit * qty * starfirePactTradeTaxMult(world, factionId));
   if (!ledgerApi.debit(world, factionId, 'credits', cost, `marketBuy:${resId}`, systemId)) {
     return { ok: false, reason: '信用点不足' };
   }
@@ -87,7 +104,7 @@ export function marketSell(world, factionId, systemId, resId, amount, ledgerApi)
   const qty = Math.max(0, Math.round(amount));
   if (qty <= 0) return { ok: false, reason: '数量无效' };
   const unit = marketUnitPrice(m, resId, qty, 'sell');
-  const gain = Math.floor(unit * qty);
+  const gain = Math.floor(unit * qty / starfirePactTradeTaxMult(world, factionId));
   m.stock[resId] += qty;
   ledgerApi.credit(world, factionId, 'credits', gain, `marketSell:${resId}`, systemId);
   return { ok: true, gained: gain, unitPrice: unit };

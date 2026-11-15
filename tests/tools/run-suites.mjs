@@ -72,7 +72,9 @@ async function runSuitePass(s) {
 const allSuites = collectSuites().filter((s) => {
   if (FILTER_TIER != null && (s.tier ?? 1) !== FILTER_TIER) return false;
   if (FILTER_GROUP && s.group !== FILTER_GROUP) return false;
-  if (FILTER_ID && s.id !== FILTER_ID) return false;
+  // SPEC-PLAN-060 CHK-60-01：--suite/--id 同时支持套件 id 与 aliases（文件名口径）
+  if (FILTER_ID && s.id !== FILTER_ID
+    && !(Array.isArray(s.aliases) && s.aliases.includes(FILTER_ID))) return false;
   return true;
 });
 

@@ -20,6 +20,7 @@ import { el, clearEl } from '../components/dom.js';
 import { CanvasManager } from '../../render/CanvasManager.js';
 import { GalaxyRenderer } from '../../render/GalaxyRenderer.js';
 import { L } from '../../core/i18n.js';
+import { toast } from '../components/index.js'; // SPEC-PLAN-058 Task 58.4：信标收益零静默回执
 
 /** 图层复选框定义（10 键，标签取 zh-CN 词典 ui.layer.*） */
 const LAYER_DEFS = [
@@ -73,6 +74,19 @@ export const GalaxyView = {
     head.appendChild(this._timeHint);
     head.appendChild(el('span', { class: 'vf-grow' }));
     this._quickBar = el('div', { class: 'vf-row', style: { gap: '6px' } });
+    // SPEC-PLAN-058 Task 58.4（BUG-06）：一键复位视角（顶栏常驻）
+    head.appendChild(el('button', {
+      class: 'vf-btn small',
+      text: '🎯 复位视角',
+      title: '将星图视角复位至母星系/星区质心（zoom 1×）',
+      on: {
+        click: () => {
+          if (this._renderer && typeof this._renderer.resetView === 'function') {
+            this._renderer.resetView();
+          }
+        },
+      },
+    }));
     head.appendChild(this._quickBar);
 
     // —— 主体：画布 + 图层面板 ——
@@ -81,6 +95,8 @@ export const GalaxyView = {
     this._bodyEl = body;
     this._renderer = new GalaxyRenderer();
     this._renderer.init(this._cm);
+    // SPEC-PLAN-058 Task 58.4（BUG-06）：首帧对准玩家母星系，消除星团挤在画布底部 1/4
+    this._renderer.centerOnHomeSystem(this.app.world);
     if (this._snap) this._renderer.setSnapshot(this._snap);
 
     // 图层复选框组（.vf-layers 由 styles.css 定位在左上角）
@@ -374,7 +390,7 @@ function tutorialApi() {
 /* ==================== SPEC-PLAN-052 Task 52.1：星图信标流脉冲与自主舰队轨迹（M4 工位 D） ==================== */
 
 import { showModal } from '../components/modal.js';
-import { spaceOperaView } from '../../simulation/ViewModels.js';
+import { spaceOperaView, beaconOutcomeSummaryZh } from '../../simulation/ViewModels.js';
 
 /** 信标脉冲呼吸半径（canvas 逻辑像素；命中半径 = PULSE_MAX + 6） */
 const PULSE_MIN = 6;
@@ -535,7 +551,12 @@ export function openBeaconModal(view, beacon) {
     btn.textContent = opt.label || opt.id;
     btn.title = 'RespondSubspaceBeacon → ' + opt.id + (opt.effectHint ? '（' + opt.effectHint + '）' : '');
     btn.addEventListener('click', () => {
-      app.dispatch('RespondSubspaceBeacon', { beaconId: beacon.id, responseOptionId: opt.id });
+      // SPEC-PLAN-058 Task 58.4（BUG-08.1）：读取 lastBeaconResponse 明示收益
+      const res = app.dispatch('RespondSubspaceBeacon', { beaconId: beacon.id, responseOptionId: opt.id });
+      if (res && res.ok) {
+        const outcome = (w.spaceOperaState && w.spaceOperaState.lastBeaconResponse) || {};
+        toast(`◈ 信标响应完成：${beaconOutcomeSummaryZh(outcome, opt)}`, { kind: 'ok' });
+      }
       if (modalHandle && typeof modalHandle.close === 'function') modalHandle.close();
       view._renderQuickBar && view._renderQuickBar();
       view._forceRebuild && view._forceRebuild();

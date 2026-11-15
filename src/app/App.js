@@ -562,9 +562,14 @@ export class App {
       this.sideNav.refresh();
       this.refreshSnapshot();
     } catch (e) {
-      // 未知路由回菜单
-      console.warn('路由失败', e);
+      // SPEC-PLAN-057 Task 57.2（BUG-01 / CHK-M5-01）：严禁静默回退。
+      // 旧实现仅以 warn 级日志提示「路由失败」后直接闪回菜单，导致 3D 地表挂载崩溃
+      // 被只检查 console.error 的门禁漏检。升级为显式致命断言 + 可见错误横幅。
+      console.error(`[CRITICAL] 视图挂载致命异常 (${route.screen}):`, e);
+      this._lastRouteError = e;
+      this.showFatalError(`视图 ${route.screen} 加载失败: ${e && e.message}`);
       if (route.screen !== 'menu') navigate('menu');
+      throw e;
     }
   }
 
@@ -632,6 +637,29 @@ export class App {
     console.error('致命错误', err);
     this.setSpeed(0);
     toast(`发生未处理错误: ${err && err.message}`, { kind: 'error' });
+  }
+
+  /**
+   * SPEC-PLAN-057 Task 57.2：可见致命错误横幅（替代静默闪回）。
+   * 幂等挂载在 #app 首子节点之前；DOM 桩/受限环境下静默降级，绝不二次抛错。
+   */
+  showFatalError(msg) {
+    const text = String(msg || '发生未处理错误');
+    try {
+      const host = this.root || (typeof document !== 'undefined' ? document.getElementById('app') : null);
+      if (host && typeof document !== 'undefined' && typeof host.insertBefore === 'function') {
+        const prev = typeof host.querySelector === 'function' ? host.querySelector('.vf-fatal-banner') : null;
+        if (prev) {
+          prev.textContent = `⚠ ${text}`;
+        } else {
+          const banner = document.createElement('div');
+          banner.className = 'boot-error vf-fatal-banner';
+          banner.textContent = `⚠ ${text}`;
+          host.insertBefore(banner, host.firstChild || null);
+        }
+      }
+      toast(text, { kind: 'error' });
+    } catch (_) { /* 受限宿主环境：横幅降级，异常已在控制台显式记录 */ }
   }
 
   /** 帮助/确认弹窗（供各视图复用） */

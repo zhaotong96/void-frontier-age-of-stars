@@ -23,8 +23,8 @@
 
 import { registerCommand } from '../core/commandBus.js';
 import { emit } from '../core/eventBus.js';
-import { SPACE_OPERA_COMMANDS, validateSpaceOperaCommandPayload } from '../domain/world/commandSchemas.js';
-import { ensureSpaceOperaState } from '../domain/world/worldMigration.js';
+import { SPACE_OPERA_COMMANDS, validateSpaceOperaCommandPayload, isEntityIdField, normalizeEntityIdValue } from '../domain/world/commandSchemas.js';
+import { ensureSpaceOperaState } from '../domain/world/spaceOperaState.js'; // 叶子模块（破环）
 import {
   registerSituationArc,
   spawnSituation,
@@ -56,6 +56,8 @@ import {
 import {
   assignParagonDestinyTrait,
   toggleBeholderMode,
+  awakeLegendaryBeholder,
+  recruitSeraCartographer,
 } from '../domain/characters/galacticParagons.js';
 import {
   listActiveBeacons,
@@ -116,8 +118,30 @@ function validateSpaceOpera(ctx, cmd) {
   return { ok: true };
 }
 
+/**
+ * SPEC-PLAN-057 Task 57.3（BUG-04）：把 cmd.params 内全部字符串实体 ID 原地
+ * 归一化为统一整数键，确保底层领域层始终收到确定性数字（validate 已先行放行）。
+ * @returns {number} 归一化字段数
+ */
+export function normalizeSpaceOperaEntityIds(params) {
+  if (!params || typeof params !== 'object' || Array.isArray(params)) return 0;
+  let count = 0;
+  for (const key of Object.keys(params)) {
+    if (!isEntityIdField(key)) continue;
+    const val = params[key];
+    if (typeof val !== 'string') continue;
+    const normalized = normalizeEntityIdValue(val);
+    if (typeof normalized === 'number') {
+      params[key] = normalized;
+      count += 1;
+    }
+  }
+  return count;
+}
+
 /** 18 条命令共用 execute：幂等挂载容器 → 查阶段 handler；无 handler 静默不做事 */
 function executeSpaceOpera(ctx, cmd) {
+  normalizeSpaceOperaEntityIds(cmd && cmd.params);
   const state = ensureSpaceOperaState(ctx.world);
   const fn = handlers.get(cmd.type);
   if (!fn) return state; // 阶段未施工属正常：编排层后续注入，此处零业务副作用
@@ -629,6 +653,18 @@ registerCommand('HireEnclaveMentor', {
     return { ok: true };
   },
   execute(ctx, cmd) { hireEnclaveMentor(ctx.world, cmd.params.enclaveType); },
+});
+
+registerCommand('RecruitSeraCartographer', {
+  desc: 'M5 共创赛道 C：招募第 3 位传奇群像缄默制图师·赛拉（幂等；虚空裁缝天命）',
+  validate() { return { ok: true }; },
+  execute(ctx) { recruitSeraCartographer(ctx.world); },
+});
+
+registerCommand('AwakeLegendaryBeholder', {
+  desc: 'M5 开局保底唤醒先驱者核心 The Beholder（幂等；capExempt 不占在编领袖容量）',
+  validate() { return { ok: true }; },
+  execute(ctx) { awakeLegendaryBeholder(ctx.world); },
 });
 
 registerCommand('AttackEnclave', {

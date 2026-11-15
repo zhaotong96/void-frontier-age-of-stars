@@ -38,6 +38,24 @@ export const OPPORTUNITY_FREQ_CLASS = 'OPPORTUNITY_BEACON';
 /** 频段等权权重表（doc46 未给频段偏置 → 四频段等概率；冻结） */
 export const FREQ_CLASS_WEIGHTS = Object.freeze([1, 1, 1, 1]);
 
+/**
+ * SPEC-PLAN-056 Task 56.2 §4 / CHECKLIST CHK-M5-04：频段 → 颜色简写 band 权威映射。
+ * 语义以 56 号总纲为准：求援/军事 SOS → red、商业黑市 → gold、先驱者低语 → cyan、
+ * 银河日报 → purple、机遇信标 → gold。58 号子卷把求援与黑市两色对调，按
+ * 「任何冲突一律以 56 号总纲为准」修正。后半组为总纲使用的别名，保证双口径一致。
+ */
+export const BEACON_FREQ_BAND = Object.freeze({
+  FREQ_DISTRESSED_CIV: 'red',
+  FREQ_SHADOW_CONTRACT: 'gold',
+  FREQ_PRECURSOR_ECHO: 'cyan',
+  FREQ_STAR_JOURNAL: 'purple',
+  OPPORTUNITY_BEACON: 'gold',
+  FREQ_MILITARY_SOS: 'red',
+  FREQ_COMMERCE_BLACK: 'gold',
+  FREQ_PRECURSOR_WHISPER: 'cyan',
+  FREQ_GALACTIC_DAILY: 'purple',
+});
+
 /* ============================== 非帝国动态叙事信标模板（26 条 ≥ 24） ============================== */
 
 export const SUBSPACE_BEACON_TEMPLATES = Object.freeze([
@@ -306,6 +324,46 @@ export const SUBSPACE_BEACON_TEMPLATES = Object.freeze([
     responseOptions: Object.freeze([
       Object.freeze({ id: 'decode', label: '拼接残段星图', effectHint: '拼接成功 → 科研数据 +12', effect: Object.freeze({ kind: 'CREDIT', resId: 'researchData', amount: 12 }) }),
       Object.freeze({ id: 'dismiss', label: '静默标记航路', effectHint: '无效果，仅标记', effect: null }),
+    ]),
+  }),
+
+  // —— 外网实测共创精选 1：致谢外测指挥官 K. 维瑟尔（SPEC-PLAN-059 Task 59.1 / doc56 赛道 B）——
+  Object.freeze({
+    templateId: 'tpl_co_last_lighthouse',
+    freqClass: 'FREQ_STAR_JOURNAL',
+    title: '最后的跃迁灯塔员（K. 维瑟尔 遗言广播）',
+    body: '「……我是第三象限第 4107 号退役引力灯塔守钟人 K. 维瑟尔。自动化矩阵已全面替代人工灯塔，今日是我值守的最后一秒。在关停人工折叠光束前，我将这本星图手记与一万两千次人工校准数据广播给深空……愿航向永明。」（外网实测玩家共创投稿 · 致谢 K. 维瑟尔）',
+    responseOptions: Object.freeze([
+      Object.freeze({
+        id: 'claim_heritage', label: '回拨坐标继承灯塔手记',
+        effectHint: '继承遗产 → 获得 +350 信用点与航行校准数据',
+        effect: Object.freeze({ kind: 'CREDIT', resId: 'credits', amount: 350 }),
+      }),
+      Object.freeze({
+        id: 'inscribe_beacon', label: '将灯塔员铭文刻入子空间中继站',
+        effectHint: '向先驱守望致敬 → 帝国凝聚力 +25',
+        effect: Object.freeze({ kind: 'UNITY_GRANT', amount: 25 }),
+      }),
+    ]),
+  }),
+
+  // —— 外网实测共创精选 2：致谢外测先锋指挥官（SPEC-PLAN-059 Task 59.1 / doc56 赛道 B）——
+  Object.freeze({
+    templateId: 'tpl_co_automated_toll_7',
+    freqClass: 'FREQ_SHADOW_CONTRACT',
+    title: '自动收费门架 Toll-Station-7 扣款拦截',
+    body: '「警告：检测到未注册跃迁波形切入 Toll-Station-7 走廊。本设施由旧银河公理财团全自动运转，已持续向过往星舰扣取过路费 420 年。请立即缴费 50 点或接受巡逻无人机扫描。」（外网实测玩家共创投稿 · 致谢先锋指挥官）',
+    responseOptions: Object.freeze([
+      Object.freeze({
+        id: 'pay_toll', label: '照付过路费并下载中继固件',
+        effectHint: '合规通行 → 获得 +40 科研数据',
+        effect: Object.freeze({ kind: 'CREDIT', resId: 'researchData', amount: 40 }),
+      }),
+      Object.freeze({
+        id: 'hack_station', label: '黑入收费门架溢流资金池',
+        effectHint: '截留黑金 → 获得 +400 信用点',
+        effect: Object.freeze({ kind: 'CREDIT', resId: 'credits', amount: 400 }),
+      }),
     ]),
   }),
 ]);

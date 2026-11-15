@@ -10,6 +10,14 @@ import { emit } from '../../core/eventBus.js';
 import { RNG } from '../../core/rng.js';
 import { credit } from '../economy/ledger.js';
 import { ANOMALY_TEMPLATES } from '../../content/anomalies.js';
+
+/**
+ * SPEC-PLAN-059 Task 59.5 / doc56 CHK-M5-05 零漂移红线：共创异常模板追加到
+ * ANOMALY_TEMPLATES 末尾后，RNG.pick 的采样域必须锁定为 M5 前的 20 条基线模板。
+ * 否则 arr.length 变化会改变 int(world, n) 的取模结果，令 REG-01 4,320 Ticks
+ * 金快照哈希漂移。共创异常经 activateSpaceOperaCampaign 独立播种，不进本采样域。
+ */
+const BASELINE_ANOMALY_TEMPLATES = ANOMALY_TEMPLATES.slice(0, 20);
 import { createEntity, getEntity } from '../entities/registry.js';
 import { getMod } from '../factions/modifiers.js';
 import { getRelation } from '../diplomacy/war.js';
@@ -149,7 +157,7 @@ function findScanningFleet(world, factionId, systemId) {
 export function spawnAnomaliesForSystem(world, sys, factionId) {
   if (!sys.flags?.hasAnomalySlot) return;
   if ((sys.anomalyIds || []).length > 0) return; // 幂等
-  const template = RNG.pick(world, ANOMALY_TEMPLATES);
+  const template = RNG.pick(world, BASELINE_ANOMALY_TEMPLATES);
   const anomaly = createEntity(world, 'anomalies', {
     systemId: sys.id,
     templateId: template.id,

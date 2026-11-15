@@ -12,7 +12,7 @@
  * 顶层不依赖 importScripts。
  */
 
-const CACHE_NAME = 'void-frontier-v1';
+const CACHE_NAME = 'void-frontier-v2';
 
 /** 预缓存清单：应用外壳（全部相对路径） */
 const PRECACHE_URLS = [
@@ -21,6 +21,7 @@ const PRECACHE_URLS = [
   './styles.css',
   './favicon.svg',
   './manifest.webmanifest',
+  './dist/void-frontier.bundle.js', // SPEC-PLAN-057：默认 Bundle 优先 → 纳入离线外壳
 ];
 
 self.addEventListener('install', (event) => {

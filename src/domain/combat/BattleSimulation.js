@@ -235,6 +235,14 @@ export function finishBattle(world, battle, winnerSide) {
   //    （首行守卫 world.spaceOperaState —— 金快照/默认流程世界零读取零写入零漂移）——
   grantSpaceBattleParagonXp(world, battle);
 
+  // SPEC-PLAN-059 Task 59.4（赛道 E）：纳米寄生修复群战后自动修复 5% 结构
+  const ships = world.entities && world.entities.ships ? world.entities.ships : {};
+  for (const u of (battle.units || [])) {
+    const ship = ships[u.shipId];
+    if (!ship || u.destroyed) continue;
+    naniteSymbiontRepair(ship);
+  }
+
   delete world.battles.active[battle.id];
 }
 
@@ -244,3 +252,4 @@ installCombatBehaviors(unitBehaviors, projectileBehaviors);
 
 // 42 号总纲 §五.2：太空战役群像 XP 结算接线（galacticParagons 不反读本模块，无环）
 import { grantSpaceBattleParagonXp } from '../characters/galacticParagons.js';
+import { naniteSymbiontRepair } from '../fleets/fleetDoctrineAndScars.js';

@@ -32,29 +32,61 @@
   </div>
 
   <script>
-    // 双模自适应加载器：file:// 直接加载零依赖单文件 Bundle（消除 ES Modules
-    // 与动态 import() 的 CORS 拦截）；HTTP/Pages 优先 ESM 并在加载失败时无缝
-    // 回退到 Bundle（满足 GitHub Pages 二级路径与弱网环境）。
+    /**
+     * SPEC-PLAN-057 Task 57.4（BUG-05 / doc56 Task 56.1 §4）：单文件 Bundle 优先极速加载器。
+     * - 默认生产（含 file://）：直载 ./dist/void-frontier.bundle.js，1 个请求取代
+     *   188 个独立 JS 模块的跨洋瀑布，冷启动由分钟级降至秒级；
+     * - ?esm=1：开发者调试模式，直载 ./src/main.js；
+     * - Bundle 加载失败 → 回退 ESM 源码；8 秒内未完成启动 → #boot-status 给出可见重试按钮，
+     *   专治「深层子模块挂起但不触发顶层 onerror」的静默卡死。
+     */
     (function bootLoader() {
-      function loadBundle() {
-        const s = document.createElement('script');
-        s.src = './dist/void-frontier.bundle.js';
-        s.defer = true;
-        s.onerror = function () {
-          const st = document.getElementById('boot-status');
-          if (st) st.textContent = '静态包加载失败，请确认 ./dist/void-frontier.bundle.js 存在。';
-        };
-        document.body.appendChild(s);
+      var statusEl = document.getElementById('boot-status');
+      var retryShown = false;
+      var useESM = new URLSearchParams(window.location.search).get('esm') === '1';
+
+      function isBootDone() {
+        return !!(window.__bootSteps && window.__bootSteps.indexOf('boot:end') >= 0);
       }
-      if (location.protocol === 'file:' || location.search.includes('bundle=1')) {
-        loadBundle();
+      function showRetry(reason) {
+        if (retryShown || !statusEl) return;
+        retryShown = true;
+        statusEl.textContent = '启动超时或加载失败：' + reason;
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'vf-btn small primary';
+        btn.textContent = '↻ 重新加载';
+        btn.style.marginLeft = '8px';
+        btn.addEventListener('click', function () { location.reload(); });
+        statusEl.appendChild(btn);
+      }
+      function armWatchdog(tag) {
+        setTimeout(function () {
+          if (!isBootDone()) showRetry(tag + ' 未在 8 秒内完成启动');
+        }, 8000);
+      }
+      function loadESM(isFallback) {
+        var m = document.createElement('script');
+        m.type = 'module';
+        m.src = './src/main.js';
+        m.onerror = function () { showRetry('ESM 源码加载失败'); };
+        document.body.appendChild(m);
+        armWatchdog(isFallback ? 'ESM 回退' : 'ESM 调试');
+      }
+      if (useESM) {
+        console.log('[BOOT] 开发者模式：直接加载 ESM 源码');
+        loadESM(false);
         return;
       }
-      const m = document.createElement('script');
-      m.type = 'module';
-      m.src = './src/main.js';
-      m.onerror = loadBundle;
-      document.body.appendChild(m);
+      console.log('[BOOT] 生产模式：加载单文件 Bundle 极速启动');
+      var s = document.createElement('script');
+      s.src = './dist/void-frontier.bundle.js';
+      s.onerror = function () {
+        console.warn('[BOOT] Bundle 加载异常，降级回退至 ESM 源码');
+        loadESM(true);
+      };
+      document.body.appendChild(s);
+      armWatchdog('Bundle');
     })();
   </script>
 </body>

@@ -178,4 +178,15 @@ export const ANOMALY_TEMPLATES = [
     risks: ['读数湮灭'],
     storyTag: 'crisis_rift',
   },
+
+  // —— 外网实测共创精选（SPEC-PLAN-059 Task 59.5 / doc56 赛道 A）——
+  {
+    id: 'ano_echo_mirror',
+    nameZh: '镜渊回声 / 记忆尘埃场', nameEn: 'Echo Mirror Anomaly',
+    descZh: '悬浮在引力井中的高维记忆尘埃场，不断折射反射过去的航迹电波。提升全星区情报解密 +2，深核勘探掉落双倍奇异物质。',
+    category: 'spatial', difficultyMod: 3,
+    rewards: [{ resId: 'researchData', amount: 50 }, { resId: 'exoticMatter', amount: 4 }],
+    risks: ['镜像守卫共振', '时空相位扰动'],
+    storyTag: 'co_echo_mirror',
+  },
 ];

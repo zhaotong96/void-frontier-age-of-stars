@@ -26,7 +26,52 @@ import { ensureCompactPlanetState, seedCompactTiles } from '../planets/planetSta
 import { applyArchetypeProfile } from '../planets/archetypeMechanics.js';
 import { ensureBeaconStream, stepBeaconStream } from './subspaceBeaconStream.js';
 import { ensureAutonomousFleets } from './autonomousSectorLife.js';
-import { ensureParagonProfile } from '../characters/galacticParagons.js';
+import { ensureParagonProfile, awakeLegendaryBeholder } from '../characters/galacticParagons.js';
+import { ANOMALY_TEMPLATES } from '../../content/anomalies.js';
+import { createEntity } from '../entities/registry.js';
+import { emit } from '../../core/eventBus.js';
+
+/**
+ * SPEC-PLAN-059 Task 59.5（doc56 赛道 A）：镜渊回声 / 记忆尘埃场在活体战役中可达。
+ * 确定性挑选首个具备异常槽且未占用的星系，直接落一条共创异常实体（零 world.rng 消费）。
+ * 幂等：soState.echoMirrorAnomalyId 记账。REG-01 不调用 activateSpaceOperaCampaign。
+ */
+function seedEchoMirrorAnomaly(world) {
+  const soState = world.spaceOperaState;
+  if (!soState || soState.echoMirrorAnomalyId) return null;
+  const tpl = ANOMALY_TEMPLATES.find((t) => t.id === 'ano_echo_mirror');
+  if (!tpl) return null;
+  const systems = (world.entities && world.entities.systems) || {};
+  let sys = null;
+  for (const key of Object.keys(systems).sort()) {
+    const s = systems[key];
+    if (s && s.flags && s.flags.hasAnomalySlot && !(s.anomalyIds || []).length) { sys = s; break; }
+  }
+  if (!sys) return null;
+  const anomaly = createEntity(world, 'anomalies', {
+    systemId: sys.id,
+    templateId: tpl.id,
+    category: tpl.category,
+    nameZh: tpl.nameZh,
+    nameEn: tpl.nameEn,
+    descZh: tpl.descZh,
+    state: 'detected',
+    progress: 0,
+    difficulty: Number.isFinite(sys.dangerRating) ? Math.round(sys.dangerRating + tpl.difficultyMod) : tpl.difficultyMod,
+    rewards: tpl.rewards.map((r) => ({ ...r })),
+    risks: tpl.risks.slice(),
+    discoveredBy: world.playerFactionId || null,
+    resolvedBy: null,
+    storyTag: tpl.storyTag || null,
+  });
+  if (!Array.isArray(sys.anomalyIds)) sys.anomalyIds = [];
+  sys.anomalyIds.push(anomaly.id);
+  soState.echoMirrorAnomalyId = anomaly.id;
+  emit(world, 'AnomalyDetected', {
+    anomalyId: anomaly.id, systemId: sys.id, factionId: world.playerFactionId,
+  }, 'exploration');
+  return anomaly;
+}
 
 /** spaceOperaState 容器版本（冻结契约值；实现在 ./spaceOperaState.js 叶子模块） */
 export { SPACE_OPERA_SCHEMA_VERSION, ensureSpaceOperaState } from './spaceOperaState.js';
@@ -91,6 +136,11 @@ export function activateSpaceOperaCampaign(world) {
     const ch = characters[charIds[i]];
     if (ch) ensureParagonProfile(ch, world);
   }
+
+  // —— 3.5 SPEC-PLAN-058 Task 58.1（BUG-10）：开局保底唤醒 The Beholder ——
+  // 仅在活体战役链路触达；REG-01 无参 createStarterCampaign() 不经过此路径（零漂移）。
+  awakeLegendaryBeholder(world);
+  seedEchoMirrorAnomaly(world); // 赛道 A：共创空间异常入库
 
   // —— 4. 首帧信标池预热（立即补齐至 >= 15 条非帝国叙事信标）——
   stepBeaconStream(world);

@@ -134,6 +134,15 @@ export function syncColonyToSpaceOpera(colony, world) {
       compact.envVector[7] = Math.min(100.0, compact.envVector[7] + heavyCount * HEAVY_ENV_MONTHLY_PER_BUILDING);
     }
   }
+  // SPEC-PLAN-058 Task 58.3（BUG-09.1 / doc56 Task 56.2 §4）：紧凑底座计算结果
+  // 回写主游戏殖民地实体，供 UI/门禁直接读取（此前仅存在于 planet.compactState.colony）。
+  // radicalCell 权威容器是 compact.radicalCell（shadowSyndicateArc.ensureRadicalCell），
+  // 兼容 cColony.radicalCell 的旧形态。
+  const cell = (compact.radicalCell && typeof compact.radicalCell === 'object')
+    ? compact.radicalCell
+    : (cColony.radicalCell && typeof cColony.radicalCell === 'object' ? cColony.radicalCell : null);
+  colony.industrialAttention = Number.isFinite(cColony.industrialAttention) ? cColony.industrialAttention : 0;
+  colony.radicalCellActive = Boolean(cell && cell.state === 'ACTIVE');
   return true;
 }
 
@@ -332,6 +341,11 @@ export function getSpaceOperaModifiers(colony, world) {
   if (!world || !world.spaceOperaState) return base;
 
   const soState = world.spaceOperaState;
+  // SPEC-PLAN-059 Task 59.3（doc56 赛道 D）：公约生效 → 全银河科研速度 +20%。
+  // HourlySystems research 阶段消费 researchMultiplier（金快照世界零触达）。
+  if (soState.landsraad && soState.landsraad.starfirePactActive === true) {
+    base.researchMultiplier *= 1.20;
+  }
   const planets = world.entities && world.entities.planets;
   const planet = colony && planets ? planets[colony.planetId] : null;
   const compact = planet && planet.compactState;

@@ -409,9 +409,55 @@ export function renderSpaceOperaGovernmentPanel(view) {
   /* —— 1. 领袖群像名录 —— */
   const p = panelSO({ title: '星海群像英雄（Galactic Paragons）', open: true, dense: true });
   const characters = (w.entities && w.entities.characters) || {};
+  const pf = w.playerFactionId;
+  // SPEC-PLAN-058 Task 58.1（BUG-02 / doc56 Task 56.2 §1）：政府视图只展示本国在编领袖
   const roster = Object.keys(characters).sort()
     .map((k) => characters[k])
-    .filter((ch) => ch && ch.paragon && ch.health !== 'dead');
+    .filter((ch) => ch && ch.paragon && ch.health !== 'dead'
+      && (!pf || !ch.factionId || ch.factionId === pf));
+
+  // SPEC-PLAN-058 Task 58.1（BUG-10 / CHK-58-03）：保底唤醒专属通道常驻。
+  // 新战役由 activateSpaceOperaCampaign 预置 THE_BEHOLDER → 显示「已唤醒」状态卡；
+  // 旧存档/未激活世界显示唤醒按钮，经 AwakeLegendaryBeholder 命令幂等补齐。
+  const hasBeholder = roster.some((ch) => ch.paragon && ch.paragon.paragonId === 'THE_BEHOLDER');
+  const awakeChildren = [
+    elSO('div', {
+      class: 'vf-bold', style: { color: '#00e5ff' },
+      text: hasBeholder ? '◈ 先驱者灵能共鸣：全视凝视者已在编（双形态可切换）'
+        : '◈ 先驱者灵能共鸣：检测到沉睡的核心方尖碑',
+    }),
+    elSO('div', {
+      class: 'vf-small vf-faint',
+      text: hasBeholder
+        ? '「低语方尖碑总督 ⟷ 战舰旗舰统帅」双形态已在下方名录开放切换（capExempt，不占在编容量）。'
+        : '先驱者「全视凝视者」正在亚空间沉睡，可即刻建立引力谐振唤醒（不占在编领袖容量）。',
+    }),
+  ];
+  if (!hasBeholder) {
+    awakeChildren.push(elSO('button', {
+      class: 'vf-btn primary small',
+      style: { marginTop: '4px' },
+      text: '👁 唤醒先驱者：全视凝视者（The Beholder）',
+      title: 'AwakeLegendaryBeholder → 为玩家派系生成待命态传奇档案（capExempt）',
+      on: { click: () => { app.dispatch('AwakeLegendaryBeholder', {}); view._rebuild(); } },
+    }));
+  }
+  p.appendChild(elSO('div', {
+    class: 'vf-card', style: { marginBottom: '8px', border: '1px dashed #00e5ff', padding: '6px' },
+  }, awakeChildren));
+
+  // SPEC-PLAN-059 Task 59.2（doc56 赛道 C）：第 3 位传奇群像主动招募入口
+  const hasSera = roster.some((ch) => ch.paragon && ch.paragon.paragonId === 'SERA_CARTOGRAPHER');
+  if (!hasSera) {
+    p.appendChild(elSO('button', {
+      class: 'vf-btn small',
+      style: { marginBottom: '6px' },
+      text: '✧ 招募缄默制图师·赛拉（虚空裁缝）',
+      title: 'RecruitSeraCartographer：舰队燃料 −40% / 航速 +25%，capExempt 不占容量',
+      on: { click: () => { app.dispatch('RecruitSeraCartographer', {}); view._rebuild(); } },
+    }));
+  }
+
   if (roster.length === 0) {
     p.appendChild(elSO('div', { class: 'vf-faint vf-small', text: '暂无在编群像领袖（战役开局后由群像引擎逐步扩充）。' }));
   }

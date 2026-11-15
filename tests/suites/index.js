@@ -61,6 +61,8 @@ import { suite as spaceOperaM2 } from './m2-jacobian-archetypes-ca.suite.js';
 import { suite as spaceOperaM3 } from './m3-space-opera-drama-director.suite.js';
 // doc48 GATE-18-M4：太空歌剧 M4 活体合龙/双轨经济桥/六大视图/28命令端到端门禁（SPACE-OPERA-M4）
 import { suite as spaceOperaM4 } from './m4-space-opera-live-bridge-ui.suite.js';
+// doc60 GATE-19-M5：外网实测热修复 + 玩家共创精选实装五 Block 门禁（SPACE-OPERA-M5）
+import { suite as spaceOperaM5 } from './m5-hotfix-cocreation.suite.js';
 
 export function collectSuites() {
   return [
@@ -79,6 +81,7 @@ export function collectSuites() {
     spaceOperaM2,
     spaceOperaM3,
     spaceOperaM4,
+    spaceOperaM5,
     coreRng,
     coreSerialization,
     coreMath,

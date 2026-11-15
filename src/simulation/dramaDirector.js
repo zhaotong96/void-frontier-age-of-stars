@@ -43,7 +43,7 @@ import {
   listActiveSituations,
 } from '../domain/events/situationEngine.js';
 import { injectOpportunityBeacons } from '../domain/world/subspaceBeaconStream.js';
-import { ensureSpaceOperaState } from '../domain/world/worldMigration.js';
+import { ensureSpaceOperaState } from '../domain/world/spaceOperaState.js'; // 叶子模块（破环）
 import { emit, chronicle } from '../core/eventBus.js';
 import { TICKS_PER_DAY, TICKS_PER_MONTH } from '../core/clock.js';
 

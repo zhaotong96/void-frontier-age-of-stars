@@ -66,7 +66,7 @@ import {
   switchSituationApproach,
   listActiveSituations,
 } from '../events/situationEngine.js';
-import { ensureSpaceOperaState } from '../world/worldMigration.js';
+import { ensureSpaceOperaState } from '../world/spaceOperaState.js'; // 叶子模块（破环）
 import { DOMAIN_SALTS, deriveSeed, sampleFloat01 } from '../world/deterministicRng.js';
 import {
   packTile,
@@ -96,6 +96,8 @@ export const COMMISSION_PAY_PER_FLEET = 400;
 export const CHOAM_DIVIDEND_SHARE_THRESHOLD = 30;
 export const CHOAM_DIVIDEND_MULT = 1.15;
 export const CHOAM_EMBARGO_SHARE_THRESHOLD = 50;
+/** 每 1% CHOAM 股份基准价（doc56 Task 56.2 §3 / SPEC-PLAN-058 Task 58.2：100 信用点，5% = 500） */
+export const CHOAM_SHARE_CREDITS_PER_PCT = 100;
 
 /** 宫殿间谍翼升级费用与特工招募乘子（费用为 M3 裁决值；×1.5 为 doc46 精确值） */
 export const PALACE_ESPIONAGE_UPGRADE_CREDITS = 8000;
@@ -272,11 +274,34 @@ export function adjustChoamShares(world, delta) {
   const soState = ensureS7State(world);
   const cur = Number.isFinite(soState.landsraad.choamShares) ? soState.landsraad.choamShares : 0;
   const d = Number.isFinite(delta) ? delta : 0;
+  if (d === 0) return cur;
   const next = Math.max(0, Math.min(100, cur + d));
+  const actualDelta = next - cur;
+  if (actualDelta === 0) return cur;
+
+  // SPEC-PLAN-058 Task 58.2（BUG-03 / doc56 Task 56.2 §3）：真实信用点结算。
+  // 旧实现只改持股数值不扣账，形成「白嫖垄断股权」漏洞；买入按实际成交量扣款，
+  // 抛售按实际成交量回款，余额不足由 debit 失败抛 SO 错误 → 命令总线整体回滚。
+  const pf = world && world.playerFactionId;
+  const hasLedger = !!(pf && world.economy && world.economy.ledgers
+    && world.economy.ledgers[pf]);
+  if (hasLedger) {
+    if (actualDelta > 0) {
+      const cost = actualDelta * CHOAM_SHARE_CREDITS_PER_PCT;
+      if (!debit(world, pf, 'credits', cost, 'choamBuy', 's7')) {
+        throw new Error(`SO: 信用点不足 ${cost}，无法买入 ${actualDelta}% CHOAM 股份`);
+      }
+    } else {
+      const refund = Math.abs(actualDelta) * CHOAM_SHARE_CREDITS_PER_PCT;
+      credit(world, pf, 'credits', refund, 'choamSell', 's7');
+    }
+  }
+
   soState.landsraad.choamShares = next;
   emit(world, 'ChoamSharesAdjusted', {
     choamShares: next,
-    delta: d,
+    delta: actualDelta,
+    creditsDelta: hasLedger ? -actualDelta * CHOAM_SHARE_CREDITS_PER_PCT : 0,
     dividendMult: choamTradeDividendMult(world),
     embargoLeverage: hasEmbargoLeverage(world),
   }, 'diplomacy');
@@ -318,7 +343,11 @@ export const LANDSRAAD_BILL_KINDS = Object.freeze([
   'CHARTER_SANCTION',
   'CHARTER_SUBSIDY',
   'CHARTER_MANDATE',
+  'CHARTER_STARFIRE_PACT', // SPEC-PLAN-059 Task 59.3 / doc56 赛道 D：第 4 宪章
 ]);
+/** 星火公约通过奖励（科研数据）与全银河科研速度加成（doc56 赛道 D：+20%） */
+export const STARFIRE_PACT_RESEARCH_GRANT = 120;
+export const STARFIRE_PACT_RESEARCH_MULT = 1.20;
 
 /** 提案门槛：兰兹拉德 standing ≥ 10 方可提案（议会发言权最低席位） */
 export const LANDSRAAD_PROPOSE_MIN_STANDING = 10;
@@ -486,6 +515,17 @@ export function settleLandsraadBillMonthly(world) {
   }
   if (!passed) {
     landsraad.standing = Math.max(0, Math.min(100, standing - LANDSRAAD_VETO_STANDING_REBOUND));
+  }
+  // SPEC-PLAN-059 Task 59.3（doc56 赛道 D）：星火科研共享公约通过效果
+  if (passed && bill.kind === 'CHARTER_STARFIRE_PACT') {
+    if (pf && world.economy) {
+      credit(world, pf, 'researchData', STARFIRE_PACT_RESEARCH_GRANT,
+        'charterStarfire', `bill_${bill.id}`, FLOW.TRANSFER);
+    }
+    landsraad.starfirePactActive = true;
+    chronicle(world, 'diplomacy',
+      `大议会已签署《星火科研共享公约》：全银河科研数据网络接入，获得 ${STARFIRE_PACT_RESEARCH_GRANT} 科研数据`,
+      { billKind: bill.kind });
   }
   if (passed && bill.kind === 'CHARTER_SUBSIDY' && pf && world.economy) {
     credit(world, pf, 'credits', COMMISSION_PAY_BASE * LANDSRAAD_SUBSIDY_CREDITS_MULT,

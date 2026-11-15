@@ -50,7 +50,7 @@ import {
   registerSituationMonthlyHook,
 } from '../events/situationEngine.js';
 import { DOMAIN_SALTS, deriveSeed, mix32, sampleFloat01 } from '../world/deterministicRng.js';
-import { ensureSpaceOperaState } from '../world/worldMigration.js';
+import { ensureSpaceOperaState } from '../world/spaceOperaState.js'; // 叶子模块（破环）
 import { numericEntityKey, ensureCompactPlanetState } from '../planets/planetStateSchema.js';
 import { techDef } from '../research/research.js';
 import { shipSizeOf } from '../fleets/fleetDoctrineAndScars.js';
@@ -187,14 +187,19 @@ export function leaderCapOf(world, profession) {
  * 统计某职业在编领袖数与软惩罚倍率（纯读，零写入）：
  *  在编口径：health !== 'dead' 且 profession 匹配且 非 capExempt（传奇/导师不占容量）。
  */
-export function leaderCapStats(world, profession) {
+export function leaderCapStats(world, profession, factionId = null) {
   const characters = world && world.entities && world.entities.characters ? world.entities.characters : {};
+  // SPEC-PLAN-058 Task 58.1（BUG-02 / doc56 Task 56.2 §1）：默认只统计玩家派系在编领袖。
+  // 原实现遍历全银河 30 名角色，把 5 个 AI 帝国的 25 名将领算进玩家编制，导致开局
+  // 「在编 18/上限 4」的 ×4.50 维护费与 ×0.10 XP 假象。无 factionId 的合成人物照旧兼容。
+  const targetFaction = factionId || (world && world.playerFactionId) || null;
   let employed = 0;
   for (const key of Object.keys(characters).sort()) {
     const ch = characters[key];
     const p = ch && ch.paragon;
     if (!ch || !isPlainObject(p)) continue;
     if (ch.health === 'dead') continue;
+    if (targetFaction && ch.factionId && ch.factionId !== targetFaction) continue;
     if (p.profession !== profession) continue;
     if (p.capExempt === true) continue;
     employed += 1;
@@ -518,6 +523,12 @@ export const DESTINY_TRAITS = Object.freeze({
     nameZh: '铁血后勤', profession: 'commander',
     bonus: Object.freeze({ supplySaving: 0.10 }),
     descZh: '舰队补给消耗 −10%',
+  }),
+  // SPEC-PLAN-059 Task 59.2（赛道 C）：赛拉专属天命【虚空裁缝】
+  commander_void_tailor: Object.freeze({
+    nameZh: '虚空裁缝', profession: 'commander',
+    bonus: Object.freeze({ foldLaneFuelSaving: 0.40, disengageChance: 0.20 }),
+    descZh: '全帝国舰队跨星系折叠航行燃料消耗 −40%、紧急撤退成功率 +20%',
   }),
   official_pillar_stability: Object.freeze({
     nameZh: '定海基石', profession: 'official',
@@ -957,6 +968,14 @@ function performBorderlordCoup(world, leader) {
 export const LEGENDARY_PARAGONS = Object.freeze({
   TUBOREK: Object.freeze({ nameZh: '图博雷克', capExempt: true, buildSpeedBonus: 1.0 }),
   THE_BEHOLDER: Object.freeze({ nameZh: '全视凝视者', capExempt: true, dualMode: true }),
+  // SPEC-PLAN-059 Task 59.2 / doc56 赛道 C：第 3 位传奇群像（导航官）
+  SERA_CARTOGRAPHER: Object.freeze({
+    nameZh: '缄默制图师·赛拉',
+    capExempt: true,
+    foldLaneFuelSaving: 0.40,   // 全帝国舰队跨星系燃料消耗 −40%
+    fleetSpeedBonus: 0.25,      // doc56 赛道 C：跨星系航速 +25%
+    traumaBackgroundZh: '她曾把一整支远征舰队画进一条不存在的折叠航道；此后便不再开口说话。',
+  }),
 });
 
 /** 灵能合唱体月产额（每名/月；M3 裁决值，产出 = 能量 + 凝聚双通道） */
@@ -981,7 +1000,126 @@ export function applyLegendaryParagon(world, characterId, paragonId) {
   p.capExempt = def.capExempt === true;
   if (Number.isFinite(def.buildSpeedBonus)) p.buildSpeedBonus = def.buildSpeedBonus;
   if (def.dualMode === true) p.dualMode = true;
+  // SPEC-PLAN-059 Task 59.2：赛拉专属属性灌注（折叠航道燃料 / 航速 / 创伤背景）
+  if (Number.isFinite(def.foldLaneFuelSaving)) p.foldLaneFuelSaving = def.foldLaneFuelSaving;
+  if (Number.isFinite(def.fleetSpeedBonus)) p.fleetSpeedBonus = def.fleetSpeedBonus;
+  if (def.traumaBackgroundZh) p.traumaBackgroundZh = def.traumaBackgroundZh;
+  if (paragonId === 'SERA_CARTOGRAPHER') {
+    p.destinyTrait = 'commander_void_tailor';
+    p.trauma = ['melancholic'];
+  }
   return p;
+}
+
+/**
+ * SPEC-PLAN-058 Task 58.1（BUG-10 / doc56 Task 56.2 §2）：开局保底唤醒 The Beholder。
+ * 幂等：玩家派系已有 THE_BEHOLDER 档案时原样返回；否则确定性构造待命态传奇人物
+ * （capExempt 不占编制），锚定首个玩家殖民地行星以支持双形态切换，并登记抵达台账
+ * 阻止月度招募流程重复刷出。仅供活体战役激活器与 AwakeLegendaryBeholder 命令触达，
+ * REG-01 金快照世界（无 spaceOperaState）首行守卫零读取零写入。
+ *
+ * @returns {object|null} 已存在/新建的 THE_BEHOLDER 人物实体
+ */
+export function awakeLegendaryBeholder(world) {
+  if (!world || !world.spaceOperaState) return null;
+  const pf = world.playerFactionId;
+  if (!pf) return null;
+  const characters = (world.entities && world.entities.characters) || {};
+  for (const key of Object.keys(characters).sort()) {
+    const ch = characters[key];
+    if (ch && isPlainObject(ch.paragon) && ch.paragon.paragonId === 'THE_BEHOLDER'
+      && (!ch.factionId || ch.factionId === pf)) return ch;
+  }
+  const planets = (world.entities && world.entities.planets) || {};
+  const colonies = (world.entities && world.entities.colonies) || {};
+  let anchorId = null;
+  let anchorPlanet = null;
+  for (const key of Object.keys(colonies).sort()) {
+    const col = colonies[key];
+    if (!col || (col.factionId && col.factionId !== pf)) continue;
+    const planet = planets[col.planetId];
+    if (planet) { anchorId = planet.id; anchorPlanet = planet; break; }
+  }
+  const leader = createEntity(world, 'characters', {
+    factionId: pf,
+    name: '全视凝视者',
+    species: 'machine',
+    age: 0,
+    role: 'tactical',
+    roleName: '灵能机械核心',
+    fleetId: null,
+    level: 6,
+    xp: 0,
+    traits: ['steady'],
+    loyalty: 90,
+    stress: 0,
+    health: 'healthy',
+    history: [],
+    note: '先驱者灵能核心（M5 开局保底唤醒，capExempt）',
+    statModifiers: {},
+  });
+  const pg = ensureParagonProfile(leader, world);
+  applyLegendaryParagon(world, leader.id, 'THE_BEHOLDER');
+  pg.mode = 'WARSHIP_COMMANDER';
+  if (anchorId != null) {
+    pg.governedPlanetId = anchorId;
+    // toggleBeholderMode 的 MONOLITH 前置要求 compact.colony.ownerId >= 0。
+    // 开局 HourlySystems 首 tick 才由 syncColonyToSpaceOpera 写入该字段 —— 这里在
+    // 保底唤醒时同步落账（数值与桥函数完全同源），确保第 1 天即可真实切换双形态。
+    const cColony = anchorPlanet && anchorPlanet.compactState
+      ? anchorPlanet.compactState.colony : null;
+    if (cColony) {
+      cColony.ownerId = numericEntityKey(pf);
+      cColony.ownerFactionId = pf;
+    }
+  }
+  const soState = world.spaceOperaState;
+  if (!isPlainObject(soState.legendaryParagons)) soState.legendaryParagons = {};
+  if (!soState.legendaryParagons.THE_BEHOLDER) {
+    soState.legendaryParagons.THE_BEHOLDER = {
+      leaderId: leader.id,
+      arrivedTick: clampTick(world.tick),
+      source: 'm5Guaranteed',
+    };
+  }
+  emit(world, 'LegendaryParagonAwakened', { paragonId: 'THE_BEHOLDER', leaderId: leader.id }, 'politics');
+  chronicle(world, 'politics', '先驱者核心「全视凝视者」已唤醒（M5 开局保底，不占在编领袖容量）', { leaderId: leader.id });
+  return leader;
+}
+
+/**
+ * SPEC-PLAN-059 Task 59.2（doc56 赛道 C）：招募第 3 位传奇群像「缄默制图师·赛拉」。
+ * 幂等；确定性构造（零 world.rng）；自带专属天命【虚空裁缝】与创伤背景。
+ * 仅由玩家命令触达，REG-01 金快照世界首行守卫零触达。
+ */
+export function recruitSeraCartographer(world) {
+  if (!world || !world.spaceOperaState) return null;
+  const pf = world.playerFactionId;
+  if (!pf) return null;
+  const characters = (world.entities && world.entities.characters) || {};
+  for (const key of Object.keys(characters).sort()) {
+    const ch = characters[key];
+    if (ch && isPlainObject(ch.paragon) && ch.paragon.paragonId === 'SERA_CARTOGRAPHER'
+      && (!ch.factionId || ch.factionId === pf)) return ch;
+  }
+  const leader = createEntity(world, 'characters', {
+    factionId: pf, name: '缄默制图师·赛拉', species: 'human', age: 41,
+    role: 'navigator', roleName: '折叠航道制图官', fleetId: null,
+    level: 6, xp: 0, traits: ['steady', 'bookish'], loyalty: 88, stress: 12,
+    health: 'healthy', history: [], note: '外网实测共创精选 · 第 3 位传奇群像（capExempt）',
+    statModifiers: {},
+  });
+  applyLegendaryParagon(world, leader.id, 'SERA_CARTOGRAPHER');
+  const soState = world.spaceOperaState;
+  if (!isPlainObject(soState.legendaryParagons)) soState.legendaryParagons = {};
+  if (!soState.legendaryParagons.SERA_CARTOGRAPHER) {
+    soState.legendaryParagons.SERA_CARTOGRAPHER = {
+      leaderId: leader.id, arrivedTick: clampTick(world.tick), source: 'm5CoCreation',
+    };
+  }
+  emit(world, 'LegendaryParagonRecruited', { paragonId: 'SERA_CARTOGRAPHER', leaderId: leader.id }, 'politics');
+  chronicle(world, 'politics', '缄默制图师·赛拉加入帝国宫廷：折叠航道直连，舰队燃料消耗 −40%', { leaderId: leader.id });
+  return leader;
 }
 
 /**
@@ -1182,6 +1320,7 @@ export function paragonFleetModifiers(character) {
   const out = {
     weaponDamage: 0, fireRate: 0, disengageChance: 0, shieldRegen: 0,
     baseDamage: 0, orbitalBombardment: 0, armyDamage: 0, supplySaving: 0,
+    foldLaneFuelSaving: 0, // SPEC-PLAN-059 赛道 C：【虚空裁缝】折叠航道燃料节省
     crossSpaceFireControl: false, psychicShieldPenetration: false,
   };
   const p = isPlainObject(character) && isPlainObject(character.paragon) ? character.paragon : null;

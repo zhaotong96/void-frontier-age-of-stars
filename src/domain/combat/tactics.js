@@ -12,6 +12,7 @@ import { BAL } from '../../content/constants.js';
 import { layerResist } from '../../content/weapons.js';
 import { applyDamage, destroyShip } from '../ships/ship.js';
 import { emit } from '../../core/eventBus.js';
+import { unsinkableDamageMultiplier } from '../fleets/fleetDoctrineAndScars.js';
 // doc35 WP-P0-2：战术 v2（world.combatV2 门控；金快照零漂移）
 import {
   subsystemModifiers, stepFlux, applyHitV2, tryLayeredInterception, FLUX_HEAT_GAIN,
@@ -348,7 +349,12 @@ function tryIntercept(world, battle, missile, target, dt) {
 // ———— 伤害管线（COMBAT-01：护盾 → 装甲 → 结构，逐层抗性） ————
 
 function applyHit(world, battle, attacker, target, baseDamage, damageType) {
-  const tShip = world.entities.ships[target.shipId];
+  // SPEC-PLAN-059 Task 59.4（赛道 E）：不沉勋章 —— 攻击方结构 <25% 时全武器伤害 +30%
+  const ships = world.entities && world.entities.ships ? world.entities.ships : {};
+  const aShip = attacker ? ships[attacker.shipId] : null;
+  const sModMult = unsinkableDamageMultiplier(aShip);
+  if (sModMult !== 1) baseDamage *= sModMult;
+  const tShip = ships[target.shipId];
   if (!tShip || tShip.status === 'destroyed') return;
   // doc35 WP-P0-2：v2 伤害管线（方向性穿甲 + 分部损伤 + 热幅能；world.combatV2 门控）
   if (world.combatV2 === true) {

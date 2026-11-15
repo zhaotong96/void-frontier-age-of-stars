@@ -42,6 +42,17 @@ import { el } from '../components/dom.js';
 import { panel } from '../components/panels.js';
 import { showModal, toast } from '../components/index.js';
 import { L } from '../../core/i18n.js';
+
+/**
+ * SPEC-PLAN-057 Task 57.1（BUG-07 / BUG-12 / doc56 Task 56.1 §2）：外骨骼满状态单一真源。
+ * 逐字段：hpMax=100 / hp=100 / shieldMax=60 / shield=60 / staminaMax=100 /
+ * stamina=100 / fuel=100 / flash=0。构造与 _setupScene 场景重建共用同一冻结常量，
+ * 保证「任务阵亡后进入自由探索」不再残留 0 HP / 残盾，且门禁可动态断言而非伪绿。
+ */
+export const GROUND_CHAR_FULL_STATE = Object.freeze({
+  hpMax: 100, hp: 100, shieldMax: 60, shield: 60,
+  staminaMax: 100, stamina: 100, fuel: 100, flash: 0,
+});
 import { CanvasManager } from '../../render/CanvasManager.js';
 import { PlanetSurface3D } from '../../render/gl/PlanetSurface3D.js';
 import { PlanetSurfaceScene } from '../../render/gl/PlanetSurfaceScene.js';
@@ -626,8 +637,8 @@ export const GroundView = {
     this.char3d = {                    // 第三人称角色状态（视图侧竖直物理 + 自由模式 XZ）
       x: 0, y: 0, z: 0, vy: 0, onGround: true,
       yaw: 0, state: 'idle', animT: 0, attackT: 0, attackKind: null, struckFx: false,
-      hp: 100, hpMax: 100, shield: 30, shieldMax: 30, stamina: 100, staminaMax: 100,
-      fuel: 100, dodgeT: 0, dodgeX: 0, dodgeZ: 0, atkCd: 0, blockT: 0,
+      ...GROUND_CHAR_FULL_STATE,
+      dodgeT: 0, dodgeX: 0, dodgeZ: 0, atkCd: 0, blockT: 0,
     };
     this._fx = { slashes: [], beams: [], dig: [] };  // 瞬时视觉特效（每帧消费）
     this._strikeSeen = new Map();      // 单位打击拍检测（unitId → 上一帧 struck）
@@ -729,10 +740,41 @@ export const GroundView = {
     this._buildBriefing(mission);
   },
 
+  /**
+   * SPEC-PLAN-057 Task 57.1（BUG-01）：行星灵魂徽标芯片实例方法闭环。
+   * M4 工位 D 把实现落地为文件末尾的独立导出函数 refreshGroundOperaChip(view)，
+   * 却未在 GroundView 对象上挂载同名实例方法，导致 _setHead 调用抛 TypeError，
+   * 又被 App 的静默路由回退吞掉 —— 3D 地表入口闪回主菜单。
+   */
+  _refreshOperaChip() {
+    refreshGroundOperaChip(this);
+  },
+
+  /** SPEC-PLAN-059 Task 59.6（赛道 F）：当前是否处于深核共振弱点暴露态 */
+  _isCoreResonanceActive() {
+    return coreResonanceDamageMultiplier(this.planet) === CORE_RESONANCE_DAMAGE_MULT;
+  },
+
+  /** 玩家对巨兽/守卫的单发伤害倍率（触发时给出一次性 Toast 回执） */
+  _coreDamageMult() {
+    const mult = coreResonanceDamageMultiplier(this.planet);
+    if (mult > 1) this._notifyCoreResonance();
+    return mult;
+  },
+
+  /** 每场景仅弹一次共振破甲提示，避免逐帧刷屏 */
+  _notifyCoreResonance() {
+    if (this._resonanceToastShown) return;
+    this._resonanceToastShown = true;
+    try {
+      toast('⚡ 深核共振破甲触发：巨兽晶核过载，造成双倍伤害！', { kind: 'ok' });
+    } catch (_) { /* 无 DOM 的诊断/门禁宿主：旗标已置位，回执降级不致命 */ }
+  },
+
   /** 头部信息与按钮组 */
   _setHead(infoText, btnDefs) {
     if (this.headInfo) this.headInfo.textContent = infoText || '';
-    this._refreshOperaChip();
+    refreshGroundOperaChip(this);
     if (!this.headBtns) return;
     this.headBtns.innerHTML = '';
     for (const b of btnDefs) {
@@ -1081,6 +1123,7 @@ export const GroundView = {
     this._pylonShield = 0;          // 充能桩护盾存量（0..100，HUD 展示）
     this._pendingMastery = [];       // 采样后基因逆向延时队列 [{speciesIdx, t}]
     this._warden = null;             // 阶段 4 机偶守卫（视图侧遭遇战，域侧仅存战果位）
+    this._resonanceToastShown = false; // SPEC-PLAN-059 赛道 F：共振破甲提示每场景仅一次
     // doc20：气象锋面状态 + Tier 4 利维坦遭遇战（视图侧 3600HP，域侧仅存战果位）
     ensurePlanetThreat(planet);
     this._stormState = null;
@@ -1113,7 +1156,10 @@ export const GroundView = {
     c.vy = 0;
     c.onGround = true;
     c.state = 'idle';
-    c.fuel = 100;
+    // SPEC-PLAN-057 Task 57.1（BUG-07 / BUG-12）：场景重建必须整组复位角色生存状态，
+    // 否则上一场任务阵亡后的 0 HP / 残盾会沿用到自由探索（左下角显示 0/100）。
+    // 外骨骼初始护盾由 30 提升至 60，提升熔岩星等极端大气环境的生存容错。
+    Object.assign(c, GROUND_CHAR_FULL_STATE);
     this._missionGroundSynced = true;
     this._lastActiveUnitId = null;
     // 相机置于角色背后；首屏构图（doc7 §5.2）：任务模式且存在站点蓝图时，
@@ -1421,6 +1467,10 @@ export const GroundView = {
         // doc18 WP-4：科考分析面罩开关（60m 目击 / 25m 光谱识别锁定）
         this._visorOn = !this._visorOn;
         this._visorLockT = 0;
+        // SPEC-PLAN-057 Task 57.1 / doc56 Task 56.1 §2：面罩切换零静默即时回执
+        toast(this._visorOn
+          ? '已开启三模态科考面罩（按 Tab 切换：生态光谱 / 电磁测向 / 地质穿透）'
+          : '已关闭科考分析面罩', { kind: 'info' });
         break;
       case 'KeyR':
         this._tryRestoreTerrain();
@@ -1452,7 +1502,7 @@ export const GroundView = {
       case 'Digit9':
       case 'Digit0': {
         // [SPEC-39 S3] 野战部署物快捷栏（7=探地雷达 8=充能桩 9=哨兵塔 0=诱饵弹）
-        if (this.mode === 'free' && this.planet) {
+        if ((this.mode === 'free' || this.mode === 'mission') && this.planet) {
           const KINDS = ['dep_gpr_radar', 'dep_thermal_pylon', 'dep_sentry_turret', 'dep_decoy_emitter'];
           const kindId = KINDS[({ Digit7: 0, Digit8: 1, Digit9: 2, Digit0: 3 })[code]];
           const res = this.app.dispatch('DeployFieldTool', {
@@ -1460,18 +1510,22 @@ export const GroundView = {
           });
           this._deployNote = res && res.ok ? `已部署 ${kindId}` : `部署失败：${(res && res.reason) || '未知'}`;
           this._deployNoteT = this._clock;
+          // SPEC-PLAN-056 Wave 1（BUG-08 / BUG-11）：地表部署零静默 —— 即时 Toast 回执与前置原因
+          try { toast(this._deployNote, { kind: res && res.ok ? 'ok' : 'warn' }); } catch (_) { /* 无 DOM 宿主降级 HUD */ }
         }
         break;
       }
       case 'KeyX': {
         // [SPEC-39 S3] 深核矿脉采掘：脚下启动钻机（+180‰ 热度 / 600s / +4.5s 噪音）
-        if (this.mode === 'free' && this.planet) {
+        if ((this.mode === 'free' || this.mode === 'mission') && this.planet) {
           const res = this.app.dispatch('StartDeepCoreExtraction', {
             planetId: this.planet.id, x: this.char3d.x, z: this.char3d.z,
           });
           this._deepCoreT = this._clock;
           this._deployNote = res && res.ok ? '深核钻机已启动（噪音将引来增援）' : `钻机启动失败：${(res && res.reason) || '未知'}`;
           this._deployNoteT = this._clock;
+          // SPEC-PLAN-056 Wave 1：深核钻机启动/失败同样即时回执
+          try { toast(this._deployNote, { kind: res && res.ok ? 'ok' : 'warn' }); } catch (_) { /* 无 DOM 宿主降级 HUD */ }
         }
         break;
       }
@@ -2122,7 +2176,9 @@ export const GroundView = {
       this._oneShot.attack = null;
       const reach = kind === 'ranged' ? 14 : 4.2;
       if (d <= reach) {
-        const dmg = kind === 'light' ? 25 : kind === 'heavy' ? 45 : 30;
+        const baseDmg = kind === 'light' ? 25 : kind === 'heavy' ? 45 : 30;
+        // SPEC-PLAN-059 Task 59.6（赛道 F）：深核钻机运转 + ★3 警戒 → 对机偶守卫 ×2.0
+        const dmg = baseDmg * this._coreDamageMult();
         wd.hp -= dmg;
         wd.flash = 1;
         if (wd.hp <= 0) {
@@ -2382,7 +2438,9 @@ export const GroundView = {
       const reach = kind === 'ranged' ? 16 : 5.0;
       const d3 = Math.hypot(lv.x - c3.x, lv.z - c3.z);
       if (d3 <= reach) {
-        const dmg = kind === 'light' ? 30 : kind === 'heavy' ? 55 : 40;
+        const baseDmg = kind === 'light' ? 30 : kind === 'heavy' ? 55 : 40;
+        // SPEC-PLAN-059 Task 59.6（赛道 F）：深核钻机运转 + ★3 警戒 → 对利维坦 ×2.0
+        const dmg = baseDmg * this._coreDamageMult();
         lv.hp -= dmg;
         lv.flash = 1;
         lv.dmgSincePart += dmg;
@@ -2513,6 +2571,13 @@ export const GroundView = {
 
   /** 任务模式帧：输入 → 固定步长模拟 → 竖直物理 → 渲染 */
   _missionFrame(dt) {
+    // SPEC-PLAN-057 Task 57.1（BUG-11 / doc56 BUG-09）：模态弹窗或显式暂停期间
+    // 冻结地表任务时钟，避免玩家阅读信标/叙事弹窗时小队被环境伤害或增援团灭。
+    if (this._isPaused
+      || (typeof document !== 'undefined' && typeof document.querySelector === 'function'
+        && document.querySelector('.vf-modal-backdrop'))) {
+      return;
+    }
     const w = this.app.world;
     const m = w.entities.groundMissions[this.missionId];
     if (!m || m.status !== 'active') {
@@ -4559,6 +4624,32 @@ const GROUND_EPOCH_ZH = ['蛮荒', '勘探', '工业', '觉醒', '遗产'];
  * 当前行星的 16 原型徽标 + 五纪元徽记 + 工业关注度警示灯（0..6 翠绿 / ≥7 高危红色）。
  * world.spaceOperaState 未激活或行星未挂载 compactState → 芯片清空（零侵入）。
  */
+/* ==================== SPEC-PLAN-059 Task 59.6 / doc56 赛道 F：深核共振破甲 ==================== */
+
+/** 共振破甲伤害倍率（doc56 标定值 ×2.0） */
+export const CORE_RESONANCE_DAMAGE_MULT = 2.0;
+
+/**
+ * 深核钻机共振破甲判定（纯函数，Node/浏览器双端可测）：
+ *  - 钻机运行：planet.surfaceDelta.extraction[0] === 1（surfaceEvents.js 权威元组）；
+ *  - 警戒星级 ≥ 3：planet.surfaceDelta.heat[1]（实际运行时结构，planetaryThreat 星级）；
+ *    兼容 spec59 书写的 planet.threat.heat.stars / star 形态。
+ * 二者同时成立 → 玩家对利维坦与先驱者机偶守卫伤害 ×2.0。
+ */
+export function coreResonanceDamageMultiplier(planet) {
+  const sd = planet && planet.surfaceDelta;
+  const ext = sd && sd.extraction;
+  if (!ext || ext[0] !== 1) return 1.0;
+  let star = 0;
+  if (sd && Array.isArray(sd.heat) && Number.isFinite(Number(sd.heat[1]))) {
+    star = Number(sd.heat[1]);
+  } else if (planet && planet.threat && planet.threat.heat) {
+    const h = planet.threat.heat;
+    star = Number(h.stars != null ? h.stars : (h.star != null ? h.star : 0)) || 0;
+  }
+  return star >= 3 ? CORE_RESONANCE_DAMAGE_MULT : 1.0;
+}
+
 export function refreshGroundOperaChip(view) {
   const chip = view.headOperaChip;
   if (!chip) return;

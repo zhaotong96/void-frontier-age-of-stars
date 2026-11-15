@@ -44,7 +44,7 @@
 
 import { HULLS } from '../../content/hulls.js';
 import { DOMAIN_SALTS, deriveSeed, sampleFloat01 } from '../world/deterministicRng.js';
-import { ensureSpaceOperaState } from '../world/worldMigration.js';
+import { ensureSpaceOperaState } from '../world/spaceOperaState.js'; // 叶子模块（破环）
 import { numericEntityKey } from '../planets/planetStateSchema.js';
 import { debit, credit } from '../economy/ledger.js';
 import { emit } from '../../core/eventBus.js';
@@ -370,6 +370,18 @@ export const SMOD_CATALOG = Object.freeze({
   smod_flux_coil_overdrive: Object.freeze({ nameZh: '幅能线圈超驰', fireRate: 0.10, weaponDamage: 0.05 }),
   smod_aurora_armor_weave: Object.freeze({ nameZh: '极光装甲织网', armor: 0.15 }),
   smod_psychic_relay: Object.freeze({ nameZh: '灵能中继核', shieldRegen: 0.20, psychicShieldPenetration: true }),
+  // —— 外测共创精选 S-Mod（SPEC-PLAN-059 Task 59.4 / doc56 赛道 E）——
+  smod_unsinkable_medal: Object.freeze({
+    nameZh: '不沉勋章',
+    structureThreshold: 0.25,
+    criticalDamageBonus: 0.30,
+    descZh: '舰体结构低于 25% 时全武器伤害 +30%',
+  }),
+  smod_nanite_symbiont: Object.freeze({
+    nameZh: '纳米寄生修复群',
+    autoRepairPct: 0.05,
+    descZh: '战斗结束后自动修复战舰 5% 结构',
+  }),
 });
 
 /** S-Mod 安装费用（1 exoticMatter，doc46 交付契约精确值） */
@@ -493,6 +505,37 @@ export function installShipSMod(world, shipId, moduleId) {
   scars.sMods.push(moduleId);
   emit(world, 'ShipSModInstalled', { shipId: ship.id, moduleId, sMods: scars.sMods.slice() }, 'fleet');
   return scars;
+}
+
+/**
+ * SPEC-PLAN-059 Task 59.4（赛道 E）：【不沉勋章】伤害倍率。
+ * 结构 HP / 结构上限 < 25% 时全武器伤害 ×1.30；未安装/已毁/数据缺失恒 1.0，
+ * 保证既有世界（无新词条）逐位零漂移。
+ */
+export function unsinkableDamageMultiplier(ship) {
+  const scars = ship && ship.scars;
+  if (!scars || !Array.isArray(scars.sMods) || !scars.sMods.includes('smod_unsinkable_medal')) return 1.0;
+  if (!ship.hp || ship.status === 'destroyed') return 1.0;
+  const def = SMOD_CATALOG.smod_unsinkable_medal;
+  const max = ship.stats && Number.isFinite(ship.stats.structure) ? ship.stats.structure : 0;
+  const cur = Number.isFinite(ship.hp.structure) ? ship.hp.structure : 0;
+  if (max <= 0) return 1.0;
+  return cur / max < def.structureThreshold ? 1 + def.criticalDamageBonus : 1.0;
+}
+
+/** 【纳米寄生修复群】：战后自动修复 5% 结构，返回实际修复量 */
+export function naniteSymbiontRepair(ship) {
+  const scars = ship && ship.scars;
+  if (!scars || !Array.isArray(scars.sMods) || !scars.sMods.includes('smod_nanite_symbiont')) return 0;
+  if (!ship.hp || ship.status === 'destroyed') return 0;
+  const max = ship.stats && Number.isFinite(ship.stats.structure) ? ship.stats.structure : 0;
+  if (max <= 0) return 0;
+  const def = SMOD_CATALOG.smod_nanite_symbiont;
+  const before = Number.isFinite(ship.hp.structure) ? ship.hp.structure : 0;
+  const after = Math.min(max, before + max * def.autoRepairPct);
+  const healed = Math.max(0, after - before);
+  if (healed > 0) ship.hp.structure = Math.round(after * 100) / 100;
+  return healed;
 }
 
 /** 战舰是否挂载零幅能导弹挂架（ZERO_FLUX_MISSILES 权威集） */
