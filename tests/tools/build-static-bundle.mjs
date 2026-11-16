@@ -107,7 +107,7 @@ function scanSpecifiers(source) {
 }
 
 /** 转换单个模块体：剥离 import/export，改写为 __exports/__require 形态 */
-function transformModule(id, source) {
+export function transformModule(id, source) {
   const deps = new Map(); // spec → module id
   const out = [];
 
@@ -204,6 +204,262 @@ function namedDestructure(inner, req, skipDefault) {
   return `${prefix}const { ${names} } = ${req};`;
 }
 
+
+/**
+ * SPEC-ACC-062 Task 62.3 (FINDING-M5-05)：零依赖 JS 词法级压缩器
+ * 剥离注释与多余空白/缩进，保留字符串、模板字面量（含 ${...} 嵌套）及正则字面量语义，
+ * 并保留必要换行以维持 ASI 安全，确保 dist/void-frontier.bundle.js < 2.0 MiB。
+ */
+export function compactJS(code) {
+  const out = [];
+  const n = code.length;
+  let i = 0;
+  let prevNonWs = '';
+  let lastWord = '';
+  const regexPrevKeywords = new Set([
+    'return', 'throw', 'case', 'delete', 'void', 'typeof', 'in', 'instanceof', 'new', 'else', 'do', 'yield', 'await'
+  ]);
+  const regexPrevChars = new Set(['', '(', '[', '{', ',', ';', ':', '=', '!', '&', '|', '?', '~', '+', '-', '*', '%', '<', '>', '^', '\n']);
+
+  function isIdentChar(ch) {
+    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch === '_' || ch === '$';
+  }
+  function canStartRegex() {
+    if (regexPrevChars.has(prevNonWs)) return true;
+    if (lastWord && regexPrevKeywords.has(lastWord)) return true;
+    return false;
+  }
+  function pushTokenChar(ch) {
+    out.push(ch);
+    if (ch !== ' ' && ch !== '\t' && ch !== '\r') {
+      prevNonWs = ch;
+    }
+  }
+
+  let pendingSpace = false;
+  let pendingNewline = false;
+
+  function flushWhitespace(nextCh) {
+    if (pendingNewline) {
+      if (out.length > 0 && out[out.length - 1] !== '\n') {
+        out.push('\n');
+        prevNonWs = '\n';
+      }
+      pendingNewline = false;
+      pendingSpace = false;
+      return;
+    }
+    if (pendingSpace) {
+      const prev = out.length > 0 ? out[out.length - 1] : '';
+      if (prev && prev !== '\n' && isIdentChar(prev) && isIdentChar(nextCh)) {
+        out.push(' ');
+      } else if (prev && prev !== '\n' && ((prev === '+' && nextCh === '+') || (prev === '-' && nextCh === '-'))) {
+        out.push(' ');
+      }
+      pendingSpace = false;
+    }
+  }
+
+  while (i < n) {
+    const ch = code[i];
+    const next = i + 1 < n ? code[i + 1] : '';
+
+    // Whitespace
+    if (ch === ' ' || ch === '\t' || ch === '\r') {
+      pendingSpace = true;
+      i++;
+      continue;
+    }
+    if (ch === '\n') {
+      pendingNewline = true;
+      lastWord = '';
+      i++;
+      continue;
+    }
+
+    // Line comment
+    if (ch === '/' && next === '/') {
+      i += 2;
+      while (i < n && code[i] !== '\n') i++;
+      continue;
+    }
+
+    // Block comment
+    if (ch === '/' && next === '*') {
+      const isKeep = i + 2 < n && code[i + 2] === '!';
+      if (isKeep) {
+        flushWhitespace('/');
+        const start = i;
+        i += 2;
+        while (i < n && !(code[i] === '*' && code[i + 1] === '/')) i++;
+        if (i < n) i += 2;
+        out.push(code.slice(start, i));
+        out.push('\n');
+        prevNonWs = '\n';
+      } else {
+        i += 2;
+        while (i < n && !(code[i] === '*' && code[i + 1] === '/')) {
+          if (code[i] === '\n') pendingNewline = true;
+          i++;
+        }
+        if (i < n) i += 2;
+        pendingSpace = true;
+      }
+      continue;
+    }
+
+    // String literals
+    if (ch === "'" || ch === '"') {
+      flushWhitespace(ch);
+      const quote = ch;
+      out.push(ch);
+      i++;
+      while (i < n) {
+        const c = code[i];
+        out.push(c);
+        i++;
+        if (c === '\\' && i < n) {
+          out.push(code[i]);
+          i++;
+        } else if (c === quote) {
+          break;
+        }
+      }
+      prevNonWs = quote;
+      lastWord = '';
+      continue;
+    }
+
+    // Template literal
+    if (ch === '`') {
+      flushWhitespace('`');
+      out.push('`');
+      i++;
+      let tplDepth = 0;
+      const braceStack = [];
+      while (i < n) {
+        const c = code[i];
+        if (c === '\\' && i + 1 < n) {
+          out.push(c, code[i + 1]);
+          i += 2;
+          continue;
+        }
+        if (tplDepth === 0) {
+          if (c === '`') {
+            out.push('`');
+            i++;
+            break;
+          }
+          if (c === '$' && i + 1 < n && code[i + 1] === '{') {
+            out.push('${');
+            i += 2;
+            tplDepth = 1;
+            braceStack.push(1);
+            continue;
+          }
+          out.push(c);
+          i++;
+        } else {
+          if (c === "'" || c === '"' || c === '`') {
+            const q = c;
+            out.push(c);
+            i++;
+            if (q === '`') {
+              // nested template inside ${...}
+              let d = 0;
+              while (i < n) {
+                const nc = code[i];
+                if (nc === '\\' && i + 1 < n) { out.push(nc, code[i + 1]); i += 2; continue; }
+                out.push(nc);
+                i++;
+                if (nc === '$' && code[i] === '{') { d++; out.push('{'); i++; }
+                else if (d > 0 && nc === '}') { d--; }
+                else if (d === 0 && nc === '`') break;
+              }
+            } else {
+              while (i < n) {
+                const nc = code[i];
+                out.push(nc);
+                i++;
+                if (nc === '\\' && i < n) { out.push(code[i]); i++; }
+                else if (nc === q) break;
+              }
+            }
+            continue;
+          }
+          if (c === '{') {
+            braceStack[braceStack.length - 1]++;
+          } else if (c === '}') {
+            braceStack[braceStack.length - 1]--;
+            if (braceStack[braceStack.length - 1] === 0) {
+              braceStack.pop();
+              tplDepth = braceStack.length;
+            }
+          }
+          out.push(c);
+          i++;
+        }
+      }
+      prevNonWs = '`';
+      lastWord = '';
+      continue;
+    }
+
+    // Regex literal
+    if (ch === '/' && canStartRegex()) {
+      flushWhitespace('/');
+      out.push('/');
+      i++;
+      let inClass = false;
+      while (i < n) {
+        const c = code[i];
+        out.push(c);
+        i++;
+        if (c === '\\' && i < n) {
+          out.push(code[i]);
+          i++;
+        } else if (c === '[') {
+          inClass = true;
+        } else if (c === ']') {
+          inClass = false;
+        } else if (c === '/' && !inClass) {
+          break;
+        } else if (c === '\n') {
+          break;
+        }
+      }
+      while (i < n && /[a-z]/i.test(code[i])) {
+        out.push(code[i]);
+        i++;
+      }
+      prevNonWs = '/';
+      lastWord = '';
+      continue;
+    }
+
+    // Identifiers / numbers
+    if (isIdentChar(ch)) {
+      flushWhitespace(ch);
+      const start = i;
+      while (i < n && isIdentChar(code[i])) {
+        out.push(code[i]);
+        i++;
+      }
+      const word = code.slice(start, i);
+      prevNonWs = word[word.length - 1];
+      lastWord = word;
+      continue;
+    }
+
+    // Punctuation / operators
+    flushWhitespace(ch);
+    pushTokenChar(ch);
+    lastWord = '';
+    i++;
+  }
+  return out.join('');
+}
+
 /** 主流程 */
 export function buildBundle({ log = console.log } = {}) {
   const modules = collectModules(ENTRY);
@@ -232,11 +488,12 @@ export function buildBundle({ log = console.log } = {}) {
   chunks.push(`  __require(${JSON.stringify(ENTRY)});`);
   chunks.push('})();');
 
+  const compacted = compactJS(chunks.join('\n')).replace(/\r\n/g, '\n');
   mkdirSync(OUT_DIR, { recursive: true });
-  writeFileSync(OUT_FILE, chunks.join('\n'));
-  const kb = Math.round(chunks.join('\n').length / 1024);
-  log(`打包完成：${OUT_FILE}（${modules.size} 个模块，${kb} KB）`);
-  return { moduleCount: modules.size, bytes: chunks.join('\n').length };
+  writeFileSync(OUT_FILE, compacted, 'utf8');
+  const kb = Math.round(compacted.length / 1024);
+  log(`打包完成：${OUT_FILE}（${modules.size} 个模块，${kb} KB / ${(compacted.length / 1048576).toFixed(2)} MiB）`);
+  return { moduleCount: modules.size, bytes: compacted.length };
 }
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];

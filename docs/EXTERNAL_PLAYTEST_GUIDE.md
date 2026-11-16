@@ -3,8 +3,8 @@
 > **文档标识**：`SPEC-GUIDE-055` / `EXTERNAL-PLAYTEST-GUIDE`  
 > **适用对象**：外部测试玩家、QA 体验人员、太空科幻策略游戏爱好者（纯玩家视角，零代码门槛）  
 > **线上体验入口**：[https://zhaotong96.github.io/void-frontier-age-of-stars/](https://zhaotong96.github.io/void-frontier-age-of-stars/)  
-> **版本阶段**：Space Opera M4（太空歌剧前后端活体合龙版）  
-> **更新日期**：2026-11-14  
+> **版本阶段**：v3.0（Space Opera M6 / V1.0 Gold Master Edition · 黄金母盘公测版）  
+> **更新日期**：2026-11-16  
 
 ---
 

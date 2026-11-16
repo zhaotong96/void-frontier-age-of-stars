@@ -11,6 +11,7 @@
 
 import { createStarterCampaign, createMinimalWorld } from '../../src/devtools/scenarioFactory.js';
 import { StateMachineFuzzer, cyclicProbe } from '../fuzz/StateMachineFuzzer.js';
+import { unlinkSync } from 'node:fs';
 import { replayDump } from '../fuzz/replayCrash.js';
 import { commandList } from '../../src/core/commandBus.js';
 
@@ -87,8 +88,15 @@ export const suiteReplay = {
     if (!crash.error.stack || !crash.error.message) return { ok: false, detail: 'Dump error 签名不完整' };
     if (!crash.breadcrumbs.some((b) => b.type === 'FAULT')) return { ok: false, detail: 'Dump 面包屑缺 FAULT 步' };
 
-    // 3. 离线重放：同种子重建 → 逐面包屑重喂 → 错误签名 + 堆栈首帧比对
-    const rep = await replayDump(crash);
+    // 3. 离线重放：同种子重建 → 逐面包屑重喂 → 错误签名 + 堆栈首帧比对（完成后清理临时 Dump）
+    let rep;
+    try {
+      rep = await replayDump(crash);
+    } finally {
+      if (crash && crash.dumpPath) {
+        try { unlinkSync(crash.dumpPath); } catch { /* ignore cleanup error */ }
+      }
+    }
     if (!rep.replayError) return { ok: false, detail: `重放未崩溃: ${rep.reason}` };
     if (!rep.ok) {
       return {

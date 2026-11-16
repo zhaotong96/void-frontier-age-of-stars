@@ -727,10 +727,11 @@ export const GroundView = {
     else mission = missions[0] || null;
 
     // —— 目标行星解析（_returnToOrbit 与简报预选共用） ——
+    const candidatePid = param || app._groundTargetPlanet || null;
     if (mission) {
       this._targetPlanetId = mission.planetId || null;
-    } else if (param && w.entities.planets[param]) {
-      this._targetPlanetId = w.entities.planets[param].id; // 显式行星参数（无任务）
+    } else if (candidatePid && w.entities.planets[candidatePid]) {
+      this._targetPlanetId = w.entities.planets[candidatePid].id; // 显式行星参数（无任务）
     }
 
     if (mission && !forceBriefing) {

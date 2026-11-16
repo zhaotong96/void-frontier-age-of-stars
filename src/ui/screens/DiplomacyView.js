@@ -377,6 +377,7 @@ const BILL_ZH = {
   CHARTER_SANCTION: '贸易禁运制裁案（SANCTION）',
   CHARTER_SUBSIDY: '工业补贴拨款案（SUBSIDY）',
   CHARTER_MANDATE: '联合远征授权案（MANDATE）',
+  CHARTER_STARFIRE_PACT: '星火科研共享公约（STARFIRE_PACT）',
 };
 
 /** 终局天灾中文 */

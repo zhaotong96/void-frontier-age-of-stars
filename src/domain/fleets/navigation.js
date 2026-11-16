@@ -83,6 +83,7 @@ export function beginTransit(world, fleet, route, fuelAvailable) {
     }
   }
   const legs = [];
+  const fMult = fleetFuelMult(fleet, world);
   let fuelNeed = 0;
   for (let i = 0; i < route.path.length - 1; i++) {
     const a = S[route.path[i]];
@@ -91,7 +92,7 @@ export function beginTransit(world, fleet, route, fuelAvailable) {
     const gw = gatewayLinkHoursSafe(world, route.path[i], b.id, fleet.factionId);
     const h = gw != null ? gw : laneHours(world, fleet, a, b);
     legs.push({ to: b.id, eta: h });
-    fuelNeed += h * BAL.navigation.fuelPerLaneHour;
+    fuelNeed += h * BAL.navigation.fuelPerLaneHour * fMult;
   }
   if (fuelNeed > fuelAvailable) {
     return { ok: false, code: 'NO_FUEL', reason: '燃料不足以完成航线', fuelNeed };
@@ -302,6 +303,7 @@ export function planRoute(world, fleet, targetSystemId) {
   if (!route) return { ok: false, code: 'NO_ROUTE', reason: '没有可达航路' };
 
   const legs = [];
+  const fMult = fleetFuelMult(fleet, world);
   let fuelNeed = 0;
   let eta = 0;
   for (let i = 0; i < route.path.length - 1; i++) {
@@ -309,7 +311,7 @@ export function planRoute(world, fleet, targetSystemId) {
     const b = S[route.path[i + 1]];
     const h = laneHours(world, fleet, a, b);
     legs.push({ to: b.id, eta: h });
-    fuelNeed += h * BAL.navigation.fuelPerLaneHour;
+    fuelNeed += h * BAL.navigation.fuelPerLaneHour * fMult;
     eta += h;
   }
   const fuelAvailable = fleetFuelTotal(world, fleet);

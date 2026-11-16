@@ -322,7 +322,7 @@ export const ColonyView = {
         click: () => {
           // 设置 GroundView 的目标行星
           app._groundTargetPlanet = groundPlanetId;
-          app.goto('ground');
+          app.goto('ground', groundPlanetId);
         },
       },
     }));

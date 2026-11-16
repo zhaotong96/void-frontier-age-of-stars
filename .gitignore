@@ -11,3 +11,13 @@ Thumbs.db
 
 # SPEC-PLAN-048 Task 4.4 / doc52 Task 52.5：模糊测试崩溃转储（临时工件不入库）
 tests/fuzz/dumps/*.json
+
+# Google Drive 桌面端存根与私有元数据防误入库
+*.gdoc
+*.gsheet
+*.gslides
+
+# 自动化测试与历史验收截图（本地保留，禁止入库）
+docs/screenshots/
+
+

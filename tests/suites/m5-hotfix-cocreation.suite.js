@@ -43,7 +43,7 @@ import {
   SMOD_CATALOG, SMOD_INSTALL_EXOTIC_MATTER, installShipSMod,
   unsinkableDamageMultiplier, naniteSymbiontRepair,
 } from '../../src/domain/fleets/fleetDoctrineAndScars.js';
-import { seraFleetModifiers } from '../../src/domain/fleets/navigation.js';
+import { seraFleetModifiers, planRoute, beginTransit } from '../../src/domain/fleets/navigation.js';
 import {
   GroundView, refreshGroundOperaChip, GROUND_CHAR_FULL_STATE,
   CORE_RESONANCE_DAMAGE_MULT, coreResonanceDamageMultiplier,
@@ -453,9 +453,167 @@ export const suite = {
       parts.push('Block5 六大共创赛道全链路 + 星火+120/+20% + S-Mod 扣料/效果 + 共振×2.0 + REG-01 8be8ce2c');
     }
 
+
+    /* ================ Block 6：CHK-M6-01..04（M5 专家终审遗留阻断项闭环） ================ */
+    {
+      // CHK-M6-01：赛拉招募前后 planRoute / beginTransit 燃料折扣实测（×0.60 × 0.80 = ×0.48）
+      const nw = createStarterCampaign();
+      activateSpaceOperaCampaign(nw);
+      const pf = nw.playerFactionId;
+      const fleet = Object.values(nw.entities.fleets).find((f) => f && f.factionId === pf && f.systemId);
+      assert(!!fleet, 'CHK-M6-01 必须存在玩家在位舰队');
+      const sysIds = Object.keys(nw.entities.systems).sort();
+      let targetSysId = null;
+      let bestEta = -1;
+      for (const sid of sysIds) {
+        if (sid === fleet.systemId) continue;
+        const probePlan = planRoute(nw, fleet, sid);
+        if (probePlan.ok && probePlan.eta > bestEta) {
+          bestEta = probePlan.eta;
+          targetSysId = sid;
+        }
+      }
+      assert(!!targetSysId && bestEta >= 5, 'CHK-M6-01 必须存在长距离可达航线');
+      for (const sid of fleet.shipIds) {
+        const s = nw.entities.ships[sid];
+        if (s) s.fuel = 10000;
+      }
+      const planBefore = planRoute(nw, fleet, targetSysId);
+      assertEq(planBefore.ok, true, 'CHK-M6-01 招募前 planRoute 须成功');
+      const rec = dispatch(nw, 'RecruitSeraCartographer', {});
+      assertEq(rec.ok, true, 'CHK-M6-01 RecruitSeraCartographer 须成功');
+      const planAfter = planRoute(nw, fleet, targetSysId);
+      assertEq(planAfter.ok, true, 'CHK-M6-01 招募后 planRoute 须成功');
+      assert(planAfter.fuelNeed <= planBefore.fuelNeed * 0.60 + 1e-6 && planAfter.fuelNeed > 0,
+        'CHK-M6-01 招募赛拉后 planRoute fuelNeed 须应用赛拉燃料折扣（≤ 0.60×）');
+      const trRes = beginTransit(nw, fleet, planAfter.route, 10000);
+      assertEq(trRes.ok, true, 'CHK-M6-01 beginTransit 须成功');
+      assertNear(trRes.fuelNeed, planAfter.fuelNeed, 1e-9,
+        'CHK-M6-01 beginTransit fuelNeed 须与 planRoute 口径完全一致');
+
+      // 轻量无头 DOM 沙箱（Node 下临时挂载，浏览器下使用真实 offscreen div）
+      const withDom = (fn) => {
+        const prevDoc = globalThis.document;
+        const prevNode = globalThis.Node;
+        if (typeof prevDoc !== 'undefined') {
+          return fn(prevDoc.createElement('div'));
+        }
+        class MockNode {}
+        const makeNode = (tag) => {
+          const node = Object.assign(new MockNode(), {
+            tagName: String(tag).toUpperCase(),
+            children: [],
+            attrs: {},
+            dataset: {},
+            style: {},
+            classList: { add() {}, remove() {}, toggle() {} },
+            textContent: '',
+            innerHTML: '',
+            appendChild(c) { if (c && c.children && c.tagName === '#fragment') { for (const x of c.children) node.children.push(x); } else if (c) { node.children.push(c); } return c; },
+            append(...items) { for (const c of items) { if (typeof c === 'string') node.children.push({ textContent: c, children: [] }); else if (c) node.appendChild(c); } },
+            replaceChildren() { node.children.length = 0; },
+            setAttribute(k, v) { node.attrs[k] = String(v); },
+            removeAttribute(k) { delete node.attrs[k]; },
+            addEventListener() {},
+          });
+          return node;
+        };
+        const collectText = (n) => {
+          if (!n) return '';
+          let s = n.textContent || '';
+          for (const c of (n.children || [])) s += ' ' + collectText(c);
+          return s;
+        };
+        globalThis.Node = MockNode;
+        globalThis.document = {
+          createElement: (t) => makeNode(t),
+          createElementNS: (_ns, t) => makeNode(t),
+          createTextNode: (t) => Object.assign(new MockNode(), { textContent: String(t), children: [] }),
+          createDocumentFragment: () => makeNode('#fragment'),
+        };
+        try {
+          return fn(makeNode('div'), collectText);
+        } finally {
+          if (prevDoc === undefined) delete globalThis.document;
+          else globalThis.document = prevDoc;
+          if (prevNode === undefined) delete globalThis.Node;
+          else globalThis.Node = prevNode;
+        }
+      };
+
+      // CHK-M6-02 & CHK-M6-03：GovernmentView 创伤对象解构无 [object Object] + DiplomacyView 星火公约无裸枚举
+      const uiWorld = createStarterCampaign();
+      activateSpaceOperaCampaign(uiWorld);
+      const upf = uiWorld.playerFactionId;
+      const paragonChar = Object.values(uiWorld.entities.characters).find((c) => c && c.paragon && (!c.factionId || c.factionId === upf));
+      assert(!!paragonChar, 'CHK-M6-02 必须存在玩家派系传奇领袖');
+      paragonChar.paragon.trauma = [{ traitId: 'MELANCHOLIC', tier: 1 }, { traitId: 'LAVISH_LIFESTYLE', tier: 2 }];
+      paragonChar.paragon.traumaBackgroundZh = '早年经历双星坍缩劫难，长期失眠。';
+      const gvProj = governmentView(uiWorld, upf);
+      const pgProj = gvProj.paragons.find((p) => p.id === paragonChar.id);
+      assert(!!pgProj && Array.isArray(pgProj.trauma) && pgProj.trauma.length === 2, 'CHK-M6-02 governmentView 须透传创伤数组');
+
+      withDom((root, collectText) => {
+        const readText = collectText || ((el) => el.textContent || '');
+        const mockApp = { world: uiWorld, dispatch: () => ({ ok: true }), goto: () => {} };
+        const govStub = Object.create(GovernmentView);
+        govStub._mounted = true;
+        govStub.app = mockApp;
+        govStub._app = mockApp;
+        govStub._body = root;
+        govStub._titleExtra = document.createElement('span');
+        govStub._rebuild();
+        const govText = readText(root);
+        assert(!govText.includes('[object Object]'), 'CHK-M6-02 GovernmentView 严禁渲染 [object Object]');
+        assert(govText.includes('幽暗抑郁症 I') && govText.includes('穷奢极欲 II'),
+          'CHK-M6-02 GovernmentView 须将 {traitId,tier} 解析为「幽暗抑郁症 I / 穷奢极欲 II」');
+        assert(govText.includes('往事档案：早年经历双星坍缩劫难'),
+          'CHK-M6-02 GovernmentView 须渲染 pg.traumaBackgroundZh 往事档案');
+
+        const dipRoot = document.createElement('div');
+        const dipStub = Object.create(DiplomacyView);
+        dipStub._mounted = true;
+        dipStub.app = mockApp;
+        dipStub._app = mockApp;
+        dipStub._body = dipRoot;
+        dipStub._expanded = new Set();
+        dipStub._rebuild();
+        const dipText = readText(dipRoot);
+        assert(dipText.includes('星火科研共享公约'), 'CHK-M6-03 DiplomacyView 须渲染「星火科研共享公约」');
+        assert(!/提案：\s*CHARTER_STARFIRE_PACT/.test(dipText),
+          'CHK-M6-03 DiplomacyView 提案按钮不得裸露 CHARTER_STARFIRE_PACT 枚举名');
+      });
+
+      // CHK-M6-04：GroundView._build(param) 与 app._groundTargetPlanet 行星灵魂上下文解析
+      const gw = createStarterCampaign();
+      activateSpaceOperaCampaign(gw);
+      const targetPid = Object.keys(gw.entities.planets).sort().find((k) => gw.entities.planets[k] && gw.entities.planets[k].compactState);
+      assert(!!targetPid, 'CHK-M6-04 必须存在含太空歌剧原型的行星');
+      const gvStub = Object.create(GroundView);
+      gvStub._mounted = true;
+      gvStub._forceBriefing = true;
+      gvStub._targetPlanetId = null;
+      gvStub._handlers = [];
+      gvStub._teardownScene = () => {};
+      gvStub.body = { innerHTML: '', replaceChildren() {}, appendChild() {} };
+      gvStub.headInfo = { textContent: '' };
+      gvStub.headBtns = { replaceChildren() {}, appendChild() {} };
+      gvStub.headOperaChip = null;
+      gvStub.app = { world: gw, _groundTargetPlanet: null, dispatch: () => ({ ok: true }), goto: () => {} };
+      gvStub._buildBriefing = () => {};
+      gvStub._build(targetPid);
+      assertEq(gvStub._targetPlanetId, targetPid, 'CHK-M6-04 GroundView._build(planetId) 须锁定 _targetPlanetId');
+      gvStub._targetPlanetId = null;
+      gvStub.app._groundTargetPlanet = targetPid;
+      gvStub._build(null);
+      assertEq(gvStub._targetPlanetId, targetPid, 'CHK-M6-04 GroundView._build(null) 须回退 app._groundTargetPlanet');
+
+      parts.push('Block6 CHK-M6-01..04 赛拉0.48×燃料 + 创伤中文零[object Object] + 星火公约中文化 + 地表行星参数透传');
+    }
+
     return {
       ok: true,
-      detail: `M5 五 Block 全绿：${parts.join(' | ')}`,
+      detail: `M5/M6 六 Block 全绿：${parts.join(' | ')}`,
     };
   },
 };

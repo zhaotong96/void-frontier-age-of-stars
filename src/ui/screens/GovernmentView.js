@@ -382,6 +382,11 @@ const PROFESSION_ZH = { commander: '舰队统帅', official: '政务官员', sci
 
 /** 创伤特质徽标（TRAUMA_TRAITS 键 → 中文短标） */
 const TRAUMA_ZH = {
+  SUBSTANCE_ABUSER: '药物成瘾',
+  MELANCHOLIC: '幽暗抑郁症',
+  LAVISH_LIFESTYLE: '穷奢极欲',
+  DESTRUCTIVE: '暴躁破坏狂',
+  CORRUPT: '贪腐受贿',
   substance_abuse: '酗酒/药瘾',
   melancholic: '忧郁成疾',
   political_dismissal: '罢黜怀恨',
@@ -478,13 +483,22 @@ export function renderSpaceOperaGovernmentPanel(view) {
     if (loyal < 30) {
       row.appendChild(elSO('div', { class: 'vf-warn vf-small', text: '叛变风险警告：忠诚度低于 30，每月检定可能触发政变。' }));
     }
-    // 创伤特质徽标
+    // 创伤特质徽标（CHK-M6-04：兼容 { traitId, tier } 对象与旧字符串）
     const trauma = Array.isArray(pg.trauma) ? pg.trauma : [];
-    const traumaTags = trauma
-      .map((t) => (t && TRAUMA_ZH[t.id || t]) || (t && t.id) || t)
-      .filter(Boolean);
+    const traumaTags = trauma.map((t) => {
+      if (!t) return null;
+      const key = typeof t === 'object' ? (t.traitId || t.id) : t;
+      const name = TRAUMA_ZH[key] || String(key || '');
+      const tier = typeof t === 'object' && Number.isFinite(t.tier) && t.tier >= 1
+        ? (t.tier === 1 ? ' I' : t.tier === 2 ? ' II' : ` ${t.tier}`)
+        : '';
+      return name ? `${name}${tier}` : null;
+    }).filter(Boolean);
     if (traumaTags.length > 0) {
       row.appendChild(elSO('div', { class: 'vf-warn vf-small', text: `创伤特质：${traumaTags.join('、')}` }));
+    }
+    if (pg.traumaBackgroundZh) {
+      row.appendChild(elSO('div', { class: 'vf-faint vf-small', text: `往事档案：${pg.traumaBackgroundZh}` }));
     }
     // 领袖上限软惩罚红字
     const capStats = leaderCapStats(w, pg.profession);

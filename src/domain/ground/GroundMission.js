@@ -275,12 +275,16 @@ function nearestAlivePlayer(mission, x, y) {
   return best;
 }
 
+const TURRET_TARGET_WEIGHT = 0.55;
+
 function nearestEnemyWithin(mission, u, radius) {
-  let best = null, bestD = Infinity;
+  let best = null, bestScore = Infinity;
   for (const e of mission.enemies) {
     if (e.state === 'dead') continue;
     const d = dist(u.x, u.y, e.x, e.y);
-    if (d <= radius && d < bestD) { bestD = d; best = e; }
+    if (d > radius) continue;
+    const score = e.type === 'turret' ? d * TURRET_TARGET_WEIGHT : d;
+    if (score < bestScore) { bestScore = score; best = e; }
   }
   return best;
 }
@@ -1343,14 +1347,15 @@ function playerStrike(mission, u) {
   const site = mission.coordSpace === 'site_meters';
   const meleeReach = site ? MELEE_REACH_M : MELEE_REACH;
   if (k === 'ranged') {
-    let best = null, bestD = Infinity, bestCover = false;
+    let best = null, bestScore = Infinity, bestCover = false;
     for (const e of mission.enemies) {
       if (e.state === 'dead') continue;
       const d = dist(u.x, u.y, e.x, e.y);
-      if (d >= u.range || d >= bestD) continue;
+      const score = e.type === 'turret' ? d * TURRET_TARGET_WEIGHT : d;
+      if (d >= u.range || score >= bestScore) continue;
       const los = lineOfSight(mission, u.x, u.y, e.x, e.y);
       if (!los.clear) continue;
-      best = e; bestD = d; bestCover = los.cover;
+      best = e; bestScore = score; bestCover = los.cover;
     }
     if (best) {
       damageEnemy(mission, best, u.rangedDmg * (bestCover ? COVER_MULT : 1), RANGED_POISE);
